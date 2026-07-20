@@ -28,14 +28,14 @@ use commonware_utils::{
 use rand_core::CryptoRng;
 use std::{hash::Hash, sync::Arc};
 
-/// Completion of an automaton request as observed by consensus.
+/// Completion of an automaton request at the proxy response boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Completion<T> {
-    /// The automaton returned a value to consensus.
+    /// The proxy successfully placed the returned value on consensus's response channel.
     Returned(T),
-    /// The automaton dropped its response channel.
+    /// The automaton dropped its response channel while consensus was still waiting.
     Closed,
-    /// Consensus stopped waiting for the response.
+    /// Consensus dropped its response receiver before the proxy could deliver a value.
     Canceled,
 }
 
@@ -146,8 +146,9 @@ impl<S: certificate::Scheme, D: Digest> AuditLog<S, D> {
         state.events.push(recorded);
     }
 
-    fn assert_well_formed(&self) {
-        let _ = self.observer();
+    /// Checks only append-order metadata. Activity validity is independently
+    /// computed when the event is recorded; event content is not validated here.
+    fn assert_history_ordering(&self) {
         let mut previous_generation = None;
         for (expected, recorded) in self.events().iter().enumerate() {
             assert_eq!(
@@ -163,14 +164,6 @@ impl<S: certificate::Scheme, D: Digest> AuditLog<S, D> {
                 );
             }
             previous_generation = Some(recorded.generation);
-            match &recorded.event {
-                Event::Activity { valid, activity } => {
-                    let _ = (valid, activity);
-                }
-                Event::Automaton(event) => {
-                    let _ = event;
-                }
-            }
         }
     }
 }
@@ -184,6 +177,8 @@ where
     D: Digest,
 {
     inner: reporter::Reporter<E, S, L, D>,
+    /// Shared across clones; activity validity is RNG-state-independent, and
+    /// this verifier RNG never perturbs the simulated consensus runtime.
     verifier: Arc<Mutex<TestRng>>,
     scheme: S,
     audit: AuditLog<S, D>,
@@ -257,7 +252,7 @@ where
     D: Digest + Eq + Hash + Clone,
 {
     for reporter in reporters {
-        reporter.audit.assert_well_formed();
+        reporter.audit.assert_history_ordering();
     }
     reporters
         .iter()
@@ -358,13 +353,20 @@ where
                     result = receiver => {
                         match result {
                             Ok(value) => {
-                                audit.record(Event::Automaton(
-                                    completed(Completion::Returned(value.clone())),
-                                ));
-                                sender.send_lossy(value);
+                                let completion = if sender.send_lossy(value.clone()) {
+                                    Completion::Returned(value)
+                                } else {
+                                    Completion::Canceled
+                                };
+                                audit.record(Event::Automaton(completed(completion)));
                             }
                             Err(_) => {
-                                audit.record(Event::Automaton(completed(Completion::Closed)));
+                                let completion = if sender.is_closed() {
+                                    Completion::Canceled
+                                } else {
+                                    Completion::Closed
+                                };
+                                audit.record(Event::Automaton(completed(completion)));
                             }
                         }
                     },
@@ -683,6 +685,46 @@ mod tests {
                     outcome: Completion::Returned(false),
                 }) if round == &request_context.round && payload == &certified
             ));
+        });
+    }
+
+    #[test]
+    fn automaton_records_canceled_when_immediate_value_cannot_be_delivered() {
+        deterministic::Runner::seeded(7).start(|context| async move {
+            let (participants, _) = id_mock::fixture(&mut test_rng(), b"simplex-audit-canceled", N);
+            let audit: AuditLog<id_mock::Scheme, Sha256Digest> =
+                AuditLog::new(participants[0].clone(), 0);
+            let request_context = Context {
+                round: round(5),
+                leader: participants[0].clone(),
+                parent: (View::new(3), digest(0xD)),
+            };
+            let mut automaton = RecordingAutomaton::new(
+                context,
+                ImmediateAutomaton {
+                    proposed: digest(0xA),
+                },
+                audit.clone(),
+            );
+
+            let output = automaton.propose(request_context.clone()).await;
+            drop(output);
+            assert!(
+                automaton
+                    .verify(request_context.clone(), digest(0xB))
+                    .await
+                    .await
+                    .unwrap()
+            );
+
+            let events = audit.events();
+            assert!(events.iter().any(|recorded| matches!(
+                &recorded.event,
+                Event::Automaton(AutomatonEvent::ProposeCompleted {
+                    context,
+                    outcome: Completion::Canceled,
+                }) if context == &request_context
+            )));
         });
     }
 }

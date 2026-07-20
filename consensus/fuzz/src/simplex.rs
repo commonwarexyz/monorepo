@@ -295,6 +295,29 @@ mod tests {
         assert!(matches!(c1, Certifier::Always));
     }
 
+    #[test]
+    fn certify_choice_reject_view_is_consistent_across_validators() {
+        let choice = CertifyChoice::RejectView {
+            view: commonware_consensus::types::View::new(5),
+        };
+        for validator_idx in [0, 3] {
+            let Certifier::Custom(certify) = choice.into_certifier(validator_idx) else {
+                panic!("RejectView must construct a custom certifier");
+            };
+            let result = |view| {
+                certify(
+                    commonware_consensus::types::Round::new(
+                        commonware_consensus::types::Epoch::new(crate::EPOCH),
+                        commonware_consensus::types::View::new(view),
+                    ),
+                    Sha256Digest([0; 32]),
+                )
+            };
+            assert!(!result(5));
+            assert!(result(6));
+        }
+    }
+
     fn test_input(seed: u64, containers: u64) -> FuzzInput {
         FuzzInput {
             raw_bytes: seed.to_be_bytes().to_vec(),

@@ -208,14 +208,16 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
 
 /// Per-iteration choice of `Application::certify` behavior.
 ///
-/// `SingleCancel` and `SinglePending` apply their non-default certifier only
-/// to the validator at `target_idx` so quorum certification is still reachable
-/// when the selected validator already overlaps another modeled adversary.
+/// `SingleCancel` and `SinglePending` apply their non-default certifier only to
+/// `target_idx`. `RejectView` applies the same deterministic rejection rule to
+/// every validator, preserving the certification-consistency assumption while
+/// exercising the protocol's rejection path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertifyChoice {
     Always,
     SingleCancel { target_idx: u8 },
     SinglePending { target_idx: u8 },
+    RejectView { view: View },
 }
 
 impl CertifyChoice {
@@ -235,6 +237,9 @@ impl CertifyChoice {
                 } else {
                     application::Certifier::Always
                 }
+            }
+            CertifyChoice::RejectView { view } => {
+                application::Certifier::Custom(Box::new(move |round, _| round.view() != view))
             }
         }
     }
@@ -464,19 +469,24 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        // Single-target certify variants stall N4F1C3: its three honest
-        // certifiers are exactly the finalize quorum, so disabling one halts
-        // finalization for the rest of the run. Sample them only when every
-        // validator is honest and the quorum keeps one certifier of slack.
+        // A consistent one-view rejection is safe in either configuration: all
+        // correct validators nullify that view and certify later views. The
+        // single-target cancel/pending variants require N4F0C4, where disabling
+        // one certifier still leaves a finalize quorum.
+        let reject_view = View::new(u.int_in_range(1..=required_containers)?);
         let certify = if configuration == N4F0C4 {
             let target_idx = u.int_in_range(0..=configuration.n as u8 - 1)?;
-            match u.int_in_range(0..=3)? {
+            match u.int_in_range(0..=5)? {
                 0 => CertifyChoice::SingleCancel { target_idx },
                 1 => CertifyChoice::SinglePending { target_idx },
+                2 => CertifyChoice::RejectView { view: reject_view },
                 _ => CertifyChoice::Always,
             }
         } else {
-            CertifyChoice::Always
+            match u.int_in_range(0..=3)? {
+                0 => CertifyChoice::RejectView { view: reject_view },
+                _ => CertifyChoice::Always,
+            }
         };
 
         let reporting = ReporterWiring::arbitrary(u)?;
@@ -1921,7 +1931,7 @@ fn run_standard_once<P: simplex::Simplex>(
 /// This path exists only for the dedicated audit fuzz targets. The shared
 /// [`run_standard_once`] path and every other fuzz mode continue to use the
 /// consensus mock reporter and application automaton directly.
-fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> bool {
+fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool, bool) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -2021,7 +2031,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> bool 
         }
 
         if !config.is_valid() {
-            return false;
+            return (false, false);
         }
 
         let reporter_only: Vec<_> = reporters
@@ -2029,10 +2039,23 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> bool 
             .map(|(_, reporter)| reporter)
             .collect();
         let summary_reporters = summaries(&reporter_only);
+        let rejected_certification_observed = reporter_only.iter().any(|reporter| {
+            reporter.audit().events().iter().any(|recorded| {
+                matches!(
+                    &recorded.event,
+                    simplex_audit::Event::Automaton(
+                        simplex_audit::AutomatonEvent::CertifyCompleted {
+                            outcome: simplex_audit::Completion::Returned(false),
+                            ..
+                        }
+                    )
+                )
+            })
+        });
         invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
         invariants::check_vote_invariants(config.faults as usize, &summary_reporters);
         invariants::check::<P>(config.n, reporter_only.as_slice());
-        true
+        (true, rejected_certification_observed)
     })
 }
 
@@ -3225,27 +3248,43 @@ mod tests {
     #[cfg(feature = "mocks")]
     #[test]
     fn audited_standard_checks_simplex_id_and_certificate_mock() {
-        assert!(run_audited_standard_once::<simplex::SimplexId>(
-            audit_input()
-        ));
-        assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()));
+        assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
+        assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()).0);
     }
 
     #[test]
-    fn single_target_certify_preserves_liveness_with_full_honesty() {
+    fn audited_standard_observes_rejected_certification() {
+        let mut input = audit_input();
+        input.certify = CertifyChoice::RejectView { view: View::new(1) };
+        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
+        assert!(valid, "audit run was not checked");
+        assert!(rejected, "audit run did not reach false certification");
+    }
+
+    #[test]
+    fn certify_variants_preserve_liveness_with_full_honesty() {
         // With four honest validators, disabling one certifier leaves exactly
-        // the finalize quorum: the run must still finalize (the liveness wait
-        // completes) and pass invariants. This is the configuration under
-        // which `FuzzInput::arbitrary` samples certify variants.
+        // the finalize quorum. A consistently rejected view is nullified before
+        // later views resume certification. Both paths must retain liveness.
         for certify in [
             CertifyChoice::SingleCancel { target_idx: 0 },
             CertifyChoice::SinglePending { target_idx: 0 },
+            CertifyChoice::RejectView { view: View::new(1) },
         ] {
             let mut input = audit_input();
             input.certify = certify;
             let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
             assert!(audit.is_some(), "run with {certify:?} produced no audit");
         }
+    }
+
+    #[test]
+    fn rejected_view_preserves_liveness_with_one_byzantine_validator() {
+        let mut input = audit_input();
+        input.configuration = N4F1C3;
+        input.certify = CertifyChoice::RejectView { view: View::new(1) };
+        let audit = run_standard_once::<simplex::SimplexId>(input, false, true, false, None);
+        assert!(audit.is_some(), "rejecting one view prevented recovery");
     }
 
     #[test]

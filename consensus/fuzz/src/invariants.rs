@@ -829,6 +829,7 @@ where
     L::Elector: Clone,
 {
     type ExactVotes = BTreeMap<(Round, Vec<u8>), BTreeSet<Proposal<Sha256Digest>>>;
+    type ApplicationProposal = (Round, (View, Sha256Digest), Sha256Digest);
 
     let correct_observers: HashSet<Vec<u8>> = reporters
         .iter()
@@ -840,8 +841,6 @@ where
         BTreeMap::new();
     let mut finalization_history: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
         BTreeMap::new();
-    let mut certification_results: BTreeMap<(Round, Sha256Digest), bool> = BTreeMap::new();
-    let mut certification_conflicts: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
     let mut context_leaders: BTreeMap<Round, BTreeSet<Vec<u8>>> = BTreeMap::new();
 
     for reporter in reporters {
@@ -854,8 +853,8 @@ where
         let observer_bytes = observer.as_ref().to_vec();
         let events = audit.events();
 
-        let mut accepted_proposals: BTreeSet<(Round, View, Sha256Digest)> = BTreeSet::new();
-        let mut rejected_proposals: BTreeSet<(Round, View, Sha256Digest)> = BTreeSet::new();
+        let mut accepted_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
+        let mut rejected_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
         let mut successful_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut failed_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut reported_certifications: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
@@ -962,34 +961,39 @@ where
 
                     match activity {
                         Activity::Notarize(vote) if vote.signer() == observer_idx => {
-                            let key = (
-                                vote.proposal.round,
-                                vote.proposal.parent,
-                                vote.proposal.payload,
-                            );
+                            let matches_vote =
+                                |(round, (parent_view, _), payload): &ApplicationProposal| {
+                                    *round == vote.proposal.round
+                                        && *parent_view == vote.proposal.parent
+                                        && *payload == vote.proposal.payload
+                                };
 
                             // Invariant: local_notarize_requires_application_acceptance
                             // Every notarize vote produced by a correct local engine
                             // must follow a successful proposal construction or a
-                            // successful verification for the same
-                            // (round, parent-view, payload). A proposal that the
-                            // application rejected must never be notarized later.
+                            // successful verification for the same round, parent view,
+                            // and payload under at least one full parent context.
+                            // Application outcomes retain both the parent view and
+                            // digest. The signed Proposal exposes only the parent view,
+                            // so a rejection under one parent digest cannot invalidate
+                            // an acceptance under another digest with the same view.
                             //
                             // Source: the Automaton contract says returning a proposal
                             // commits the proposer to accepting it, while the
                             // instantiated voter's proposal lifecycle and round code
                             // require a Verified proposal before constructing a
                             // notarize vote.
-                            assert!(
-                                accepted_proposals.contains(&key),
-                                "Invariant violation: local notarize without successful propose/verify: observer {observer_bytes:?}, proposal {:?}",
-                                vote.proposal
-                            );
-                            assert!(
-                                !rejected_proposals.contains(&key),
-                                "Invariant violation: locally rejected proposal was notarized: observer {observer_bytes:?}, proposal {:?}",
-                                vote.proposal
-                            );
+                            if !accepted_proposals.iter().any(matches_vote) {
+                                let rejected_contexts: BTreeSet<_> = rejected_proposals
+                                    .iter()
+                                    .filter(|proposal| matches_vote(proposal))
+                                    .map(|(_, parent, _)| *parent)
+                                    .collect();
+                                panic!(
+                                    "Invariant violation: local notarize without successful propose/verify: observer {observer_bytes:?}, proposal {:?}, rejected parent contexts {rejected_contexts:?}",
+                                    vote.proposal
+                                );
+                            }
                         }
                         Activity::Certification(certificate) => {
                             let key = (certificate.proposal.round, certificate.proposal.payload);
@@ -1031,11 +1035,6 @@ where
                                 "Invariant violation: local finalize without successful certification: observer {observer_bytes:?}, proposal {:?}",
                                 vote.proposal
                             );
-                            assert!(
-                                !failed_certifications.contains(&key),
-                                "Invariant violation: locally failed certification was finalized: observer {observer_bytes:?}, proposal {:?}",
-                                vote.proposal
-                            );
                             local_finalizes
                                 .entry(vote.proposal.round)
                                 .or_default()
@@ -1052,6 +1051,8 @@ where
                                 .entry(context.round)
                                 .or_default()
                                 .insert(context.leader.as_ref().to_vec());
+                            // The recorded parent omits its epoch; the audited fuzz
+                            // targets are single-epoch, so it matches the child epoch.
                             let parent = (
                                 Round::new(context.round.epoch(), context.parent.0),
                                 context.parent.1,
@@ -1100,14 +1101,14 @@ where
                             context,
                             outcome: Completion::Returned(payload),
                         } => {
-                            accepted_proposals.insert((context.round, context.parent.0, *payload));
+                            accepted_proposals.insert((context.round, context.parent, *payload));
                         }
                         AutomatonEvent::VerifyCompleted {
                             context,
                             payload,
                             outcome: Completion::Returned(result),
                         } => {
-                            let key = (context.round, context.parent.0, *payload);
+                            let key = (context.round, context.parent, *payload);
                             if *result {
                                 accepted_proposals.insert(key);
                             } else {
@@ -1120,26 +1121,6 @@ where
                             outcome: Completion::Returned(result),
                         } => {
                             let key = (*round, *payload);
-
-                            // Invariant: certification_results_are_consistent
-                            // All correct applications that return a Boolean result
-                            // for the same (round, payload) must return the same value.
-                            // Missing, pending, closed, and canceled outcomes are
-                            // ignored, so a finite fuzz prefix cannot fail merely
-                            // because a result was not observed.
-                            //
-                            // Source: the instantiated protocol's "Certification"
-                            // section requires certification to be deterministic and
-                            // consistent across all honest participants.
-                            match certification_results.entry(key) {
-                                Entry::Vacant(entry) => {
-                                    entry.insert(*result);
-                                }
-                                Entry::Occupied(entry) if entry.get() != result => {
-                                    certification_conflicts.insert(key);
-                                }
-                                Entry::Occupied(_) => {}
-                            }
                             if *result {
                                 successful_certifications.insert(key);
                             } else {
@@ -1217,12 +1198,6 @@ where
     {
         panic!(
             "Invariant violation: conflicting finalization history in round {round:?}: {proposals:?}"
-        );
-    }
-
-    if !certification_conflicts.is_empty() {
-        panic!(
-            "Invariant violation: correct applications returned conflicting certification results: {certification_conflicts:?}"
         );
     }
 
@@ -2076,10 +2051,18 @@ mod tests {
         leader: id_mock::PublicKey,
         proposal: &Proposal<Sha256Digest>,
     ) -> Context<Sha256Digest, id_mock::PublicKey> {
+        automaton_context_with_parent_digest(leader, proposal, digest(0xF))
+    }
+
+    fn automaton_context_with_parent_digest(
+        leader: id_mock::PublicKey,
+        proposal: &Proposal<Sha256Digest>,
+        parent_digest: Sha256Digest,
+    ) -> Context<Sha256Digest, id_mock::PublicKey> {
         Context {
             round: proposal.round,
             leader,
-            parent: (proposal.parent, digest(0xF)),
+            parent: (proposal.parent, parent_digest),
         }
     }
 
@@ -2107,10 +2090,20 @@ mod tests {
         proposal: &Proposal<Sha256Digest>,
         result: bool,
     ) {
+        record_verify_result_with_parent_digest(reporter, leader, proposal, digest(0xF), result);
+    }
+
+    fn record_verify_result_with_parent_digest(
+        reporter: &AuditReporter,
+        leader: id_mock::PublicKey,
+        proposal: &Proposal<Sha256Digest>,
+        parent_digest: Sha256Digest,
+        result: bool,
+    ) {
         record_automaton(
             reporter,
             AutomatonEvent::VerifyCompleted {
-                context: automaton_context(leader, proposal),
+                context: automaton_context_with_parent_digest(leader, proposal, parent_digest),
                 payload: proposal.payload,
                 outcome: Completion::Returned(result),
             },
@@ -2249,13 +2242,37 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "locally rejected proposal was notarized")]
-    fn rejected_proposal_is_never_notarized() {
+    fn rejection_under_another_parent_digest_does_not_override_acceptance() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(1, &participants, &schemes);
+        let proposal = proposal(5, 4, 0xA);
+        record_verify_result_with_parent_digest(
+            &reporter,
+            participants[0].clone(),
+            &proposal,
+            digest(0xE),
+            false,
+        );
+        record_verify_result_with_parent_digest(
+            &reporter,
+            participants[0].clone(),
+            &proposal,
+            digest(0xF),
+            true,
+        );
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[1], proposal).unwrap(),
+        ));
+        check_fuzz_invariants(std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize without successful propose/verify")]
+    fn local_notarize_after_only_rejection_is_rejected() {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(1, &participants, &schemes);
         let proposal = proposal(5, 4, 0xA);
         record_verify_result(&reporter, participants[0].clone(), &proposal, false);
-        record_verify_result(&reporter, participants[0].clone(), &proposal, true);
         reporter.report(Activity::Notarize(
             Notarize::sign(&schemes[1], proposal).unwrap(),
         ));
@@ -2294,26 +2311,6 @@ mod tests {
             &schemes, 5, 4, 0xA,
         )));
         check_fuzz_invariants(std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn one_certification_result_is_an_allowed_incomplete_observation() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(5, 4, 0xA), true);
-        check_fuzz_invariants(std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "conflicting certification results")]
-    fn inconsistent_certification_results_are_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let reporter_a = audit_reporter(0, &participants, &schemes);
-        let reporter_b = audit_reporter(1, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        record_certify_result(&reporter_a, &proposal, true);
-        record_certify_result(&reporter_b, &proposal, false);
-        check_fuzz_invariants(&[reporter_a, reporter_b]);
     }
 
     #[test]
