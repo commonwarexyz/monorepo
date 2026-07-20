@@ -1,21 +1,17 @@
 use super::{Config, Error, Identifier};
-use crate::{
-    journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
-    },
-    Context,
-};
+use crate::Context;
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    buffer,
+    buffer::{self, paged},
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler,
 };
 use commonware_utils::{Array, Span};
 use futures::future::try_join;
-use std::{collections::BTreeSet, num::NonZeroUsize, ops::Deref};
+use std::{marker::PhantomData, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
+use zstd::{bulk::compress, decode_all};
 
 /// The percentage of table entries that must reach `table_resize_frequency`
 /// before a resize is triggered.
@@ -24,35 +20,29 @@ const RESIZE_THRESHOLD: u64 = 50;
 /// Location of an item in the [Freezer].
 ///
 /// This can be used to directly access the data for a given
-/// key-value pair (rather than walking the journal chain).
+/// key-value pair (rather than walking the record chain).
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, FixedArray)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
-pub struct Cursor([u8; u64::SIZE + u64::SIZE + u32::SIZE]);
+pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
 
 impl Cursor {
     /// Create a new [Cursor].
-    fn new(section: u64, offset: u64, size: u32) -> Self {
-        let mut buf = [0u8; u64::SIZE + u64::SIZE + u32::SIZE];
-        buf[..u64::SIZE].copy_from_slice(&section.to_be_bytes());
-        buf[u64::SIZE..u64::SIZE + u64::SIZE].copy_from_slice(&offset.to_be_bytes());
-        buf[u64::SIZE + u64::SIZE..].copy_from_slice(&size.to_be_bytes());
+    fn new(offset: u64, size: u32) -> Self {
+        let mut buf = [0u8; u64::SIZE + u32::SIZE];
+        buf[..u64::SIZE].copy_from_slice(&offset.to_be_bytes());
+        buf[u64::SIZE..].copy_from_slice(&size.to_be_bytes());
         Self(buf)
     }
 
-    /// Get the section of the cursor.
-    fn section(&self) -> u64 {
-        u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
-    }
-
-    /// Get the offset of the cursor.
+    /// Get the byte offset of the value in the value blob.
     fn offset(&self) -> u64 {
-        u64::from_be_bytes(self.0[u64::SIZE..u64::SIZE + u64::SIZE].try_into().unwrap())
+        u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
     }
 
     /// Get the size of the value.
     fn size(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
+        u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
     }
 }
 
@@ -60,7 +50,7 @@ impl Read for Cursor {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        <[u8; u64::SIZE + u64::SIZE + u32::SIZE]>::read(buf).map(Self)
+        <[u8; u64::SIZE + u32::SIZE]>::read(buf).map(Self)
     }
 }
 
@@ -71,7 +61,7 @@ impl CodecWrite for Cursor {
 }
 
 impl FixedSize for Cursor {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u32::SIZE;
 }
 
 impl Span for Cursor {}
@@ -93,37 +83,29 @@ impl AsRef<[u8]> for Cursor {
 
 impl std::fmt::Debug for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Cursor(section={}, offset={}, size={})",
-            self.section(),
-            self.offset(),
-            self.size()
-        )
+        write!(f, "Cursor(offset={}, size={})", self.offset(), self.size())
     }
 }
 
 impl std::fmt::Display for Cursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Cursor(section={}, offset={}, size={})",
-            self.section(),
-            self.offset(),
-            self.size()
-        )
+        write!(f, "Cursor(offset={}, size={})", self.offset(), self.size())
     }
 }
 
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
+/// Name of the key record blob.
+const KEYS_BLOB_NAME: &[u8] = b"keys";
+
+/// Name of the value blob.
+const VALUES_BLOB_NAME: &[u8] = b"values";
+
 /// Chain head stored in a table slot.
 #[derive(Debug, Clone, PartialEq)]
 struct Entry {
-    // Section in which the head was written
-    section: u64,
-    // Position in the key index for this section
+    // Position of the chain head in the key record blob
     position: u64,
     // Number of items added to this entry since last resize
     added: u8,
@@ -133,8 +115,8 @@ impl Entry {
     /// The size of a table slot: an occupancy tag followed by an [Entry].
     ///
     /// The tag distinguishes an empty slot (all zeros, the initial state of every
-    /// table range) from a chain head at section 0, position 0.
-    const SLOT_SIZE: usize = u8::SIZE + u64::SIZE + u64::SIZE + u8::SIZE;
+    /// table range) from a chain head at position 0.
+    const SLOT_SIZE: usize = u8::SIZE + u64::SIZE + u8::SIZE;
 
     /// Parse a table slot, consuming [Self::SLOT_SIZE] bytes from `buf`.
     fn read_slot(buf: &mut impl Buf) -> Result<Option<Self>, Error> {
@@ -145,14 +127,9 @@ impl Entry {
                 Ok(None)
             }
             1 => {
-                let section = u64::read(buf).map_err(Error::Codec)?;
                 let position = u64::read(buf).map_err(Error::Codec)?;
                 let added = u8::read(buf).map_err(Error::Codec)?;
-                Ok(Some(Self {
-                    section,
-                    position,
-                    added,
-                }))
+                Ok(Some(Self { position, added }))
             }
             tag => Err(Error::Codec(commonware_codec::Error::InvalidEnum(tag))),
         }
@@ -163,7 +140,6 @@ impl Entry {
         match entry {
             Some(entry) => {
                 1u8.write(buf);
-                entry.section.write(buf);
                 entry.position.write(buf);
                 entry.added.write(buf);
             }
@@ -172,50 +148,48 @@ impl Entry {
     }
 }
 
-/// Sentinel value indicating no next entry in the collision chain.
-const NO_NEXT_SECTION: u64 = u64::MAX;
-const NO_NEXT_POSITION: u64 = u64::MAX;
+/// Sentinel value indicating no next record in the collision chain.
+const NO_NEXT: u64 = u64::MAX;
 
-/// Key entry stored in the segmented/fixed key index journal.
+/// Key record stored in the key record blob.
 ///
 /// All fields are fixed size, enabling efficient collision chain traversal
-/// without reading large values.
+/// without reading values.
 ///
-/// The `next` pointer uses sentinel values (u64::MAX, u64::MAX) to indicate
-/// "no next entry" instead of Option, ensuring fixed-size encoding.
+/// The `next` pointer uses the sentinel value `u64::MAX` to indicate "no next
+/// record" instead of Option, ensuring fixed-size encoding. Records are
+/// append-only and chains grow at the head, so `next` always references a
+/// strictly smaller position.
 #[derive(Debug, Clone, PartialEq)]
 struct Record<K: Array> {
-    /// The key for this entry.
+    /// The key for this record.
     key: K,
-    /// Pointer to next entry in collision chain (section, position in key index).
-    /// Uses (u64::MAX, u64::MAX) as sentinel for "no next".
-    next_section: u64,
-    next_position: u64,
-    /// Byte offset in value journal (same section).
+    /// Position of the next record in the collision chain.
+    /// Uses u64::MAX as sentinel for "no next".
+    next: u64,
+    /// Byte offset of the value in the value blob.
     value_offset: u64,
-    /// Size of value data in the value journal.
+    /// Size of the value's stored bytes in the value blob.
     value_size: u32,
 }
 
 impl<K: Array> Record<K> {
     /// Create a new [Record].
-    fn new(key: K, next: Option<(u64, u64)>, value_offset: u64, value_size: u32) -> Self {
-        let (next_section, next_position) = next.unwrap_or((NO_NEXT_SECTION, NO_NEXT_POSITION));
+    fn new(key: K, next: Option<u64>, value_offset: u64, value_size: u32) -> Self {
         Self {
             key,
-            next_section,
-            next_position,
+            next: next.unwrap_or(NO_NEXT),
             value_offset,
             value_size,
         }
     }
 
-    /// Get the next entry in the collision chain, if any.
-    const fn next(&self) -> Option<(u64, u64)> {
-        if self.next_section == NO_NEXT_SECTION && self.next_position == NO_NEXT_POSITION {
+    /// Get the position of the next record in the collision chain, if any.
+    const fn next(&self) -> Option<u64> {
+        if self.next == NO_NEXT {
             None
         } else {
-            Some((self.next_section, self.next_position))
+            Some(self.next)
         }
     }
 }
@@ -223,8 +197,7 @@ impl<K: Array> Record<K> {
 impl<K: Array> CodecWrite for Record<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
-        self.next_section.write(buf);
-        self.next_position.write(buf);
+        self.next.write(buf);
         self.value_offset.write(buf);
         self.value_size.write(buf);
     }
@@ -234,15 +207,13 @@ impl<K: Array> Read for Record<K> {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
-        let next_section = u64::read(buf)?;
-        let next_position = u64::read(buf)?;
+        let next = u64::read(buf)?;
         let value_offset = u64::read(buf)?;
         let value_size = u32::read(buf)?;
 
         Ok(Self {
             key,
-            next_section,
-            next_position,
+            next,
             value_offset,
             value_size,
         })
@@ -250,20 +221,8 @@ impl<K: Array> Read for Record<K> {
 }
 
 impl<K: Array> FixedSize for Record<K> {
-    // key + next_section + next_position + value_offset + value_size
-    const SIZE: usize = K::SIZE + u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
-}
-
-impl<K: Array> OversizedRecord for Record<K> {
-    fn value_location(&self) -> (u64, u32) {
-        (self.value_offset, self.value_size)
-    }
-
-    fn with_location(mut self, offset: u64, size: u32) -> Self {
-        self.value_offset = offset;
-        self.value_size = size;
-        self
-    }
+    // key + next + value_offset + value_size
+    const SIZE: usize = K::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -274,8 +233,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             key: K::arbitrary(u)?,
-            next_section: u64::arbitrary(u)?,
-            next_position: u64::arbitrary(u)?,
+            next: u64::arbitrary(u)?,
             value_offset: u64::arbitrary(u)?,
             value_size: u32::arbitrary(u)?,
         })
@@ -294,20 +252,22 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     table_resize_frequency: u8,
     table_resize_chunk_size: u32,
 
-    // Table blob that maps slots to key index chain heads
+    // Table blob that maps slots to key record chain heads
     table: E::Blob,
 
-    // Combined key index + value storage with crash recovery
-    oversized: Oversized<E, Record<K>, V>,
+    // Key record blob: one fixed-size record per put, addressed by position
+    // (insertion order). Appends buffer in the writer and reads go through
+    // the page cache (chain traversal has good locality).
+    key_partition: String,
+    keys: paged::Writer<E::Blob>,
 
-    // Target size for value blob sections
-    blob_target_size: u64,
+    // Value blob: encoded values back to back, addressed by (offset, size).
+    // Reads go directly to the blob (values should not pollute a page cache).
+    value_partition: String,
+    values: buffer::Write<E::Blob>,
+    value_compression: Option<u8>,
+    codec_config: V::Cfg,
 
-    // Current section for new writes
-    current_section: u64,
-
-    // Sections with pending table updates to be synced
-    modified_sections: BTreeSet<u64>,
     resizable: u32,
     resize_progress: Option<u32>,
 
@@ -318,9 +278,14 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     unnecessary_reads: Counter,
     unnecessary_writes: Counter,
     resizes: Counter,
+
+    _key: PhantomData<K>,
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
+    /// Size of each key record in bytes (as u64).
+    const RECORD_SIZE: u64 = Record::<K>::SIZE as u64;
+
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -337,16 +302,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Scan the table, validating every slot and counting resizable entries.
     ///
-    /// Committed slots always reference committed journal records: [Freezer::sync] and
-    /// [Freezer::sync_into] commit the journals and the table in ONE atomic commit. A
-    /// slot that does not decode, or that references a record the journals do not
-    /// hold, is therefore corruption or tampering, never a state a crash can produce.
+    /// Committed slots always reference committed key records: [Freezer::sync] and
+    /// [Freezer::sync_into] commit the key record blob, the value blob, and the table
+    /// in ONE atomic commit. A slot that does not decode, or that references a record
+    /// the key record blob does not hold, is therefore corruption or tampering, never
+    /// a state a crash can produce.
     ///
     /// Returns the number of entries that can be resized.
     async fn scan_table(
         pooler: &impl BufferPooler,
         blob: &E::Blob,
-        oversized: &Oversized<E, Record<K>, V>,
+        key_positions: u64,
         table_size: u32,
         table_resize_frequency: u8,
         table_replay_buffer: NonZeroUsize,
@@ -363,10 +329,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 continue;
             };
 
-            // Verify the chain head references a record the journals hold
-            let positions = oversized.size(entry.section)? / Record::<K>::SIZE as u64;
-            if entry.position >= positions {
-                return Err(Error::MissingRecord(entry.section, entry.position));
+            // Verify the chain head references a record the key record blob holds
+            if entry.position >= key_positions {
+                return Err(Error::MissingRecord(entry.position));
             }
 
             // If the entry has reached the resize frequency, increment the resizable entries
@@ -410,18 +375,58 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // Initialize oversized journal (verifies cross-journal consistency)
-        let oversized_cfg = OversizedConfig {
-            index_partition: config.key_partition.clone(),
-            value_partition: config.value_partition.clone(),
-            index_page_cache: config.key_page_cache.clone(),
-            index_write_buffer: config.key_write_buffer,
-            value_write_buffer: config.value_write_buffer,
-            compression: config.value_compression,
-            codec_config: config.codec_config,
+        // Open the key record and value blobs
+        let (keys_blob, keys_len) = context.open(&config.key_partition, KEYS_BLOB_NAME).await?;
+        let (values_blob, values_len) = context
+            .open(&config.value_partition, VALUES_BLOB_NAME)
+            .await?;
+
+        // Verify the two blobs describe a committed freezer state. The storage backend
+        // guarantees per-blob atomic sync (a partial record cannot survive a crash) and
+        // both blobs commit in the same batch (see the module's Recovery documentation),
+        // so a partial record or any skew between the blobs is corruption or tampering,
+        // never a state a crash can produce. Value offsets are appended in monotone
+        // order, so checking the last record's value range bounds all earlier ones.
+        if !keys_len.is_multiple_of(Self::RECORD_SIZE) {
+            return Err(Error::Corruption(format!(
+                "key record blob has a partial record: {keys_len} bytes"
+            )));
+        }
+        let key_positions = keys_len / Self::RECORD_SIZE;
+        let value_end = if key_positions == 0 {
+            0
+        } else {
+            let mut buf = keys_blob
+                .read_at(keys_len - Self::RECORD_SIZE, Record::<K>::SIZE)
+                .await?;
+            let record = Record::<K>::read(&mut buf)?;
+            record
+                .value_offset
+                .checked_add(u64::from(record.value_size))
+                .ok_or_else(|| {
+                    Error::Corruption("last key record's value range overflows".into())
+                })?
         };
-        let oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.child("oversized"), oversized_cfg).await?;
+        if value_end != values_len {
+            return Err(Error::Corruption(format!(
+                "key records reference {value_end} value bytes but {values_len} are committed"
+            )));
+        }
+
+        // Wrap the blobs for buffered appends
+        let keys = paged::Writer::new(
+            keys_blob,
+            keys_len,
+            config.key_write_buffer.get(),
+            config.key_page_cache.clone(),
+        )
+        .await?;
+        let values = buffer::Write::from_pooler(
+            &context,
+            values_blob,
+            values_len,
+            config.value_write_buffer,
+        );
 
         // Open table blob
         let (table, table_len) = context
@@ -455,7 +460,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             let resizable = Self::scan_table(
                 &context,
                 &table,
-                &oversized,
+                key_positions,
                 table_size,
                 config.table_resize_frequency,
                 config.table_replay_buffer,
@@ -463,9 +468,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             .await?;
             (table_size, resizable)
         };
-
-        // Resume appends in the newest committed section
-        let current_section = oversized.newest_section().unwrap_or(0);
 
         // Create metrics
         let puts = context.counter("puts", "number of put operations");
@@ -489,10 +491,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
-            oversized,
-            blob_target_size: config.value_target_size,
-            current_section,
-            modified_sections: BTreeSet::new(),
+            key_partition: config.key_partition,
+            keys,
+            value_partition: config.value_partition,
+            values,
+            value_compression: config.value_compression,
+            codec_config: config.codec_config,
             resizable,
             resize_progress: None,
             puts,
@@ -501,6 +505,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             unnecessary_reads,
             unnecessary_writes,
             resizes,
+            _key: PhantomData,
         })
     }
 
@@ -525,49 +530,43 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         self.resizable as u64 >= self.table_resize_threshold
     }
 
-    /// Determine which blob section to write to based on current blob size.
-    async fn update_section(&mut self) -> Result<(), Error> {
-        // Get the current value blob section size
-        let value_size = self.oversized.value_size(self.current_section).await?;
-
-        // If the current section has reached the target size, create a new section
-        if value_size >= self.blob_target_size {
-            self.current_section += 1;
-            debug!(
-                size = value_size,
-                section = self.current_section,
-                "updated section"
-            );
-        }
-
-        Ok(())
-    }
-
     /// Put a key-value pair into the [Freezer].
     /// If the key already exists, the value is updated.
     pub async fn put(&mut self, key: K, value: V) -> Result<Cursor, Error> {
         self.puts.inc();
 
-        // Update the section if needed
-        self.update_section().await?;
-
         // Get head of the chain from table
         let table_index = self.table_index(&key);
         let head = Self::read_table(&self.table, table_index).await?;
 
-        // Create key entry with pointer to previous head (value location set by oversized.append)
-        let key_entry = Record::new(
-            key,
-            head.as_ref().map(|entry| (entry.section, entry.position)),
-            0,
-            0,
-        );
+        // Encode (and optionally compress) the value, then write it at the tip of the
+        // value blob. This will typically write to an in-memory buffer and return
+        // quickly (only blocks when the buffer is full).
+        let buf = if let Some(level) = self.value_compression {
+            let encoded = value.encode();
+            compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?
+        } else {
+            // Uncompressed: pre-allocate exact size to avoid copying
+            let mut buf = Vec::with_capacity(value.encode_size());
+            value.write(&mut buf);
+            buf
+        };
+        let value_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge(buf.len()))?;
+        let value_offset = self.values.size();
+        self.values.write_at(value_offset, buf).await?;
 
-        // Write value and key entry (glob first, then index)
-        let (position, value_offset, value_size) = self
-            .oversized
-            .append(self.current_section, key_entry, &value)
-            .await?;
+        // Append the key record with a pointer to the previous head
+        let record = Record::new(
+            key,
+            head.as_ref().map(|entry| entry.position),
+            value_offset,
+            value_size,
+        );
+        let mut record_buf = self.context.storage_buffer_pool().alloc(Record::<K>::SIZE);
+        record.write(&mut record_buf);
+        let record_offset = self.keys.append_owned(record_buf.freeze()).await?;
+        debug_assert!(record_offset.is_multiple_of(Self::RECORD_SIZE));
+        let position = record_offset / Self::RECORD_SIZE;
 
         // Update the number of items added to the entry.
         //
@@ -581,12 +580,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
 
         // Update the old position
-        self.modified_sections.insert(self.current_section);
-        let new_entry = Entry {
-            section: self.current_section,
-            position,
-            added,
-        };
+        let new_entry = Entry { position, added };
         Self::write_head(
             &self.context,
             &self.table,
@@ -617,49 +611,65 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             }
         }
 
-        Ok(Cursor::new(self.current_section, value_offset, value_size))
+        Ok(Cursor::new(value_offset, value_size))
+    }
+
+    /// Read the key record at `position`.
+    async fn read_record(&self, position: u64) -> Result<Record<K>, Error> {
+        // Positions originate from committed table slots (validated at initialization)
+        // and this instance's own appends, so an unaddressable position is corruption.
+        let offset = position.checked_mul(Self::RECORD_SIZE).ok_or_else(|| {
+            Error::Corruption(format!("record position {position} is unaddressable"))
+        })?;
+        let mut buf = self.keys.read_at(offset, Record::<K>::SIZE).await?;
+        Record::<K>::read(&mut buf).map_err(Error::Codec)
+    }
+
+    /// Read and decode the value at `offset` with known `size`.
+    async fn read_value(&self, offset: u64, size: u32) -> Result<V, Error> {
+        let buf = self.values.read_at(offset, size as usize).await?.coalesce();
+        if self.value_compression.is_some() {
+            let decompressed = decode_all(buf.as_ref()).map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)
+        } else {
+            V::decode_cfg(buf.as_ref(), &self.codec_config).map_err(Error::Codec)
+        }
     }
 
     /// Get the value for a given [Cursor].
     async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
-        let value = self
-            .oversized
-            .get_value(cursor.section(), cursor.offset(), cursor.size())
-            .await?;
-
-        Ok(value)
+        self.read_value(cursor.offset(), cursor.size()).await
     }
 
-    /// Find the first key entry matching `key`, returning it with its section.
+    /// Find the first key record matching `key`.
     ///
-    /// Reads key entries only, never values.
-    async fn find_key(&self, key: &K) -> Result<Option<(u64, Record<K>)>, Error> {
+    /// Reads key records only, never values.
+    async fn find_key(&self, key: &K) -> Result<Option<Record<K>>, Error> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let Some(head) = Self::read_table(&self.table, table_index).await? else {
             return Ok(None);
         };
-        let (mut section, mut position) = (head.section, head.position);
+        let mut position = head.position;
 
         // Follow the linked list chain to find the first matching key
         loop {
-            // Get the key entry from the fixed key index (efficient, good cache locality)
-            let key_entry = self.oversized.get(section, position).await?;
+            // Get the key record from the key record blob (fixed size, page-cached)
+            let record = self.read_record(position).await?;
 
             // Check if this key matches
-            if key_entry.key.as_ref() == key.as_ref() {
-                return Ok(Some((section, key_entry)));
+            if record.key.as_ref() == key.as_ref() {
+                return Ok(Some(record));
             }
 
             // Increment unnecessary reads
             self.unnecessary_reads.inc();
 
             // Follow the chain
-            let Some(next) = key_entry.next() else {
+            let Some(next) = record.next() else {
                 break; // End of chain
             };
-            section = next.0;
-            position = next.1;
+            position = next;
         }
 
         Ok(None)
@@ -669,12 +679,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         self.gets.inc();
 
-        let Some((section, key_entry)) = self.find_key(key).await? else {
+        let Some(record) = self.find_key(key).await? else {
             return Ok(None);
         };
         let value = self
-            .oversized
-            .get_value(section, key_entry.value_offset, key_entry.value_size)
+            .read_value(record.value_offset, record.value_size)
             .await?;
         Ok(Some(value))
     }
@@ -692,7 +701,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Check whether a value exists for a given key.
     ///
-    /// Walks the same key index chain as [`Self::get`] with [`Identifier::Key`]
+    /// Walks the same key record chain as [`Self::get`] with [`Identifier::Key`]
     /// but never reads values.
     pub async fn has(&self, key: &K) -> Result<bool, Error> {
         self.has.inc();
@@ -791,9 +800,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     //
     // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Stage the oversized journals' syncs and the table write with one batch:
+        // Stage the key/value blobs' syncs and the table write with one batch:
         // ONE atomic commit makes them durable together, so the table can never
-        // reference records the journals do not hold.
+        // reference records the key record blob does not hold.
         let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
         self.sync_into(&mut batch).await?;
         commonware_runtime::WriteBatch::apply_sync(batch)
@@ -801,17 +810,18 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             .map_err(Error::Runtime)
     }
 
-    /// [Self::sync], staged with `batch` instead of synced directly: the
-    /// oversized journals and the table become durable when the batch is
-    /// applied.
+    /// [Self::sync], staged with `batch` instead of synced directly: the key
+    /// record blob, the value blob, and the table become durable when the
+    /// batch is applied.
     pub async fn sync_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
         &mut self,
         batch: &mut T,
     ) -> Result<(), Error> {
-        self.oversized
-            .sync_into(&self.modified_sections, batch)
-            .await?;
-        self.modified_sections.clear();
+        // The value blob is staged before the key record blob so a sequentially
+        // replayed batch (the test-only mock fallback) never syncs records ahead
+        // of the values they reference.
+        self.values.sync_into(batch).await?;
+        self.keys.sync_into(batch).await?;
 
         if self.should_resize() && self.resize_progress.is_none() {
             self.start_resize();
@@ -820,7 +830,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             self.advance_resize().await?;
         }
 
-        // Table entries are written directly to the blob; stage its
+        // Table entries are written directly to the blob. Stage its
         // durability with the batch.
         batch.sync(&self.table);
 
@@ -841,29 +851,27 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Close and remove any underlying blobs created by the [Freezer], in ONE atomic commit.
     pub async fn destroy(self) -> Result<(), Error> {
         let mut batch = self.context.batch().await.map_err(Error::Runtime)?;
-        self.destroy_into(&mut batch).await?;
+        self.destroy_into(&mut batch);
         commonware_runtime::WriteBatch::apply_sync(batch)
             .await
             .map_err(Error::Runtime)
     }
 
-    /// [Self::destroy], staged with `batch`: every partition removal (both the oversized
-    /// journal's and the table's) lands when the caller applies the batch with `apply_sync`,
-    /// atomically with everything else it stages.
+    /// [Self::destroy], staged with `batch`: every partition removal lands when the
+    /// caller applies the batch with `apply_sync`, atomically with everything else it
+    /// stages.
     ///
-    /// The table partition always exists: the table blob is created at initialization.
-    pub(crate) async fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
+    /// All three partitions exist: their blobs are opened at initialization.
+    pub(crate) fn destroy_into<T: commonware_runtime::WriteBatch<Blob = E::Blob>>(
         self,
         batch: &mut T,
-    ) -> Result<(), Error> {
-        // Stage the oversized journal's destruction
-        self.oversized.destroy_into(batch).await?;
-
-        // Stage the table's destruction
+    ) {
+        drop(self.keys);
+        batch.remove(&self.key_partition, None);
+        drop(self.values);
+        batch.remove(&self.value_partition, None);
         drop(self.table);
         batch.remove(&self.table_partition, None);
-
-        Ok(())
     }
 
     /// Get the current progress of the resize operation.
@@ -915,21 +923,55 @@ mod tests {
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
-    fn test_key_at_index(table_size: u32, table_index: u32) -> FixedBytes<64> {
+    /// Generate `count` distinct keys that all map to `table_index` in a table of
+    /// `table_size` slots.
+    fn test_keys_at_index(table_size: u32, table_index: u32, count: usize) -> Vec<FixedBytes<64>> {
         assert!(table_size.is_power_of_two());
         assert!(table_index < table_size);
 
+        let mut keys = Vec::with_capacity(count);
         for value in 0u64.. {
             let mut buf = [0u8; 64];
             let bytes = value.to_be_bytes();
             buf[..bytes.len()].copy_from_slice(&bytes);
             let key = FixedBytes::new(buf);
             if Crc32::checksum(key.as_ref()) & (table_size - 1) == table_index {
-                return key;
+                keys.push(key);
+                if keys.len() == count {
+                    return keys;
+                }
             }
         }
 
         unreachable!("u64 key space exhausted");
+    }
+
+    fn test_key_at_index(table_size: u32, table_index: u32) -> FixedBytes<64> {
+        test_keys_at_index(table_size, table_index, 1)
+            .pop()
+            .unwrap()
+    }
+
+    fn test_cfg(
+        pooler: &impl BufferPooler,
+        table_initial_size: u32,
+        table_resize_frequency: u8,
+        table_resize_chunk_size: u32,
+    ) -> super::super::Config<()> {
+        super::super::Config {
+            key_partition: "test-key".into(),
+            key_write_buffer: NZUsize!(1024),
+            key_page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),
+            value_partition: "test-value".into(),
+            value_compression: None,
+            value_write_buffer: NZUsize!(1024),
+            table_partition: "test-table".into(),
+            table_initial_size,
+            table_resize_frequency,
+            table_resize_chunk_size,
+            table_replay_buffer: NZUsize!(64 * 1024),
+            codec_config: (),
+        }
     }
 
     type TestFreezer = Freezer<Context, U64, u64>;
@@ -951,22 +993,8 @@ mod tests {
     fn issue_2966_regression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                // Use 4 entries but only insert to 2, leaving 2 empty
-                table_initial_size: 4,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 4,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
+            // Use 4 entries but only insert to 2, leaving 2 empty
+            let cfg = test_cfg(&context, 4, 1, 4);
             let mut freezer =
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
                     .await
@@ -1005,21 +1033,7 @@ mod tests {
     fn reopen_truncates_interrupted_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 2,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 1,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
+            let cfg = test_cfg(&context, 2, 1, 1);
             let key = test_key_at_index(4, 3);
 
             {
@@ -1048,21 +1062,7 @@ mod tests {
     fn reopen_recovers_completed_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 2,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 2,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
+            let cfg = test_cfg(&context, 2, 1, 2);
             let key = test_key_at_index(4, 3);
 
             {
@@ -1087,28 +1087,14 @@ mod tests {
         });
     }
 
-    /// A table slot referencing a record the journals do not hold cannot be produced by
-    /// a crash (the journals commit before or atomically with the table), so
+    /// A table slot referencing a record the key record blob does not hold cannot be
+    /// produced by a crash (the blobs and the table commit atomically), so
     /// initialization must fail loudly instead of repairing it.
     #[test_traced]
     fn dangling_slot_is_loud() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 4,
-                table_resize_frequency: 64,
-                table_resize_chunk_size: 4,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
+            let cfg = test_cfg(&context, 4, 64, 4);
 
             {
                 let mut freezer =
@@ -1119,14 +1105,13 @@ mod tests {
                 freezer.close().await.unwrap();
             }
 
-            // Point the first slot at a record position the journals do not hold
+            // Point the first slot at a record position the key record blob does not hold
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 let mut slot = Vec::with_capacity(Entry::SLOT_SIZE);
                 Entry::write_slot(
                     &mut slot,
                     Some(&Entry {
-                        section: 0,
                         position: u64::MAX / Record::<FixedBytes<64>>::SIZE as u64,
                         added: 0,
                     }),
@@ -1136,7 +1121,7 @@ mod tests {
 
             let result =
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::MissingRecord(0, _))));
+            assert!(matches!(result, Err(Error::MissingRecord(_))));
         });
     }
 
@@ -1146,21 +1131,7 @@ mod tests {
     fn sub_slot_table_is_loud() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = super::super::Config {
-                key_partition: "test-key-index".into(),
-                key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test-value-journal".into(),
-                value_compression: None,
-                value_write_buffer: NZUsize!(1024),
-                value_target_size: 10 * 1024 * 1024,
-                table_partition: "test-table".into(),
-                table_initial_size: 2,
-                table_resize_frequency: 1,
-                table_resize_chunk_size: 1,
-                table_replay_buffer: NZUsize!(64 * 1024),
-                codec_config: (),
-            };
+            let cfg = test_cfg(&context, 2, 1, 1);
 
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
@@ -1171,6 +1142,267 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("storage"), cfg.clone())
                     .await;
             assert!(matches!(result, Err(Error::InvalidTableLength(3))));
+        });
+    }
+
+    /// Records committed by different syncs share a chain: traversal crosses commit
+    /// boundaries through monotone positions.
+    #[test_traced]
+    fn chain_across_commits() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+            let keys = test_keys_at_index(4, 0, 3);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                for (i, key) in keys.iter().enumerate() {
+                    freezer.put(key.clone(), i as i32).await.unwrap();
+                    freezer.sync().await.unwrap();
+                }
+                freezer.close().await.unwrap();
+            }
+
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            for (i, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    freezer.get(Identifier::Key(key)).await.unwrap(),
+                    Some(i as i32)
+                );
+            }
+        });
+    }
+
+    /// A crash erases uncommitted puts atomically: the table slot, the key records, and
+    /// the values all revert to the last commit (never one without the others), and the
+    /// erased keys can be re-put.
+    #[test_traced]
+    fn crash_recovers_committed_chain() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+            let keys = test_keys_at_index(4, 0, 3);
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Commit the chain head for keys[0]
+            freezer.put(keys[0].clone(), 0).await.unwrap();
+            freezer.sync().await.unwrap();
+
+            // Extend the same chain without committing
+            freezer.put(keys[1].clone(), 1).await.unwrap();
+            freezer.put(keys[2].clone(), 2).await.unwrap();
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+            let keys = test_keys_at_index(4, 0, 3);
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // The committed head is intact, the uncommitted chain extensions vanished
+            assert_eq!(
+                freezer.get(Identifier::Key(&keys[0])).await.unwrap(),
+                Some(0)
+            );
+            assert_eq!(freezer.get(Identifier::Key(&keys[1])).await.unwrap(), None);
+            assert_eq!(freezer.get(Identifier::Key(&keys[2])).await.unwrap(), None);
+
+            // The erased keys can be re-put and the whole chain traverses
+            freezer.put(keys[1].clone(), 11).await.unwrap();
+            freezer.put(keys[2].clone(), 22).await.unwrap();
+            freezer.sync().await.unwrap();
+            assert_eq!(
+                freezer.get(Identifier::Key(&keys[0])).await.unwrap(),
+                Some(0)
+            );
+            assert_eq!(
+                freezer.get(Identifier::Key(&keys[1])).await.unwrap(),
+                Some(11)
+            );
+            assert_eq!(
+                freezer.get(Identifier::Key(&keys[2])).await.unwrap(),
+                Some(22)
+            );
+        });
+    }
+
+    /// Chain traversal across many records in one slot, before and after reopen.
+    #[test_traced]
+    fn chain_traversal_many_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A resize frequency of u8::MAX keeps the table at its initial size, so every
+            // key lands in one chain.
+            let cfg = test_cfg(&context, 4, u8::MAX, 4);
+            let keys = test_keys_at_index(4, 2, 64);
+
+            let mut cursors = Vec::new();
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                for (i, key) in keys.iter().enumerate() {
+                    cursors.push(freezer.put(key.clone(), i as i32).await.unwrap());
+                }
+
+                // Every key is reachable before the chain is committed
+                for (i, key) in keys.iter().enumerate() {
+                    assert_eq!(
+                        freezer.get(Identifier::Key(key)).await.unwrap(),
+                        Some(i as i32)
+                    );
+                }
+                freezer.close().await.unwrap();
+            }
+
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            for (i, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    freezer.get(Identifier::Key(key)).await.unwrap(),
+                    Some(i as i32)
+                );
+                assert!(freezer.has(key).await.unwrap());
+                assert_eq!(
+                    freezer.get(Identifier::Cursor(cursors[i])).await.unwrap(),
+                    Some(i as i32)
+                );
+            }
+        });
+    }
+
+    /// A value blob truncated behind the last committed record is corruption: both blobs
+    /// commit in the same batch, so no crash can produce it.
+    #[test_traced]
+    fn value_blob_truncated_is_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(test_key("key1"), 1).await.unwrap();
+                freezer.put(test_key("key2"), 2).await.unwrap();
+                freezer.close().await.unwrap();
+            }
+
+            {
+                let (blob, size) = context.open(&cfg.value_partition, b"values").await.unwrap();
+                blob.resize(size - 2).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            let result =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Value bytes past the last committed record's value range are corruption: unsynced
+    /// value writes are never made readable by another blob's commit.
+    #[test_traced]
+    fn value_blob_trailing_bytes_is_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(test_key("key1"), 1).await.unwrap();
+                freezer.close().await.unwrap();
+            }
+
+            {
+                let (blob, size) = context.open(&cfg.value_partition, b"values").await.unwrap();
+                blob.write_at_sync(size, vec![0xDE; 100]).await.unwrap();
+            }
+
+            let result =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A partial key record is corruption: the backend's per-blob atomic sync means no
+    /// crash can produce one.
+    #[test_traced]
+    fn partial_key_record_is_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(test_key("key1"), 1).await.unwrap();
+                freezer.close().await.unwrap();
+            }
+
+            {
+                let (blob, size) = context.open(&cfg.key_partition, b"keys").await.unwrap();
+                blob.resize(size - 3).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            let result =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A key record blob truncated behind the value blob is corruption: both blobs
+    /// commit in the same batch, so no crash can produce it.
+    #[test_traced]
+    fn key_blob_truncated_is_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, 4, 64, 4);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(test_key("key1"), 1).await.unwrap();
+                freezer.put(test_key("key2"), 2).await.unwrap();
+                freezer.close().await.unwrap();
+            }
+
+            // Drop the last record but keep its value bytes: the remaining last record's
+            // value range no longer ends at the value blob's size.
+            {
+                let (blob, size) = context.open(&cfg.key_partition, b"keys").await.unwrap();
+                blob.resize(size - Record::<FixedBytes<64>>::SIZE as u64)
+                    .await
+                    .unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            let result =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 }

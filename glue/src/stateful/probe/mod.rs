@@ -821,7 +821,6 @@ mod test {
             freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
             freezer_key_page_cache: page_cache,
             freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
-            freezer_value_target_size: 1024,
             freezer_value_compression: None,
             ordinal_partition: format!("{prefix}-{name}-ordinal"),
             items_per_section: NZU64!(10),

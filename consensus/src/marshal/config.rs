@@ -76,7 +76,7 @@ where
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
 
-    /// The page cache to use for the freezer journal.
+    /// The page cache to use for the freezer keys.
     pub page_cache: CacheRef,
 
     /// The size of the replay buffer for storage archives.

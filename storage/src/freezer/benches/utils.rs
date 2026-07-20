@@ -9,9 +9,6 @@ use std::num::{NonZeroU16, NonZeroUsize};
 /// Number of bytes that can be buffered before being written to disk.
 const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Target size of each value section before creating a new one.
-const VALUE_TARGET_SIZE: u64 = 100 * 1024 * 1024; // 100MB
-
 /// Initial size of the table.
 const TABLE_INITIAL_SIZE: u32 = 65_536;
 
@@ -55,7 +52,6 @@ pub async fn init(ctx: Context) -> FreezerType {
         value_partition: VALUE_PARTITION.into(),
         value_compression: None,
         value_write_buffer: NZUsize!(WRITE_BUFFER),
-        value_target_size: VALUE_TARGET_SIZE,
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,

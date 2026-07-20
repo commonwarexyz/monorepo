@@ -31,7 +31,6 @@ impl StorageWorkload for FreezerWorkload {
             value_partition: format!("freezer-value-conformance-{seed}"),
             value_compression: None,
             value_write_buffer: WRITE_BUFFER,
-            value_target_size: 128,
             table_partition: format!("freezer-table-conformance-{seed}"),
             table_initial_size: 4,
             table_resize_frequency: 1,

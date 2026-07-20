@@ -57,7 +57,6 @@ fn fuzz(input: FuzzInput) {
             value_partition: "fuzz-value".into(),
             value_compression: None,
             value_write_buffer: NZUsize!(1024 * 1024),
-            value_target_size: 10 * 1024 * 1024,
             table_partition: "fuzz-table".into(),
             table_initial_size: 256,
             table_resize_frequency: 4,

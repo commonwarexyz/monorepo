@@ -281,7 +281,6 @@ mod tests {
             freezer_key_partition: "test-freezer-key".into(),
             freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: "test-freezer-value".into(),
-            freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,
             ordinal_partition: "test-ordinal".into(),
             items_per_section: NZU64!(1024),

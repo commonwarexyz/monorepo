@@ -1877,7 +1877,6 @@ impl TestHarness for StandardHarness {
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
                 ),
-                freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
@@ -1919,7 +1918,6 @@ impl TestHarness for StandardHarness {
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
                 ),
-                freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),
@@ -2654,7 +2652,6 @@ impl TestHarness for CodingHarness {
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
                 ),
-                freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
@@ -2696,7 +2693,6 @@ impl TestHarness for CodingHarness {
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
                 ),
-                freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),

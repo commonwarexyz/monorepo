@@ -363,7 +363,6 @@ mod tests {
                 freezer_value_partition: format!(
                     "{partition_prefix}-finalizations-by-height-freezer-value"
                 ),
-                freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
                 items_per_section: NZU64!(10),
@@ -392,7 +391,6 @@ mod tests {
                 freezer_value_partition: format!(
                     "{partition_prefix}-finalized_blocks-freezer-value"
                 ),
-                freezer_value_target_size: 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("{partition_prefix}-finalized_blocks-ordinal"),
                 items_per_section: NZU64!(10),

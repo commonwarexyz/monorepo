@@ -51,7 +51,6 @@ const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
 const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
 const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
-const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
@@ -193,7 +192,6 @@ where
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
                 ),
-                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
                 freezer_value_compression: FREEZER_VALUE_COMPRESSION,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
@@ -236,7 +234,6 @@ where
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
                 ),
-                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
                 freezer_value_compression: FREEZER_VALUE_COMPRESSION,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,

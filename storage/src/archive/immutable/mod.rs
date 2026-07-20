@@ -56,7 +56,6 @@
 //!         freezer_key_partition: "freezer-key".into(),
 //!         freezer_key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "freezer-value".into(),
-//!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
 //!         items_per_section: NZU64!(1024),
@@ -107,9 +106,6 @@ pub struct Config<C> {
     /// The partition to use for the archive's freezer values.
     pub freezer_value_partition: String,
 
-    /// The target size of the archive's freezer value sections.
-    pub freezer_value_target_size: u64,
-
     /// The compression level to use for the archive's freezer values.
     pub freezer_value_compression: Option<u8>,
 
@@ -122,11 +118,11 @@ pub struct Config<C> {
     /// to translate to the same indices.
     pub items_per_section: NonZeroU64,
 
-    /// The amount of bytes that can be buffered for the freezer key journal before being
-    /// written to a [commonware_runtime::Blob].
+    /// The amount of bytes that can be buffered for the freezer key record blob before
+    /// being written to a [commonware_runtime::Blob].
     pub freezer_key_write_buffer: NonZeroUsize,
 
-    /// The amount of bytes that can be buffered for the freezer value journal before being
+    /// The amount of bytes that can be buffered for the freezer value blob before being
     /// written to a [commonware_runtime::Blob].
     pub freezer_value_write_buffer: NonZeroUsize,
 
@@ -168,7 +164,6 @@ mod tests {
                 freezer_key_partition: "test-freezer-key2".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "test-freezer-value2".into(),
-                freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
                 ordinal_partition: "test-ordinal2".into(),
                 items_per_section: NZU64!(512),
@@ -236,7 +231,6 @@ mod tests {
                 freezer_key_partition: "crash-freezer-key".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "crash-freezer-value".into(),
-                freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: None,
                 ordinal_partition: "crash-ordinal".into(),
                 items_per_section: NZU64!(16),
@@ -324,7 +318,6 @@ mod tests {
                 freezer_key_partition: "empty-freezer-key".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "empty-freezer-value".into(),
-                freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
                 ordinal_partition: "empty-ordinal".into(),
                 items_per_section: NZU64!(512),

@@ -10,13 +10,11 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses a three-level architecture:
-//! 1. An extendible hash table (written in a single [commonware_runtime::Blob]) that maps keys to locations
-//! 2. A key index journal ([crate::journal::segmented::fixed]) that stores keys and collision chain pointers
-//! 3. A value journal ([crate::journal::segmented::glob]) that stores the actual values
-//!
-//! These journals are combined via [crate::journal::segmented::oversized], which coordinates
-//! crash recovery between them.
+//! The [Freezer] uses a three-blob architecture:
+//! 1. An extendible hash table (a single [commonware_runtime::Blob]) that maps keys to chain heads
+//! 2. A key record blob that stores fixed-size records: each key, the location of its value, and
+//!    a collision chain pointer
+//! 3. A value blob that stores the encoded (and optionally compressed) values back to back
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -28,93 +26,87 @@
 //!         |         |         |         |         |         |
 //!         v         v         v         v         v         v
 //! +-----------------------------------------------------------------+
-//! |                      Key Index Journal                          |
-//! |  Section 0: [Entry 0][Entry 1][Entry 2]...                      |
-//! |  Section 1: [Entry 10][Entry 11][Entry 12]...                   |
-//! |  Section N: [Entry 100][Entry 101][Entry 102]...                |
+//! |                        Key Record Blob                          |
+//! |  [Record 0][Record 1][Record 2][Record 3][Record 4]...          |
 //! +-------|---------|---------|---------|---------|---------|-------+
 //!         |         |         |         |         |         |
 //!         v         v         v         v         v         v
 //! +-----------------------------------------------------------------+
-//! |                        Value Journal                            |
-//! |  Section 0: [Value 0][Value 1][Value 2]...                      |
-//! |  Section 1: [Value 10][Value 11][Value 12]...                   |
-//! |  Section N: [Value 100][Value 101][Value 102]...                |
+//! |                          Value Blob                             |
+//! |  [Value 0][Value 1][Value 2][Value 3][Value 4]...               |
 //! +-----------------------------------------------------------------+
 //! ```
 //!
 //! Each table entry is a single fixed-size slot holding the head of that entry's collision
 //! chain. An occupancy tag distinguishes an empty slot (all zeros) from a chain head at
-//! section 0, position 0. The storage backend guarantees atomic commits, so slots are
-//! never torn and committed slots never reference records the journals do not hold
-//! (see Recovery below).
+//! position 0. The storage backend guarantees atomic commits, so slots are never torn and
+//! committed slots never reference records the blobs do not hold (see Recovery below).
 //!
 //! ```text
 //! +-------------------------------------+
 //! |          Hash Table Entry           |
 //! +-------------------------------------+
 //! | occupied:  u8                       |
-//! | section:   u64                      |
 //! | position:  u64                      |
 //! | added:     u8                       |
 //! +-------------------------------------+
 //! ```
 //!
-//! The key index journal stores fixed-size entries containing a key, a pointer to the value in the
-//! value journal, and an optional pointer to the next entry in the collision chain (for keys that
-//! hash to the same table index).
+//! The key record blob stores fixed-size records containing a key, the location of its value in
+//! the value blob, and a pointer to the next record in the collision chain (for keys that hash
+//! to the same table index). Records are addressed by position (insertion order) and chains
+//! grow at the head, so a chain pointer always references a strictly older position.
 //!
 //! ```text
 //! +-------------------------------------+
-//! |        Key Index Entry              |
+//! |             Key Record              |
 //! +-------------------------------------+
 //! | Key:           Array                |
+//! | Next:          u64 (u64::MAX=none)  |
 //! | Value Offset:  u64                  |
 //! | Value Size:    u32                  |
-//! | Next:          Option<(u64, u32)>   |
 //! +-------------------------------------+
 //! ```
 //!
-//! The value journal stores the actual encoded values at the offsets referenced by the key index entries.
+//! The value blob stores the encoded values at the offsets referenced by the key records.
 //!
 //! # Traversing Conflicts
 //!
-//! When multiple keys hash to the same table index, they form a linked list within the key index
-//! journal. Each key index entry points to its value in the value journal:
+//! When multiple keys hash to the same table index, they form a linked list within the key
+//! record blob. Each key record points to its value in the value blob:
 //!
 //! ```text
 //! Hash Table:
 //! [Index 42]         +-------------------+
-//!                    | section: 2        |
-//!                    | offset: 768       |
+//!                    | position: 7       |
 //!                    +---------+---------+
 //!                              |
-//! Key Index Journal:           v
-//! [Section 2]        +-----------------------+
+//! Key Record Blob:             v
+//! [Position 7]       +-----------------------+
 //!                    | Key: "foo"            |
-//!                    | ValOff: 100           |
-//!                    | ValSize: 20           |
-//!                    | Next: (1, 512) -------+---+
+//!                    | Next: 4 --------------+---+
+//!                    | ValOff: 100           |   |
+//!                    | ValSize: 20           |   |
 //!                    +-----------------------+   |
 //!                                                v
-//! [Section 1]        +-----------------------+
+//! [Position 4]       +-----------------------+
 //!                    | Key: "bar"            |
-//!                    | ValOff: 50            |
-//!                    | ValSize: 20           |
-//!                    | Next: (0, 256) -------+---+
+//!                    | Next: 1 --------------+---+
+//!                    | ValOff: 50            |   |
+//!                    | ValSize: 20           |   |
 //!                    +-----------------------+   |
 //!                                                v
-//! [Section 0]        +-----------------------+
+//! [Position 1]       +-----------------------+
 //!                    | Key: "baz"            |
+//!                    | Next: none            |
 //!                    | ValOff: 0             |
 //!                    | ValSize: 20           |
-//!                    | Next: None            |
 //!                    +-----------------------+
 //!
-//! Value Journal:
-//! [Section 0]        [Value: 126 @ offset 0 ]
-//! [Section 1]        [Value: 84  @ offset 50]
-//! [Section 2]        [Value: 42  @ offset 100]
+//! Value Blob:
+//! [Value: 126 @ offset 0  ]
+//! [Value: 84  @ offset 50 ]
+//! [Value: 42  @ offset 100]
 //! ```
 //!
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
@@ -156,18 +148,26 @@
 //! Each sync will process up to `table_resize_chunk_size` entries until the resize is complete. If there is
 //! an ongoing resize when closing the [Freezer], the resize will be completed before closing.
 //!
+//! # Commits
+//!
+//! Mutations accumulate in write buffers until [Freezer::sync] or [Freezer::sync_into] commits
+//! the value blob, the key record blob, and the table as ONE atomic batch
+//! ([commonware_runtime::WriteBatch]). A committed table slot therefore never references a
+//! record the key record blob does not hold, and a committed record never references value
+//! bytes that never landed: after a crash, all three blobs read back from the same commit.
+//!
 //! # Recovery
 //!
 //! [Freezer::init] recovers from the freezer's own committed state, which is always
-//! internally consistent: [Freezer::sync] and [Freezer::sync_into] commit the
-//! journals and the table atomically, so a committed slot never references a
-//! missing record. The committed table length encodes the table's
-//! geometry: the blob grows one slot per landed resize chunk, so a length between two
-//! powers of two is a resize the freezer did not finish and initialization drops the
-//! partially copied upper half (the resize restarts once triggered again).
-//! Initialization then rescans the table to count entries eligible for resizing,
-//! failing loudly on any slot that does not decode or that references a record the
-//! journals do not hold.
+//! internally consistent (see Commits). Initialization verifies that the key record blob
+//! holds whole records (the backend's per-blob atomic sync makes a partial record
+//! corruption, never a crash state), that the last record's value range ends exactly at
+//! the value blob's committed size, and that every occupied table slot references a
+//! record the key record blob holds — failing loudly on any violation instead of
+//! repairing. The committed table length encodes the table's geometry: the blob grows one
+//! slot per landed resize chunk, so a length between two powers of two is a resize the
+//! freezer did not finish and initialization drops the partially copied upper half (the
+//! resize restarts once triggered again).
 //!
 //! # Example
 //!
@@ -180,17 +180,16 @@
 //! executor.start(|context| async move {
 //!     // Create a freezer
 //!     let cfg = Config {
-//!         key_partition: "freezer-key-index".into(),
+//!         key_partition: "freezer-keys".into(),
 //!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-//!         value_partition: "freezer-value-journal".into(),
+//!         value_partition: "freezer-values".into(),
 //!         value_compression: Some(3),
 //!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         value_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer-table".into(),
-//!         table_initial_size: 65_536, // ~3MB initial table size
+//!         table_initial_size: 65_536, // ~700KB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
-//!         table_resize_chunk_size: 16_384, // ~1MB of table entries rewritten per sync
+//!         table_resize_chunk_size: 16_384, // ~160KB of table entries rewritten per sync
 //!         table_replay_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         codec_config: (),
 //!     };
@@ -232,48 +231,59 @@ pub enum Identifier<'a, K: Array> {
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
-    #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
+    /// The stored blobs cannot describe any committed freezer state.
+    ///
+    /// The key record blob, the value blob, and the table commit as ONE atomic batch
+    /// and the backend's per-blob sync is atomic, so this is corruption or tampering,
+    /// never a state a crash can produce.
+    #[error("corruption: {0}")]
+    Corruption(String),
     /// The table blob length cannot describe a committed table.
     ///
     /// Table writes are slot-aligned and every committed table holds at least one slot,
     /// so this is corruption or tampering, never a state a crash can produce.
     #[error("invalid table length: {0}")]
     InvalidTableLength(u64),
-    /// A table slot references a journal record that does not exist.
+    /// A table slot references a key record that does not exist.
     ///
-    /// Committed slots always reference committed journal records (the journals commit
-    /// before or atomically with the table), so this is corruption or tampering, never
-    /// a state a crash can produce.
-    #[error("table references a missing record (section: {0}, position: {1})")]
-    MissingRecord(u64, u64),
+    /// Committed slots always reference committed records (the blobs commit atomically
+    /// with the table), so this is corruption or tampering, never a state a crash can
+    /// produce.
+    #[error("table references a missing record (position: {0})")]
+    MissingRecord(u64),
+    /// The encoded value is larger than a [Cursor] can address.
+    #[error("value too large: {0} bytes")]
+    ValueTooLarge(usize),
+    /// Compressing a value failed.
+    #[error("compression failed")]
+    CompressionFailed,
+    /// Decompressing a stored value failed.
+    #[error("decompression failed")]
+    DecompressionFailed,
 }
 
 /// Configuration for [Freezer].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The [commonware_runtime::Storage] partition for the key index journal.
+    /// The [commonware_runtime::Storage] partition for the key record blob.
     pub key_partition: String,
 
-    /// The size of the write buffer for the key index journal.
+    /// The size of the write buffer for the key record blob.
     pub key_write_buffer: NonZeroUsize,
 
-    /// The page cache for the key index journal.
+    /// The page cache for key record reads.
     pub key_page_cache: CacheRef,
 
-    /// The [commonware_runtime::Storage] partition for the value journal.
+    /// The [commonware_runtime::Storage] partition for the value blob.
     pub value_partition: String,
 
-    /// The compression level for the value journal.
+    /// The compression level for stored values.
     pub value_compression: Option<u8>,
 
-    /// The size of the write buffer for the value journal.
+    /// The size of the write buffer for the value blob.
     pub value_write_buffer: NonZeroUsize,
-
-    /// The target size of each value journal section before creating a new one.
-    pub value_target_size: u64,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,
@@ -315,7 +325,6 @@ mod tests {
     }
 
     const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_VALUE_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
@@ -329,13 +338,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: compression,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -400,13 +408,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -450,13 +457,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -504,13 +510,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer with a very small table to force collisions
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -568,13 +573,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -637,13 +641,12 @@ mod tests {
     fn test_crash_consistency() {
         fn crash_cfg(pooler: &impl commonware_runtime::BufferPooler) -> Config<()> {
             Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -733,13 +736,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -795,13 +797,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -840,13 +841,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -913,13 +913,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
@@ -984,13 +983,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1062,13 +1060,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1120,13 +1117,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: 128, // Force multiple journal sections
                 table_partition: "test-table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
@@ -1277,13 +1273,12 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                key_partition: "test-key-index".into(),
+                key_partition: "test-keys".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test-value-journal".into(),
+                value_partition: "test-values".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,

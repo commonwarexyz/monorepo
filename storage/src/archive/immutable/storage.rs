@@ -94,7 +94,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
                 value_partition: cfg.freezer_value_partition,
                 value_compression: cfg.freezer_value_compression,
                 value_write_buffer: cfg.freezer_value_write_buffer,
-                value_target_size: cfg.freezer_value_target_size,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,
@@ -252,7 +251,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
     async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // ONE batch stages everything: freezer table writes and journal
+        // ONE batch stages everything: freezer table writes and blob
         // appends, ordinal writes, and the commit record. The whole sync is
         // a single commit with a single fsync. The record is still staged
         // last, so a sequentially replayed batch (the test-only mock
@@ -305,7 +304,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         self.ordinal.destroy_into(&mut batch);
 
         // Stage the freezer's destruction
-        self.freezer.destroy_into(&mut batch).await?;
+        self.freezer.destroy_into(&mut batch);
 
         // Stage the commit record's destruction (its partition always exists: the blob is
         // created at initialization)

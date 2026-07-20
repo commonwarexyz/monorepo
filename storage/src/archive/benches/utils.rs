@@ -72,7 +72,6 @@ impl Archive {
                     freezer_key_partition: "archive-bench-freezer-key".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                     freezer_value_partition: "archive-bench-freezer-value".into(),
-                    freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
                     ordinal_partition: "archive-bench-ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
