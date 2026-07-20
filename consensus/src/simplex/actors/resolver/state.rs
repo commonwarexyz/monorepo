@@ -58,8 +58,8 @@ pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
-    /// Lowest view that fetch scans still need to consider (see
-    /// [Self::fetch_missing]). Views below this cursor have already been
+    /// Lowest anchor that fetch scans still need to consider (see
+    /// [Self::fetch_missing]). Anchors below this cursor have already been
     /// requested or are covered by a stored nullification. A floor raise
     /// landing mid-term pulls it back to just above the floor (see
     /// [Self::prune]).
@@ -222,10 +222,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Return requests for any missing nullifications.
     ///
     /// Scans from the cursor (never below the floor), requesting each term's
-    /// lowest uncovered view and advancing the cursor past everything
-    /// scanned. Requests stay pending in the resolver until answered or
-    /// retained out (we must eventually receive a nullification at the
-    /// anchor or a notarization/finalization at a higher view). See the
+    /// anchor and advancing the cursor past everything scanned. Requests
+    /// stay pending in the resolver until answered or retained out (we must
+    /// eventually receive a nullification at the anchor or a
+    /// notarization/finalization at a higher view). See the
     /// [module docs](super) for the full strategy, including how mid-term
     /// floor raises pull the cursor back.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {

@@ -8,9 +8,9 @@
 //!
 //! A nullification covers the view it was created for and the rest of that view's term, and a
 //! request only accepts nullifications from its own term (see [`crate::types::View::covers`]).
-//! One request per term, at its lowest uncovered view, is therefore sufficient: whatever answers
-//! it covers the rest of the term, and a higher floor moots it. The fetch scan requests each
-//! term's anchor and advances a cursor past everything it scanned:
+//! One request per term, at its lowest uncovered view (the term's "anchor"), is therefore
+//! sufficient: whatever answers it covers the rest of the term, and a higher floor moots it. The
+//! fetch scan requests each term's anchor and advances a cursor past everything it scanned:
 //!
 //! ```text
 //! term:      [1  2  3  4  5] [6 . . . 10] [11 . . . 15]    current = 14

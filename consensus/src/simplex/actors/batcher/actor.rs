@@ -129,7 +129,10 @@ where
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
         if scheme.me().is_some() {
-            required_active -= 1;
+            // We are live by construction (we never observe our own messages).
+            required_active = required_active
+                .checked_sub(1)
+                .expect("quorum is never zero");
         }
         (
             Self {
