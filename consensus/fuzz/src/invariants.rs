@@ -26,19 +26,20 @@ use std::{
     hash::Hash,
 };
 
-/// Input capabilities selected by [`check`].
+/// Safety-observation forms accepted by [`check`].
 ///
-/// Summary-only inputs run the original certificate-state invariants. A slice
-/// of the fuzz-only [`RecordingReporter`] runs those same invariants plus the
-/// temporal audit invariants that require full activity and automaton history.
+/// Extracted replica states and consensus mock Reporter slices run the basic
+/// certificate-state invariants. RecordingReporter slices, supplied by the
+/// dedicated audit targets, additionally run invariants requiring append-only
+/// activity and automaton history.
 pub trait SafetyObservations<P: Simplex> {
     fn check_safety(self, n: u32);
 }
 
-/// Checks Simplex safety using the capabilities provided by `input`.
+/// Checks Simplex safety using the provided observations.
 ///
-/// This remains the single entrypoint: the concrete reporter type determines
-/// whether only the original summary invariants or also the fuzz audit
+/// This remains the single entrypoint: the concrete observation type determines
+/// whether only the basic invariants or also the audit-history
 /// invariants are observable.
 pub fn check<P: Simplex>(n: u32, observations: impl SafetyObservations<P>) {
     observations.check_safety(n);
@@ -814,10 +815,11 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     }
 }
 
-/// Checks invariants that require the fuzz-only append-only activity and
-/// automaton history. Every reporter in this slice must belong to a correct
-/// engine; adversarial observers remain available to the separate vote/fault
-/// checker, but must not be passed to the certificate-state [`check`] call.
+/// Checks invariants that require the append-only activity and automaton history
+/// collected by the dedicated audit targets. Every reporter in this slice must
+/// belong to a correct engine; adversarial observers remain available to the
+/// separate vote/fault checker, but must not be passed to [`check`] as safety
+/// observations.
 fn check_fuzz_invariants<E, S, L>(reporters: &[RecordingReporter<E, S, L, Sha256Digest>])
 where
     E: CryptoRng,
@@ -879,7 +881,7 @@ where
                     // Source: the Simplex paper's quorum-intersection safety proof
                     // relies on correct replicas not equivocating. The instantiated
                     // protocol's proposal, certification, and fault-evidence types
-                    // sign the parent together with the payload. This fuzz Reporter
+                    // sign the parent together with the payload. RecordingReporter
                     // extends the summary model by retaining that signed parent.
                     match activity {
                         Activity::Notarize(vote) => {
