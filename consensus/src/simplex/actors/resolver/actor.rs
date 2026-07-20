@@ -50,6 +50,9 @@ pub struct Actor<
     mailbox_size: NonZeroUsize,
     fetch_timeout: Duration,
 
+    /// Certificates known between the floor and the current view. Serves
+    /// [HandlerMessage::Produce] requests and emits the [Effect]s the actor
+    /// applies to the resolver (see [Self::apply_effects]).
     state: State<S, D>,
 
     /// Responses to notarization deliveries, keyed by notarization view and
@@ -173,22 +176,21 @@ impl<
     }
 
     /// Handles a certification outcome from the voter.
-    ///
-    /// Responses held for the view's notarization deliveries are answered
-    /// with the verdict. Success completes those fetches. Failure blocks the
-    /// peers that served the uncertifiable notarization and the resolver
-    /// retries the still-pending requests, mirroring how [Self::validate]
-    /// treats peers that serve a notarization for a view already marked
-    /// failed. No copy of that notarization can certify anywhere, so the
-    /// view cannot finalize and honest participants nullify it: the retried
-    /// request is eventually answered by that covering nullification (or by
-    /// a certificate at a higher view).
     fn certified<R: Resolver<Key = U64, Subscriber = ()>>(
         &mut self,
         resolver: &mut R,
         view: View,
         success: bool,
     ) {
+        // Answer the responses held for the view's notarization deliveries.
+        // Success completes those fetches. Failure blocks the peers that
+        // served the uncertifiable notarization and the resolver retries the
+        // still-pending requests, mirroring how [Self::validate] treats peers
+        // that serve a notarization for a view already marked failed. No copy
+        // of that notarization can certify anywhere, so the view cannot
+        // finalize and honest participants nullify it: the retried request is
+        // eventually answered by that covering nullification (or by a
+        // certificate at a higher view).
         if let Some(responses) = self.held.remove(&view) {
             for response in responses {
                 response.send_lossy(success);
