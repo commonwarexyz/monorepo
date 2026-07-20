@@ -419,13 +419,9 @@ where
                 // Skip certificates we already have for the view
                 let kind = message.kind();
                 let round = work.get(&view);
-                let duplicate = round.is_some_and(|round| match &message {
-                    Certificate::Notarization(_) => round.has_notarization(),
-                    Certificate::Nullification(_) => round.has_nullification(),
-                    Certificate::Finalization(_) => round.has_finalization(),
-                });
+                let duplicate = round.is_some_and(|round| round.has_certificate(kind));
                 if duplicate {
-                    trace!(%view, kind, "skipping duplicate certificate");
+                    trace!(%view, %kind, "skipping duplicate certificate");
                     continue;
                 }
 
@@ -435,7 +431,7 @@ where
                 let span = info_span!(
                     parent: parent,
                     "simplex.batcher.verify_certificate",
-                    kind,
+                    %kind,
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
@@ -456,7 +452,7 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .mark_notarized();
+                            .certify(kind);
                         voter.recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
@@ -473,7 +469,7 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .mark_nullified();
+                            .certify(kind);
                         voter.recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
@@ -490,7 +486,7 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .mark_finalized();
+                            .certify(kind);
                         voter.recovered(Certificate::Finalization(finalization));
                     }
                 }
@@ -566,7 +562,7 @@ where
                 // Forward leader's proposal to voter (if we're not the leader and haven't already)
                 if let Some(round) = work.get_mut(&current.view)
                     && let Some(me) = self.scheme.me()
-                    && let Some(proposal) = round.forward_proposal(me)
+                    && let Some(proposal) = round.try_forward_proposal(me)
                 {
                     round.span().in_scope(|| voter.proposal(proposal));
                 }
@@ -588,30 +584,9 @@ where
                 async {
                     // Batch verify votes if ready
                     let timer = self.verify_latency.timer(self.context.as_ref());
-                    let verified = if round.ready_notarizes() {
-                        Some(
-                            round
-                                .verify_notarizes(self.context.as_mut(), &self.strategy)
-                                .await,
-                        )
-                    } else if round.ready_nullifies() {
-                        Some(
-                            round
-                                .verify_nullifies(self.context.as_mut(), &self.strategy)
-                                .await,
-                        )
-                    } else if round.ready_finalizes() {
-                        Some(
-                            round
-                                .verify_finalizes(self.context.as_mut(), &self.strategy)
-                                .await,
-                        )
-                    } else {
-                        None
-                    };
-
-                    // Process batch verification results
-                    if let Some((batch, failed)) = verified {
+                    if let Some((batch, failed)) = round
+                    .try_verify(self.context.as_mut(), &self.strategy)
+                    .await {
                         timer.observe(self.context.as_ref());
 
                         // Process verified votes.
@@ -637,41 +612,15 @@ where
                         );
                     }
 
-                    // Try to construct and forward certificates
-                    if let Some(notarization) = self
+                    // Construct and forward every certificate with a verified quorum
+                    while let Some(certificate) = self
                         .recover_latency
-                        .time_some(
-                            self.context.as_ref(),
-                            round.try_construct_notarization(&self.strategy),
-                        )
+                        .time_some(self.context.as_ref(), round.try_construct_certificate(&self.strategy))
                         .await
                     {
-                        debug!(%updated_view, "constructed notarization, forwarding to voter");
-
-                        // Forward notarization to voter
-                        voter.recovered(Certificate::Notarization(notarization));
-                    }
-                    if let Some(nullification) = self
-                        .recover_latency
-                        .time_some(
-                            self.context.as_ref(),
-                            round.try_construct_nullification(&self.strategy),
-                        )
-                        .await
-                    {
-                        debug!(%updated_view, "constructed nullification, forwarding to voter");
-                        voter.recovered(Certificate::Nullification(nullification));
-                    }
-                    if let Some(finalization) = self
-                        .recover_latency
-                        .time_some(
-                            self.context.as_ref(),
-                            round.try_construct_finalization(&self.strategy),
-                        )
-                        .await
-                    {
-                        debug!(%updated_view, "constructed finalization, forwarding to voter");
-                        voter.recovered(Certificate::Finalization(finalization));
+                        let kind = certificate.kind();
+                        debug!(%updated_view, %kind, "constructed certificate, forwarding to voter");
+                        voter.recovered(certificate);
                     }
                 }
                 .instrument(span)
