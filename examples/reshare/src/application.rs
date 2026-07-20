@@ -67,7 +67,7 @@ where
         let parent = ancestry.next().await?;
         let height = parent.height().next();
         // The `reshare::Application` wrapper selected and fetched the payload.
-        let payload = input.parent.payload;
+        let payload = input.upstream.payload;
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {
