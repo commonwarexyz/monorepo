@@ -191,8 +191,12 @@
 //!    directed unit test.
 //!
 //! What remains uncovered by all three layers: platform I/O semantics (the
-//! block-granular tearing model and fsyncgate cache model are assumptions
-//! about the OS and device, not checked facts), wall-clock effects,
+//! block-granular tearing model, the fsyncgate cache model, and
+//! neighboring-block isolation — a crashed write may tear only the blocks
+//! it touched, never disturbing others, which is SQLite's "powersafe
+//! overwrite" assumption at block granularity and is implicit in the crash
+//! fan only resolving WRITTEN blocks — are assumptions about the OS and
+//! device, not checked facts), wall-clock effects,
 //! reader/writer async interleavings (see below), and staged batch resize
 //! (`Batch::resize` has no model action — its shrink-into-hole regressions
 //! are pinned by unit tests in `tests`). Batch operations over blobs with a
