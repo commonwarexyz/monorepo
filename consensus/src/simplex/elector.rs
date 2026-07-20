@@ -187,15 +187,9 @@ impl<H: Hasher> RoundRobin<H> {
     /// The term length is consensus-critical: every participant must configure
     /// the same value (see [`TermLength`]). The timeout is local policy.
     ///
-    /// # Panics
-    ///
-    /// Panics if `term_length` is 1 (single-view terms need no timeout and are
-    /// the default).
+    /// A `term_length` of 1 is rejected at engine construction (single-view
+    /// terms need no timeout and are the default).
     pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
-        assert!(
-            term_length.get() > 1,
-            "stable leaders require a term length greater than 1"
-        );
         self.terms = Terms::Stable {
             length: term_length,
             stall_timeout,
@@ -541,13 +535,6 @@ mod tests {
                 ]
             );
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "stable leaders require a term length greater than 1")]
-    fn round_robin_with_term_panics_on_term_length_one() {
-        let _ =
-            <RoundRobin>::default().with_term(TermLength::new(NZU32!(1)), Duration::from_secs(10));
     }
 
     #[test]
