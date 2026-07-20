@@ -22,6 +22,7 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -38,7 +39,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 
 impl<
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: VariableValue,
     H: Hasher,
@@ -86,7 +87,7 @@ pub mod partitioned {
 
     impl<
         F: Graftable,
-        E: Context,
+        E: Context + Spawner,
         K: Array,
         V: VariableValue,
         H: Hasher,
@@ -102,7 +103,7 @@ pub mod partitioned {
         /// The configured [`Strategy`] is used to parallelize merkleization.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }

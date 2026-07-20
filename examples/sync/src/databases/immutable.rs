@@ -51,6 +51,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig,
         },
         translator: commonware_storage::translator::EightCap,
         init_cache_size: Some(NZUsize!(1 << 16)),
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 

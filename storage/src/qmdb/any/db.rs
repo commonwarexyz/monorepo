@@ -12,7 +12,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, bitmap::Shared, build_snapshot_from_log, delete_known_loc, metrics::Metrics,
+        Error, bitmap::Shared, delete_known_loc, metrics::Metrics,
         operation::Operation as OperationTrait, update_known_loc,
     },
 };
@@ -20,6 +20,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -592,7 +593,7 @@ where
                 match op {
                     Operation::CommitFloor(_, _) => {}
                     Operation::Update(update) => {
-                        let key = update.key().clone();
+                        let key = update.into_key();
                         let previous_loc = prior_state_by_key.get(&key).copied().flatten();
 
                         if loc >= rewind_size {
@@ -716,19 +717,32 @@ where
 {
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata).
+    /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
+    /// (see [crate::qmdb::SnapshotBuild::Concurrency]).
     ///
     /// # Panics
     ///
     /// Panics if the last operation is not a commit floor operation. Empty logs are handled
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init_from_log(
+        context: E,
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
+        init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        E: Spawner,
+        I: crate::qmdb::SnapshotBuild<F>,
+        C: 'static,
+    {
+        // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
+        // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
+        let log = Arc::new(log);
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
             let last_commit_loc = Location::new(
@@ -738,15 +752,26 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &log,
+                &*log,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
             .await?;
 
+            // Build the snapshot, collecting each replayed location's activity status.
+            let (active_keys, activity) = index
+                .build_snapshot(
+                    context,
+                    inactivity_floor_loc,
+                    &log,
+                    init_concurrency,
+                    init_buffer,
+                    cache_size,
+                )
+                .await?;
+
             // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
-            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0; replay
-            // appends bits from the inactivity floor onward.
+            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
             let bitmap = shared_bitmap.unwrap_or_else(|| {
                 let pruned_chunks =
                     (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
@@ -755,11 +780,12 @@ where
                 Arc::new(Shared::new(bm))
             });
 
-            // Extend the bitmap up to the inactivity floor (zero-fill).
+            // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
+            // suffix, all under a single lock acquisition.
             {
                 let mut guard = bitmap.write();
                 // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
-                // inactivity floor; otherwise `extend_to` would silently leave gaps.
+                // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
                 assert!(
                     guard.pruned_bits() <= *inactivity_floor_loc,
                     "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
@@ -767,36 +793,16 @@ where
                     *inactivity_floor_loc,
                 );
                 guard.extend_to(*inactivity_floor_loc);
+                for is_active in activity.iter() {
+                    guard.push(is_active);
+                }
             }
-
-            // Replay through `build_snapshot_from_log`. The closure fires synchronously between
-            // the helper's awaits, so each invocation does its own brief lock-update-release.
-            // Holding the guard across `.await` would not be `Send`-safe.
-            let active_keys = {
-                let bitmap = &bitmap;
-                build_snapshot_from_log(
-                    inactivity_floor_loc,
-                    &log,
-                    &mut index,
-                    cache_size,
-                    |is_active, old_loc| {
-                        let mut guard = bitmap.write();
-                        guard.push(is_active);
-                        if let Some(loc) = old_loc {
-                            guard.set_bit(*loc, false);
-                        }
-                    },
-                )
-                .await?
-            };
-
-            // CommitFloor convention: only the current `last_commit_loc` carries bit=1; earlier
-            // CommitFloors are 0. `build_snapshot_from_log` reports `is_active = (loc ==
-            // last_commit_loc)` for each CommitFloor op, so the per-op push above already
-            // encodes this.
 
             (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
+
+        // The build has returned, so every worker clone of the log is dropped. Reclaim it.
+        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.
         if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {

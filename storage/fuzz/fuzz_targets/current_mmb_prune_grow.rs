@@ -170,6 +170,8 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
         grafted_metadata_partition: format!("fuzz-current-mmb-pruning-{name}-grafted-metadata"),
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(3)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 

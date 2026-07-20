@@ -346,6 +346,7 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -363,7 +364,7 @@ use self::db::Metrics;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy> {
+pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
@@ -379,39 +380,50 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
+
+    /// Size (in bytes) of the read buffer used to replay the log during init.
+    pub init_buffer: NonZeroUsize,
+
+    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
+    /// `()` for index types that build serially, and the number of build tasks (including the
+    /// init task itself, which replays and routes the log, so `1` builds entirely on the init
+    /// task) for index types that build in parallel.
+    pub init_concurrency: B,
 }
 
-impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
-    fn from(cfg: Config<T, J, S>) -> Self {
+impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T, J, S, B> {
+    fn from(cfg: Config<T, J, S, B>) -> Self {
         Self {
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
             init_cache_size: cfg.init_cache_size,
+            init_buffer: cfg.init_buffer,
+            init_concurrency: cfg.init_concurrency,
         }
     }
 }
 
 /// Configuration for a `Current` authenticated db with fixed-size values.
-pub type FixedConfig<T, S> = Config<T, FConfig, S>;
+pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 
 /// Configuration for a `Current` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
+pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
 pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
     context: E,
-    config: Config<T, J::Config, S>,
+    config: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
-    E: Context,
+    E: Context + Spawner,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: IndexFactory<T, Value = Location<F>>,
-    J: authenticated::Backing<E, Item = Operation<F, U>>,
+    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
@@ -751,6 +763,16 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
+        fixed_config_full(partition_prefix, pooler, ())
+    }
+
+    /// Shared config construction for every fixed-value flavor, generic over the index's
+    /// snapshot-build concurrency.
+    pub(crate) fn fixed_config_full<T: Translator + Default, B>(
+        partition_prefix: &str,
+        pooler: &impl BufferPooler,
+        init_concurrency: B,
+    ) -> FixedConfig<T, Sequential, B> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -770,6 +792,8 @@ pub mod tests {
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency,
         }
     }
 
@@ -778,6 +802,16 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ()), Sequential> {
+        variable_config_full(partition_prefix, pooler, ())
+    }
+
+    /// Shared config construction for every variable-value flavor, generic over the index's
+    /// snapshot-build concurrency.
+    pub(crate) fn variable_config_full<T: Translator + Default, B>(
+        partition_prefix: &str,
+        pooler: &impl BufferPooler,
+        init_concurrency: B,
+    ) -> VariableConfig<T, ((), ()), Sequential, B> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
@@ -799,7 +833,25 @@ pub mod tests {
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency,
         }
+    }
+
+    /// Like [fixed_config], typed for a partitioned index at the serial concurrency.
+    pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
+        partition_prefix: &str,
+        pooler: &impl BufferPooler,
+    ) -> FixedConfig<T, Sequential, NonZeroUsize> {
+        fixed_config_full(partition_prefix, pooler, NZUsize!(1))
+    }
+
+    /// Like [variable_config], typed for a partitioned index at the serial concurrency.
+    pub(crate) fn variable_config_partitioned<T: Translator + Default>(
+        partition_prefix: &str,
+        pooler: &impl BufferPooler,
+    ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
+        variable_config_full(partition_prefix, pooler, NZUsize!(1))
     }
 
     /// Commit a set of writes as a single batch.
@@ -1610,6 +1662,8 @@ pub mod tests {
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(1),
             };
             let db = ForgedExclusionDb::init(context.child("db"), cfg)
                 .await
@@ -1691,26 +1745,26 @@ pub mod tests {
             $cb!($($args)*, ov, OrderedVariableDb, variable_config);
             $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
             $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config);
-            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config);
-            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config);
-            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config);
-            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config);
-            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config);
-            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config);
-            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned);
             $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
             $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
             $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
             $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config);
-            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned);
         };
     }
 
@@ -1719,16 +1773,16 @@ pub mod tests {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, of, OrderedFixedDb, fixed_config);
             $cb!($($args)*, ov, OrderedVariableDb, variable_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config);
-            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config);
-            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config);
-            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned);
             $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
             $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned);
         };
     }
 
@@ -1737,16 +1791,16 @@ pub mod tests {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
             $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
-            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config);
-            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config);
-            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config);
-            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned);
             $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
             $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned);
         };
     }
 

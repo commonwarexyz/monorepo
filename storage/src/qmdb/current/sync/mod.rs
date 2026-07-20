@@ -72,6 +72,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -103,18 +104,20 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     U: Update + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>>,
+    J: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
@@ -150,9 +153,19 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
+    let snapshot_context = context.child("any_snapshot");
     let any_metrics = AnyMetrics::new(context.child("any"));
-    let any: AnyDb<F, E, J, I, H, U, N, S> =
-        AnyDb::init_from_log(index, log, Some(bitmap), cache_size, any_metrics).await?;
+    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        Some(bitmap),
+        init_concurrency,
+        init_buffer,
+        cache_size,
+        any_metrics,
+    )
+    .await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -244,7 +257,7 @@ macro_rules! impl_current_sync_database {
         impl<F, E, K, V, H, T, const N: usize, S> Database for $db<F, E, K, V, H, T, N, S>
         where
             F: Graftable,
-            E: Context,
+            E: Context + Spawner,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,
@@ -273,6 +286,8 @@ macro_rules! impl_current_sync_database {
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
+                let init_buffer = config.init_buffer;
+                let init_concurrency = config.init_concurrency;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
@@ -281,6 +296,8 @@ macro_rules! impl_current_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    init_concurrency,
+                    init_buffer,
                     cache_size,
                     metadata_partition,
                     strategy,

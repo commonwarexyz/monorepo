@@ -361,6 +361,8 @@ impl EngineDefinition for SingleDbEngine {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         };
 
         // Destructure the 7 channels.

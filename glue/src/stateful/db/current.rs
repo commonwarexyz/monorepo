@@ -13,6 +13,7 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     index::{
@@ -471,7 +472,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -572,7 +573,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -671,6 +672,7 @@ mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
     use commonware_storage::{
         Context,
         merkle::Graftable,
@@ -702,7 +704,7 @@ mod open {
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Context,
+        E: Context + Spawner,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -719,7 +721,7 @@ mod open {
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Context,
+        E: Context + Spawner,
         K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -745,7 +747,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -851,7 +853,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -957,7 +959,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -1012,7 +1014,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -1067,7 +1069,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -1123,7 +1125,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -1249,6 +1251,8 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 
@@ -1277,6 +1281,8 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 

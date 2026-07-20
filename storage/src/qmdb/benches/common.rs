@@ -11,11 +11,17 @@ use commonware_storage::{
         any::{
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
             ordered::{
-                fixed::{Db as OFixed, partitioned::p256::Db as OFixP256},
+                fixed::{
+                    Db as OFixed,
+                    partitioned::{Db as OFixPart, p256::Db as OFixP256},
+                },
                 variable::Db as OVariable,
             },
             traits::{DbAny, UnmerkleizedBatch},
-            unordered::{fixed::Db as UFixed, variable::Db as UVariable},
+            unordered::{
+                fixed::{Db as UFixed, partitioned::Db as UFixPart},
+                variable::Db as UVariable,
+            },
         },
         current::{
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
@@ -54,6 +60,14 @@ pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Ray
 /// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
 /// partitioned ordered index's cursor (get_mut/find/update) on apply.
 pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+/// Ordered "any" DB with a partitioned snapshot index (~16.8M partitions, P=3). The inline-SoA config
+/// for very large key sets (P=2 spills past ~33M entries), used by the `init_scale` bench.
+#[allow(dead_code)]
+pub type AnyOFixP3Db<F> = OFixPart<F, Context, Digest, Digest, Sha256, EightCap, 3, Rayon>;
+/// Unordered "any" DB with a partitioned snapshot index (65,536 partitions, P=2), used by the
+/// `init_scale` bench to exercise the unordered index's parallel snapshot build.
+#[allow(dead_code)]
+pub type AnyUFixP64kDb<F> = UFixPart<F, Context, Digest, Digest, Sha256, EightCap, 2, Rayon>;
 pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
@@ -147,12 +161,24 @@ pub fn any_fix_cfg_with(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyFixedConfig<EightCap, Rayon> {
+    any_fix_cfg_full(ctx, items_per_blob, page_cache_size, ())
+}
+
+/// Shared fixed-value config construction, generic over the index's snapshot-build concurrency.
+pub fn any_fix_cfg_full<B>(
+    ctx: &(impl BufferPooler + Strategizer),
+    items_per_blob: NonZeroU64,
+    page_cache_size: NonZeroUsize,
+    init_concurrency: B,
+) -> AnyFixedConfig<EightCap, Rayon, B> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, page_cache_size);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency,
     }
 }
 
@@ -166,6 +192,7 @@ pub fn imm_fix_cfg_with(
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 
@@ -184,6 +211,8 @@ pub fn cur_fix_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -203,6 +232,8 @@ pub fn any_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -223,6 +254,8 @@ pub fn cur_var_digest_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -250,6 +283,8 @@ pub fn any_var_vec_cfg_with(
         ),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -275,6 +310,8 @@ pub fn cur_var_vec_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 

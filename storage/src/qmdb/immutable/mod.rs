@@ -136,6 +136,9 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
+
+    /// Size (in bytes) of the read buffer used to replay the log during init.
+    pub init_buffer: NonZeroUsize,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -225,6 +228,7 @@ where
         mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
         translator: T,
+        init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
@@ -256,6 +260,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
+                init_buffer,
                 cache_size,
                 |_, _| {},
             )

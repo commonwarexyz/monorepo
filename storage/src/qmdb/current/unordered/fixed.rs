@@ -21,6 +21,7 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
@@ -38,7 +39,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 
 impl<
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -84,7 +85,7 @@ pub mod partitioned {
 
     impl<
         F: Graftable,
-        E: Context,
+        E: Context + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -96,7 +97,10 @@ pub mod partitioned {
     {
         /// Initializes a [Db] authenticated database from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
-        pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
+        pub async fn init(
+            context: E,
+            config: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
     }
@@ -107,11 +111,15 @@ pub mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::current::{tests::fixed_config, unordered::tests as shared},
-        translator::TwoCap,
+        qmdb::current::{
+            tests::{fixed_config, fixed_config_partitioned},
+            unordered::tests as shared,
+        },
+        translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::TestRng;
     use rand::Rng as _;
@@ -412,5 +420,119 @@ pub mod test {
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
         shared::test_proving_repeated_updates(open_db);
+    }
+
+    /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's
+    /// updates and deletes inactivate locations from the first), prune it, then assert that
+    /// reopening it at a range of worker counts reconstructs the identical root and key-value
+    /// state. Unlike the `any` equivalence tests, the current root commits to the activity bitmap,
+    /// so this exercises the parallel build's bitmap reconstruction (`for_each_value` +
+    /// last-commit) over a pruned prefix, not just the snapshot index and MMR.
+    #[commonware_macros::boxed]
+    async fn check_current_parallel_init_equivalence<const P: usize>(
+        context: deterministic::Context,
+        partition: &'static str,
+        concurrency_sweep: &[usize],
+    ) {
+        type PartDb<const P: usize, S> = partitioned::Db<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Digest,
+            Sha256,
+            OneCap,
+            P,
+            32,
+            S,
+        >;
+
+        /// The value each key holds after the two commits below.
+        fn expected_value(i: u64) -> Option<Digest> {
+            if i % 7 == 1 {
+                None
+            } else if i.is_multiple_of(3) {
+                Some(Sha256::hash(&((i + 1) * 11).to_be_bytes()))
+            } else {
+                Some(Sha256::hash(&(i * 7).to_be_bytes()))
+            }
+        }
+
+        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+            .await
+            .unwrap();
+
+        // Commit 1: insert.
+        let mut batch = db.new_batch();
+        for i in 0u64..2000 {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
+        let mut batch = db.new_batch();
+        for i in (0u64..2000).step_by(3) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
+            batch = batch.write(k, Some(v));
+        }
+        for i in (1u64..2000).step_by(7) {
+            let k = Sha256::hash(&i.to_be_bytes());
+            batch = batch.write(k, None);
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let root = db.root();
+        drop(db);
+
+        // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
+        // match the original root and serve the expected value for every key.
+        for &concurrency in concurrency_sweep {
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
+            let ctx = context
+                .child("reopen")
+                .with_attribute("concurrency", concurrency);
+            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            assert_eq!(
+                db.root(),
+                root,
+                "current root mismatch at P={P} concurrency={concurrency}"
+            );
+            for i in 0u64..2000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                assert_eq!(
+                    db.get(&k).await.unwrap(),
+                    expected_value(i),
+                    "value mismatch for key {i}"
+                );
+            }
+            drop(db);
+        }
+    }
+
+    /// The unordered sweep runs at P=1 only: `P=2` allocates 65,536 hash sub-indexes per index
+    /// instance, which is too memory-heavy for the default suite, and the range/offset arithmetic
+    /// is shared with the ordered variant's P=2 coverage.
+    #[test_traced("WARN")]
+    fn test_current_unordered_partitioned_p1_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            check_current_parallel_init_equivalence::<1>(
+                context,
+                "current_unordered_parallel_equiv_p1",
+                &[1, 2, 3, 5],
+            )
+            .await;
+        });
     }
 }

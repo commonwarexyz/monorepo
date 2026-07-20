@@ -329,6 +329,8 @@ pub(crate) fn any_fix_cfg_with_cache(
         journal_config: fix_log_cfg(pc),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -341,6 +343,8 @@ fn any_var_cfg_with_cache(
         journal_config: var_log_cfg(pc),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -354,6 +358,8 @@ pub(crate) fn cur_fix_cfg_with_cache(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -367,6 +373,8 @@ fn cur_var_cfg_with_cache(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 

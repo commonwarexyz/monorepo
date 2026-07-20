@@ -19,6 +19,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = unordered::Operation<F, K, VariableEncoding<V>>;
@@ -36,8 +37,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+    F: Family,
+    E: Context + Spawner,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+> Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -73,6 +81,7 @@ pub mod partitioned {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -96,7 +105,7 @@ pub mod partitioned {
 
     impl<
         F: Family,
-        E: Context,
+        E: Context + Spawner,
         K: Key,
         V: VariableValue,
         H: Hasher,
@@ -111,7 +120,7 @@ pub mod partitioned {
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(
             context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
@@ -174,6 +183,8 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 

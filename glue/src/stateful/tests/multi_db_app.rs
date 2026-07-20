@@ -436,6 +436,8 @@ impl EngineDefinition for MultiDbEngine {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         };
         // One witness entry per section so the periodic prune actually drops entries
         // (pruning is section-aligned).

@@ -13,6 +13,7 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     index::{
@@ -475,7 +476,7 @@ impl<F, E, K, V, H, T, S> ManagedDb<E>
     >
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -574,7 +575,7 @@ impl<F, E, K, V, H, T, S> ManagedDb<E>
     >
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -677,7 +678,7 @@ impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
     >
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -731,7 +732,7 @@ impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
     >
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -815,6 +816,8 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 

@@ -164,6 +164,8 @@ fn any_fixed_config(
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
         init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -177,6 +179,8 @@ fn any_variable_config(
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -191,6 +195,8 @@ fn current_fixed_config(
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -205,6 +211,8 @@ fn current_variable_config(
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -218,6 +226,7 @@ fn immutable_fixed_config(
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 
@@ -231,6 +240,7 @@ fn immutable_variable_config(
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 

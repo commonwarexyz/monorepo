@@ -73,6 +73,8 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
         grafted_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
         init_cache_size: Some(NZUsize!(1 << 16)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 

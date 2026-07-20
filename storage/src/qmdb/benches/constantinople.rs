@@ -363,6 +363,8 @@ fn main() {
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -379,6 +381,8 @@ fn main() {
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -394,6 +398,8 @@ fn main() {
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
@@ -411,6 +417,8 @@ fn main() {
                     },
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
@@ -421,6 +429,8 @@ fn main() {
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)

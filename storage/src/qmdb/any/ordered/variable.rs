@@ -20,6 +20,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = ordered::Operation<F, K, VariableEncoding<V>>;
@@ -37,8 +38,15 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
+impl<
+    F: Family,
+    E: Context + Spawner,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+> Db<F, E, K, V, H, T, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -78,6 +86,7 @@ pub mod partitioned {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -101,7 +110,7 @@ pub mod partitioned {
 
     impl<
         F: Family,
-        E: Context,
+        E: Context + Spawner,
         K: Key,
         V: VariableValue,
         H: Hasher,
@@ -116,7 +125,7 @@ pub mod partitioned {
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(
             context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
         }
@@ -164,14 +173,18 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
+    pub(crate) type VarConfig<B = ()> =
+        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential, B>;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
+    pub(crate) fn create_test_config<B>(
+        seed: u64,
+        pooler: &impl BufferPooler,
+        init_concurrency: B,
+    ) -> VarConfig<B> {
         let page_cache =
             CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
@@ -193,14 +206,104 @@ pub(crate) mod test {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency,
         }
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let config = create_test_config(seed, &context, ());
         AnyTest::init(context, config).await.unwrap()
+    }
+
+    /// Serial-vs-parallel init equivalence for the variable-value partitioned db. The parallel
+    /// build streams variable-size ops through the shared log, which the fixed-value equivalence
+    /// tests cannot cover.
+    #[test_traced("WARN")]
+    fn test_ordered_partitioned_variable_parallel_init_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            type PartDb<S> = partitioned::Db<
+                mmr::Family,
+                deterministic::Context,
+                Digest,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                1,
+                S,
+            >;
+
+            /// The value each key holds after the two commits below.
+            fn expected_value(i: u64) -> Option<Vec<u8>> {
+                if i % 7 == 1 {
+                    None
+                } else if i.is_multiple_of(3) {
+                    Some(vec![0xAB; (i % 17 + 1) as usize])
+                } else {
+                    Some(vec![(i % 251) as u8; (i % 40 + 1) as usize])
+                }
+            }
+
+            // Commit 1: insert every key.
+            let cfg = create_test_config(77, &context, NZUsize!(1));
+            let db = PartDb::<Sequential>::init(context.child("populate"), cfg)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0u64..500 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = vec![(i % 251) as u8; (i % 40 + 1) as usize];
+                batch = batch.write(k, Some(v));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Commit 2: update a third and delete a seventh so the replay carries churn.
+            let mut batch = db.new_batch();
+            for i in (0u64..500).step_by(3) {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, Some(vec![0xAB; (i % 17 + 1) as usize]));
+            }
+            for i in (1u64..500).step_by(7) {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, None);
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            for concurrency in [1usize, 4] {
+                let cfg = create_test_config(
+                    77,
+                    &context,
+                    core::num::NonZeroUsize::new(concurrency).unwrap(),
+                );
+                let ctx = context
+                    .child("reopen")
+                    .with_attribute("concurrency", concurrency);
+                let db = PartDb::<Sequential>::init(ctx, cfg).await.unwrap();
+                assert_eq!(
+                    db.root(),
+                    root,
+                    "root mismatch at concurrency={concurrency}"
+                );
+                for i in 0u64..500 {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    assert_eq!(
+                        db.get(&k).await.unwrap(),
+                        expected_value(i),
+                        "value mismatch for key {i}"
+                    );
+                }
+                drop(db);
+            }
+        });
     }
 
     /// Deterministic byte vector generator for variable-value tests.

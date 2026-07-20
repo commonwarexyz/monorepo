@@ -2284,6 +2284,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
                 pooler,
+                (),
             )
         }
 
@@ -2565,6 +2566,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
                 pooler,
+                (),
             )
         }
 
@@ -2585,7 +2587,8 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx);
+            let config =
+                crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx, ());
             Self::Db::init(ctx, config).await.unwrap()
         }
 

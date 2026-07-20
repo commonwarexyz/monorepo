@@ -50,7 +50,10 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
-    index::{Cursor, Unordered as Index},
+    index::{
+        Cursor, Unordered as Index,
+        partitioned::{PartitionRange, Partitioned},
+    },
     journal::{
         Error as JournalError,
         contiguous::{Contiguous, Mutable},
@@ -60,12 +63,15 @@ use crate::{
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::Operation,
+    translator::Translator,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_utils::{NZUsize, cache::Clock};
+use commonware_runtime::Spawner;
+use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc};
 use core::num::NonZeroUsize;
-use futures::{StreamExt as _, pin_mut};
+use futures::{StreamExt as _, future::join_all, pin_mut};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod any;
@@ -250,22 +256,20 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
-
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
-/// candidates from memory instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
+/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
+/// instead of re-reading the log; `None` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -276,9 +280,7 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    let stream = reader
-        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
-        .await?;
+    let stream = reader.replay(*inactivity_floor_loc, init_buffer).await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
 
@@ -333,10 +335,26 @@ where
     R::Item: Operation<F>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut(key) else {
+    let Some(cursor) = snapshot.get_mut(key) else {
         return Ok(None);
     };
+    delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
+}
 
+/// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
+/// it was present among the cursor's conflicts.
+async fn delete_at_cursor<F, C, R>(
+    mut cursor: C,
+    reader: &R,
+    key: &<R::Item as Operation<F>>::Key,
+    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    C: Cursor<Value = Location<F>>,
+    R: Contiguous,
+    R::Item: Operation<F>,
+{
     // Find the matching key among all conflicts, then delete it.
     let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? else {
         return Ok(None);
@@ -362,10 +380,28 @@ where
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+    let Some(cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
         return Ok(None);
     };
+    update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
+}
 
+/// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
+/// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
+/// is inserted at the cursor.
+async fn update_at_cursor<F, C, R>(
+    mut cursor: C,
+    reader: &R,
+    key: &<R::Item as Operation<F>>::Key,
+    new_loc: Location<F>,
+    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    C: Cursor<Value = Location<F>>,
+    R: Contiguous,
+    R::Item: Operation<F>,
+{
     // Find the matching key among all conflicts, then update its location.
     if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? {
         assert!(new_loc > loc);
@@ -411,6 +447,361 @@ where
     }
 
     Ok(None)
+}
+
+/// Number of operations the snapshot replay batches per worker-channel send during a parallel build.
+const SNAPSHOT_ROUTE_BATCH: usize = 4096;
+
+/// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
+/// the replay from running arbitrarily far ahead of a slow worker.
+const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
+
+/// A batch of keyed operations routed to a snapshot-build worker: each entry is the op's key, its
+/// location, and whether it is a delete.
+type RoutedBatch<K> = Vec<(K, u64, bool)>;
+
+/// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
+/// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
+/// `reader` and `(location -> key)` cache. Returns the populated worker index.
+async fn build_snapshot_worker<F, C, R>(
+    log: Arc<C>,
+    mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
+    mut index: R,
+    cache_size: Option<NonZeroUsize>,
+) -> Result<R, Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Operation<F>>,
+    R: PartitionRange<Value = Location<F>>,
+{
+    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    while let Some(batch) = rx.recv().await {
+        for (key, loc, is_delete) in batch {
+            if is_delete {
+                if let Some(cursor) = index.get_mut(&key) {
+                    delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
+                }
+            } else {
+                let new_loc = Location::new(loc);
+                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
+                    update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
+                        .await?;
+                }
+
+                // This update op is now a `find_update_op` candidate for later ops of its key.
+                // `key` is owned by this batch and unused after the update, so move it in.
+                if let Some(cache) = cache.as_mut() {
+                    cache.put(loc, key);
+                }
+            }
+        }
+    }
+    Ok(index)
+}
+
+/// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
+/// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
+/// activity bitmap (see [SnapshotBuild::build_snapshot]).
+async fn build_snapshot_serial<F, C, I>(
+    inactivity_floor_loc: Location<F>,
+    reader: &C,
+    snapshot: &mut I,
+    init_buffer: NonZeroUsize,
+    cache_size: Option<NonZeroUsize>,
+) -> Result<(usize, BitMap), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Operation<F>>,
+    I: Index<Value = Location<F>>,
+{
+    // Track per-op transitions locally: push each op's status and clear the bit of any location it
+    // supersedes. The state after the last op is each location's final status.
+    let mut activity = BitMap::new();
+    let floor = *inactivity_floor_loc;
+    let active_keys = build_snapshot_from_log(
+        inactivity_floor_loc,
+        reader,
+        snapshot,
+        init_buffer,
+        cache_size,
+        |is_active, old_loc| {
+            activity.push(is_active);
+            if let Some(loc) = old_loc {
+                activity.set(*loc - floor, false);
+            }
+        },
+    )
+    .await?;
+    Ok((active_keys, activity))
+}
+
+/// Build a snapshot by splitting the log replay across parallel workers, each owning a contiguous
+/// range of the index's partitions (see [Partitioned]). Returns the number of active keys and
+/// the activity bitmap (see [SnapshotBuild::build_snapshot]).
+async fn build_snapshot_parallel<F, E, C, I>(
+    snapshot: &mut I,
+    context: E,
+    inactivity_floor_loc: Location<F>,
+    log: &Arc<C>,
+    init_concurrency: NonZeroUsize,
+    init_buffer: NonZeroUsize,
+    cache_size: Option<NonZeroUsize>,
+) -> Result<(usize, BitMap), Error<F>>
+where
+    F: Family,
+    E: Spawner,
+    C: Contiguous<Item: Operation<F>> + 'static,
+    I: Partitioned + Index<Value = Location<F>>,
+{
+    let count = snapshot.partition_count();
+    let workers = (init_concurrency.get() - 1).min(count);
+
+    // No workers: build on this task.
+    if workers == 0 {
+        return build_snapshot_serial(
+            inactivity_floor_loc,
+            &**log,
+            snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await;
+    }
+
+    let floor = *inactivity_floor_loc;
+    let range_size = count.div_ceil(workers);
+
+    // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
+    // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
+    // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
+    let workers = count.div_ceil(range_size);
+    let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
+
+    // Spawn one worker per contiguous partition range, each owning its own reader and cache.
+    let mut senders = Vec::with_capacity(workers);
+    let mut handles = Vec::with_capacity(workers);
+    for w in 0..workers {
+        let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
+        senders.push(tx);
+        let log = log.clone();
+
+        // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
+        // only that many slots, so per-worker memory is the range, not the full partition set.
+        let lo = w * range_size;
+        let range_len = range_size.min(count - lo);
+        let worker_index = snapshot.new_range(lo, range_len);
+        let handle = context
+            .child("snapshot_worker")
+            .with_attribute("worker", w)
+            .dedicated()
+            .spawn(move |_| {
+                build_snapshot_worker::<F, C, I::Range>(log, rx, worker_index, per_worker_cache)
+            });
+        handles.push(handle);
+    }
+
+    // Replay the log once and route each keyed op to the worker owning its partition.
+    // Routing runs in an inner future so any replay failure is captured rather than
+    // returned immediately: returning while the worker handles are merely dropped would
+    // leave the workers running detached, retaining the log and their range allocations
+    // after init has already failed. The stream is also released before the join.
+    let end = log.bounds().end;
+    let routing_result: Result<(), Error<F>> = async {
+        let stream = log.replay(floor, init_buffer).await?;
+        pin_mut!(stream);
+        let mut batches: Vec<RoutedBatch<_>> = (0..workers)
+            .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
+            .collect();
+
+        // A closed channel means a worker terminated early (e.g. returned an `Error<F>`
+        // while resolving a collision). Stop routing on the first such send failure and
+        // let the join below surface that worker's error, rather than panicking on the
+        // send.
+        while let Some(result) = stream.next().await {
+            let (loc, op) = result?;
+            let is_delete = op.is_delete();
+            let Some(key) = op.into_key() else { continue };
+            let w = I::partition_of(key.as_ref()) / range_size;
+            batches[w].push((key, loc, is_delete));
+            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+                let batch =
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                if senders[w].send(batch).await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Flush remaining batches before the channels close.
+        for (w, batch) in batches.into_iter().enumerate() {
+            if !batch.is_empty() && senders[w].send(batch).await.is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    // Close the channels so each worker's stream terminates and it returns its index.
+    drop(senders);
+
+    // Join workers before surfacing any replay failure, so none outlive a failed init.
+    let joined = join_all(handles).await;
+    routing_result?;
+
+    // Install each worker's partition range into the snapshot. Each worker carries its own
+    // partition offset, so installation needs no range arguments.
+    for handle in joined {
+        let worker_index = handle??;
+        snapshot.install_range(worker_index);
+    }
+
+    // Reconstruct the activity bitmap in location order: a location is active iff it is the
+    // current location of an active key, or it is the last commit. This matches the serial
+    // build's per-op push-then-clear, which leaves exactly those bits set. Each active key
+    // holds exactly one location in the snapshot, so the same walk counts the active keys.
+    let mut total_items = 0;
+    let mut active: BitMap = BitMap::zeroes(end - floor);
+    snapshot.for_each_value(|loc| {
+        active.set(**loc - floor, true);
+        total_items += 1;
+    });
+
+    // The last operation is the final commit (a log always ends with one), which stays active.
+    // An empty log has none.
+    if let Some(last_commit) = end.checked_sub(1)
+        && last_commit >= floor
+    {
+        active.set(last_commit - floor, true);
+    }
+
+    Ok((total_items, active))
+}
+
+/// Builds a database's snapshot index from the operations log.
+///
+/// Generic over the `Index` type so each index controls how it builds: serially with the default
+/// method body, or split across parallel workers with an override.
+///
+/// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
+/// drop every clone of the shared log before returning) are enforced by the implementations
+/// rather than the public contract.
+pub trait SnapshotBuild<F: Family>:
+    sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
+{
+    /// The concurrency configuration the build consumes. Index types that always build serially
+    /// declare `()`, so a setting they cannot use is unrepresentable.
+    type Concurrency: Copy + Send + 'static;
+
+    /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
+    /// keys and the activity status of every replayed location, in location order: a location's
+    /// bit is set iff it holds the current operation of an active key or is the last commit.
+    ///
+    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
+    /// build's `(location -> key)` cache (`None` disables it).
+    // In-crate callers await this future at concrete index types, so the flexibility an explicit
+    // `Send` bound on the returned future would add is unused.
+    #[allow(async_fn_in_trait)]
+    async fn build_snapshot<E, C>(
+        &mut self,
+        _context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        _init_concurrency: Self::Concurrency,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+    {
+        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+    }
+}
+
+mod sealed {
+    use crate::translator::Translator;
+
+    pub trait SnapshotBuildSealed {}
+    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
+    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
+    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
+        for crate::index::partitioned::unordered::Index<T, V, P>
+    {
+    }
+    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
+        for crate::index::partitioned::ordered::Index<T, V, P>
+    {
+    }
+}
+
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
+    type Concurrency = ();
+}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
+    type Concurrency = ();
+}
+
+impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+    for crate::index::partitioned::unordered::Index<T, Location<F>, P>
+{
+    type Concurrency = NonZeroUsize;
+
+    async fn build_snapshot<E, C>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+    {
+        build_snapshot_parallel(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+        )
+        .await
+    }
+}
+
+impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
+{
+    type Concurrency = NonZeroUsize;
+
+    async fn build_snapshot<E, C>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+    {
+        build_snapshot_parallel(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+        )
+        .await
+    }
 }
 
 /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
