@@ -372,7 +372,7 @@ mod tests {
         assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
 
         // A notarization certificate drops the verifier's notarize buffers
-        round.mark_certified(Kind::Notarization);
+        round.record_certificate(Kind::Notarization);
         assert!(round.has_certificate(Kind::Notarization));
 
         // The leader's proposal is still discovered when the leader is set
