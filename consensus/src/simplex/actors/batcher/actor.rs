@@ -344,9 +344,6 @@ where
                         round.set_span(span);
                         round.set_leader(leader);
 
-                        let has_forwardable_proposal =
-                            me.is_some_and(|me| round.has_forwardable_proposal(me));
-
                         // If the leader nullified this view or has not been active
                         // recently, tell the voter to reduce the leader timeout to now.
                         //
@@ -363,9 +360,9 @@ where
                             false => match am_leader {
                                 // If we are the leader, we should not timeout
                                 true => None,
-                                // If we are not the leader, don't have a proposal
-                                // to forward, and the leader isn't active, we should timeout.
-                                false => (!has_forwardable_proposal && !self.is_active(leader))
+                                // If we are not the leader and the leader isn't
+                                // active, we should timeout.
+                                false => (!self.is_active(leader))
                                     .then_some(TimeoutReason::Inactivity)
                             },
                         };
