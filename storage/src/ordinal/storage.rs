@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
-use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
@@ -24,13 +24,22 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 }
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
-    fn new(value: V) -> Self {
-        let crc = Crc32::checksum(&value.encode());
-        Self { value, crc }
+    /// Serialize `value` followed by the CRC of its serialized bytes.
+    fn encode(value: &V) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(Self::SIZE);
+        value.write(&mut buf);
+        assert_eq!(buf.len(), V::SIZE, "write() did not write expected bytes");
+        let crc = Crc32::checksum(&buf);
+        crc.write(&mut buf);
+        buf
     }
 
-    fn is_valid(&self) -> bool {
-        self.crc == Crc32::checksum(&self.value.encode())
+    /// Deserialize a record, returning the value only if the stored CRC matches the raw
+    /// value bytes.
+    fn decode_valid(mut buf: &[u8]) -> Option<V> {
+        let crc = Crc32::checksum(buf.get(..V::SIZE)?);
+        let record = Self::read(&mut buf).ok()?;
+        (record.crc == crc).then_some(record.value)
     }
 }
 
@@ -63,7 +72,10 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let value = V::arbitrary(u)?;
-        Ok(Self::new(value))
+        let mut buf = Vec::with_capacity(V::SIZE);
+        value.write(&mut buf);
+        let crc = Crc32::checksum(&buf);
+        Ok(Self { value, crc })
     }
 }
 
@@ -228,15 +240,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
                     // A committed record that is missing or invalid cannot be recovered
                     replay_blob.seek_to(offset)?;
-                    let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
-                    if let Ok(record) = Record::<V>::read(&mut record_buf)
-                        && record.is_valid()
-                    {
-                        items += 1;
-                        intervals.insert(index);
-                        continue;
+                    let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
+                    if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
+                        return Err(Error::MissingRecord(index));
                     }
-                    return Err(Error::MissingRecord(index));
+                    items += 1;
+                    intervals.insert(index);
                 }
             }
         }
@@ -303,8 +312,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         // Write the value to the blob
         let blob = self.blobs.get_mut(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let record = Record::new(value);
-        blob.write_at(offset, record.encode_mut()).await?;
+        blob.write_at(offset, Record::encode(&value)).await?;
         self.pending.insert(section);
 
         // Add to intervals
@@ -327,15 +335,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
-        let record = Record::<V>::read(&mut read_buf)?;
+        let read_buf = blob.read_at(offset, Record::<V>::SIZE).await?.coalesce();
 
         // If record is valid, return it
-        if record.is_valid() {
-            Ok(Some(record.value))
-        } else {
-            Err(Error::InvalidRecord(index))
-        }
+        let value =
+            Record::<V>::decode_valid(read_buf.as_ref()).ok_or(Error::InvalidRecord(index))?;
+        Ok(Some(value))
     }
 
     /// Check if an index exists.

@@ -118,6 +118,32 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(57);
 const PAGE_CACHE_SIZE: usize = 1;
 
+/// Reopen the journal, returning the recovered journal with its size and pruning
+/// boundary. The errors this harness exercises reject before any mutation, so the
+/// on-disk state is intact and recovery matches a restart.
+async fn reopen(
+    context: &deterministic::Context,
+    cfg: &JournalConfig,
+    restarts: &mut usize,
+) -> (
+    Journal<deterministic::Context, commonware_cryptography::sha256::Digest>,
+    u64,
+    u64,
+) {
+    let journal = Journal::init(
+        context
+            .child("journal")
+            .with_attribute("instance", *restarts),
+        cfg.clone(),
+    )
+    .await
+    .unwrap();
+    *restarts += 1;
+    let size = journal.size();
+    let start = journal.bounds().start;
+    (journal, size, start)
+}
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
@@ -139,12 +165,21 @@ fn fuzz(input: FuzzInput) {
         let mut restarts = 0usize;
 
         for op in input.ops.iter() {
-            match op {
+            journal = match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());
                     match journal.append(&digest).await {
-                        Ok(_pos) => journal_size += 1,
-                        Err(Error::SizeOverflow) => {}
+                        Ok((journal, _pos)) => {
+                            journal_size += 1;
+                            journal
+                        }
+                        Err(Error::SizeOverflow) => {
+                            let (journal, size, start) =
+                                reopen(&context, &cfg, &mut restarts).await;
+                            journal_size = size;
+                            oldest_retained_pos = start;
+                            journal
+                        }
                         Err(e) => panic!("unexpected append error: {e:?}"),
                     }
                 }
@@ -154,6 +189,7 @@ fn fuzz(input: FuzzInput) {
                     if bounds.contains(pos) {
                         journal.read(*pos).await.unwrap();
                     }
+                    journal
                 }
 
                 JournalOperation::ReadMany { positions } => {
@@ -180,43 +216,46 @@ fn fuzz(input: FuzzInput) {
                             assert_eq!(batch[i], single);
                         }
                     }
+                    journal
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size();
-                    assert_eq!(journal_size, size, "unexpected size");
+                    assert_eq!(journal_size, journal.size(), "unexpected size");
+                    journal
                 }
 
-                JournalOperation::Sync => {
-                    journal.sync().await.unwrap();
-                }
+                JournalOperation::Sync => journal.sync().await.unwrap(),
 
                 JournalOperation::Rewind { size } => {
                     if *size <= journal_size && *size >= oldest_retained_pos {
-                        journal.rewind(*size).await.unwrap();
-                        journal.sync().await.unwrap();
+                        let journal = journal.rewind(*size).await.unwrap().sync().await.unwrap();
                         journal_size = *size;
                         oldest_retained_pos = journal.bounds().start;
+                        journal
+                    } else {
+                        journal
                     }
                 }
 
                 JournalOperation::Bounds => {
                     let _bounds = journal.bounds();
+                    journal
                 }
 
                 JournalOperation::Prune { min_pos } => {
                     if *min_pos <= journal_size {
-                        journal.prune(*min_pos).await.unwrap();
+                        let (journal, _) = journal.prune(*min_pos).await.unwrap();
                         oldest_retained_pos = journal.bounds().start;
+                        journal
+                    } else {
+                        journal
                     }
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
                     let bounds = journal.bounds();
                     let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                    let replay = journal.replay(start_pos, NZUsize!(*buffer)).await;
-
-                    match replay {
+                    match journal.replay(start_pos, NZUsize!(*buffer)).await {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
@@ -231,22 +270,15 @@ fn fuzz(input: FuzzInput) {
                         }
                         Err(e) => panic!("unexpected replay error: {e:?}"),
                     }
+                    journal
                 }
 
                 JournalOperation::Restart => {
                     drop(journal);
-                    journal = Journal::init(
-                        context
-                            .child("journal")
-                            .with_attribute("instance", restarts),
-                        cfg.clone(),
-                    )
-                    .await
-                    .unwrap();
-                    restarts += 1;
-                    // Reset tracking variables to match recovered state
-                    journal_size = journal.size();
-                    oldest_retained_pos = journal.bounds().start;
+                    let (journal, size, start) = reopen(&context, &cfg, &mut restarts).await;
+                    journal_size = size;
+                    oldest_retained_pos = start;
+                    journal
                 }
 
                 JournalOperation::Destroy => {
@@ -259,6 +291,10 @@ fn fuzz(input: FuzzInput) {
                         // Exercise the EmptyAppend error path
                         let err = journal.append_many(Many::Flat(&[])).await;
                         assert!(matches!(err, Err(Error::EmptyAppend)));
+                        let (journal, size, start) = reopen(&context, &cfg, &mut restarts).await;
+                        journal_size = size;
+                        oldest_retained_pos = start;
+                        journal
                     } else {
                         let items: Vec<_> = (0..*count)
                             .map(|_| {
@@ -268,23 +304,36 @@ fn fuzz(input: FuzzInput) {
                             })
                             .collect();
                         match journal.append_many(Many::Flat(&items)).await {
-                            Ok(_) => journal_size += *count as u64,
-                            Err(Error::SizeOverflow) => {}
+                            Ok((journal, _)) => {
+                                journal_size += *count as u64;
+                                journal
+                            }
+                            Err(Error::SizeOverflow) => {
+                                let (journal, size, start) =
+                                    reopen(&context, &cfg, &mut restarts).await;
+                                journal_size = size;
+                                oldest_retained_pos = start;
+                                journal
+                            }
                             Err(e) => panic!("unexpected append_many error: {e:?}"),
                         }
                     }
                 }
 
                 JournalOperation::MultipleSync => {
-                    journal.sync().await.unwrap();
-                    journal.sync().await.unwrap();
-                    journal.sync().await.unwrap();
+                    let journal = journal.sync().await.unwrap();
+                    let journal = journal.sync().await.unwrap();
+                    journal.sync().await.unwrap()
                 }
 
                 JournalOperation::AppendNested { count_a, count_b } => {
                     if *count_a == 0 && *count_b == 0 {
                         let err = journal.append_many(Many::Nested(&[&[], &[]])).await;
                         assert!(matches!(err, Err(Error::EmptyAppend)));
+                        let (journal, size, start) = reopen(&context, &cfg, &mut restarts).await;
+                        journal_size = size;
+                        oldest_retained_pos = start;
+                        journal
                     } else {
                         let items_a: Vec<_> = (0..*count_a)
                             .map(|_| {
@@ -302,8 +351,17 @@ fn fuzz(input: FuzzInput) {
                             .collect();
                         let slices: &[&[_]] = &[&items_a, &items_b];
                         match journal.append_many(Many::Nested(slices)).await {
-                            Ok(_) => journal_size += *count_a as u64 + *count_b as u64,
-                            Err(Error::SizeOverflow) => {}
+                            Ok((journal, _)) => {
+                                journal_size += *count_a as u64 + *count_b as u64;
+                                journal
+                            }
+                            Err(Error::SizeOverflow) => {
+                                let (journal, size, start) =
+                                    reopen(&context, &cfg, &mut restarts).await;
+                                journal_size = size;
+                                oldest_retained_pos = start;
+                                journal
+                            }
                             Err(e) => panic!("unexpected append_many error: {e:?}"),
                         }
                     }
@@ -312,10 +370,14 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::RewindTo { keep_value } => {
                     if journal_size > oldest_retained_pos {
                         let target = Sha256::hash(&keep_value.to_be_bytes());
-                        let new_size = journal.rewind_to(|item| *item == target).await.unwrap();
-                        journal.sync().await.unwrap();
+                        let (journal, new_size) =
+                            journal.rewind_to(|item| *item == target).await.unwrap();
+                        let journal = journal.sync().await.unwrap();
                         journal_size = new_size;
                         oldest_retained_pos = journal.bounds().start;
+                        journal
+                    } else {
+                        journal
                     }
                 }
 
@@ -328,11 +390,12 @@ fn fuzz(input: FuzzInput) {
                             assert_eq!(sync_val, async_val);
                         }
                     }
+                    journal
                 }
 
                 JournalOperation::PruningBoundary => {
-                    let boundary = journal.pruning_boundary();
-                    assert_eq!(boundary, oldest_retained_pos);
+                    assert_eq!(journal.pruning_boundary(), oldest_retained_pos);
+                    journal
                 }
 
                 JournalOperation::InitAtSize { size } => {
@@ -341,23 +404,21 @@ fn fuzz(input: FuzzInput) {
                         .child("journal")
                         .with_attribute("instance", restarts);
                     restarts += 1;
-                    journal = match Journal::init_at_size(attempt, cfg.clone(), *size).await {
-                        Ok(j) => j,
+                    let journal = match Journal::init_at_size(attempt, cfg.clone(), *size).await {
+                        Ok(journal) => journal,
                         // `u64::MAX` is rejected (no append could ever succeed) before any reset
                         // is staged, so the prior on-disk state is intact. Reopen it to continue.
                         Err(Error::SizeOverflow) => {
-                            let reopen = context
-                                .child("journal")
-                                .with_attribute("instance", restarts);
-                            restarts += 1;
-                            Journal::init(reopen, cfg.clone()).await.unwrap()
+                            let (journal, _, _) = reopen(&context, &cfg, &mut restarts).await;
+                            journal
                         }
                         Err(e) => panic!("unexpected init_at_size error: {e:?}"),
                     };
                     journal_size = journal.size();
                     oldest_retained_pos = journal.bounds().start;
+                    journal
                 }
-            }
+            };
         }
     });
 }

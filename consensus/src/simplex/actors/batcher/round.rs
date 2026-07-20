@@ -240,37 +240,45 @@ impl<
     }
 
     /// Adds a vote that we constructed ourselves to the verifier.
+    ///
+    /// Duplicate nullifies are ignored (the voter re-sends its nullify vote on
+    /// every timeout retry).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a notarize or finalize vote is added more than once.
     pub fn add_constructed(&mut self, message: Vote<S, D>) {
         match &message {
             Vote::Notarize(notarize) => {
-                // Report activity
-                self.reporter.report(Activity::Notarize(notarize.clone()));
-
                 // Our own votes are already verified
                 assert!(
                     self.votes.insert_notarize(notarize.clone()),
                     "duplicate notarize"
                 );
+
+                // Report activity
+                self.reporter.report(Activity::Notarize(notarize.clone()));
             }
             Vote::Nullify(nullify) => {
+                // The voter re-sends its nullify on every timeout retry (the
+                // batcher's state does not survive a restart), so duplicates
+                // are expected and ignored.
+                if !self.votes.insert_nullify(nullify.clone()) {
+                    return;
+                }
+
                 // Report activity
                 self.reporter.report(Activity::Nullify(nullify.clone()));
-
-                // Our own votes are already verified
-                assert!(
-                    self.votes.insert_nullify(nullify.clone()),
-                    "duplicate nullify"
-                );
             }
             Vote::Finalize(finalize) => {
-                // Report activity
-                self.reporter.report(Activity::Finalize(finalize.clone()));
-
                 // Our own votes are already verified
                 assert!(
                     self.votes.insert_finalize(finalize.clone()),
                     "duplicate finalize"
                 );
+
+                // Report activity
+                self.reporter.report(Activity::Finalize(finalize.clone()));
             }
         }
 

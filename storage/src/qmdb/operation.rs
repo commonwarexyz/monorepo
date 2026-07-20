@@ -22,6 +22,9 @@ pub trait Operation<F: Family> {
     /// Returns the key if this operation involves a key, None otherwise.
     fn key(&self) -> Option<&Self::Key>;
 
+    /// Consumes the operation and returns its owned key, if any.
+    fn into_key(self) -> Option<Self::Key>;
+
     /// If this operation updates its key's value.
     fn is_update(&self) -> bool;
 

@@ -2631,6 +2631,242 @@ mod tests {
 
     test_for_all_fixtures!(all_recovery);
 
+    fn all_crash_after_nullify<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+    {
+        // Create context
+        let n = 4;
+        let required_containers = View::new(10);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(3600));
+        executor.start(|mut context| async move {
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Participant 0 never starts an engine and no links exist yet, so no
+            // view can produce a certificate before the crash below.
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx_scheme, validator) in participants.iter().enumerate() {
+                // Skip first peer
+                if idx_scheme == 0 {
+                    continue;
+                }
+
+                // Create scheme context
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: NZUsize!(4),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Wait for every online validator to construct its nullify vote for
+            // view 1.
+            let stalled = View::new(1);
+            loop {
+                let nullified = reporters.iter().zip(participants.iter().skip(1)).all(
+                    |(reporter, validator)| {
+                        reporter
+                            .nullifies
+                            .lock()
+                            .get(&stalled)
+                            .is_some_and(|nullifiers| nullifiers.contains(validator))
+                    },
+                );
+                if nullified {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // The reporter observes our vote via the batcher, which can run ahead
+            // of the voter's journal sync in the same instant. Wait one more tick
+            // so every vote is durable before crashing.
+            context.sleep(Duration::from_secs(1)).await;
+
+            // Crash every online validator before any nullification certificate
+            // can circulate.
+            for handle in engine_handlers.drain(..) {
+                handle.abort();
+                let _ = handle.await;
+            }
+            relay.deregister_all();
+
+            // Restore connectivity between the online validators.
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &participants,
+                Action::Link(link),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
+
+            // Restart every online validator from its journal.
+            let mut reporters = Vec::new();
+            for (idx_scheme, validator) in participants.iter().enumerate() {
+                // Skip first peer
+                if idx_scheme == 0 {
+                    continue;
+                }
+
+                // Create scheme context
+                let context = context
+                    .child("validator_restarted")
+                    .with_attribute("public_key", validator);
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: NZUsize!(4),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) =
+                    register_validator(&mut oracle, validator.clone()).await;
+                engine.start(pending, recovered, resolver);
+            }
+
+            // The restarted validators must reconstruct a nullification for view 1
+            // to make progress (participant 0 never votes, so every remaining vote
+            // is required to reach quorum).
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        });
+    }
+
+    test_for_all_fixtures!(all_crash_after_nullify);
+
     fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

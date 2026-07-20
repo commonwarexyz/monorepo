@@ -26,16 +26,68 @@
 pub mod ordered;
 pub mod unordered;
 
+#[commonware_macros::stability(ALPHA)]
+use crate::index::{Cursor, Unordered};
+
 // Because the prefix length has a max of 3, we can safely use a 4-byte int for the index type
 // used by prefix conversion.
 const INDEX_INT_SIZE: usize = 4;
+
+/// An index whose snapshot build can be split across parallel workers, each owning a contiguous
+/// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
+/// populated through its cursor operations, and folded back into the full index by
+/// [Self::install_range].
+#[commonware_macros::stability(ALPHA)]
+pub(crate) trait Partitioned: Unordered {
+    /// A worker's restricted view over the contiguous partition range it owns.
+    type Range: PartitionRange<Value = Self::Value> + Send + 'static;
+
+    /// The number of partitions in the index.
+    fn partition_count(&self) -> usize;
+
+    /// The partition index that holds `key`.
+    fn partition_of(key: &[u8]) -> usize;
+
+    /// Create a [Self::Range] covering partitions `[offset, offset + count)`.
+    fn new_range(&self, offset: usize, count: usize) -> Self::Range;
+
+    /// Move a populated `range`'s contents into self at the global slot range it was created
+    /// with, which must be empty.
+    fn install_range(&mut self, range: Self::Range);
+
+    /// Visit every value held across all partitions, in unspecified order.
+    fn for_each_value(&self, f: impl FnMut(&Self::Value));
+}
+
+/// One [Partitioned] worker's restricted view of its partition range: only the cursor
+/// operations (addressed by full key), so the globally-addressed [Unordered] methods cannot be
+/// miscalled on a worker.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) trait PartitionRange: Sized {
+    /// The value type held by the range.
+    type Value: Send + Sync;
+
+    /// The cursor over one key's values (see [Unordered::Cursor]).
+    type Cursor<'a>: Cursor<Value = Self::Value>
+    where
+        Self: 'a;
+
+    /// Mutable access to `key`'s values, if the key exists (see [Unordered::get_mut]). The key's
+    /// partition must fall within this range.
+    fn get_mut(&mut self, key: &[u8]) -> Option<Self::Cursor<'_>>;
+
+    /// Mutable access to `key`'s values if the key exists, otherwise insert `value` for it and
+    /// return `None` (see [Unordered::get_mut_or_insert]). The key's partition must fall within
+    /// this range.
+    fn get_mut_or_insert(&mut self, key: &[u8], value: Self::Value) -> Option<Self::Cursor<'_>>;
+}
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing
 /// the referenced partition. The returned index value is in the range `[0, 2^(P*8) - 1]`.
 ///
 /// Partition order tracks lexicographic key order, which the [`ordered`] variant relies on to
 /// traverse keys in order.
-fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
+pub(crate) fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
         assert!(P > 0, "P must be greater than 0");

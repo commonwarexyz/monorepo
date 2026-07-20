@@ -343,8 +343,8 @@ pub trait Database: Sized + Send {
 
     /// Persist the compact-initialized state once the caller has verified its root.
     fn persist_compact_state(
-        &mut self,
-    ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
+        self,
+    ) -> impl Future<Output = Result<Self, qmdb::Error<Self::Family>>> + Send;
 }
 
 /// Configuration for compact synchronization into a compact-storage database.
@@ -531,7 +531,7 @@ where
         // The peer response has already authenticated the final commit and frontier. From here,
         // construction should only fail for local database/storage reasons; a root mismatch is a
         // bug in this path.
-        let mut db = DB::from_validated_state(
+        let db = DB::from_validated_state(
             context.child("compact").with_attribute("attempt", attempt),
             db_config.clone(),
             validated_state,
@@ -547,7 +547,7 @@ where
         if let Some(callback) = callback {
             let _ = callback.send(true);
         }
-        db.persist_compact_state().await?;
+        let db = db.persist_compact_state().await?;
         return Ok(db);
     }
 }
@@ -1155,8 +1155,8 @@ mod tests {
             self.root
         }
 
-        async fn persist_compact_state(&mut self) -> Result<(), qmdb::Error<Self::Family>> {
-            Ok(())
+        async fn persist_compact_state(self) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(self)
         }
     }
 
