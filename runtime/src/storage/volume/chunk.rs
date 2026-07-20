@@ -671,6 +671,219 @@ impl ChunkMap {
     }
 }
 
+// Bounded Kani proof harnesses over the real [`Segment`] (run directly via
+// `cargo kani -p commonware-runtime --harness <name>`). The `kani` cfg is
+// set by the Kani driver and is not declared in the workspace check-cfg
+// list, so every mention of it lives inside this allowed scope.
+#[allow(unexpected_cfgs)]
+mod verification {
+    #[cfg(kani)]
+    mod proofs {
+        use super::super::{
+            ChunkCrc, ChunkState, CrcPage, Segment, CRC_PAGE_CHUNKS, CRC_PAGE_WORDS,
+        };
+
+        /// Segment-level chunk count, small enough for dense symbolic
+        /// content within one 64-bit word. Word- and page-boundary
+        /// variants (boundaries near chunk 64 and 1024) exceeded the
+        /// solver budget: their symbolic-length bitmap and page surgery
+        /// stalled CBMC for over 100 minutes per harness before being
+        /// stop-gated, so multi-word masks and whole-page drops rely on
+        /// the unit tests.
+        const SEG_LEN: u64 = 12;
+
+        /// A symbolic chunk state carrying a known CRC (the only kind
+        /// mutation installs: [`ChunkCrc::Unloaded`] is hydration-only).
+        fn any_known_state() -> ChunkState {
+            let crc = if kani::any() {
+                ChunkCrc::Ready(kani::any())
+            } else {
+                ChunkCrc::Pending
+            };
+            ChunkState {
+                crc,
+                verified: kani::any(),
+            }
+        }
+
+        /// The mask of live bit positions (slots in `[lead, len)`) within
+        /// 64-bit word `word` of a page based at chunk offset `base`.
+        fn live_mask(lead: u64, len: u64, base: u64, word: usize) -> u64 {
+            let lo = base + word as u64 * 64;
+            let live_lo = lead.max(lo);
+            let live_hi = len.min(lo + 64);
+            if live_hi <= live_lo {
+                0
+            } else if live_hi - live_lo == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << (live_hi - live_lo)) - 1) << (live_lo - lo)
+            }
+        }
+
+        /// A symbolic segment of exactly `len` chunks (concrete at every
+        /// call site): symbolic dead lead, unverified bits, and resident
+        /// values, clean below the lead exactly as the audit demands.
+        /// Content is installed with branch-free masked writes — data-
+        /// dependent branches in the generator loop stall CBMC's symbolic
+        /// execution — so the length stays concrete and the bits, values,
+        /// and lead carry all the symbolism. Returns the segment and its
+        /// set unverified-bit count. `with_page` controls whether the
+        /// (single) CRC page is allocated, the one shape choice.
+        fn any_segment(len: u64, with_page: bool) -> (Segment, u64) {
+            debug_assert!(len <= CRC_PAGE_CHUNKS, "single-page generator");
+            let lead: u64 = kani::any();
+            kani::assume(lead < len);
+            let mut seg = Segment::new(len);
+            seg.lead = lead;
+            let mut unverified = 0;
+            for rel in 0..len {
+                let bit = rel >= lead && kani::any();
+                seg.unverified.set(rel, bit);
+                unverified += u64::from(bit);
+            }
+            if with_page {
+                let mut resident = [0u64; CRC_PAGE_WORDS];
+                for (word, slot) in resident.iter_mut().enumerate() {
+                    *slot = kani::any::<u64>() & live_mask(lead, len, 0, word);
+                }
+                let mut values = vec![0u32; Segment::page_cover(len, 0)];
+                for value in &mut values {
+                    *value = kani::any();
+                }
+                seg.pages[0] = Some(Box::new(CrcPage { resident, values }));
+            }
+            (seg, unverified)
+        }
+
+        /// Whether no resident-mask bit is set outside the segment's live
+        /// slots `[lead, len)`. This is the stale-bit hygiene `push`,
+        /// `truncate`, and `drop_front` maintain. The in-tree audit cannot
+        /// see it (a stale bit at a live slot surfaces as a wrong CRC, not
+        /// a count drift), so the harnesses assert it directly.
+        fn resident_bits_hygienic(seg: &Segment) -> bool {
+            for (idx, page) in seg.pages.iter().enumerate() {
+                let Some(page) = page.as_deref() else {
+                    continue;
+                };
+                let base = idx as u64 * CRC_PAGE_CHUNKS;
+                for (word, &bits) in page.resident.iter().enumerate() {
+                    if bits & !live_mask(seg.lead, seg.len, base, word) != 0 {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+
+        /// `Segment::drop_front` kills exactly the slots below the new
+        /// lead (bits clear and are counted back exactly, values drop),
+        /// preserves every surviving slot, and stays hygienic.
+        #[kani::proof]
+        #[kani::unwind(18)]
+        fn segment_drop_front_exact() {
+            let (mut seg, _) = any_segment(SEG_LEN, kani::any());
+            let lead: u64 = kani::any();
+            kani::assume(lead > seg.lead && lead < seg.len);
+            let mut expected = 0;
+            for rel in 0..SEG_LEN {
+                if rel >= seg.lead && rel < lead && seg.unverified.get(rel) {
+                    expected += 1;
+                }
+            }
+            let old_len = seg.len;
+            let probe: u64 = kani::any();
+            kani::assume(probe < seg.len);
+            let probe_bit = seg.unverified.get(probe);
+            let probe_value = seg.resident(probe);
+            let cleared = seg.drop_front(lead);
+            assert_eq!(cleared, expected, "cleared count inexact");
+            assert_eq!(seg.lead, lead, "lead not installed");
+            assert_eq!(seg.len, old_len, "length moved");
+            assert_eq!(seg.unverified.len(), seg.len, "bitmap desynced");
+            assert!(resident_bits_hygienic(&seg), "stale resident bit");
+            if probe < lead {
+                assert!(!seg.unverified.get(probe), "dead slot bit survived");
+                assert!(seg.resident(probe).is_none(), "dead slot value survived");
+            } else {
+                assert_eq!(seg.unverified.get(probe), probe_bit, "live bit changed");
+                assert_eq!(seg.resident(probe), probe_value, "live value changed");
+            }
+            // Skip the state's drop glue: Kani runs no leak checks and the
+            // BTree deallocation loops otherwise dominate the formula.
+            std::mem::forget(seg);
+        }
+
+        /// `Segment::truncate` drops exactly the slots at and beyond the
+        /// new length, preserves every kept slot, keeps the value storage
+        /// sized to the kept coverage, and stays hygienic (no resident bit
+        /// survives beyond the new length). The new length is assumed
+        /// above the dead lead per the map-level caller contract (shrinks
+        /// below the pruned floor are rejected).
+        #[kani::proof]
+        #[kani::unwind(18)]
+        fn segment_truncate_hygiene() {
+            let (mut seg, _) = any_segment(SEG_LEN, kani::any());
+            let new_len: u64 = kani::any();
+            kani::assume(new_len > seg.lead && new_len < seg.len);
+            let probe: u64 = kani::any();
+            kani::assume(probe < new_len);
+            let probe_bit = seg.unverified.get(probe);
+            let probe_value = seg.resident(probe);
+            seg.truncate(new_len);
+            assert_eq!(seg.len, new_len, "length not installed");
+            assert_eq!(seg.unverified.len(), new_len, "bitmap desynced");
+            assert!(resident_bits_hygienic(&seg), "stale resident bit");
+            if let Some(page) = seg.pages[0].as_deref() {
+                assert_eq!(
+                    page.values.len(),
+                    Segment::page_cover(new_len, 0),
+                    "value storage desynced"
+                );
+            }
+            assert_eq!(seg.unverified.get(probe), probe_bit, "kept bit changed");
+            assert_eq!(seg.resident(probe), probe_value, "kept value changed");
+            // Skip the state's drop glue: Kani runs no leak checks and the
+            // BTree deallocation loops otherwise dominate the formula.
+            std::mem::forget(seg);
+        }
+
+        /// `Segment::push` appends exactly the given state — the new slot
+        /// reads back verbatim, every existing slot is preserved, and the
+        /// segment stays hygienic.
+        #[kani::proof]
+        #[kani::unwind(18)]
+        fn segment_push_exact() {
+            let (mut seg, _) = any_segment(SEG_LEN, kani::any());
+            let state = any_known_state();
+            let old_len = seg.len;
+            let probe: u64 = kani::any();
+            kani::assume(probe < old_len);
+            let probe_bit = seg.unverified.get(probe);
+            let probe_value = seg.resident(probe);
+            seg.push(state);
+            assert_eq!(seg.len, old_len + 1, "length not bumped");
+            assert_eq!(seg.unverified.len(), seg.len, "bitmap desynced");
+            assert_eq!(
+                seg.unverified.get(old_len),
+                !state.verified,
+                "pushed bit not read back"
+            );
+            let expect = match state.crc {
+                ChunkCrc::Ready(value) => Some(value),
+                _ => None,
+            };
+            assert_eq!(seg.resident(old_len), expect, "pushed value not read back");
+            assert!(resident_bits_hygienic(&seg), "stale resident bit");
+            assert_eq!(seg.unverified.get(probe), probe_bit, "existing bit changed");
+            assert_eq!(seg.resident(probe), probe_value, "existing value changed");
+            // Skip the state's drop glue: Kani runs no leak checks and the
+            // BTree deallocation loops otherwise dominate the formula.
+            std::mem::forget(seg);
+        }
+    }
+}
+
 /// Cap on a blob's cached committed-CRC pages (16 pages of 1024 values is
 /// 64 KiB, covering 64 MiB of data). A page is needed once per chunk
 /// lifetime — a verified chunk never consults its CRC again — so the cache
