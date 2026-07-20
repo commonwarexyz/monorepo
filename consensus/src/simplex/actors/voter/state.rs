@@ -475,7 +475,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
 
-        // Skip to the start of the next term.
+        // Skip to the start of the next term. This needs no finalization
+        // guard: a nullification below `last_finalized` in an earlier term
+        // targets a view at or below it (`enter_view` only advances), and one
+        // in the same term cannot exist (see [Same-Term Vote
+        // Safety](crate::simplex#same-term-vote-safety)).
         let next_view = view.next_term_start(self.term_length());
         self.enter_view(next_view);
         self.set_leader(next_view, Some(&nullification.certificate));
