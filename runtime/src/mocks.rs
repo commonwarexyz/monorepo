@@ -11,10 +11,14 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use futures::FutureExt as _;
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
-use std::{future::Future, mem, sync::Arc};
+use std::{
+    future::{Future, poll_fn},
+    mem,
+    sync::Arc,
+    task::Poll,
+};
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -683,16 +687,20 @@ pub fn release_pending_syncs(pending: &PendingSyncs) {
     }
 }
 
-/// Drive `fut` to completion.
+/// Drive `fut` to completion, releasing any parked syncs each time it stalls.
 pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
-    loop {
-        if let Some(out) = fut.as_mut().now_or_never() {
-            break out;
+    poll_fn(|cx| match fut.as_mut().poll(cx) {
+        Poll::Ready(out) => Poll::Ready(out),
+        Poll::Pending => {
+            // A concurrent task may park a new sync after this release, so
+            // self-wake to check again on the next scheduler tick.
+            release_pending_syncs(pending);
+            cx.waker().wake_by_ref();
+            Poll::Pending
         }
-        release_pending_syncs(pending);
-        crate::reschedule().await;
-    }
+    })
+    .await
 }
 
 /// Fail all pending syncs with an injected I/O error.
