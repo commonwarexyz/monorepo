@@ -467,7 +467,7 @@ where
     )
     .await?;
 
-    let metrics = Metrics::new(context);
+    let metrics = Box::new(Metrics::new(context));
     let db = db::Db {
         any,
         grafted_tree: Arc::new(grafted_tree),
