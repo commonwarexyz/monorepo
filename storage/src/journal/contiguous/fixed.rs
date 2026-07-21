@@ -429,12 +429,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             }
         }
 
-        // Check the two newest blobs for interior holes. Only they can hold non-durable data
-        // (see "Durability invariant" in the module docs), and a crash during an in-flight fsync
-        // can lose an interior page while later pages survive. `Writer::new` sizes a blob by its
-        // last valid page, so it cannot see such a hole. Re-read each blob from the front and
-        // truncate at the first bad page (rounded down to whole items) so `recover_bounds` sees
-        // only intact data.
+        // Check the two newest blobs for interior holes. Only they can hold non-durable data, and
+        // a crash during an in-flight fsync can lose an interior page while later pages survive.
+        // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Re-read
+        // each blob from the front and truncate at the first bad page (rounded down to whole
+        // items) so `recover_bounds` sees only intact data.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
@@ -1155,7 +1154,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// At most one commit is in flight at a time: if a prior commit's sync is still pending, this
     /// call waits for it before starting a new one. Appends and reads proceed while the returned
-    /// handle is pending.
+    /// handle is pending, and dropping the handle does not cancel the sync.
     pub async fn start_commit(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_commit().await;
         (self, handle)
@@ -1683,13 +1682,13 @@ mod tests {
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
             let handle = journal.start_commit().await;
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             journal.destroy().await.unwrap();
         });
@@ -1715,14 +1714,14 @@ mod tests {
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             assert!(journal.commit().now_or_never().is_none());
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             pending.unblock();
             journal.commit().await.unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
             journal.destroy().await.unwrap();
         });
     }

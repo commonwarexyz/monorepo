@@ -150,16 +150,10 @@ pub(super) struct Writable<E: Context> {
     /// Cached owned snapshot of [Self::sealed].
     sealed_snapshot: Option<Arc<[Sealed<E::Blob>]>>,
 
-    /// Durability dependency for the blob immediately before the live tail.
-    ///
-    /// Rollover stores the just-sealed blob's sync here. Commit handles may complete without
-    /// clearing this slot.
-    predecessor_sync: Option<SyncCompletion>,
+    /// Sync of the tail's predecessor.
+    tail_predecessor_sync: Option<SyncCompletion>,
 
-    /// Sync of the live tail started by the last commit.
-    ///
-    /// Kept on failure so later operations keep failing; cleared by rollover (whose seal waits
-    /// for it) and by destructive-operation drains.
+    /// Sync of the live tail. Kept on failure so later operations keep failing.
     tail_sync: Option<SyncCompletion>,
 }
 
@@ -226,7 +220,7 @@ impl<E: Context> Writable<E> {
             tail,
             sealed,
             sealed_snapshot: None,
-            predecessor_sync: None,
+            tail_predecessor_sync: None,
             tail_sync: None,
         })
     }
@@ -274,7 +268,7 @@ impl<E: Context> Writable<E> {
 
     /// Seal the tail, start syncing it, and open the next blob as the new tail.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
-        self.drain_predecessor_sync().await?;
+        self.drain_tail_predecessor_sync().await?;
 
         // Open the next tail first so a failure leaves the current tail untouched.
         let next_blob = self
@@ -288,12 +282,12 @@ impl<E: Context> Writable<E> {
         self.metrics.synced.inc();
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
-        debug_assert!(self.predecessor_sync.is_none());
+        debug_assert!(self.tail_predecessor_sync.is_none());
 
         // seal() waits for any outstanding writer sync, so a successful seal proves any prior
         // tail sync already succeeded.
         self.tail_sync = None;
-        self.predecessor_sync = Some(handle.boxed().shared());
+        self.tail_predecessor_sync = Some(handle.boxed().shared());
         Ok(())
     }
 
@@ -306,7 +300,7 @@ impl<E: Context> Writable<E> {
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
-        self.drain_predecessor_sync().await?;
+        self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
@@ -333,7 +327,7 @@ impl<E: Context> Writable<E> {
         let current_bytes = self.tail.size();
         assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
-            self.drain_predecessor_sync().await?;
+            self.drain_tail_predecessor_sync().await?;
             self.drain_tail_sync().await?;
             self.tail.resize(byte_offset).await?;
         }
@@ -351,7 +345,7 @@ impl<E: Context> Writable<E> {
         blob: u64,
         byte_offset: u64,
     ) -> Result<(), Error> {
-        self.drain_predecessor_sync().await?;
+        self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
         let idx = blob
@@ -392,7 +386,7 @@ impl<E: Context> Writable<E> {
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
-        self.drain_predecessor_sync().await?;
+        self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
@@ -408,12 +402,12 @@ impl<E: Context> Writable<E> {
     }
 
     /// Drain predecessor sync. Clear only on success.
-    async fn drain_predecessor_sync(&mut self) -> Result<(), Error> {
-        let Some(predecessor) = self.predecessor_sync.clone() else {
+    async fn drain_tail_predecessor_sync(&mut self) -> Result<(), Error> {
+        let Some(predecessor) = self.tail_predecessor_sync.clone() else {
             return Ok(());
         };
         predecessor.await?;
-        self.predecessor_sync = None;
+        self.tail_predecessor_sync = None;
         Ok(())
     }
 
@@ -427,7 +421,8 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Start syncing the tail and its sealed predecessor.
+    /// Start syncing the tail, returning a handle that completes once both the tail and its
+    /// predecessor are durable.
     pub(super) async fn start_sync(&mut self) -> Handle<()> {
         // Keep one tail sync in flight.
         if let Some(prior) = self.tail_sync.clone()
@@ -438,7 +433,7 @@ impl<E: Context> Writable<E> {
         let tail = self.tail.start_sync().await.boxed().shared();
         self.metrics.synced.inc();
         self.tail_sync = Some(tail.clone());
-        let predecessor = self.predecessor_sync.clone();
+        let predecessor = self.tail_predecessor_sync.clone();
         Handle::from_future(async move {
             if let Some(predecessor) = predecessor {
                 let (predecessor, tail) = future::join(predecessor, tail).await;
@@ -452,7 +447,7 @@ impl<E: Context> Writable<E> {
 
     /// Remove every blob and the partition itself.
     pub(super) async fn destroy(mut self) -> Result<(), Error> {
-        self.drain_predecessor_sync().await?;
+        self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
         let tail_blob = self.tail_blob_index();
@@ -838,8 +833,8 @@ mod tests {
     }
 
     impl<E: Context> Writable<E> {
-        pub(in crate::journal::contiguous) const fn has_predecessor_sync(&self) -> bool {
-            self.predecessor_sync.is_some()
+        pub(in crate::journal::contiguous) const fn has_tail_predecessor_sync(&self) -> bool {
+            self.tail_predecessor_sync.is_some()
         }
 
         /// Open `blob` as an independent writer, outside this journal's tracking
