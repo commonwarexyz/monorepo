@@ -2526,9 +2526,8 @@ async fn conformance_cancel_write() {
 
         rig.yields.store(true, Ordering::SeqCst);
         let completed = {
-            let mut fut = Box::pin(
-                rig.blobs[&0].write_at(0, IoBuf::copy_from_slice(&pattern(1_000_000))),
-            );
+            let mut fut =
+                Box::pin(rig.blobs[&0].write_at(0, IoBuf::copy_from_slice(&pattern(1_000_000))));
             let mut completed = false;
             for _ in 0..polls {
                 if let Poll::Ready(result) = futures::poll!(fut.as_mut()) {

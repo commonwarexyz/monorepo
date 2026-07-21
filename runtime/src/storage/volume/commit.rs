@@ -49,9 +49,7 @@ pub(super) fn checked_table_len(len: usize) -> Result<u32, Error> {
 /// Convert a checksum extent's value count to the on-disk ref field.
 pub(super) fn checked_checksum_count(bytes: usize) -> Result<u32, Error> {
     debug_assert!(bytes.is_multiple_of(4));
-    (bytes / 4)
-        .try_into()
-        .map_err(|_| Error::OffsetOverflow)
+    (bytes / 4).try_into().map_err(|_| Error::OffsetOverflow)
 }
 
 /// A planned write for the commit's WRITE phase.

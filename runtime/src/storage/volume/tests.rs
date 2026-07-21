@@ -5197,10 +5197,8 @@ async fn test_volume_second_crash_during_recovery_repairs() {
         .into_iter()
         .filter_map(|slot| {
             let at = super::layout::Superblock::slot_offset(slot) as usize;
-            super::layout::Superblock::decode(
-                &source[at..at + super::layout::Superblock::SIZE],
-            )
-            .map(|sb| (slot, sb))
+            super::layout::Superblock::decode(&source[at..at + super::layout::Superblock::SIZE])
+                .map(|sb| (slot, sb))
         })
         .collect();
     slots.sort_unstable_by_key(|(_, sb)| sb.seq);
@@ -5209,8 +5207,7 @@ async fn test_volume_second_crash_during_recovery_repairs() {
     assert_ne!(fallback_slot, losing_slot);
     let decode_table = |sb: &super::layout::Superblock| {
         super::layout::Table::decode(
-            &source[sb.table_offset as usize
-                ..(sb.table_offset + sb.table_len as u64) as usize],
+            &source[sb.table_offset as usize..(sb.table_offset + sb.table_len as u64) as usize],
         )
         .expect("table decodes")
     };
@@ -5241,9 +5238,9 @@ async fn test_volume_second_crash_during_recovery_repairs() {
     gated.sync_gate.wait_reached().await;
     let repairs = tearing.unsynced.lock().clone();
     assert_eq!(repairs.len(), 2, "recovery must issue exactly two repairs");
-    assert!(repairs.iter().any(|(offset, _)| {
-        *offset == super::layout::Superblock::slot_offset(*losing_slot)
-    }));
+    assert!(repairs
+        .iter()
+        .any(|(offset, _)| { *offset == super::layout::Superblock::slot_offset(*losing_slot) }));
     assert!(repairs
         .iter()
         .any(|(offset, _)| *offset == fallback_physical));
@@ -5285,12 +5282,12 @@ async fn test_volume_second_crash_during_recovery_repairs() {
             .await
             .unwrap_or_else(|error| panic!("repair outcome {outcome} failed: {error}"));
         assert_eq!(size, expected.len() as u64, "repair outcome {outcome}");
-        let got = blob
-            .read_at(0, expected.len())
-            .await
-            .unwrap()
-            .coalesce();
-        assert_eq!(got.as_ref(), expected.as_slice(), "repair outcome {outcome}");
+        let got = blob.read_at(0, expected.len()).await.unwrap().coalesce();
+        assert_eq!(
+            got.as_ref(),
+            expected.as_slice(),
+            "repair outcome {outcome}"
+        );
         drop(blob);
         audit_volume(&recovered, true);
     }
