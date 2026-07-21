@@ -1561,8 +1561,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         let handle = self.blobs.start_sync().await;
-        handle.await?;
-        Ok(())
+        Ok(handle.await?)
     }
 
     /// In-place [Journal::sync].
