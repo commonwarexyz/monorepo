@@ -87,10 +87,16 @@
 //! dealt while the node was still bootstrapping. When the floor stays in `E`,
 //! startup is unchanged and the engine for `E` starts immediately.
 //!
-//! This path requires the provider handed to marshal and the probe to answer
-//! unregistered epochs with the all-epoch verifier (see
-//! [`provider::FallbackProvider`]). Without the fallback, marshal panics when
-//! installing a floor for an epoch it cannot verify.
+//! This path requires marshal and the probe to verify certificates from any
+//! epoch. For a threshold scheme, certificate verification depends only on the
+//! reshare-invariant group key, so a
+//! [`ConstantProvider`](commonware_cryptography::certificate::ConstantProvider)
+//! serves both: marshal over the all-epoch certificate verifier (as
+//! [`bootstrap`] already wires it), the probe over the anchored epoch's
+//! verifier scheme (which also supplies the committee to solicit). The
+//! epoch-keyed scheme registry is needed only by the orchestrator's Simplex
+//! engines. A marshal provider that cannot verify the floor's epoch panics at
+//! floor installation.
 //!
 //! # Marshal Retention
 //!
@@ -153,7 +159,6 @@ pub mod anchor;
 pub mod bootstrap;
 pub mod fence;
 pub mod orchestrator;
-pub mod provider;
 pub mod reshare;
 pub mod state_sync;
 pub mod types;

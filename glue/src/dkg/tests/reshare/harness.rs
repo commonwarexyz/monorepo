@@ -3,7 +3,6 @@ use crate::{
         ParticipantsProvider, Registrar, ReshareBlock, SecretStore, anchor,
         fence::Fence,
         orchestrator,
-        provider::FallbackProvider,
         reshare::{self, Input as ReshareInput},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::mocks::{FilteredReceiver, MemorySecretStore},
@@ -49,7 +48,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::deal,
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
-    certificate::{Provider as CertificateProvider, Scoped},
+    certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
@@ -672,13 +671,6 @@ impl EngineDefinition for ReshareEngine {
         let provider = DynamicProvider::new();
         let store = self.store(public_key);
         self.initial.register_epoch_zero(&provider, &store).await;
-        // Probe and marshal judge certificates through the all-epoch fallback
-        // so epochs beyond the registered horizon stay judgeable. Signing
-        // scheme lookup still resolves only registered epochs.
-        let fallback_provider = FallbackProvider::new(
-            provider.clone(),
-            Scheme::certificate_verifier(NAMESPACE, *self.initial.info.output.public().public()),
-        );
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
@@ -796,9 +788,20 @@ impl EngineDefinition for ReshareEngine {
         let minimum_probe_epoch = anchor_artifact
             .as_ref()
             .map_or_else(Epoch::zero, |artifact| artifact.epoch);
+        // Threshold certificate verification depends only on the constant
+        // group key, so the anchored epoch's verifier judges replies from any
+        // epoch while supplying the committee to solicit.
+        let probe_info = anchor_artifact
+            .as_ref()
+            .map_or(&self.initial.info, |artifact| &artifact.info);
+        let probe_scheme = Scheme::verifier(
+            NAMESPACE,
+            probe_info.output.players().clone(),
+            probe_info.output.public().clone(),
+        );
         let (probe_actor, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
-            provider: fallback_provider.clone(),
+            provider: ConstantProvider::new(probe_scheme),
             strategy: Sequential,
             capacity: NZUsize!(100),
             blocker: oracle.control(public_key.clone()),
@@ -830,7 +833,10 @@ impl EngineDefinition for ReshareEngine {
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                provider: fallback_provider.clone(),
+                provider: ConstantProvider::<_, Epoch>::new(Scheme::certificate_verifier(
+                    NAMESPACE,
+                    *self.initial.info.output.public().public(),
+                )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
                 start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
@@ -994,7 +1000,7 @@ impl EngineDefinition for ReshareEngine {
             orchestrator::Config {
                 oracle: oracle.control(public_key.clone()),
                 manager: oracle.manager(),
-                provider: fallback_provider.clone(),
+                provider: provider.clone(),
                 marshal: marshal.clone(),
                 application: deferred.clone(),
                 strategy: Sequential,
