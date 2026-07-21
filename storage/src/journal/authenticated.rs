@@ -396,9 +396,6 @@ where
     /// Merkle structure is durably persisted, meaning recovery may be required on startup in the
     /// event of a crash.
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        // Runs the inner journal's commit rather than awaiting a start_commit handle so the
-        // journal's commit-duration metrics keep covering this path.
-        //
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
         // limit memory bloat.
         (self.journal, self.merkle) = try_join!(

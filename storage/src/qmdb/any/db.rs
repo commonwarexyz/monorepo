@@ -878,8 +878,6 @@ where
     )]
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, crate::qmdb::Error<F>> {
-        // Runs the log's commit rather than awaiting a start_commit handle so journal-level
-        // commit-duration metrics keep covering this path.
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;
