@@ -126,7 +126,7 @@
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
 //!   entered in the current term.
-//! * Votes are tracked down to `view_retention_window` views below the highest finalized view: late
+//! * Votes are tracked down to `view_retention` views below the highest finalized view: late
 //!   votes in that window are still reported (and equivocation there is still detected), even
 //!   though they are no longer verified or used for certificate construction. Votes below the
 //!   window are ignored on arrival, so downstream systems consuming per-vote activity (rewards,
@@ -427,7 +427,7 @@ cfg_if::cfg_if! {
             /// View currently being driven.
             pub current: View,
             /// Views retained below `finalized` (for reporting and backfill).
-            pub view_retention_window: ViewDelta,
+            pub view_retention: ViewDelta,
             /// Number of views in each leader term.
             pub term_length: TermLength,
         }
@@ -435,11 +435,11 @@ cfg_if::cfg_if! {
         impl Viewport {
             /// Returns the lowest view retained (genesis is never tracked).
             pub const fn floor(&self) -> View {
-                self.finalized.saturating_sub(self.view_retention_window)
+                self.finalized.saturating_sub(self.view_retention)
             }
 
             /// Returns whether `view` is retained: at or above the activity
-            /// floor and not genesis. Views up to `view_retention_window` below
+            /// floor and not genesis. Views up to `view_retention` below
             /// `finalized` are kept so late votes are still reported (even
             /// when no longer needed for progress).
             pub const fn retains(&self, view: View) -> bool {
@@ -820,7 +820,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -898,7 +898,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -928,7 +928,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check reporters for correct activity
-            let latest_complete = required_containers.saturating_sub(view_retention_window);
+            let latest_complete = required_containers.saturating_sub(view_retention);
             for reporter in reporters.iter() {
                 // Ensure no faults
                 reporter.assert_no_faults();
@@ -1073,7 +1073,7 @@ mod tests {
         let n = 5;
         let active_count = quorum(n) as usize;
         let initial_tip_target = View::new(15);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(5);
         let timeout_retry = Duration::from_secs(1);
         let namespace = b"consensus".to_vec();
@@ -1157,7 +1157,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1278,7 +1278,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
-                view_retention_window,
+                view_retention,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -1343,7 +1343,7 @@ mod tests {
     {
         let n = 5;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -1422,7 +1422,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1485,7 +1485,7 @@ mod tests {
         // Create context
         let n_active = 5;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -1584,7 +1584,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1638,7 +1638,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
 
@@ -1740,7 +1740,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(1),
                         timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -1828,7 +1828,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
@@ -1916,7 +1916,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2038,7 +2038,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                view_retention_window,
+                view_retention,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2087,7 +2087,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
@@ -2175,7 +2175,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2322,7 +2322,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -2411,7 +2411,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2496,7 +2496,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
@@ -2573,7 +2573,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2659,7 +2659,7 @@ mod tests {
                     // certified for the purposes of testing.
                     let mut found = 0;
                     let notarizations = reporter.notarizations.lock();
-                    for view in View::range(latest, latest.saturating_add(view_retention_window)) {
+                    for view in View::range(latest, latest.saturating_add(view_retention)) {
                         if notarizations.contains_key(&view) {
                             found += 1;
                         }
@@ -2669,10 +2669,7 @@ mod tests {
                     // bounds that to a handful of views, not the viewport.
                     let tolerated_missing = 3;
                     assert!(
-                        found
-                            >= view_retention_window
-                                .get()
-                                .saturating_sub(tolerated_missing),
+                        found >= view_retention.get().saturating_sub(tolerated_missing),
                         "found: {found}"
                     );
                 }
@@ -2695,7 +2692,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(10);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(3600));
@@ -2770,7 +2767,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2888,7 +2885,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2931,7 +2928,7 @@ mod tests {
         // Create context
         let n = 10;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
@@ -3008,7 +3005,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3110,7 +3107,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3196,7 +3193,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3301,7 +3298,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3392,7 +3389,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -3467,7 +3464,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3561,7 +3558,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3632,7 +3629,7 @@ mod tests {
     {
         let n = 4;
         let required_containers = View::new(10);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3726,7 +3723,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3913,7 +3910,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                view_retention_window: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -3941,7 +3938,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4035,7 +4032,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4091,7 +4088,7 @@ mod tests {
         // Create context
         let n = 7;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4189,7 +4186,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4283,7 +4280,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                view_retention_window,
+                view_retention,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4343,7 +4340,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4436,7 +4433,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4492,7 +4489,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4582,7 +4579,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4654,7 +4651,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(100);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4705,7 +4702,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        view_delta: ViewDelta::new(view_retention_window.get().saturating_mul(4)),
+                        view_delta: ViewDelta::new(view_retention.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.child("byzantine_engine"), cfg);
@@ -4745,7 +4742,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4796,7 +4793,7 @@ mod tests {
         // Create context
         let n = 10;
         let required_containers = View::new(1_000);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
@@ -4874,7 +4871,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -4997,7 +4994,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(100),
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
-                view_retention_window: ViewDelta::new(4),
+                view_retention: ViewDelta::new(4),
                 skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 16),
@@ -5086,7 +5083,7 @@ mod tests {
     {
         let n = 3;
         let required_containers = View::new(10);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
@@ -5173,7 +5170,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5300,7 +5297,7 @@ mod tests {
         let n = 10;
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -5510,7 +5507,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(11),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -5634,7 +5631,7 @@ mod tests {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
-        let view_retention_window = ViewDelta::new(100);
+        let view_retention = ViewDelta::new(100);
         let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -5716,7 +5713,7 @@ mod tests {
                     certification_timeout: Duration::from_millis(200),
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_millis(100),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5785,7 +5782,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let view_retention_window = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
@@ -5862,7 +5859,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5964,7 +5961,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    view_retention_window,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5990,7 +5987,7 @@ mod tests {
             }
 
             // Check reporters for correct activity
-            let latest_complete = target.saturating_sub(view_retention_window);
+            let latest_complete = target.saturating_sub(view_retention);
             for reporter in reporters.values() {
                 // Ensure no faults
                 reporter.assert_no_faults();
@@ -6204,7 +6201,7 @@ mod tests {
                 "unexpected twins count for n={n} (expected f={faults})",
             );
 
-            let view_retention_window = ViewDelta::new(10);
+            let view_retention = ViewDelta::new(10);
             let skip_timeout = Duration::from_secs(11);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
@@ -6385,7 +6382,7 @@ mod tests {
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
-                            view_retention_window,
+                            view_retention,
                             skip_timeout,
                             fetch_concurrent: NZUsize!(4),
                             replay_buffer: NZUsize!(1024 * 1024),
@@ -6455,7 +6452,7 @@ mod tests {
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        view_retention_window,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -6719,14 +6716,14 @@ mod tests {
         let viewport = Viewport {
             finalized: View::new(20),
             current: View::new(25),
-            view_retention_window: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             term_length: TermLength::new(commonware_utils::NZU32!(10)),
         };
 
         // Genesis is never tracked
         assert!(!viewport.retains(View::zero()));
 
-        // Retention floor is view_retention_window below finalized
+        // Retention floor is view_retention below finalized
         assert_eq!(viewport.floor(), View::new(10));
         assert!(!viewport.retains(View::new(9)));
         assert!(viewport.retains(View::new(10)));

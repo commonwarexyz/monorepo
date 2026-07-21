@@ -171,7 +171,7 @@ impl<
                 scheme: cfg.scheme,
                 elector: cfg.elector,
                 epoch: cfg.epoch,
-                view_retention_window: cfg.view_retention_window,
+                view_retention: cfg.view_retention,
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,

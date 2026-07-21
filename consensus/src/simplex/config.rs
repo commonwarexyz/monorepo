@@ -133,7 +133,7 @@ where
     /// Reporter for the consensus engine.
     ///
     /// Activity is exported for every tracked view, including votes that arrive up to
-    /// `view_retention_window` views below the highest finalized view; votes below that window
+    /// `view_retention` views below the highest finalized view; votes below that window
     /// are dropped without being reported. Reported votes are not guaranteed to be
     /// verified (see [`crate::simplex::types::Activity`]). Consider wrapping with
     /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
@@ -181,7 +181,7 @@ where
 
     /// Number of views behind the finalized tip to track (in memory and in the
     /// journal) for recent activity.
-    pub view_retention_window: ViewDelta,
+    pub view_retention: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
     /// for at least this long.
@@ -249,7 +249,7 @@ impl<
             "timeout retry broadcast must be greater than zero"
         );
         assert!(
-            !self.view_retention_window.is_zero(),
+            !self.view_retention.is_zero(),
             "view retention timeout must be greater than zero"
         );
         assert!(

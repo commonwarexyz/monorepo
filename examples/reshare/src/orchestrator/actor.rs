@@ -354,7 +354,7 @@ where
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(2),
                 fetch_timeout: Duration::from_secs(1),
-                view_retention_window: ViewDelta::new(256),
+                view_retention: ViewDelta::new(256),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
