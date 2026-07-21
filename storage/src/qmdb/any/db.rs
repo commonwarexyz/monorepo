@@ -855,7 +855,19 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
     /// the Merkle state is not durably persisted, so recovery may be required on startup in the
-    /// event of a crash (use [Self::sync] for the stronger guarantee).
+    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
+    /// the prior commit's sync before starting. Failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    #[tracing::instrument(
+        name = "qmdb.any.db.start_commit",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     #[boxed]
     pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_commit_calls.inc();

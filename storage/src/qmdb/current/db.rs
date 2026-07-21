@@ -791,10 +791,12 @@ where
 {
     /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// This call does not persist bitmap metadata. A new commit waits for the prior commit's
-    /// sync before starting. Failures of the deferred durability work surface on the returned
-    /// handle and again on the next durability operation.
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
+    /// bitmap metadata is not durably persisted, so recovery may be required on startup in the
+    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
+    /// the prior commit's sync before starting. Failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    #[tracing::instrument(name = "qmdb.current.db.start_commit", level = "info", skip_all)]
     #[boxed]
     pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let (any, handle) = self.any.start_commit().await?;

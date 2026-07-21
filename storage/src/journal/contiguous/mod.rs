@@ -305,7 +305,7 @@ pub trait Mutable: Contiguous + Sized {
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
-    /// for the state present when the call begins (later appends need their own commit); use
+    /// for the state present when the call begins (later appends need their own commit). Use
     /// [Self::sync] to also guarantee that no recovery will be needed on startup.
     fn start_commit(
         self,

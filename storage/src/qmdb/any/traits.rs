@@ -108,7 +108,7 @@ pub trait DbAny<F: Family>:
     /// Begin durably persisting the database.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
-    /// for the state applied before the call; use [Self::sync] to also eliminate recovery on
+    /// for the state applied before the call. Use [Self::sync] to also eliminate recovery on
     /// startup.
     fn start_commit(self) -> impl Future<Output = Result<(Self, Handle<()>), Error<F>>> + Send;
 
