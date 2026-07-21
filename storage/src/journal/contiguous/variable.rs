@@ -9,7 +9,7 @@
 //! and starts its fsync after awaiting the previous rollover's fsync, so only the tail and its
 //! predecessor can ever hold non-durable data. Recovery forward-validates those two blobs for
 //! interior fsync holes, and the offsets journal only advances after the data it indexes is
-//! durable. See the [`fixed`](super::fixed) module docs for the full model.
+//! durable. See the [`fixed`] module docs for the full model.
 
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
