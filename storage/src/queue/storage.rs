@@ -73,9 +73,7 @@ pub struct Config<C> {
 /// Applications must handle duplicates (idempotent processing).
 ///
 /// Storage-mutating functions consume the queue and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization. Methods that only
-/// update in-memory cursors ([Queue::dequeue], [Queue::ack], [Queue::ack_up_to], [Queue::reset])
-/// borrow the queue mutably instead.
+/// dropped future) destroys the handle, and recovery is re-initialization.
 pub struct Queue<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,

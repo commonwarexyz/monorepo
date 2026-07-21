@@ -324,9 +324,6 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     }
 
     /// Returns true when `index` is below the prune floor.
-    ///
-    /// Storing at a pruned index fails (and the failure consumes the cache), so callers
-    /// that race puts against pruning should check this before calling a put method.
     pub fn pruned(&self, index: u64) -> bool {
         self.0.pruned(index)
     }

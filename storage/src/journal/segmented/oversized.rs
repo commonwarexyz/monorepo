@@ -632,9 +632,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Returns true when `section` is below the prune floor.
-    ///
-    /// Mutating a pruned section fails (and the failure consumes the journal), so callers that
-    /// race mutations against pruning should check this first.
     pub fn pruned(&self, section: u64) -> bool {
         self.index.pruned(section)
     }

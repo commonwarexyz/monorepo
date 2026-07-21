@@ -46,7 +46,9 @@ pub enum Error {
 /// A write-once key-value store addressed by both an index and a key.
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization.
+/// dropped future) destroys the handle, and recovery is re-initialization. Pruning
+/// implementations reject puts below the prune floor with [Error::AlreadyPrunedTo] without
+/// mutating; check [prunable::Archive::pruned] first to keep the handle.
 pub trait Archive: Send + Sized {
     /// The type of the key.
     type Key: Array;
@@ -60,10 +62,6 @@ pub trait Archive: Send + Sized {
     /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique: the same key
     /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
     /// with an [Identifier::Key] identifier may return any of the values associated with that key.
-    ///
-    /// Pruning implementations reject indices below the prune floor with
-    /// [Error::AlreadyPrunedTo] without mutating; check [prunable::Archive::pruned] first to
-    /// keep the handle.
     fn put(
         self,
         index: u64,
@@ -186,10 +184,6 @@ pub trait MultiArchive: Archive {
     /// Multiple items may share the same `index`. If the same key is stored at
     /// multiple indices, any associated value may be returned when queried with
     /// [Identifier::Key].
-    ///
-    /// Pruning implementations reject indices below the prune floor with
-    /// [Error::AlreadyPrunedTo] without mutating; check [prunable::Archive::pruned] first to
-    /// keep the handle.
     fn put_multi(
         self,
         index: u64,
