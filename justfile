@@ -178,9 +178,10 @@ udeps:
 miri module *args='':
     MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
 
-# Run the fast Kani proofs: decode totality plus the container-substitution smoke test (the slow table proofs live in kani-table)
+# Run the fast Kani proofs: decode and recovery-geometry totality plus the
+# container-substitution smoke test (the slow table proofs live in kani-table)
 kani *args='':
-    cargo kani -p commonware-runtime -Z stubbing --harness header_read_total --harness header_from_floor_bounded --harness superblock_decode_total --harness vecmap_symbolic_inserts {{ args }}
+    cargo kani -p commonware-runtime -Z stubbing --harness header_read_total --harness header_from_floor_bounded --harness superblock_decode_total --harness recovery_block_alignment_total --harness recovery_chunk_span_bounded --harness vecmap_symbolic_inserts {{ args }}
 
 # Run the slow Kani table-decode proofs (6 to 30 minutes each, memory-hungry)
 kani-table *args='':

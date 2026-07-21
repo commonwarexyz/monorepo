@@ -25,3 +25,9 @@ name = "blob_integrity"
 path = "fuzz_targets/blob_integrity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "volume_recovery"
+path = "fuzz_targets/volume_recovery.rs"
+test = false
+doc = false

@@ -374,19 +374,26 @@ fn table_overlaps_content(sb: &Superblock, other: &Table) -> bool {
 /// hole-heavy blob (one run per isolated block) would otherwise make
 /// startup O(runs x manifested chunks).
 fn entry_chunk_span(entry: &Entry, chunk: u64) -> Option<(u64, u64)> {
-    let chunk_start = chunk * BLOCK;
+    let chunk_start = chunk.checked_mul(BLOCK)?;
     let i = entry.runs.partition_point(|r| r.logical <= chunk_start);
     let run = &entry.runs[i.checked_sub(1)?];
-    if chunk_start >= run.logical + run.len {
+    let run_end = run.logical.checked_add(run.len)?;
+    if chunk_start >= run_end {
         return None;
     }
-    let span = (run.logical + run.len - chunk_start).min(BLOCK);
-    Some((run.physical + (chunk_start - run.logical), span))
+    let offset = chunk_start.checked_sub(run.logical)?;
+    let physical = run.physical.checked_add(offset)?;
+    let span = run_end.checked_sub(chunk_start)?.min(BLOCK);
+    Some((physical, span))
 }
 
 /// The last backed chunk of an entry.
 fn entry_last_chunk(entry: &Entry) -> Option<u64> {
-    entry.runs.last().map(|r| chunk_of(r.logical + r.len - 1))
+    entry
+        .runs
+        .last()
+        .and_then(|r| r.logical.checked_add(r.len)?.checked_sub(1))
+        .map(chunk_of)
 }
 
 /// Bound on concurrently in-flight manifest-verification reads.
@@ -1106,6 +1113,75 @@ pub(super) async fn hydrate<S: crate::Storage>(
         return Err(corrupt("checksum refs without backed chunks"));
     }
     Ok(inner)
+}
+
+// Recovery consumes CRC-valid but otherwise hostile table fields. These
+// bounded proofs establish that the address-geometry helpers are total over
+// arbitrary integers and preserve the bounds expected by manifest reads.
+#[cfg(kani)]
+mod verification {
+    use super::super::layout::Run;
+    use super::*;
+
+    #[kani::proof]
+    fn recovery_block_alignment_total() {
+        let len: u64 = kani::any();
+        match checked_block_align(len) {
+            Some(aligned) => {
+                assert!(aligned >= len);
+                assert!(aligned.is_multiple_of(BLOCK));
+                assert!(aligned - len < BLOCK);
+            }
+            None => assert!(len > u64::MAX - (BLOCK - 1)),
+        }
+    }
+
+    fn valid_run(run: &Run) -> bool {
+        run.len > 0
+            && run.logical.is_multiple_of(BLOCK)
+            && run.physical.is_multiple_of(BLOCK)
+            && run.logical.checked_add(run.len).is_some()
+            && checked_block_align(run.len)
+                .and_then(|len| run.physical.checked_add(len))
+                .is_some()
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn recovery_chunk_span_bounded() {
+        let first = Run {
+            logical: kani::any(),
+            physical: kani::any(),
+            len: kani::any(),
+        };
+        let second = Run {
+            logical: kani::any(),
+            physical: kani::any(),
+            len: kani::any(),
+        };
+        kani::assume(valid_run(&first));
+        kani::assume(valid_run(&second));
+        kani::assume(first.logical + first.len <= second.logical);
+
+        let entry = Entry {
+            id: 0,
+            partition: 0,
+            name: Vec::new(),
+            version: 0,
+            size: u64::MAX,
+            floor: 0,
+            runs: vec![first, second],
+            checksums: Vec::new(),
+            tail_crc: 0,
+            shadow: None,
+        };
+
+        if let Some((physical, span)) = entry_chunk_span(&entry, kani::any()) {
+            assert!(span > 0 && span <= BLOCK);
+            assert!(physical.is_multiple_of(BLOCK));
+            assert!(physical.checked_add(span).is_some());
+        }
+    }
 }
 
 #[cfg(test)]

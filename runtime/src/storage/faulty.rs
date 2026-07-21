@@ -29,6 +29,10 @@ enum Op {
 /// Each rate is a probability from 0.0 (never fail) to 1.0 (always fail).
 #[derive(Clone, Debug, Default)]
 pub struct Config {
+    /// One-shot failure after a fixed number of allowed wrapped storage
+    /// operations. This is checked before the probabilistic rates below.
+    pub fail_after: Option<u64>,
+
     /// Failure rate for `open_versioned` operations.
     pub open_rate: Option<f64>,
 
@@ -76,6 +80,13 @@ impl Config {
             Op::Scan => self.scan_rate,
         }
         .unwrap_or(0.0)
+    }
+
+    /// Fail one operation after `allowed_operations` wrapped operations have
+    /// been allowed through without this scheduled fault.
+    pub const fn fail_after(mut self, allowed_operations: u64) -> Self {
+        self.fail_after = Some(allowed_operations);
+        self
     }
 
     /// Set the open failure rate.
@@ -141,25 +152,49 @@ struct Oracle {
 }
 
 impl Oracle {
+    const fn scheduled(config: &mut Config) -> bool {
+        let Some(remaining) = config.fail_after.as_mut() else {
+            return false;
+        };
+        if *remaining == 0 {
+            config.fail_after = None;
+            return true;
+        }
+        *remaining -= 1;
+        false
+    }
+
     /// Check if a fault should be injected for the given operation.
     fn should_fail(&self, op: Op) -> bool {
-        self.roll(Some(self.config.read().rate_for(op)))
+        let mut config = self.config.write();
+        let scheduled = Self::scheduled(&mut config);
+        let rate = config.rate_for(op);
+        drop(config);
+        scheduled || self.roll(Some(rate))
     }
 
     /// Check if a write fault should be injected. Returns (should_fail, partial_rate).
     /// Reads config once to avoid nested lock acquisition.
     fn check_write_fault(&self) -> (bool, Option<f64>) {
-        let config = self.config.read();
-        let fail = self.roll(Some(config.rate_for(Op::Write)));
-        (fail, config.partial_write_rate)
+        let mut config = self.config.write();
+        let scheduled = Self::scheduled(&mut config);
+        let rate = config.rate_for(Op::Write);
+        let partial = config.partial_write_rate;
+        drop(config);
+        let fail = scheduled || self.roll(Some(rate));
+        (fail, partial)
     }
 
     /// Check if a resize fault should be injected. Returns (should_fail, partial_rate).
     /// Reads config once to avoid nested lock acquisition.
     fn check_resize_fault(&self) -> (bool, Option<f64>) {
-        let config = self.config.read();
-        let fail = self.roll(Some(config.rate_for(Op::Resize)));
-        (fail, config.partial_resize_rate)
+        let mut config = self.config.write();
+        let scheduled = Self::scheduled(&mut config);
+        let rate = config.rate_for(Op::Resize);
+        let partial = config.partial_resize_rate;
+        drop(config);
+        let fail = scheduled || self.roll(Some(rate));
+        (fail, partial)
     }
 
     /// Check if an event should occur based on a probability rate.
@@ -452,6 +487,20 @@ mod tests {
                 config,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_fail_after_is_exact_and_one_shot() {
+        let h = Harness::new(Config::default().fail_after(2));
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"data").await.unwrap();
+        assert!(matches!(blob.sync().await, Err(Error::Io(_))));
+        assert_eq!(h.config.read().fail_after, None);
+
+        // The schedule disables itself after firing rather than turning into
+        // an always-fail configuration.
+        blob.sync().await.unwrap();
     }
 
     #[tokio::test]

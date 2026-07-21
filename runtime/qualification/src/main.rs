@@ -26,7 +26,11 @@
 //! flushed `CUT ...` lines to choose a fault point.
 
 #[cfg(unix)]
+mod audit;
+
+#[cfg(unix)]
 mod unix {
+    use crate::audit;
     use commonware_runtime::{
         tokio as runtime, Batchable as _, Blob as _, Runner as _, Spawner as _, Storage as _,
         Supervisor as _, WriteBatch as _,
@@ -722,6 +726,39 @@ mod unix {
         Ok(actual)
     }
 
+    fn audited_state(snapshot: &audit::Snapshot) -> Result<State, AnyError> {
+        let found: BTreeSet<Vec<u8>> = snapshot
+            .blobs
+            .iter()
+            .filter(|blob| blob.partition == PARTITION)
+            .map(|blob| blob.name.clone())
+            .collect();
+        let wanted: BTreeSet<Vec<u8>> = NAMES.iter().map(|name| name.to_vec()).collect();
+        if found != wanted || snapshot.blobs.len() != NAMES.len() {
+            return Err(format!(
+                "raw namespace mismatch at seq {}: found {found:?}, wanted {wanted:?}",
+                snapshot.sequence
+            )
+            .into());
+        }
+        let mut state = State::new();
+        for (index, name) in NAMES.iter().enumerate() {
+            let blob = snapshot
+                .blobs
+                .iter()
+                .find(|blob| blob.partition == PARTITION && blob.name == *name)
+                .ok_or("raw snapshot is missing a qualification blob")?;
+            if blob.version != 0 || blob.size != blob.content.len() as u64 {
+                return Err(format!("raw blob {:?} has invalid version or size", blob.name).into());
+            }
+            state.blobs[index] = BlobState {
+                content: blob.content.clone(),
+                floor: blob.floor,
+            };
+        }
+        Ok(state)
+    }
+
     fn equivalent(left: &State, right: &State) -> bool {
         left.blobs.iter().zip(&right.blobs).all(|(left, right)| {
             left.floor == right.floor
@@ -1070,9 +1107,20 @@ mod unix {
             cut(recovery_tx, "recovery-start")?;
         }
         let storage = root.join(STORAGE);
+        let raw_snapshot = audit::audit_storage(&storage)?;
+        let raw_state = audited_state(&raw_snapshot)?;
         runtime::Runner::new(runtime::Config::new().with_storage_directory(storage)).start(
             |context| async move {
                 let actual = inspect(&context).await?;
+                if !equivalent(&actual, &raw_state) {
+                    return Err(format!(
+                        "production recovery disagrees with independent raw audit at seq {}: raw={} production={}",
+                        raw_snapshot.sequence,
+                        state_summary(&raw_state),
+                        state_summary(&actual)
+                    )
+                    .into());
+                }
                 let mask = recovered_mask(&actual, &oracle.acknowledged, oracle.pending.as_ref())?;
                 if reconcile {
                     cut(recovery_tx, "recovery-complete")?;

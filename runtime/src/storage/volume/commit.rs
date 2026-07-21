@@ -386,16 +386,23 @@ pub(super) async fn commit_locked<S: crate::Storage>(
                 .map(|write| ready.file.write_at(write.physical, write.bytes.clone())),
         )
         .await?;
-        // Wall-clock fsync timing (metrics only; wasm32 has no monotonic
-        // clock).
-        #[cfg(not(target_arch = "wasm32"))]
-        let start = std::time::Instant::now();
-        ready.file.sync().await?;
-        #[cfg(not(target_arch = "wasm32"))]
-        ready
-            .metrics
-            .fsync_duration
-            .observe(start.elapsed().as_secs_f64());
+        // The cfg is a mutation-testing negative control. The assurance gate
+        // must prove that omitting this durability barrier breaks a test.
+        #[cfg(not(commonware_volume_mutation_skip_commit_sync))]
+        {
+            // Wall-clock fsync timing (metrics only; wasm32 has no monotonic
+            // clock).
+            #[cfg(not(target_arch = "wasm32"))]
+            let start = std::time::Instant::now();
+            ready.file.sync().await?;
+            #[cfg(not(target_arch = "wasm32"))]
+            ready
+                .metrics
+                .fsync_duration
+                .observe(start.elapsed().as_secs_f64());
+        }
+        #[cfg(commonware_volume_mutation_skip_commit_sync)]
+        let _ = &ready.metrics.fsync_duration;
         Ok::<(), Error>(())
     };
     if let Err(e) = written.await {
@@ -403,6 +410,9 @@ pub(super) async fn commit_locked<S: crate::Storage>(
             error = %e,
             "volume commit write/fsync failed; storage poisoned until restart"
         );
+        // The cfg is a mutation-testing negative control. The assurance gate
+        // must prove that losing this fatal latch breaks a test.
+        #[cfg(not(commonware_volume_mutation_skip_commit_poison))]
         ready.poison(e.clone());
         guard.disarm();
         return Err(e);

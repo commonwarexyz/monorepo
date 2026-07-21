@@ -4021,10 +4021,9 @@ async fn test_volume_hydrate_reads_only_frontier() {
     }
 }
 
-/// A checksum page read that started through an old ref must not install its
-/// result after a commit replaces that ref. The loader retries against the
-/// current entry; the foreground read then retries its data generation and
-/// returns the newly committed bytes.
+/// A checksum page read that started through an old ref must not return its
+/// result after a commit replaces that ref. The loader rechecks the current
+/// entry and observes that the rewritten chunk no longer needs that page.
 #[tokio::test]
 async fn test_volume_checksum_page_rechecks_ref_after_commit_swap() {
     let pool = test_pool();
@@ -4053,9 +4052,10 @@ async fn test_volume_checksum_page_rechecks_ref_after_commit_swap() {
     );
 
     gated.read_gate.arm();
-    let reader = tokio::spawn({
-        let blob = blob.clone();
-        async move { blob.read_at(0, 10).await }
+    let loader = tokio::spawn({
+        let ready = blob.ready.clone();
+        let core = blob.core.clone();
+        async move { super::paging::load_committed_page(&ready, &core, 0).await }
     });
     gated.read_gate.wait_reached().await;
 
@@ -4076,7 +4076,16 @@ async fn test_volume_checksum_page_rechecks_ref_after_commit_swap() {
     );
 
     gated.read_gate.release();
-    let got = reader.await.unwrap().unwrap().coalesce();
+    assert_eq!(
+        loader.await.unwrap().unwrap(),
+        None,
+        "the page loader must discard the superseded ref"
+    );
+    assert!(
+        !blob.core.inner.lock().crc_guarded().contains(&old_ref),
+        "the superseded ref must not enter the guarded-ref cache"
+    );
+    let got = blob.read_at(0, 10).await.unwrap().coalesce();
     assert_eq!(got.as_ref(), &[2u8; 10]);
 }
 

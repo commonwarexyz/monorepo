@@ -157,6 +157,9 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
             let mut inner = blob.inner.lock();
             // A commit swapped the entry mid-read (the extent may have been
             // recycled): retry against the current refs.
+            // The cfg is a mutation-testing negative control. The assurance
+            // gate must prove that accepting a recycled ref breaks a test.
+            #[cfg(not(commonware_volume_mutation_accept_stale_ref))]
             if !inner
                 .committed_entry()
                 .is_some_and(|e| e.checksums.contains(&r))

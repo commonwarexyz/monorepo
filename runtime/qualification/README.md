@@ -17,6 +17,14 @@ Partial outcomes are adopted into the stable oracle before another epoch runs.
 the first two-blob batch, bit 4 is its overlapping successor, and bit 5 is the
 namespace batch. The model rejects bit 4 unless bit 3 is also set.
 
+Before production recovery starts, `worker` and `verify` also run an independent
+read-only parser over the raw volume file. It shares the CRC32C primitive but
+does not call the production volume layout, decoder, recovery, paging, or read
+code. It validates table semantics and non-overlapping allocations, verifies
+every checksum-ref guard, scrubs every backed chunk, reconstructs partial
+frontiers from their shadows, and requires production recovery to return the
+same complete logical contents and floors.
+
 Build and initialize a new qualification directory:
 
 ```sh
@@ -187,3 +195,17 @@ cache configuration. Some drivers complete or transform flush flags above the
 leaf device, so a missing leaf marker requires tracing each layer rather than
 assuming the filesystem did nothing. This is supporting evidence only; it does
 not replace a hard power cut.
+
+## Mutation gate
+
+Run the implementation-level negative controls after changing commit, recovery,
+or checksum paging:
+
+```sh
+runtime/qualification/scripts/mutation-gate.sh
+```
+
+The gate separately removes the commit fsync, accepts a checksum page read from
+a superseded ref, and suppresses the fatal poison latch after a commit I/O
+failure. Each mutated build must compile, run its targeted witness, and fail the
+test. A surviving mutation fails the gate.
