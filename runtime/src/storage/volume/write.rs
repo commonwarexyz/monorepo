@@ -416,7 +416,7 @@ async fn plan_stretch<S: crate::Storage>(
                             span_physical,
                             span_len,
                             extent,
-                            seq: state.seq(),
+                            seq: state.next_seq(),
                             source,
                         }))
                     } else {
@@ -472,7 +472,7 @@ async fn plan_stretch<S: crate::Storage>(
                         stretch_end,
                         extent,
                         chunk_base: chunk_start,
-                        seq: state.seq(),
+                        seq: state.next_seq(),
                     }))
                 }
             }
@@ -807,7 +807,7 @@ async fn materialize_cow<S: crate::Storage>(
 fn free_unpublished<S: crate::Storage>(ready: &Ready<S>, extent: Option<Extent>) {
     let Some(extent) = extent else { return };
     let mut state = ready.state.lock();
-    let seq = state.seq();
+    let seq = state.next_seq();
     state.defer_free(extent, seq);
 }
 

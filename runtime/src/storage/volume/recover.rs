@@ -36,7 +36,7 @@ use super::{
     chunk::{chunk_of, ChunkCrc, ChunkState},
     layout::{ChecksumRef, Entry, Slot, Superblock, Table},
     paging::{stream_ref_windows, window_value},
-    state::{BlobInner, Genesis, Ready, State},
+    state::{BlobInner, DurableHead, Genesis, Ready, State},
     Config, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
@@ -921,12 +921,14 @@ pub(super) async fn recover<S: crate::Storage>(
         dormant,
         recovery_verified,
         alloc: Allocator::rebuild(2 * BLOCK, used),
-        adopted_seq: table.seq,
-        sacred_slot: slot,
-        table_extent: Extent {
-            offset: sb.table_offset,
-            len: block_align(sb.table_len as u64),
-        },
+        durable: DurableHead::new(
+            table.seq,
+            slot,
+            Extent {
+                offset: sb.table_offset,
+                len: block_align(sb.table_len as u64),
+            },
+        ),
         next_id: table.next_id,
         provisioned: len,
     });
@@ -984,9 +986,7 @@ async fn init_fresh<S: crate::Storage>(
         dormant: BTreeMap::new(),
         recovery_verified: BTreeMap::new(),
         alloc: Allocator::rebuild(2 * BLOCK, [table_extent]),
-        adopted_seq: 0,
-        sacred_slot: Slot::A,
-        table_extent,
+        durable: DurableHead::new(0, Slot::A, table_extent),
         next_id: 0,
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
     });

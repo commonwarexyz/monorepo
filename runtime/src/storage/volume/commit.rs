@@ -68,8 +68,6 @@ struct PreparedCommit {
     committed: Vec<(Arc<BlobCore>, Entry)>,
     /// The capture set (groups it covers are cleared at finalize).
     capture: BTreeSet<u64>,
-    /// The previous confirmed table extent (freed on confirmation).
-    old_table: Extent,
 }
 
 /// A prepared commit whose metadata writes and superblock have completed the
@@ -512,17 +510,17 @@ async fn prepare_commit<S: crate::Storage>(
         // issued bytes; released before any I/O below (the capture is a
         // value snapshot, and the freeze boundary protects it thereafter).
         let write_guard = blob.write_lock.lock().await;
-        let (plan, preloaded) = plan_refs(ready, &blob).await?;
-        let Some(captured) = capture_blob(ready, &blob, seq, plan, &preloaded) else {
+        let Some((plan, preloaded)) = plan_refs(ready, &blob).await? else {
+            ready.state.lock().clear_dirty(id);
             continue;
         };
+        let captured = capture_blob(ready, &blob, seq, plan, &preloaded);
         drop(write_guard);
         let entry = stage_meta(ready, seq, captured, &mut writes, &mut manifest)?;
         committed.push((blob, entry));
     }
 
-    let (old_table, table_extent) =
-        assemble_table(ready, seq, &mut committed, &mut manifest, &mut writes)?;
+    let table_extent = assemble_table(ready, seq, &mut committed, &mut manifest, &mut writes)?;
 
     Ok(PreparedCommit {
         seq,
@@ -530,17 +528,18 @@ async fn prepare_commit<S: crate::Storage>(
         writes,
         committed,
         capture,
-        old_table,
     })
 }
 
 /// The checksum-ref shape decided for one capture: extend coverage with
 /// one new delta ref, or rewrite the whole array as a single ref from
 /// chunk 0.
-struct RefPlan {
-    delta: bool,
-    /// Chunk coverage end of the previously committed refs.
-    prev_end: u64,
+#[derive(Clone, Copy)]
+enum RefPlan {
+    /// Retain the old refs and append coverage from `prev_end`.
+    Delta { prev_end: u64 },
+    /// Replace every old ref with one compacted array.
+    Rewrite,
 }
 
 /// Decide the checksum-ref shape ONCE, and preload what a full rewrite
@@ -563,7 +562,7 @@ struct RefPlan {
 async fn plan_refs<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
-) -> Result<(Option<RefPlan>, Vec<(u64, Vec<u32>)>), Error> {
+) -> Result<Option<(RefPlan, Vec<(u64, Vec<u32>)>)>, Error> {
     let decision = {
         let inner = blob.inner.lock();
         if inner.removed() {
@@ -588,18 +587,21 @@ async fn plan_refs<S: crate::Storage>(
             Some((delta, prev_end, load))
         }
     };
-    match decision {
-        Some((delta, prev_end, load)) => {
-            let preloaded = match load {
-                // Boxed: the cold streaming loader would otherwise deepen
-                // every commit future's layout.
-                Some(refs) => Box::pin(load_committed_refs(ready, blob, &refs)).await?,
-                None => Vec::new(),
-            };
-            Ok((Some(RefPlan { delta, prev_end }), preloaded))
-        }
-        None => Ok((None, Vec::new())),
-    }
+    let Some((delta, prev_end, load)) = decision else {
+        return Ok(None);
+    };
+    let preloaded = match load {
+        // Boxed: the cold streaming loader would otherwise deepen
+        // every commit future's layout.
+        Some(refs) => Box::pin(load_committed_refs(ready, blob, &refs)).await?,
+        None => Vec::new(),
+    };
+    let plan = if delta {
+        RefPlan::Delta { prev_end }
+    } else {
+        RefPlan::Rewrite
+    };
+    Ok(Some((plan, preloaded)))
 }
 
 /// One blob's capture: the entry to encode plus the metadata bytes and
@@ -621,22 +623,19 @@ struct Captured {
 /// Capture one blob's value snapshot under its write lock (held by the
 /// caller): raise the freeze boundary, finalize deferred CRCs, freeze and
 /// merge the captured runs, take the dirty set, and encode the new
-/// checksum array. Returns `None` for a blob removed since planning (its
-/// dirt drops with it).
+/// checksum array. The commit lock keeps the blob live from planning
+/// through this capture.
 fn capture_blob<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
     seq: u64,
-    plan: Option<RefPlan>,
+    plan: RefPlan,
     preloaded: &[(u64, Vec<u32>)],
-) -> Option<Captured> {
+) -> Captured {
     let id = blob.id;
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
-    if inner.removed() {
-        state.clear_dirty(id);
-        return None;
-    }
+    debug_assert!(!inner.removed(), "planned blob removed under commit lock");
 
     inner.freeze_for_capture(seq);
     let dirty_chunks = inner.take_dirty_chunks();
@@ -661,32 +660,31 @@ fn capture_blob<S: crate::Storage>(
     let covered_end = covered_end(&inner);
 
     // The ref shape decided at preload (inputs stable, see
-    // [`plan_refs`]). A removal between planning and this capture is
-    // caught by the removed check above, so a live capture always
-    // carries a plan.
-    let RefPlan { delta, prev_end } = plan.expect("live blob carries a ref plan");
+    // [`plan_refs`]). The commit lock prevents removal before capture.
     let floor_chunk = chunk_of(inner.floor());
     let live_ref = |r: &ChecksumRef| r.first_chunk + r.count as u64 > floor_chunk;
     let prev_refs = inner
         .committed_entry()
         .map_or(&[][..], |e| &e.checksums[..]);
-    let (array_start, checksums) = if delta {
-        // Refs wholly below the pruned floor drop (their extents supersede
-        // below); a straddling ref stays with its low values unused, so
-        // pruning never rewrites the array.
-        let live: Vec<ChecksumRef> = prev_refs.iter().filter(|r| live_ref(r)).copied().collect();
-        // The new array continues the retained coverage. With nothing
-        // retained (no previous refs, or the floor passed them all), it
-        // restarts at the floor's chunk: chunks below it are unbacked and
-        // never loaded, and no ref may end at or below the floor chunk.
-        let start = if live.is_empty() {
-            floor_chunk
-        } else {
-            prev_end
-        };
-        (start, live)
-    } else {
-        (floor_chunk, Vec::new())
+    let (array_start, checksums) = match plan {
+        RefPlan::Delta { prev_end } => {
+            // Refs wholly below the pruned floor drop (their extents
+            // supersede below); a straddling ref stays with its low values
+            // unused, so pruning never rewrites the array.
+            let live: Vec<ChecksumRef> =
+                prev_refs.iter().filter(|r| live_ref(r)).copied().collect();
+            // The new array continues the retained coverage. With nothing
+            // retained (no previous refs, or the floor passed them all), it
+            // restarts at the floor's chunk: chunks below it are unbacked and
+            // never loaded, and no ref may end at or below the floor chunk.
+            let start = if live.is_empty() {
+                floor_chunk
+            } else {
+                prev_end
+            };
+            (start, live)
+        }
+        RefPlan::Rewrite => (floor_chunk, Vec::new()),
     };
     let cksum_bytes: Vec<u8> = {
         let mut bytes = Vec::with_capacity((covered_end.saturating_sub(array_start) * 4) as usize);
@@ -743,16 +741,17 @@ fn capture_blob<S: crate::Storage>(
             .committed_entry()
             .and_then(|entry| entry.shadow.map(|offset| Extent { offset, len: BLOCK })),
     );
-    if delta {
-        // Extents of refs dropped below the floor supersede even in a delta
-        // commit. Retained refs remain owned by the new entry.
-        for r in prev_refs {
-            if !live_ref(r) {
-                superseded.push(r.extent());
+    match plan {
+        RefPlan::Delta { .. } => {
+            // Extents of refs dropped below the floor supersede even in a
+            // delta commit. Retained refs remain owned by the new entry.
+            for r in prev_refs {
+                if !live_ref(r) {
+                    superseded.push(r.extent());
+                }
             }
         }
-    } else {
-        superseded.extend(prev_refs.iter().map(ChecksumRef::extent));
+        RefPlan::Rewrite => superseded.extend(prev_refs.iter().map(ChecksumRef::extent)),
     }
 
     let entry = Entry {
@@ -768,14 +767,14 @@ fn capture_blob<S: crate::Storage>(
         shadow: None, // filled after allocation below
     };
 
-    Some(Captured {
+    Captured {
         entry,
         dirty_chunks,
         array_start,
         cksum_bytes,
         shadow_bytes,
         superseded,
-    })
+    }
 }
 
 /// Allocate and stage one captured blob's metadata writes — the new
@@ -875,7 +874,7 @@ fn assemble_table<S: crate::Storage>(
     committed: &mut [(Arc<BlobCore>, Entry)],
     manifest: &mut [(u64, u64)],
     writes: &mut Vec<MetaWrite>,
-) -> Result<(Extent, Extent), Error> {
+) -> Result<Extent, Error> {
     let mut state = ready.state.lock();
     let (partitions, entries) = state.table_entries(committed);
     manifest.sort_unstable();
@@ -897,7 +896,7 @@ fn assemble_table<S: crate::Storage>(
         physical: superblock_offset,
         bytes: IoBuf::from(sb.encode()),
     });
-    Ok((state.table_extent(), extent))
+    Ok(extent)
 }
 
 /// Publish a confirmed commit.
@@ -913,12 +912,7 @@ fn finalize<S: crate::Storage>(ready: &Ready<S>, durable: DurableCommit) {
     }
 
     let mut state = ready.state.lock();
-    let resolved_members = state.confirm(
-        prepared.seq,
-        prepared.old_table,
-        prepared.table_extent,
-        &prepared.capture,
-    );
+    let resolved_members = state.confirm(prepared.seq, prepared.table_extent, &prepared.capture);
     state.apply_frees();
     // Captured blobs whose last handle dropped mid-commit could not demote
     // then (their next entry lived only in this snapshot), and clean

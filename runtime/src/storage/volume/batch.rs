@@ -724,7 +724,7 @@ async fn apply_task<S: crate::Storage>(
     for (id, st) in staged {
         let _guard = st.core.write_lock.lock().await;
         let mut state = ready.state.lock();
-        let seq = state.seq();
+        let seq = state.next_seq();
         for extent in st.discarded {
             state.defer_free(extent, seq);
         }
@@ -790,7 +790,7 @@ async fn apply_task<S: crate::Storage>(
 /// the apply task fails validation (the task owns the staged state).
 fn discard_staged<S: crate::Storage>(ready: &Ready<S>, staged: BTreeMap<u64, Staged>) {
     let mut state = ready.state.lock();
-    let seq = state.seq();
+    let seq = state.next_seq();
     for st in staged.into_values() {
         st.core.inner.lock().unstage_batch();
         for extent in st.overlay.fresh {

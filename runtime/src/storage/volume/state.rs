@@ -326,6 +326,21 @@ struct DeferredFree {
     handle_gate: Option<u64>,
 }
 
+/// The durable head adopted at recovery or advanced by confirmation. Its
+/// sequence, sacred superblock slot, and table extent change atomically.
+#[derive(Clone, Copy)]
+pub(super) struct DurableHead {
+    seq: u64,
+    slot: Slot,
+    table: Extent,
+}
+
+impl DurableHead {
+    pub const fn new(seq: u64, slot: Slot, table: Extent) -> Self {
+        Self { seq, slot, table }
+    }
+}
+
 /// Volume-wide mutable state.
 pub(super) struct State {
     /// partition -> name -> blob id. Partition existence is first-class.
@@ -340,16 +355,9 @@ pub(super) struct State {
     dormant: BTreeMap<u64, (String, Entry)>,
     alloc: super::alloc::Allocator,
     pending_free: Vec<DeferredFree>,
-    /// Seq of the next commit.
-    seq: u64,
-    /// Seq of the most recent snapshot (freeze epoch for `RunMeta::born`).
-    snapshot_seq: u64,
-    /// Highest confirmed commit seq.
-    confirmed_seq: u64,
-    /// Superblock slot holding the last confirmed commit.
-    sacred_slot: Slot,
-    /// The last confirmed table's extent (freed when superseded).
-    table_extent: Extent,
+    /// Sequence assigned to the next commit.
+    next_seq: u64,
+    durable: DurableHead,
     /// Chunks recovery CRC-checked while verifying the adopted commit's
     /// delta manifest, per blob id. Consumed at hydration to seed verified
     /// bits so first reads skip re-verification.
@@ -543,7 +551,7 @@ impl State {
         // audits along the way. Removed-with-handles blobs are skipped:
         // unlink moved their extents to `pending_free` (counted there).
         let mut referenced: Vec<(Extent, String)> = Vec::new();
-        referenced.push((self.table_extent, "table".into()));
+        referenced.push((self.durable.table, "table".into()));
         for deferred in &self.pending_free {
             referenced.push((deferred.extent, "pending free".into()));
         }
@@ -639,7 +647,7 @@ impl State {
 
     /// Apply deferred frees eligible under the current confirmed seq.
     pub fn apply_frees(&mut self) {
-        let confirmed = self.confirmed_seq;
+        let confirmed = self.durable.seq;
         let mut kept = Vec::with_capacity(self.pending_free.len());
         for deferred in self.pending_free.drain(..) {
             let gated = match deferred.handle_gate {
@@ -1068,12 +1076,7 @@ pub(super) struct Genesis {
     pub dormant: BTreeMap<u64, (String, Entry)>,
     pub recovery_verified: BTreeMap<u64, Vec<u64>>,
     pub alloc: Allocator,
-    /// Seq of the adopted commit (the next commit is `adopted_seq + 1`).
-    pub adopted_seq: u64,
-    /// Superblock slot holding the adopted commit.
-    pub sacred_slot: Slot,
-    /// The adopted table's extent.
-    pub table_extent: Extent,
+    pub durable: DurableHead,
     pub next_id: u64,
     /// Bytes of the volume file known to exist.
     pub provisioned: u64,
@@ -1084,6 +1087,7 @@ impl State {
     /// follows the adopted seq, the adopted seq is the snapshot and
     /// confirmation floor, and every runtime set starts empty.
     pub fn boot(genesis: Genesis) -> Self {
+        let durable = genesis.durable;
         Self {
             partitions: genesis.partitions,
             open: BTreeMap::new(),
@@ -1091,11 +1095,8 @@ impl State {
             dormant: genesis.dormant,
             alloc: genesis.alloc,
             pending_free: Vec::new(),
-            seq: genesis.adopted_seq + 1,
-            snapshot_seq: genesis.adopted_seq,
-            confirmed_seq: genesis.adopted_seq,
-            sacred_slot: genesis.sacred_slot,
-            table_extent: genesis.table_extent,
+            next_seq: durable.seq + 1,
+            durable,
             recovery_verified: genesis.recovery_verified,
             next_id: genesis.next_id,
             dirty: Default::default(),
@@ -1109,20 +1110,20 @@ impl State {
         }
     }
 
-    /// Seq of the next commit.
-    pub const fn seq(&self) -> u64 {
-        self.seq
+    /// Sequence assigned to the next commit.
+    pub const fn next_seq(&self) -> u64 {
+        self.next_seq
     }
 
     /// Seq of the most recent snapshot (the freeze epoch).
     pub const fn snapshot_seq(&self) -> u64 {
-        self.snapshot_seq
+        self.next_seq - 1
     }
 
     /// Highest confirmed commit seq.
     #[cfg(test)]
     pub const fn confirmed_seq(&self) -> u64 {
-        self.confirmed_seq
+        self.durable.seq
     }
 
     /// Next blob id (persisted, never reused).
@@ -1158,9 +1159,8 @@ impl State {
 
     /// Assign the next commit's seq and advance the freeze epoch.
     pub const fn begin_snapshot(&mut self) -> u64 {
-        let seq = self.seq;
-        self.seq += 1;
-        self.snapshot_seq = seq;
+        let seq = self.next_seq;
+        self.next_seq += 1;
         seq
     }
 
@@ -1188,14 +1188,9 @@ impl State {
         self.alloc.allocate(len)
     }
 
-    /// The last confirmed table's extent (superseded on confirmation).
-    pub const fn table_extent(&self) -> Extent {
-        self.table_extent
-    }
-
     /// The superblock slot the next commit writes (never the sacred one).
     pub const fn standby_slot(&self) -> Slot {
-        self.sacred_slot.other()
+        self.durable.slot.other()
     }
 
     /// Capture the namespace into table entries: captured blobs
@@ -1284,17 +1279,14 @@ impl State {
     /// old table, and resolve every applied-batch group the capture
     /// covers (capture expansion guarantees all-or-nothing coverage —
     /// never-split). Returns the resolved groups' members.
-    pub fn confirm(
-        &mut self,
-        seq: u64,
-        old_table: Extent,
-        table: Extent,
-        capture: &BTreeSet<u64>,
-    ) -> Vec<u64> {
-        self.sacred_slot = self.sacred_slot.other();
-        self.confirmed_seq = seq;
-        self.defer_free(old_table, seq);
-        self.table_extent = table;
+    pub fn confirm(&mut self, seq: u64, table: Extent, capture: &BTreeSet<u64>) -> Vec<u64> {
+        let previous = self.durable;
+        self.durable = DurableHead {
+            seq,
+            slot: previous.slot.other(),
+            table,
+        };
+        self.defer_free(previous.table, seq);
         let mut resolved: Vec<u64> = Vec::new();
         self.groups.retain(|group| {
             let covered = group.iter().any(|id| capture.contains(id));
@@ -1467,7 +1459,7 @@ impl<S: crate::Storage> Drop for HandleTracker<S> {
 /// table, so removal frees gate only on that commit's seq (plus the handle
 /// gate for extents still readable through open handles).
 pub(super) fn unlink(state: &mut State, id: u64) {
-    let seq = state.seq;
+    let seq = state.next_seq;
     state.encoded.remove(&id);
     if let Some(core) = state.open.get(&id).cloned() {
         let mut inner = core.inner.lock();
