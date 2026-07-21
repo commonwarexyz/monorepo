@@ -551,7 +551,7 @@ where
         // State-extraction invariants assume each reporter is honest;
         // include only correct reporters here. Quorum thresholds still
         // derive from the full validator set, so `config.n` is unchanged.
-        let correct_reporters = reporters
+        let correct_reporters: Vec<_> = reporters
             .into_iter()
             .enumerate()
             .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))

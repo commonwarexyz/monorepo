@@ -1,13 +1,16 @@
-use crate::id_mock;
 #[cfg(feature = "mocks")]
 use crate::simplex_certificate_mock as cert_mock;
-use commonware_codec::Read;
-use commonware_consensus::simplex::{
-    elector::{Config as ElectorConfig, Random, RoundRobin},
-    scheme::{
-        Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-        secp256r1,
+use crate::{Configuration, N4F1C3, id_mock};
+use commonware_codec::{Encode, Read};
+use commonware_consensus::{
+    simplex::{
+        elector::{Config as ElectorConfig, Random, RoundRobin},
+        scheme::{
+            Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+            secp256r1,
+        },
     },
+    types::View,
 };
 use commonware_cryptography::{
     PublicKey, Sha256,
@@ -69,6 +72,25 @@ where
         Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     );
+
+    /// A view whose leader is the configured Byzantine participant in the
+    /// dedicated audit harness, if this instantiation has a statically known
+    /// leader schedule. Returning `None` disables rejected-certification
+    /// sampling for that instantiation.
+    fn audit_rejection_view(_configuration: Configuration) -> Option<View> {
+        None
+    }
+
+    /// Per-view seed embedded in this instantiation's certificates, if any.
+    ///
+    /// Returns the seed bytes exactly as carried by the certificate so that
+    /// byte equality across certificates checks seed uniqueness per view.
+    /// Schemes without an embedded seed return `None`.
+    fn certificate_seed(
+        _certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
+    ) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 pub struct SimplexEd25519;
@@ -107,6 +129,10 @@ impl Simplex for SimplexId {
     ) {
         id_mock::fixture(context, namespace, n)
     }
+
+    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
+        (configuration == N4F1C3).then(|| View::new(3))
+    }
 }
 
 #[cfg(feature = "mocks")]
@@ -128,6 +154,10 @@ impl Simplex for SimplexCertificateMock {
     ) {
         let fixture = cert_mock::fixture_with::<false, true, true, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
+    }
+
+    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
+        (configuration == N4F1C3).then(|| View::new(3))
     }
 }
 
@@ -205,6 +235,14 @@ impl Simplex for SimplexBls12381MinPk {
         let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
     }
+
+    fn certificate_seed(
+        certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
+    ) -> Option<Vec<u8>> {
+        certificate
+            .get()
+            .map(|signature| signature.seed_signature.encode().as_ref().to_vec())
+    }
 }
 
 pub struct SimplexBls12381MinPkCustomRandom;
@@ -224,6 +262,14 @@ impl Simplex for SimplexBls12381MinPkCustomRandom {
         let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
     }
+
+    fn certificate_seed(
+        certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
+    ) -> Option<Vec<u8>> {
+        certificate
+            .get()
+            .map(|signature| signature.seed_signature.encode().as_ref().to_vec())
+    }
 }
 
 pub struct SimplexBls12381MinSig;
@@ -242,6 +288,14 @@ impl Simplex for SimplexBls12381MinSig {
     ) {
         let fixture = bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
+    }
+
+    fn certificate_seed(
+        certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
+    ) -> Option<Vec<u8>> {
+        certificate
+            .get()
+            .map(|signature| signature.seed_signature.encode().as_ref().to_vec())
     }
 }
 
@@ -293,6 +347,29 @@ mod tests {
         assert!(matches!(c0, Certifier::Pending));
         let c1 = CertifyChoice::SinglePending { target_idx: 2 }.into_certifier(3);
         assert!(matches!(c1, Certifier::Always));
+    }
+
+    #[test]
+    fn certify_choice_reject_view_is_consistent_across_validators() {
+        let choice = CertifyChoice::RejectView {
+            view: commonware_consensus::types::View::new(5),
+        };
+        for validator_idx in [0, 3] {
+            let Certifier::Custom(certify) = choice.into_certifier(validator_idx) else {
+                panic!("RejectView must construct a custom certifier");
+            };
+            let result = |view| {
+                certify(
+                    commonware_consensus::types::Round::new(
+                        commonware_consensus::types::Epoch::new(crate::EPOCH),
+                        commonware_consensus::types::View::new(view),
+                    ),
+                    Sha256Digest([0; 32]),
+                )
+            };
+            assert!(!result(5));
+            assert!(result(6));
+        }
     }
 
     fn test_input(seed: u64, containers: u64) -> FuzzInput {

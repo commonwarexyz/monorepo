@@ -295,6 +295,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_audit"
+path = "fuzz_targets/simplex_id_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_faulty_msg"
 path = "fuzz_targets/simplex_id_faulty_msg.rs"
 test = false
@@ -316,6 +323,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_twins_mutator_audit"
+path = "fuzz_targets/simplex_id_twins_mutator_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_twins_campaign"
 path = "fuzz_targets/simplex_id_twins_campaign.rs"
 test = false
@@ -323,8 +337,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_twins_campaign_audit"
+path = "fuzz_targets/simplex_id_twins_campaign_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_cert_mock"
 path = "fuzz_targets/simplex_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_audit"
+path = "fuzz_targets/simplex_cert_mock_audit.rs"
 test = false
 doc = false
 bench = false
