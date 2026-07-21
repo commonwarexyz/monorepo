@@ -429,12 +429,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             }
         }
 
-        // Check the two newest blobs for interior holes. Only they can hold non-durable data
-        // (see "Durability invariant" in the module docs), and a crash during an in-flight fsync
-        // can lose an interior page while later pages survive. `Writer::new` sizes a blob by its
-        // last valid page, so it cannot see such a hole. Re-read each blob from the front and
-        // truncate at the first bad page (rounded down to whole items) so `recover_bounds` sees
-        // only intact data.
+        // Check the two newest blobs for interior holes. Only they can hold non-durable data, and
+        // a crash during an in-flight fsync can lose an interior page while later pages survive.
+        // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Re-read
+        // each blob from the front and truncate at the first bad page (rounded down to whole
+        // items) so `recover_bounds` sees only intact data.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
