@@ -41,8 +41,9 @@
 //! identical except each reader issues its gets in `batch`-key `get_many` calls, exercising the
 //! batched read path the commit path uses. Keys are sampled the same way `generate` derives them
 //! (`Sha256(index)` over the keyspace), so nearly all gets hit a live key. By default these modes
-//! use a passthrough page cache (no in-process caching) so reads always reach the storage layer;
-//! pass a non-zero `cache_pages` to measure through an in-process cache of that many pages instead.
+//! use a minimal 64-page cache, which uniform-random reads at this scale virtually never hit, so
+//! reads reach the storage layer. Pass a larger `cache_pages` to measure through an in-process
+//! cache of that many pages instead.
 //!
 //! The optional index flavor (default `ordered`) selects the snapshot index: `ordered` is the P=3
 //! partitioned ordered index (the inline-SoA config for large key sets), `unordered` the P=2
@@ -86,6 +87,11 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 /// (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top of a
 /// realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
+
+/// Page cache size for the get modes when `cache_pages` is not given: small enough that
+/// uniform-random reads at benchmark scale virtually never hit it, so cold reads reach the
+/// storage layer through the same cache path production runs.
+const MIN_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(64);
 
 /// Commit (and prune-eligible) cadence during population.
 const COMMIT_FREQUENCY: u32 = 10_000;
@@ -136,7 +142,7 @@ fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, 0/omitted = passthrough)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
     );
 }
 
@@ -213,14 +219,15 @@ fn main() {
                     (None, 5)
                 };
                 // Trailing options in either order: an index flavor (default ordered) and an
-                // in-process page cache size (omitted/`0` = passthrough, so reads reach storage).
+                // in-process page cache size (omitted = a minimal cache, so reads reach
+                // storage).
                 let mut index = IndexKind::Ordered;
                 let mut cache_pages = None;
                 for arg in &argv[opts_at.min(argv.len())..] {
                     if let Some(kind) = IndexKind::parse(arg) {
                         index = kind;
-                    } else if let Ok(n) = arg.parse::<usize>() {
-                        cache_pages = NonZeroUsize::new(n);
+                    } else if let Some(n) = arg.parse::<usize>().ok().and_then(NonZeroUsize::new) {
+                        cache_pages = Some(n);
                     } else {
                         usage();
                         return;
@@ -369,22 +376,12 @@ fn get_bench(
     }
     let cfg = Config::default().with_storage_directory(folder);
     Runner::new(cfg).start(|ctx| async move {
-        // Passthrough by default so point reads reach the storage layer instead of the in-process
-        // cache, which is what the cold-read measurement is about.
-        let (page_cache, cache_mode) = cache_pages.map_or_else(
-            || {
-                (
-                    CacheRef::passthrough_from_pooler(&ctx, PAGE_SIZE),
-                    "passthrough".to_string(),
-                )
-            },
-            |pages| {
-                (
-                    CacheRef::from_pooler(&ctx, PAGE_SIZE, pages),
-                    format!("{pages} pages"),
-                )
-            },
-        );
+        // A minimal page cache by default: uniform-random reads at benchmark scale virtually
+        // never hit it, so the cold pass measures the storage layer through the same cache path
+        // production runs.
+        let cache_pages = cache_pages.unwrap_or(MIN_PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(&ctx, PAGE_SIZE, cache_pages);
+        let cache_mode = format!("{cache_pages} pages");
         let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1));
         config.merkle_config.page_cache = page_cache.clone();
         config.journal_config.page_cache = page_cache;
