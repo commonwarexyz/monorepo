@@ -4464,6 +4464,40 @@ mod tests {
         });
     }
 
+    /// A torn page below a mid-blob watermark takes the truncate path (the floor is
+    /// blob-granular), but recovery still fails: `align` finds the acknowledged data missing.
+    /// Retries fail identically.
+    #[test_traced]
+    fn test_variable_recovery_rejects_torn_page_below_mid_blob_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "variable-torn-mid-blob-watermark".into(),
+                items_per_section: NZU64!(30),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            // The watermark (20) sits mid-blob: blob 0 holds 20 9-byte frames across 3 pages.
+            journal.sync().await.unwrap();
+
+            // Tear page 1 (bytes 64..128), beneath the acknowledged frames ending at byte 180.
+            corrupt_page(&context, &cfg.data_partition(), 0, 1, 64).await;
+
+            for child in ["second", "retry"] {
+                let result = Journal::<_, u64>::init(context.child(child), cfg.clone()).await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
+            }
+        });
+    }
+
     /// Test that a durable data blob above the sync watermark, sitting beyond an empty
     /// intermediate blob, is rolled back to the contiguous boundary during recovery.
     ///
