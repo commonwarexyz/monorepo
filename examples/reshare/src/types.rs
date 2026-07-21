@@ -13,7 +13,11 @@ use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
     bls12381::{
         dkg::feldman_desmedt::DealerPrivMsg,
-        primitives::{group::Share, variant::MinSig},
+        primitives::{
+            group::Share,
+            sharing::{Mode, ModeVersion},
+            variant::MinSig,
+        },
     },
     certificate::{Provider as CertificateProvider, Scoped},
     ed25519, sha256,
@@ -54,6 +58,8 @@ pub type Database<E> = Shared<Qmdb<E>>;
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
+pub const SHARING_MODE: Mode = Mode::NonZeroCounter;
+pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 pub const PAGE_SIZE: std::num::NonZeroU16 = commonware_utils::NZU16!(1024);
 pub const PAGE_CACHE_SIZE: std::num::NonZeroUsize = NZUsize!(16);
 pub const IO_BUFFER_SIZE: std::num::NonZeroUsize = NZUsize!(2048);
@@ -134,7 +140,7 @@ impl Read for Block {
             range: NonEmptyRange::read(buf)?,
             payload: Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
                 buf,
-                &MAX_PARTICIPANTS,
+                &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
         })
     }
@@ -504,7 +510,7 @@ mod epoch_info_hex {
     ) -> Result<dkg::types::EpochInfo<MinSig, ed25519::PublicKey>, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        dkg::types::EpochInfo::decode_cfg(bytes.as_slice(), &MAX_PARTICIPANTS)
+        dkg::types::EpochInfo::decode_cfg(bytes.as_slice(), &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
             .map_err(D::Error::custom)
     }
 }

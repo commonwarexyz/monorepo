@@ -8,7 +8,7 @@ use commonware_cryptography::{
     Signer,
     bls12381::{
         dkg::feldman_desmedt::{Output, deal},
-        primitives::{group::Share, sharing::Mode, variant::MinSig},
+        primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
 };
@@ -128,7 +128,7 @@ fn trusted_bootstrap(network: &NetworkConfig) -> anyhow::Result<TrustedBootstrap
     let players = participants.get(Epoch::zero());
     let mut rng = rand::make_rng::<StdRng>();
     let (output, shares): (Output<MinSig, PublicKey>, Map<PublicKey, Share>) =
-        deal::<MinSig, _, N3f1>(&mut rng, Mode::RootsOfUnity, players.clone())?;
+        deal::<MinSig, _, N3f1>(&mut rng, types::SHARING_MODE, players.clone())?;
     let genesis = EpochInfo {
         outcome: EpochOutcome::Success,
         epoch: Epoch::zero(),

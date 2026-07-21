@@ -4,9 +4,9 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
-        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MESSAGE_BACKLOG, NAMESPACE,
-        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL, Registrar,
-        Scheme, VOTE_CHANNEL,
+        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
+        MESSAGE_BACKLOG, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
+        RESOLVER_CHANNEL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -19,7 +19,7 @@ use commonware_consensus::{
     simplex::{config::ForwardingPolicy, elector::RoundRobin},
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519, sha256::Sha256};
+use commonware_cryptography::{ed25519, sha256::Sha256};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
@@ -283,6 +283,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         StateSyncConfig {
             partition_prefix: partition_prefix.to_string(),
             max_participants: MAX_PARTICIPANTS,
+            max_supported_mode: MAX_SUPPORTED_MODE,
         },
         state_sync,
     )
@@ -303,7 +304,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             state_sync: state_sync.clone(),
             fence,
             namespace: NAMESPACE,
-            sharing_mode: Mode::RootsOfUnity,
+            sharing_mode: SHARING_MODE,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
             max_participants: MAX_PARTICIPANTS,

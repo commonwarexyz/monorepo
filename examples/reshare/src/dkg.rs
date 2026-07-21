@@ -2,16 +2,13 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MESSAGE_BACKLOG, NAMESPACE,
-        Participants, RESOLVER_CHANNEL, VOTE_CHANNEL,
+        DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
+        MESSAGE_BACKLOG, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
     },
 };
 use clap::Args;
 use commonware_consensus::types::Epoch;
-use commonware_cryptography::{
-    bls12381::primitives::{sharing::Mode, variant::MinSig},
-    ed25519::PublicKey,
-};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_glue::dkg::{
     bootstrap,
     types::{EpochInfo, EpochOutcome},
@@ -90,7 +87,8 @@ pub async fn run(context: tokio::Context, args: Dkg) {
             secret_store: store,
             strategy,
             namespace: NAMESPACE,
-            sharing_mode: Mode::RootsOfUnity,
+            sharing_mode: SHARING_MODE,
+            max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
             participants: participants.get(Epoch::zero()),
             blocks_per_epoch: BLOCKS_PER_EPOCH,
@@ -211,7 +209,7 @@ mod tests {
 
         let players = Set::from_iter_dedup(network.participants.iter().take(2).cloned());
         let (output, _shares) =
-            deal::<MinSig, _, N3f1>(test_rng(), Mode::RootsOfUnity, players.clone()).unwrap();
+            deal::<MinSig, _, N3f1>(test_rng(), SHARING_MODE, players.clone()).unwrap();
         let genesis = EpochInfo {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
