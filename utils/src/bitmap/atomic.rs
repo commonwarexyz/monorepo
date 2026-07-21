@@ -1,11 +1,10 @@
 //! A fixed-length bitmap whose bits can be set concurrently through shared references.
 
 use super::BitMap;
-#[cfg(not(feature = "std"))]
-use alloc::{collections::VecDeque, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "std")]
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// A fixed-length bitmap whose bits can be set concurrently through shared references.
 ///

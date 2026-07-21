@@ -15,7 +15,9 @@ use core::{
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
 
+#[cfg(feature = "std")]
 mod atomic;
+#[cfg(feature = "std")]
 pub use atomic::Atomic;
 mod prunable;
 pub use prunable::Prunable;
@@ -115,6 +117,7 @@ impl<const N: usize> BitMap<N> {
     /// # Panics
     ///
     /// Panics if the chunk count does not match `len` or a bit at index >= `len` is set.
+    #[cfg(feature = "std")]
     fn from_chunks(chunks: VecDeque<[u8; N]>, len: u64) -> Self {
         assert_eq!(
             chunks.len() as u64,
