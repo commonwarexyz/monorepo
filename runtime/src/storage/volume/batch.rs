@@ -56,7 +56,7 @@ use super::{
     chunk::{chunk_of, ChunkCrc, ChunkState, RunMeta},
     commit,
     paging::CrcMemo,
-    resize::{read_frontier, FrontierRead},
+    resize::{read_frontier, FrontierCrc, FrontierRead},
     state::{
         check_floor, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun,
     },
@@ -317,9 +317,10 @@ impl<S: crate::Storage> Batch<S> {
                             phys,
                             span,
                             old_span,
-                            expected,
-                            verified: state.verified,
-                            resident: true,
+                            crc: FrontierCrc::Resident {
+                                expected,
+                                verified: state.verified,
+                            },
                         })
                     }
                     // Pending chunks are overlay-resident with a full-span
@@ -336,9 +337,7 @@ impl<S: crate::Storage> Batch<S> {
                                 phys,
                                 span,
                                 old_span,
-                                expected,
-                                verified: true,
-                                resident: false,
+                                crc: FrontierCrc::Committed { expected },
                             })
                         }
                         None => chunk,

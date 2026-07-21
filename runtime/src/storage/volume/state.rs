@@ -53,6 +53,17 @@ pub(super) struct OverlayEntry {
     bytes: Vec<u8>,
 }
 
+/// An opened blob's namespace/commit phase. The commit lock makes capture and
+/// removal mutually exclusive, so represent them as one state rather than
+/// independent flags.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum BlobLifecycle {
+    #[default]
+    Live,
+    Capturing,
+    Removed,
+}
+
 /// Per-blob mutable state.
 #[derive(Debug, Default)]
 pub(super) struct BlobInner {
@@ -114,12 +125,9 @@ pub(super) struct BlobInner {
     /// snapshot capture must not merge this blob's runs: staged overlays
     /// (see [`StagedBlob`]) reference base runs by key.
     staged_batches: usize,
-    /// Captured by an in-flight commit whose finalize has not run yet: the
-    /// blob's next committed entry exists only in the snapshot, so it must
-    /// not be demoted against the stale one (see [`State::maybe_demote`]).
-    capturing: bool,
-    /// Unlinked from the namespace (handles may still read).
-    removed: bool,
+    /// Namespace/commit phase. Capturing blocks demotion until finalize;
+    /// removed blobs remain readable through existing handles.
+    lifecycle: BlobLifecycle,
 }
 
 impl BlobInner {
@@ -462,7 +470,7 @@ impl State {
             return;
         };
         let inner = core.inner.lock();
-        if inner.removed || inner.staged_batches != 0 || inner.capturing {
+        if inner.lifecycle != BlobLifecycle::Live || inner.staged_batches != 0 {
             return;
         }
         // Clean blobs carry no unsynced bookkeeping (capture drains both).
@@ -512,7 +520,7 @@ impl State {
                 .open
                 .get(id)
                 .unwrap_or_else(|| panic!("dirty blob {id} not open"));
-            assert!(!core.inner.lock().removed, "dirty blob {id} is removed");
+            assert!(!core.inner.lock().removed(), "dirty blob {id} is removed");
         }
 
         // Applied-batch groups are pairwise disjoint and (quiesced) hold
@@ -565,7 +573,7 @@ impl State {
         }
         for (&id, core) in &self.open {
             let inner = core.inner.lock();
-            if inner.removed {
+            if inner.removed() {
                 continue;
             }
             inner.audit();
@@ -581,7 +589,7 @@ impl State {
                     // before the entry swings. Count only the old entry's
                     // retained extents during that interval; fresh metadata
                     // remains owned by the prepared commit until finalize.
-                    let superseded = inner.capturing
+                    let superseded = inner.lifecycle == BlobLifecycle::Capturing
                         && self.pending_free.iter().any(|free| free.extent == extent);
                     if !superseded {
                         referenced.push((extent, format!("open {id} metadata {i}")));
@@ -746,7 +754,7 @@ impl BlobInner {
 
     /// Whether the blob was unlinked from the namespace.
     pub const fn removed(&self) -> bool {
-        self.removed
+        matches!(self.lifecycle, BlobLifecycle::Removed)
     }
 
     /// Batches currently holding staged state for this blob.
@@ -930,8 +938,9 @@ impl BlobInner {
     /// blob, whose overlay references base runs by key (merging would
     /// move keys under it).
     pub fn freeze_for_capture(&mut self, seq: u64) {
+        debug_assert_eq!(self.lifecycle, BlobLifecycle::Live);
         self.freeze_size = self.freeze_size.max(self.size);
-        self.capturing = true;
+        self.lifecycle = BlobLifecycle::Capturing;
         self.overlay_finalize();
         for run in self.runs.values_mut() {
             run.born = run.born.min(seq);
@@ -962,7 +971,8 @@ impl BlobInner {
     /// were themselves guard-checked — and retained refs keep their
     /// standing memo. Everything else (superseded refs) drops out.
     pub fn publish_committed(&mut self, entry: Entry) {
-        self.capturing = false;
+        debug_assert_eq!(self.lifecycle, BlobLifecycle::Capturing);
+        self.lifecycle = BlobLifecycle::Live;
         self.freeze_size = entry.size;
         let prev = std::mem::take(&mut self.crc_guarded);
         let old_refs = self
@@ -1248,7 +1258,7 @@ impl State {
             // (created but never captured). Never derived from live
             // state, which may hold uncommitted writes.
             let inner = core.inner.lock();
-            if inner.removed {
+            if inner.removed() {
                 continue;
             }
             let mut entry = inner
@@ -1267,7 +1277,7 @@ impl State {
                 + self
                     .open
                     .values()
-                    .filter(|core| !core.inner.lock().removed)
+                    .filter(|core| !core.inner.lock().removed())
                     .count(),
             "encoded-entry cache out of sync with the namespace"
         );
@@ -1440,7 +1450,7 @@ impl<S: crate::Storage> Drop for HandleTracker<S> {
             let removed = state
                 .open
                 .get(&self.id)
-                .is_some_and(|b| b.inner.lock().removed);
+                .is_some_and(|b| b.inner.lock().removed());
             if removed {
                 state.open.remove(&self.id);
             } else {
@@ -1463,7 +1473,8 @@ pub(super) fn unlink(state: &mut State, id: u64) {
     state.encoded.remove(&id);
     if let Some(core) = state.open.get(&id).cloned() {
         let mut inner = core.inner.lock();
-        inner.removed = true;
+        debug_assert_eq!(inner.lifecycle, BlobLifecycle::Live);
+        inner.lifecycle = BlobLifecycle::Removed;
         inner.generation += 1;
         // The runs map keeps its entries — reads through live handles
         // stay served — but every extent is queued now, released once the
@@ -1615,7 +1626,7 @@ impl StagedBlob {
 /// the replaced block. Reads stay served (extents are gated on the open
 /// handles).
 pub(super) fn check_not_removed(blob: &BlobCore) -> Result<(), Error> {
-    if blob.inner.lock().removed {
+    if blob.inner.lock().removed() {
         return Err(Error::BlobMissing(blob.partition.clone(), hex(&blob.name)));
     }
     Ok(())

@@ -81,6 +81,32 @@ enum CrcUpdate {
     Splice { at: usize, data: IoBuf },
 }
 
+/// Extent ownership carried by a materialized stretch.
+#[derive(Clone, Copy)]
+enum StretchOwnership {
+    /// Writes an existing run. In staged mode, `private` says whether the
+    /// run belongs exclusively to this batch.
+    Existing { private: bool },
+    /// Publishes one newly allocated extent.
+    Fresh(Extent),
+    /// Publishes `fresh` in place of one block from the prior placement.
+    Cow { fresh: Extent, replaced: Extent },
+}
+
+impl StretchOwnership {
+    /// The unpublished allocation to reclaim if the write does not publish.
+    const fn fresh(self) -> Option<Extent> {
+        match self {
+            Self::Existing { .. } => None,
+            Self::Fresh(extent) | Self::Cow { fresh: extent, .. } => Some(extent),
+        }
+    }
+
+    const fn is_cow(self) -> bool {
+        matches!(self, Self::Cow { .. })
+    }
+}
+
 /// One planned stretch: a single inner write plus its state updates,
 /// published only after the write completes. A failed write publishes no
 /// bookkeeping and poisons the volume: an in-place write may already have
@@ -102,13 +128,8 @@ struct Stretch {
     /// write frontier. `None` only for an overlay fast-path stretch, whose
     /// span is derived from the spliced overlay entry at publish.
     last_span: Option<(u64, Vec<u8>)>,
-    /// COW: the replaced chunk's block to defer-free (+ generation bump).
-    replaced: Option<Extent>,
-    /// Extent allocated for this stretch (Fresh/COW), for staged-overlay
-    /// bookkeeping. Unused by the publish path (the run records it).
-    allocated: Option<Extent>,
-    /// Staged mode: whether the written extent is batch-private.
-    private: bool,
+    /// Allocation/replacement ownership published with the stretch.
+    ownership: StretchOwnership,
 }
 
 /// Write `data` at `offset`. The blob's `write_lock` MUST be held.
@@ -142,7 +163,7 @@ pub(super) async fn write_locked<S: crate::Storage>(
                 return Err(error);
             }
         };
-        if stretch.replaced.is_some() {
+        if stretch.ownership.is_cow() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
         let provisioned =
@@ -159,7 +180,7 @@ pub(super) async fn write_locked<S: crate::Storage>(
         if let Err(e) = written {
             // The unpublished stretch's fresh extent would otherwise strand
             // until restart: return it through the deferred-free path.
-            free_unpublished(ready, stretch.allocated);
+            free_unpublished(ready, stretch.ownership.fresh());
             guard.fail(&e);
             return Err(e);
         }
@@ -215,7 +236,7 @@ pub(super) async fn stage_write<S: crate::Storage>(
                     return Err(error);
                 }
             };
-        if stretch.replaced.is_some() {
+        if stretch.ownership.is_cow() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
         let provisioned =
@@ -232,7 +253,7 @@ pub(super) async fn stage_write<S: crate::Storage>(
         if let Err(e) = written {
             // Not yet recorded in the staged overlay, so the batch's drop
             // path cannot reclaim it either: free it here.
-            free_unpublished(ready, stretch.allocated);
+            free_unpublished(ready, stretch.ownership.fresh());
             guard.fail(&e);
             return Err(e);
         }
@@ -514,9 +535,7 @@ fn materialize_overlay(cursor: u64, data: &IoBuf, data_base: u64, plan: OverlayW
         run: (run_logical, run),
         crcs: vec![(chunk_of(cursor), CrcUpdate::Splice { at, data: payload })],
         last_span: None,
-        replaced: None,
-        allocated: None,
-        private,
+        ownership: StretchOwnership::Existing { private },
     }
 }
 
@@ -620,9 +639,7 @@ async fn materialize_in_place<S: crate::Storage>(
         ),
         crcs,
         last_span,
-        replaced: None,
-        allocated: None,
-        private,
+        ownership: StretchOwnership::Existing { private },
     })
 }
 
@@ -688,9 +705,7 @@ fn materialize_fresh<S: crate::Storage>(
         ),
         crcs,
         last_span,
-        replaced: None,
-        allocated: Some(extent),
-        private: true,
+        ownership: StretchOwnership::Fresh(extent),
     }
 }
 
@@ -791,12 +806,13 @@ async fn materialize_cow<S: crate::Storage>(
         crcs: vec![(chunk, update)],
         last_span,
         bytes: buf.freeze().into(),
-        replaced: Some(Extent {
-            offset: span_physical - (span_physical % BLOCK),
-            len: BLOCK,
-        }),
-        allocated: Some(extent),
-        private: true,
+        ownership: StretchOwnership::Cow {
+            fresh: extent,
+            replaced: Extent {
+                offset: span_physical - (span_physical % BLOCK),
+                len: BLOCK,
+            },
+        },
     })
 }
 
@@ -1066,17 +1082,20 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
     if inner.removed() {
         drop(inner);
         drop(state);
-        free_unpublished(ready, stretch.allocated);
+        free_unpublished(ready, stretch.ownership.fresh());
         return;
     }
     let (logical, run) = stretch.run;
 
-    if let Some(replaced) = stretch.replaced {
-        cow_remap(&mut inner, logical, run);
-        inner.defer_content_free(replaced);
-        inner.bump_generation();
-    } else {
-        inner.publish_run(logical, run);
+    match stretch.ownership {
+        StretchOwnership::Cow { replaced, .. } => {
+            cow_remap(&mut inner, logical, run);
+            inner.defer_content_free(replaced);
+            inner.bump_generation();
+        }
+        StretchOwnership::Existing { .. } | StretchOwnership::Fresh(_) => {
+            inner.publish_run(logical, run);
+        }
     }
 
     let last_chunk = stretch
@@ -1132,27 +1151,19 @@ fn publish_stretch<S: crate::Storage>(ready: &Ready<S>, blob: &BlobCore, stretch
 /// write lock.
 fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) {
     let (logical, run) = stretch.run;
-    if let Some(extent) = stretch.allocated {
-        staged.fresh.push(extent);
-    }
-    if let Some(replaced) = stretch.replaced {
-        cow_remap_staged(inner, staged, logical, run);
-        staged.replaced.push(replaced);
-        staged.relocated = true;
-    } else {
-        match staged.runs.get_mut(&logical) {
-            Some(existing) if existing.meta.physical == run.physical => {
-                existing.meta.len = existing.meta.len.max(run.len);
-            }
-            _ => {
-                staged.runs.insert(
-                    logical,
-                    StagedRun {
-                        meta: run,
-                        private: stretch.private,
-                    },
-                );
-            }
+    match stretch.ownership {
+        StretchOwnership::Existing { private } => {
+            install_staged_run(staged, logical, run, private);
+        }
+        StretchOwnership::Fresh(extent) => {
+            staged.fresh.push(extent);
+            install_staged_run(staged, logical, run, true);
+        }
+        StretchOwnership::Cow { fresh, replaced } => {
+            staged.fresh.push(fresh);
+            cow_remap_staged(inner, staged, logical, run);
+            staged.replaced.push(replaced);
+            staged.relocated = true;
         }
     }
 
@@ -1174,6 +1185,20 @@ fn publish_staged(inner: &BlobInner, staged: &mut StagedBlob, stretch: Stretch) 
     let tail_chunk = staged.tail.as_ref().map(|(c, _)| *c);
     if stretch.end >= staged.size || chunk >= tail_chunk.unwrap_or(inner.tail_chunk()) {
         staged.tail = Some((chunk, span));
+    }
+}
+
+/// Extend or install a non-COW run in the staged overlay.
+fn install_staged_run(staged: &mut StagedBlob, logical: u64, run: RunMeta, private: bool) {
+    match staged.runs.get_mut(&logical) {
+        Some(existing) if existing.meta.physical == run.physical => {
+            existing.meta.len = existing.meta.len.max(run.len);
+        }
+        _ => {
+            staged
+                .runs
+                .insert(logical, StagedRun { meta: run, private });
+        }
     }
 }
 

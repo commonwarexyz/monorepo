@@ -14,6 +14,17 @@ use super::{
 use crate::{Blob as _, Error};
 use commonware_cryptography::Crc32;
 
+/// Provenance of a shrink frontier's expected CRC.
+#[derive(Clone, Copy)]
+pub(super) enum FrontierCrc {
+    /// Resident state: preserve its verification bit, and keep the state in
+    /// place when the span does not change.
+    Resident { expected: u32, verified: bool },
+    /// Loaded from the committed checksum array: a matching read verifies
+    /// the chunk and installs resident state.
+    Committed { expected: u32 },
+}
+
 /// A frontier chunk whose surviving prefix must be read back from disk:
 /// the shrink boundary lands inside a span whose bytes are not in RAM.
 /// Shared by the published shrink ([`resize_locked`]) and the staged
@@ -26,14 +37,8 @@ pub(super) struct FrontierRead {
     pub span: u64,
     /// The chunk's CURRENT span, read back whole.
     pub old_span: u64,
-    /// The current span's expected CRC.
-    pub expected: u32,
-    /// The provenance the post-shrink state carries (the expected CRC's
-    /// own, see `write::expected_span_crc`).
-    pub verified: bool,
-    /// Whether `expected` was resident chunk state (vs a committed value
-    /// loaded for this read).
-    pub resident: bool,
+    /// Expected CRC and the state transition a matching read permits.
+    pub crc: FrontierCrc,
 }
 
 /// Read the frontier chunk's current span back and check it against its
@@ -48,24 +53,34 @@ pub(super) async fn read_frontier<S: crate::Storage>(
     blob: &BlobCore,
     fr: FrontierRead,
 ) -> Result<(Vec<u8>, Option<ChunkState>), Error> {
+    let expected = match fr.crc {
+        FrontierCrc::Resident { expected, .. } | FrontierCrc::Committed { expected } => expected,
+    };
     let read = ready
         .file
         .read_at(fr.phys, fr.old_span as usize)
         .await?
         .coalesce();
-    if Crc32::checksum(read.as_ref()) != fr.expected {
+    if Crc32::checksum(read.as_ref()) != expected {
         return Err(chunk_mismatch(ready, blob, fr.chunk));
     }
     let bytes = read.as_ref()[..fr.span as usize].to_vec();
     let trimmed = fr.span < fr.old_span;
-    let state = (trimmed || !fr.resident).then(|| ChunkState {
-        crc: ChunkCrc::Ready(if trimmed {
-            Crc32::checksum(&bytes)
-        } else {
-            fr.expected
+    let state = match (trimmed, fr.crc) {
+        (false, FrontierCrc::Resident { .. }) => None,
+        (true, FrontierCrc::Resident { verified, .. }) => Some(ChunkState {
+            crc: ChunkCrc::Ready(Crc32::checksum(&bytes)),
+            verified,
         }),
-        verified: fr.verified,
-    });
+        (false, FrontierCrc::Committed { .. }) => Some(ChunkState {
+            crc: ChunkCrc::Ready(expected),
+            verified: true,
+        }),
+        (true, FrontierCrc::Committed { .. }) => Some(ChunkState {
+            crc: ChunkCrc::Ready(Crc32::checksum(&bytes)),
+            verified: true,
+        }),
+    };
     Ok((bytes, state))
 }
 
@@ -200,9 +215,10 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                         phys,
                         span,
                         old_span,
-                        expected,
-                        verified: state.verified,
-                        resident: true,
+                        crc: FrontierCrc::Resident {
+                            expected,
+                            verified: state.verified,
+                        },
                     })
                 }
                 // Pending chunks were finalized above.
@@ -217,9 +233,7 @@ pub(super) async fn resize_locked<S: crate::Storage>(
                             phys,
                             span,
                             old_span,
-                            expected,
-                            verified: true,
-                            resident: false,
+                            crc: FrontierCrc::Committed { expected },
                         })
                     }
                     None => chunk,
