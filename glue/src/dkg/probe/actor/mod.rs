@@ -1,18 +1,11 @@
 use super::mailbox::{Mailbox, Message};
 use crate::{
-    dkg::{
-        ReshareBlock,
-        types::{EpochInfo, Participants},
-    },
+    dkg::{ReshareBlock, probe::Bootstrap, types::EpochInfo},
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
-use commonware_consensus::{
-    marshal::core::Variant,
-    simplex::scheme::Scheme,
-    types::{Epoch, FixedEpocher},
-};
+use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
 use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -42,26 +35,8 @@ where
     /// P2P manager used to track the bootstrap participants when discovery
     /// begins.
     pub manager: M,
-    /// The complete participant snapshot of [`Config::bootstrap_epoch`].
-    ///
-    /// Discovery solicits and samples `f + 1` of the snapshot's dealers,
-    /// which are the epoch's active committee (its share holders and
-    /// certificate signers), so the dealers must be that complete committee:
-    /// a subset mis-derives `f`. See the module docs for the trust model and
-    /// the budgets on faulty, stale, and unreachable members.
-    ///
-    /// The snapshot must match the epoch's canonical [`Participants`]: when
-    /// discovery begins, the actor tracks the snapshot's
-    /// [`tracked_peers`](Participants::tracked_peers) at the epoch's own
-    /// peer-set ID, and all peers must track the same set contents at the
-    /// same ID. The orchestrator tracks the identical contents if it later
-    /// enters the bootstrap epoch, so the duplicate registration is benign.
-    pub bootstrap_participants: Participants<S::PublicKey>,
-    /// Epoch whose participant snapshot is [`Config::bootstrap_participants`].
-    ///
-    /// Latest-finalization replies below this epoch are ignored, so the
-    /// discovered floor is never older than the configured trust point.
-    pub bootstrap_epoch: Epoch,
+    /// The weakly subjective checkpoint to bootstrap from.
+    pub bootstrap: Bootstrap<S::PublicKey>,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
     /// Public epoch information carried by genesis.
@@ -95,8 +70,7 @@ where
     context: ContextCell<E>,
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
-    bootstrap_participants: Participants<S::PublicKey>,
-    bootstrap_epoch: Epoch,
+    bootstrap: Bootstrap<S::PublicKey>,
     verifier: S,
     genesis: EpochInfo<<V::ApplicationBlock as ReshareBlock>::Variant, S::PublicKey>,
     strategy: T,
@@ -127,8 +101,7 @@ where
                 context: ContextCell::new(config.context),
                 mailbox,
                 manager: config.manager,
-                bootstrap_participants: config.bootstrap_participants,
-                bootstrap_epoch: config.bootstrap_epoch,
+                bootstrap: config.bootstrap,
                 verifier: config.verifier,
                 genesis: config.genesis,
                 strategy: config.strategy,
@@ -164,7 +137,8 @@ where
             context: self.context,
             mailbox: self.mailbox,
             manager: self.manager,
-            bootstrap_participants: self.bootstrap_participants,
+            sample: Sample::new(self.bootstrap.epoch),
+            bootstrap_participants: self.bootstrap.participants,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,
@@ -173,7 +147,6 @@ where
             block_codec_config: self.block_codec_config,
             retry_timeout: self.retry_timeout,
             artifact: None,
-            sample: Sample::new(self.bootstrap_epoch),
             subscribers: Vec::new(),
             pending: None,
         }

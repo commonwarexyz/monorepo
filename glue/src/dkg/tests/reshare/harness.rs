@@ -736,8 +736,10 @@ impl EngineDefinition for ReshareEngine {
         let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
             context: context.child("dkg_probe"),
             manager: oracle.manager(),
-            bootstrap_participants: self.initial.info.participants(),
-            bootstrap_epoch: Epoch::zero(),
+            bootstrap: dkg_probe::Bootstrap {
+                epoch: Epoch::zero(),
+                participants: self.initial.info.participants(),
+            },
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
                 *self.initial.info.output.public().public(),

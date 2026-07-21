@@ -11,9 +11,9 @@ use commonware_consensus::{
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
     /// Request the boundary finalization for an epoch.
-    FinalizationRequest,
+    BoundaryRequest,
     /// Response carrying a boundary finalization.
-    FinalizationResponse,
+    BoundaryResponse,
     /// Request the boundary block for an epoch.
     BlockRequest,
     /// Response carrying a finalized block.
@@ -31,8 +31,8 @@ impl FixedSize for Tag {
 impl Write for Tag {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::FinalizationRequest => 0u8.write(writer),
-            Self::FinalizationResponse => 1u8.write(writer),
+            Self::BoundaryRequest => 0u8.write(writer),
+            Self::BoundaryResponse => 1u8.write(writer),
             Self::BlockRequest => 2u8.write(writer),
             Self::BlockResponse => 3u8.write(writer),
             Self::LatestRequest => 4u8.write(writer),
@@ -46,8 +46,8 @@ impl Read for Tag {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         match u8::read(reader)? {
-            0 => Ok(Self::FinalizationRequest),
-            1 => Ok(Self::FinalizationResponse),
+            0 => Ok(Self::BoundaryRequest),
+            1 => Ok(Self::BoundaryResponse),
             2 => Ok(Self::BlockRequest),
             3 => Ok(Self::BlockResponse),
             4 => Ok(Self::LatestRequest),
@@ -60,7 +60,7 @@ impl Read for Tag {
 /// Request decoded from a peer.
 pub(crate) enum Request {
     /// Request the boundary finalization for an epoch.
-    Finalization(Epoch),
+    Boundary(Epoch),
     /// Request the boundary block for an epoch.
     Block(Epoch),
     /// Request the receiver's latest finalization.
@@ -74,7 +74,7 @@ where
     V: Variant,
 {
     /// Boundary finalization response.
-    Finalization(Finalization<S, V::Commitment>),
+    Boundary(Finalization<S, V::Commitment>),
     /// Finalized block response. The body remains encoded until the epoch and
     /// responding peer match the outstanding request.
     Block {
@@ -94,9 +94,9 @@ where
     V: Variant,
 {
     /// Request the boundary finalization for `epoch`.
-    FinalizationRequest(Epoch),
+    BoundaryRequest(Epoch),
     /// Respond with a boundary finalization.
-    FinalizationResponse(Finalization<S, V::Commitment>),
+    BoundaryResponse(Finalization<S, V::Commitment>),
     /// Request the boundary block for `epoch`.
     BlockRequest(Epoch),
     /// Respond with a finalized block.
@@ -119,12 +119,12 @@ where
 {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::FinalizationRequest(epoch) => {
-                Tag::FinalizationRequest.write(writer);
+            Self::BoundaryRequest(epoch) => {
+                Tag::BoundaryRequest.write(writer);
                 epoch.write(writer);
             }
-            Self::FinalizationResponse(finalization) => {
-                Tag::FinalizationResponse.write(writer);
+            Self::BoundaryResponse(finalization) => {
+                Tag::BoundaryResponse.write(writer);
                 finalization.write(writer);
             }
             Self::BlockRequest(epoch) => {
@@ -155,8 +155,8 @@ where
     fn encode_size(&self) -> usize {
         Tag::SIZE
             + match self {
-                Self::FinalizationRequest(epoch) => epoch.encode_size(),
-                Self::FinalizationResponse(finalization) => finalization.encode_size(),
+                Self::BoundaryRequest(epoch) => epoch.encode_size(),
+                Self::BoundaryResponse(finalization) => finalization.encode_size(),
                 Self::BlockRequest(epoch) => epoch.encode_size(),
                 Self::BlockResponse { epoch, block } => epoch.encode_size() + block.encode_size(),
                 Self::LatestRequest => 0,
@@ -176,8 +176,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(match Tag::arbitrary(u)? {
-            Tag::FinalizationRequest => Self::FinalizationRequest(Epoch::arbitrary(u)?),
-            Tag::FinalizationResponse => Self::FinalizationResponse(Finalization::arbitrary(u)?),
+            Tag::BoundaryRequest => Self::BoundaryRequest(Epoch::arbitrary(u)?),
+            Tag::BoundaryResponse => Self::BoundaryResponse(Finalization::arbitrary(u)?),
             Tag::BlockRequest => Self::BlockRequest(Epoch::arbitrary(u)?),
             Tag::BlockResponse => Self::BlockResponse {
                 epoch: Epoch::arbitrary(u)?,
@@ -193,10 +193,10 @@ where
 pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Error> {
     let tag = Tag::read(&mut reader)?;
     match tag {
-        Tag::FinalizationRequest => Ok(Some(Request::Finalization(Epoch::decode(reader)?))),
+        Tag::BoundaryRequest => Ok(Some(Request::Boundary(Epoch::decode(reader)?))),
         Tag::BlockRequest => Ok(Some(Request::Block(Epoch::decode(reader)?))),
         Tag::LatestRequest => Ok(Some(Request::Latest)),
-        Tag::FinalizationResponse | Tag::BlockResponse | Tag::LatestResponse => Ok(None),
+        Tag::BoundaryResponse | Tag::BlockResponse | Tag::LatestResponse => Ok(None),
     }
 }
 
@@ -212,7 +212,7 @@ where
 {
     let tag = Tag::read(&mut reader)?;
     match tag {
-        Tag::FinalizationResponse => Ok(Some(Response::Finalization(Finalization::decode_cfg(
+        Tag::BoundaryResponse => Ok(Some(Response::Boundary(Finalization::decode_cfg(
             reader,
             certificate_cfg,
         )?))),
@@ -224,7 +224,7 @@ where
             reader,
             certificate_cfg,
         )?))),
-        Tag::FinalizationRequest | Tag::BlockRequest | Tag::LatestRequest => Ok(None),
+        Tag::BoundaryRequest | Tag::BlockRequest | Tag::LatestRequest => Ok(None),
     }
 }
 

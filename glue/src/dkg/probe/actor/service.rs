@@ -109,13 +109,13 @@ where
                             false,
                         );
                     }
-                    wire::Request::Finalization(epoch) => {
+                    wire::Request::Boundary(epoch) => {
                         let Some(finalization) = self.produce_finalization(epoch).await else {
                             continue;
                         };
                         sender.send(
                             Recipients::One(peer),
-                            wire::Message::<S, V>::FinalizationResponse(finalization).encode(),
+                            wire::Message::<S, V>::BoundaryResponse(finalization).encode(),
                             false,
                         );
                     }

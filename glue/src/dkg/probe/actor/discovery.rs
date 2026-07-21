@@ -234,7 +234,7 @@ where
     ) {
         boundary_sender.send(
             Recipients::All,
-            wire::Message::<S, V>::FinalizationRequest(epoch).encode(),
+            wire::Message::<S, V>::BoundaryRequest(epoch).encode(),
             false,
         );
     }
@@ -268,7 +268,7 @@ where
             wire::Response::Latest(finalization) => {
                 self.handle_latest(peer, finalization, boundary_sender)
             }
-            wire::Response::Finalization(finalization) => {
+            wire::Response::Boundary(finalization) => {
                 if self.pending.is_none() {
                     return false;
                 }
@@ -642,7 +642,7 @@ mod tests {
             .expect("response decoded")
             .expect("response tag")
         {
-            wire::Response::Finalization(finalization) => finalization,
+            wire::Response::Boundary(finalization) => finalization,
             wire::Response::Block { .. } | wire::Response::Latest(_) => {
                 panic!("expected finalization response")
             }
@@ -659,7 +659,7 @@ mod tests {
             .expect("response tag")
         {
             wire::Response::Block { epoch, body } => (epoch, body),
-            wire::Response::Finalization(_) | wire::Response::Latest(_) => {
+            wire::Response::Boundary(_) | wire::Response::Latest(_) => {
                 panic!("expected block response")
             }
         }
@@ -739,7 +739,7 @@ mod tests {
                         .expect("participant count fits u16"),
                 ),
             ));
-            let message = wire::Message::<TestThresholdScheme, TestCodingVariant>::FinalizationResponse(
+            let message = wire::Message::<TestThresholdScheme, TestCodingVariant>::BoundaryResponse(
                 finalization,
             )
             .encode()
@@ -771,7 +771,7 @@ mod tests {
             let finalization_message = wire::Message::<
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
-            >::FinalizationResponse(finalization)
+            >::BoundaryResponse(finalization)
             .encode()
             .to_vec();
             let finalization = decode_finalization_response::<
@@ -824,7 +824,7 @@ mod tests {
                 &fixture.schemes,
             );
             let finalization_message =
-                wire::Message::<mocks::TestScheme, TestCodingVariant>::FinalizationResponse(
+                wire::Message::<mocks::TestScheme, TestCodingVariant>::BoundaryResponse(
                     finalization,
                 )
                 .encode()
@@ -885,7 +885,7 @@ mod tests {
             let finalization_message = wire::Message::<
                 TestThresholdScheme,
                 TestCodingVariant,
-            >::FinalizationResponse(finalization)
+            >::BoundaryResponse(finalization)
             .encode()
             .to_vec();
             let finalization = decode_finalization_response::<
