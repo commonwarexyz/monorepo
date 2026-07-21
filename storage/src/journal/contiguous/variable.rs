@@ -2227,7 +2227,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// At most one commit is in flight at a time: if a prior commit's sync is still pending, this
     /// call waits for it before starting a new one. Appends and reads proceed while the returned
-    /// handle is pending.
+    /// handle is pending, and dropping the handle does not cancel the sync.
     pub async fn start_commit(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_commit().await;
         (self, handle)
@@ -2480,13 +2480,13 @@ mod tests {
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
             let handle = journal.start_commit().await;
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             journal.destroy().await.unwrap();
         });
@@ -2519,14 +2519,14 @@ mod tests {
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             assert!(journal.commit().now_or_never().is_none());
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
 
             pending.unblock();
             journal.commit().await.unwrap();
-            assert!(journal.blobs.has_predecessor_sync());
+            assert!(journal.blobs.has_tail_predecessor_sync());
             journal.destroy().await.unwrap();
         });
     }
