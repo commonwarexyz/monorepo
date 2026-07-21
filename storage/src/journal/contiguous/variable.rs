@@ -1110,7 +1110,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 blob,
                 valid,
                 size = writer.size(),
-                "interior hole detected: truncating to last well-formed page"
+                "truncating to last well-formed page"
             );
             writer.resize(valid).await?;
             writer.sync().await?;
