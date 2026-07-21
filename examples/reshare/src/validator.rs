@@ -2,11 +2,11 @@ use crate::{
     application::App,
     config::{NetworkConfig, NodeConfig},
     types::{
-        self, ANCHOR_BOUNDARY_CHANNEL, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL,
-        Block, CERTIFICATE_CHANNEL, DKG_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
+        self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
+        DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
         LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MESSAGE_BACKLOG, NAMESPACE,
-        PAGE_CACHE_SIZE, PAGE_SIZE, PROBE_CHANNEL, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL,
-        Registrar, Scheme, VOTE_CHANNEL,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL, Registrar,
+        Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -22,25 +22,21 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519, sha256::Sha256};
 use commonware_glue::{
     dkg::{
-        SecretStore as _, anchor,
+        SecretStore as _,
         fence::Fence,
-        orchestrator, reshare,
+        orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
         db::{DatabaseSet, p2p::standard as qmdb_resolver},
-        probe::{Config as ProbeConfig, Probe},
     },
 };
-use commonware_p2p::{
-    authenticated::discovery,
-    utils::mux::{Builder, Muxer},
-};
+use commonware_p2p::authenticated::discovery;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU32, NZU64, NZUsize, ordered::Set};
+use commonware_utils::{NZDuration, NZU32, NZU64, NZUsize};
 use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -108,27 +104,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         MESSAGE_BACKLOG,
     );
     let dkg_network = p2p.register(DKG_CHANNEL, Quota::per_second(NZU32!(128)), MESSAGE_BACKLOG);
-    let probe_network = p2p.register(
-        PROBE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let anchor_boundary_network = p2p.register(
-        ANCHOR_BOUNDARY_CHANNEL,
+    let dkg_probe_network = p2p.register(
+        DKG_PROBE_CHANNEL,
         Quota::per_second(NZU32!(128)),
         MESSAGE_BACKLOG,
     );
     let p2p_handle = p2p.start();
-
-    let (certificate_mux, certificate_mux_handle, certificate_backup) = Muxer::builder(
-        context.child("certificate_mux"),
-        certificate_network.0.clone(),
-        certificate_network.1,
-        128,
-    )
-    .with_backup()
-    .build();
-    certificate_mux.start();
 
     let provider = DynamicProvider::default();
     let store = FileSecretStore::load(args.node_dir.join("secrets.json"))
@@ -205,10 +186,13 @@ pub async fn run(context: tokio::Context, args: Validator) {
         genesis_info.clone(),
         genesis_target,
     );
-    let (anchor_actor, anchor_mailbox) = anchor::Actor::new(anchor::Config {
-        context: context.child("anchor"),
+    let (probe_actor, probe_mailbox) = probe::Actor::new(probe::Config {
+        context: context.child("dkg_probe"),
         manager: oracle.clone(),
-        peers: Set::from_iter_dedup(network.participants.iter().cloned()),
+        bootstrap: probe::Bootstrap {
+            epoch: Epoch::zero(),
+            participants: genesis_info.participants(),
+        },
         verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
         genesis: genesis_info.clone(),
         strategy: Sequential,
@@ -218,43 +202,26 @@ pub async fn run(context: tokio::Context, args: Validator) {
         mailbox_size: MAILBOX_SIZE,
         block_codec_config: (),
     });
-    let anchor_handle = anchor_actor.start(certificate_backup, anchor_boundary_network);
+    let probe_handle = probe_actor.start(dkg_probe_network);
 
     let stateful_startup = context.child("stateful_startup");
     let mut plan = SyncPlan::init(&stateful_startup, partition_prefix).await;
     let should_state_sync = plan.should_state_sync(args.state_sync);
-    let anchor_artifact = if should_state_sync {
-        let artifact = anchor_mailbox.subscribe().await.expect("anchor stopped");
+    let probe_artifact = if should_state_sync {
+        let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
-            artifact.epoch,
+            artifact.info.epoch,
             Scheme::verifier(
                 NAMESPACE,
                 artifact.info.output.players().clone(),
                 artifact.info.output.public().clone(),
             ),
         );
+        plan = plan.with_floor(artifact.floor.clone());
         Some(artifact)
     } else {
         None
     };
-
-    let minimum_epoch = anchor_artifact
-        .as_ref()
-        .map_or_else(Epoch::zero, |artifact| artifact.epoch);
-    let (probe_actor, probe_mailbox) = Probe::new(ProbeConfig {
-        context: context.child("probe"),
-        provider: provider.clone(),
-        strategy: Sequential,
-        capacity: MAILBOX_SIZE,
-        blocker: oracle.clone(),
-        minimum_epoch,
-        retry_timeout: NZDuration!(Duration::from_millis(100)),
-    });
-    let probe_handle = probe_actor.start(probe_network);
-    if should_state_sync {
-        let floor = probe_mailbox.subscribe().await.expect("probe stopped");
-        plan = plan.with_floor(floor);
-    }
 
     let (marshal_actor, marshal, _) = MarshalActor::init(
         context.child("marshal"),
@@ -298,10 +265,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 
-    let fence_epoch = anchor_artifact
+    let fence_epoch = probe_artifact
         .as_ref()
-        .map_or_else(Epoch::zero, |artifact| artifact.epoch);
-    let state_sync = anchor_artifact.map(|artifact| {
+        .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
+    let state_sync = probe_artifact.map(|artifact| {
         let floor = plan
             .floor()
             .cloned()
@@ -406,7 +373,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         },
     );
     let orchestrator_handle =
-        orchestrator_actor.start(vote_network, certificate_mux_handle, resolver_network);
+        orchestrator_actor.start(vote_network, certificate_network, resolver_network);
 
     let reporters = Reporters::from((
         stateful_mailbox.clone(),
@@ -416,14 +383,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         )),
     ));
     let marshal_handle = marshal_actor.start(reporters, buffer, resolver);
-    anchor_mailbox.attach(marshal.clone());
     probe_mailbox.attach(marshal.clone());
     let stateful_handle = stateful_actor.start();
 
     if let Err(err) = try_join_all(vec![
         p2p_handle,
         broadcast_handle,
-        anchor_handle,
         probe_handle,
         qmdb_handle,
         reshare_handle,
