@@ -1,3 +1,5 @@
+//! `dkg` subcommand: one-shot glue DKG bootstrap for the epoch-0 committee.
+
 use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
@@ -24,12 +26,15 @@ use tracing::info;
 
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 
+/// Run the one-shot DKG bootstrap and write the resulting genesis.
 #[derive(Args)]
 pub struct Dkg {
+    /// Validator node directory containing config, secrets, and runtime storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
 }
 
+/// Run the bootstrap engine to completion and distribute the genesis artifact.
 pub async fn run(context: tokio::Context, args: Dkg) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
@@ -119,6 +124,8 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     engine_handle.abort();
 }
 
+/// Write `genesis` into every sibling validator directory that belongs to
+/// `network`, or into `node_dir` alone when none are found.
 fn write_genesis_to_sibling_validators(
     node_dir: &Path,
     network: &NetworkConfig,

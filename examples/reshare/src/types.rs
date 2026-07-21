@@ -1,3 +1,5 @@
+//! Types, constants, and storage config shared across the example.
+
 use crate::config::NetworkConfig;
 use commonware_actor::Feedback;
 use commonware_codec::{
@@ -52,29 +54,52 @@ use std::{
 };
 use tracing::info;
 
+/// Threshold certificate scheme used for consensus votes and certificates.
 pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
+/// QMDB holding the application state.
 pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequential>;
+/// Shared handle to the application QMDB.
 pub type Database<E> = Shared<Qmdb<E>>;
+/// Globally unique namespace for every message signed by this example.
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
+/// Number of blocks in each epoch.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
+/// Maximum participant count accepted when decoding DKG payloads.
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
+/// Share derivation mode used by DKG and reshare ceremonies.
 pub const SHARING_MODE: Mode = Mode::NonZeroCounter;
+/// Newest sharing mode version this binary accepts.
 pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
+/// Page size for storage page caches.
 pub const PAGE_SIZE: std::num::NonZeroU16 = commonware_utils::NZU16!(1024);
+/// Number of pages held by each page cache.
 pub const PAGE_CACHE_SIZE: std::num::NonZeroUsize = NZUsize!(16);
+/// Buffer size for journal replay and writes.
 pub const IO_BUFFER_SIZE: std::num::NonZeroUsize = NZUsize!(2048);
+/// P2P channel carrying simplex votes.
 pub const VOTE_CHANNEL: u64 = 0;
+/// P2P channel carrying simplex certificates.
 pub const CERTIFICATE_CHANNEL: u64 = 1;
+/// P2P channel for orchestrator resolver traffic.
 pub const RESOLVER_CHANNEL: u64 = 2;
+/// P2P channel for marshal block backfill.
 pub const BACKFILL_CHANNEL: u64 = 3;
+/// P2P channel for proposed block broadcast.
 pub const BROADCAST_CHANNEL: u64 = 4;
+/// P2P channel for QMDB state sync.
 pub const QMDB_CHANNEL: u64 = 5;
+/// P2P channel for private reshare dealings and acks.
 pub const DKG_CHANNEL: u64 = 6;
+/// P2P channel for the DKG probe.
 pub const DKG_PROBE_CHANNEL: u64 = 7;
+/// Mailbox capacity for every actor.
 pub const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(100);
+/// Maximum queued messages per P2P channel.
 pub const MESSAGE_BACKLOG: usize = 128;
+/// Maximum P2P message size in bytes.
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
+/// Chain block carrying the QMDB state root and an optional reshare payload.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Block {
     pub(crate) context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -86,6 +111,7 @@ pub struct Block {
 }
 
 impl Block {
+    /// Construct the genesis block from the epoch-0 info and initial QMDB sync target.
     pub const fn genesis(
         leader: ed25519::PublicKey,
         info: dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
@@ -183,12 +209,14 @@ impl ReshareBlock for Block {
     }
 }
 
+/// Certificate provider whose per-epoch schemes are registered as ceremonies complete.
 #[derive(Clone, Default)]
 pub struct DynamicProvider {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<Scheme>>>>,
 }
 
 impl DynamicProvider {
+    /// Register the certificate scheme for `epoch`.
     pub fn register(&self, epoch: Epoch, scheme: Scheme) {
         self.schemes.lock().insert(epoch, Arc::new(scheme));
     }
@@ -207,12 +235,14 @@ impl CertificateProvider for DynamicProvider {
     }
 }
 
+/// Adapter that registers reshare outputs with the [`DynamicProvider`].
 #[derive(Clone)]
 pub struct Registrar {
     provider: DynamicProvider,
 }
 
 impl Registrar {
+    /// Wrap `provider` for registration by the reshare actor.
     pub const fn new(provider: DynamicProvider) -> Self {
         Self { provider }
     }
@@ -243,6 +273,7 @@ impl RegistrarTrait for Registrar {
     }
 }
 
+/// Deterministic committee rotation over the ordered participant list.
 #[derive(Clone)]
 pub struct Participants {
     ordered: Arc<Vec<ed25519::PublicKey>>,
@@ -250,6 +281,7 @@ pub struct Participants {
 }
 
 impl Participants {
+    /// Build the rotation from a validated network config.
     pub fn new(config: &NetworkConfig) -> anyhow::Result<Self> {
         config.validate()?;
         Ok(Self {
@@ -258,6 +290,8 @@ impl Participants {
         })
     }
 
+    /// Committee for `epoch`: `committee_size` consecutive participants starting
+    /// at offset `epoch % participants.len()` with wraparound.
     pub fn get(&self, epoch: Epoch) -> Set<ed25519::PublicKey> {
         let offset = epoch.get() as usize % self.ordered.len();
         let players = (0..self.committee_size)
@@ -274,6 +308,7 @@ impl ParticipantsProvider for Participants {
     }
 }
 
+/// Reporter that logs every finalized block.
 #[derive(Clone)]
 pub struct LogReporter;
 
@@ -294,6 +329,9 @@ impl Reporter for LogReporter {
     }
 }
 
+/// JSON-file-backed [`dkg::SecretStore`] holding shares, dealer seeds, and dealings.
+///
+/// Material is stored as plaintext JSON, which is suitable for this example only.
 #[derive(Clone)]
 pub struct FileSecretStore {
     path: PathBuf,
@@ -308,6 +346,7 @@ struct SecretData {
 }
 
 impl FileSecretStore {
+    /// Open the store at `path`, starting empty if the file does not exist.
     pub fn load(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let path = path.into();
         let inner = if path.exists() {
@@ -322,6 +361,7 @@ impl FileSecretStore {
         })
     }
 
+    /// Seed the store with a trusted-setup share for `epoch`.
     pub fn put_initial_share(&self, epoch: Epoch, share: Share) -> anyhow::Result<()> {
         self.inner
             .lock()
@@ -412,6 +452,7 @@ impl dkg::SecretStore for FileSecretStore {
     }
 }
 
+/// Application QMDB config with partitions derived from `prefix`.
 pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
     FixedConfig {
         merkle_config: MmrJournalConfig {
@@ -435,6 +476,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
     }
 }
 
+/// QMDB state sync engine tuning.
 pub const fn sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
         fetch_batch_size: NZU64!(16),
@@ -445,6 +487,7 @@ pub const fn sync_config() -> SyncEngineConfig {
     }
 }
 
+/// Path of the genesis artifact inside `node_dir`.
 pub fn genesis_path(node_dir: &Path) -> PathBuf {
     node_dir.join("genesis.json")
 }
@@ -482,12 +525,15 @@ impl EncodedGenesis {
     }
 }
 
+/// Read the genesis epoch info from `node_dir`.
 pub fn read_genesis(
     node_dir: &Path,
 ) -> anyhow::Result<dkg::types::EpochInfo<MinSig, ed25519::PublicKey>> {
     Ok(EncodedGenesis::read(node_dir)?.epoch_info)
 }
 
+/// Write the genesis epoch info into `node_dir`, refusing to overwrite a
+/// different existing artifact.
 pub fn write_genesis(
     node_dir: &Path,
     info: &dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
@@ -495,6 +541,7 @@ pub fn write_genesis(
     EncodedGenesis::write(node_dir, info)
 }
 
+/// Serde codec for a hex-encoded [`dkg::types::EpochInfo`].
 mod epoch_info_hex {
     use super::*;
 

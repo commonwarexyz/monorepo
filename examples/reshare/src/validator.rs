@@ -1,3 +1,5 @@
+//! `validator` subcommand: run a validator node.
+
 use crate::{
     application::App,
     config::{NetworkConfig, NodeConfig},
@@ -41,6 +43,7 @@ use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
+/// Start a validator node.
 #[derive(Args)]
 pub struct Validator {
     /// Validator node directory containing config, genesis, secrets, and runtime storage.
@@ -52,6 +55,7 @@ pub struct Validator {
     pub state_sync: bool,
 }
 
+/// Start every validator actor and run until one fails.
 pub async fn run(context: tokio::Context, args: Validator) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");

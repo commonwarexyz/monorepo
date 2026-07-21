@@ -1,3 +1,5 @@
+//! `setup` subcommand: generate validator directories and network config.
+
 use crate::{
     config::{self, NetworkConfig, NodeConfig, PeerConfig},
     types::{self, BLOCKS_PER_EPOCH, FileSecretStore, MAX_PARTICIPANTS, Participants},
@@ -25,6 +27,7 @@ use std::{
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 type TrustedBootstrap = (ReshareEpochInfo, Map<PublicKey, Share>);
 
+/// Generate every validator directory with node, network, and genesis config.
 #[derive(Args)]
 pub struct Setup {
     /// Directory where validator subdirectories will be generated.
@@ -52,6 +55,7 @@ pub struct Setup {
     pub bootstrap: Bootstrap,
 }
 
+/// How the initial threshold secret is generated.
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Bootstrap {
     /// Generate genesis and epoch-0 shares with a trusted dealer.
@@ -60,6 +64,7 @@ pub enum Bootstrap {
     Dkg,
 }
 
+/// Generate the validator directories and print the commands to run next.
 pub fn run(args: Setup) {
     run_inner(args).expect("setup failed");
 }

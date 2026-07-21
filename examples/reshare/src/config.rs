@@ -1,3 +1,5 @@
+//! JSON node and network configuration shared by all subcommands.
+
 use commonware_codec::{DecodeExt as _, Encode};
 use commonware_cryptography::{
     Signer,
@@ -7,6 +9,7 @@ use commonware_formatting::{from_hex, hex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{fs, net::SocketAddr, path::Path};
 
+/// Per-node config stored in `node.json`: signing key and listen/dial addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     #[serde(with = "hex_private_key")]
@@ -16,14 +19,17 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
+    /// Read the node config from `node.json` in `node_dir`.
     pub fn load(node_dir: &Path) -> anyhow::Result<Self> {
         read_json(&node_dir.join("node.json"))
     }
 
+    /// Public key of the node's signing key.
     pub fn public_key(&self) -> PublicKey {
         self.signing_key.public_key()
     }
 
+    /// Node config with listen and dial both on localhost at `port`.
     #[cfg(test)]
     pub const fn localhost(signing_key: PrivateKey, port: u16) -> Self {
         use std::net::{IpAddr, Ipv4Addr};
@@ -37,6 +43,8 @@ impl NodeConfig {
     }
 }
 
+/// Shared network config stored in `network.json`: ordered participants,
+/// committee size, and peer dial addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(with = "hex_public_keys")]
@@ -46,10 +54,12 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
+    /// Read the network config from `network.json` in `node_dir`.
     pub fn load(node_dir: &Path) -> anyhow::Result<Self> {
         read_json(&node_dir.join("network.json"))
     }
 
+    /// Check participant and committee size invariants.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.participants.is_empty() {
             anyhow::bail!("participants must not be empty");
@@ -63,6 +73,7 @@ impl NetworkConfig {
         Ok(())
     }
 
+    /// Dial addresses for every peer except `local`.
     pub fn bootstrappers(&self, local: &PublicKey) -> Vec<(PublicKey, commonware_p2p::Ingress)> {
         self.peers
             .iter()
@@ -72,6 +83,7 @@ impl NetworkConfig {
     }
 }
 
+/// Dial address for one participant.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerConfig {
     #[serde(with = "hex_public_key")]
@@ -79,17 +91,20 @@ pub struct PeerConfig {
     pub dial: SocketAddr,
 }
 
+/// Read a JSON value from `path`.
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<T> {
     let contents = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&contents)?)
 }
 
+/// Write `value` to `path` as pretty-printed JSON.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let contents = serde_json::to_string_pretty(value)?;
     fs::write(path, contents)?;
     Ok(())
 }
 
+/// Serde codec for a hex-encoded [`PrivateKey`].
 mod hex_private_key {
     use super::*;
 
@@ -104,6 +119,7 @@ mod hex_private_key {
     }
 }
 
+/// Serde codec for a hex-encoded [`PublicKey`].
 mod hex_public_key {
     use super::*;
 
@@ -118,6 +134,7 @@ mod hex_public_key {
     }
 }
 
+/// Serde codec for a list of hex-encoded [`PublicKey`]s.
 mod hex_public_keys {
     use super::*;
 

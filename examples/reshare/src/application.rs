@@ -1,3 +1,5 @@
+//! Stateful application that records each block's height in QMDB.
+
 use crate::types::{Block, Database, Scheme};
 use commonware_consensus::{
     Heightable as _, marshal::ancestry::Ancestry, simplex::types::Context, types::Height,
@@ -20,12 +22,14 @@ use rand::Rng;
 
 const HEIGHT_KEY: U64 = U64::new(0);
 
+/// Application logic: every non-genesis block writes its height to one fixed key.
 #[derive(Clone)]
 pub struct App {
     genesis: Block,
 }
 
 impl App {
+    /// Create the application with its genesis block.
     pub const fn new(genesis: Block) -> Self {
         Self { genesis }
     }
@@ -64,10 +68,10 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let parent = ancestry.next().await?;
-        let height = parent.height().next();
         // The `reshare::Application` wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
+        let parent = ancestry.next().await?;
+        let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {

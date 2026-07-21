@@ -68,9 +68,9 @@ carries the epoch-0 `EpochInfo`.
 future committee. It asks peers for a finalized anchor, uses `stateful::probe` to
 select a floor, and state-syncs QMDB from that floor before normal processing.
 
-Do not use `--state-sync` as a normal restart flag. It cannot recover a player
-that missed private dealing traffic for an epoch in which it was already a
-player; those dealings are not replayable as private messages.
+Do not use `--state-sync` as a normal restart flag. A restart recovers from
+local storage. A player that misses its private dealings cannot recover them by
+syncing: the ceremony completes without it and publicly reveals its share.
 
 ## Limits
 
