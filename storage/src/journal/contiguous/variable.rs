@@ -1106,6 +1106,22 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                     writer.size()
                 )));
             }
+
+            // The floor's blob must retain its acknowledged prefix: a cut at or below the last
+            // acknowledged frame's start lost acknowledged data (a cut inside that frame is
+            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
+            // below the offsets pruning boundary acknowledges nothing here.
+            if blob == floor_blob
+                && floor > blob_first_position(blob, items_per_blob)?
+                && floor > offsets.pruning_boundary()
+                && valid <= offsets.read(floor - 1).await?
+            {
+                return Err(Error::Corruption(format!(
+                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
+                     of size {}",
+                    writer.size()
+                )));
+            }
             warn!(
                 blob,
                 valid,
@@ -4463,9 +4479,8 @@ mod tests {
         });
     }
 
-    /// A torn page below a mid-blob watermark takes the truncate path (the floor is
-    /// blob-granular), but recovery still fails: `align` finds the acknowledged data missing.
-    /// Retries fail identically.
+    /// A torn page below a mid-blob watermark is rejected without truncating the blob's
+    /// acknowledged prefix, and retries fail identically.
     #[test_traced]
     fn test_variable_recovery_rejects_torn_page_below_mid_blob_watermark() {
         let executor = deterministic::Runner::default();
@@ -4489,11 +4504,22 @@ mod tests {
 
             // Tear page 1 (bytes 64..128), beneath the acknowledged frames ending at byte 180.
             corrupt_page(&context, &cfg.data_partition(), 0, 1, 64).await;
+            let (_, size_before) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
 
             for child in ["second", "retry"] {
                 let result = Journal::<_, u64>::init(context.child(child), cfg.clone()).await;
                 assert!(matches!(result, Err(Error::Corruption(_))));
             }
+
+            // The rejection must not truncate the blob's acknowledged prefix.
+            let (_, size_after) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(size_after, size_before);
         });
     }
 
