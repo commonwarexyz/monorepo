@@ -167,7 +167,14 @@ impl EncodedPayload {
     }
 
     fn decode<V: Variant, S: Signer>(&self) -> Option<Payload<V, S>> {
-        Payload::decode_cfg(self.bytes.as_slice(), &self.max_participants).ok()
+        Payload::decode_cfg(
+            self.bytes.as_slice(),
+            &(
+                self.max_participants,
+                crate::dkg::tests::max_supported_mode(),
+            ),
+        )
+        .ok()
     }
 
     fn write(&self, writer: &mut impl BufMut) {

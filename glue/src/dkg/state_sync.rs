@@ -17,7 +17,10 @@ use commonware_consensus::{
 };
 #[cfg(feature = "arbitrary")]
 use commonware_cryptography::bls12381::dkg::feldman_desmedt::Output;
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{
+    Digest,
+    bls12381::primitives::{sharing::ModeVersion, variant::Variant},
+};
 use commonware_storage::{
     Context,
     metadata::{self, Metadata},
@@ -27,6 +30,7 @@ use std::{fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
 const STATE_SYNC_SUFFIX: &str = "_dkg_state_sync";
+type EpochInfoCodecConfig = (NonZeroU32, ModeVersion);
 
 /// Storage settings for a DKG state-sync recovery plan.
 #[derive(Clone, Debug)]
@@ -36,6 +40,9 @@ pub struct Config {
 
     /// Maximum participants accepted in persisted epoch information.
     pub max_participants: NonZeroU32,
+
+    /// Maximum sharing mode version accepted in persisted epoch information.
+    pub max_supported_mode: ModeVersion,
 }
 
 /// Public material needed to start DKG actors in a state-synced epoch.
@@ -136,14 +143,14 @@ where
     D: Digest,
     V: Variant,
 {
-    type Cfg = (NonZeroU32, <S::Certificate as Read>::Cfg);
+    type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(
         reader: &mut impl Buf,
-        (max_participants, certificate): &Self::Cfg,
+        (epoch_info, certificate): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         Ok(Self {
-            info: EpochInfo::read_cfg(reader, max_participants)?,
+            info: EpochInfo::read_cfg(reader, epoch_info)?,
             floor: Finalization::read_cfg(reader, certificate)?,
         })
     }
@@ -194,7 +201,7 @@ where
     Pending {
         candidate: Option<StateSync<S, D, V>>,
         partition: String,
-        max_participants: NonZeroU32,
+        codec_config: EpochInfoCodecConfig,
     },
     Resolved(Option<StateSync<S, D, V>>),
 }
@@ -263,8 +270,8 @@ where
             assert_epoch(provided);
         }
         let partition = format!("{}{STATE_SYNC_SUFFIX}", config.partition_prefix);
-        let mut store =
-            open_store::<E, S, D, V>(context, partition.clone(), config.max_participants).await;
+        let codec_config = (config.max_participants, config.max_supported_mode);
+        let mut store = open_store::<E, S, D, V>(context, partition.clone(), codec_config).await;
         if let Some(provided) = provided {
             store.put(STATE_SYNC_KEY, provided);
             store
@@ -282,7 +289,7 @@ where
             state: Arc::new(AsyncMutex::new(PlanState::Pending {
                 candidate,
                 partition,
-                max_participants: config.max_participants,
+                codec_config,
             })),
         }
     }
@@ -300,13 +307,13 @@ where
         recovered_epoch: Option<Epoch>,
     ) -> Option<StateSync<S, D, V>> {
         let mut state = self.state.lock().await;
-        let (candidate, partition, max_participants) = match &*state {
+        let (candidate, partition, codec_config) = match &*state {
             PlanState::Resolved(resolved) => return resolved.clone(),
             PlanState::Pending {
                 candidate,
                 partition,
-                max_participants,
-            } => (candidate.clone(), partition.clone(), *max_participants),
+                codec_config,
+            } => (candidate.clone(), partition.clone(), *codec_config),
         };
 
         let Some(candidate) = candidate else {
@@ -318,7 +325,7 @@ where
             return Some(candidate);
         }
 
-        let mut store = open_store::<E, S, D, V>(context, partition, max_participants).await;
+        let mut store = open_store::<E, S, D, V>(context, partition, codec_config).await;
         store.remove(&STATE_SYNC_KEY);
         store
             .sync()
@@ -333,7 +340,7 @@ where
 async fn open_store<E, S, D, V>(
     context: E,
     partition: String,
-    max_participants: NonZeroU32,
+    epoch_info_codec_config: EpochInfoCodecConfig,
 ) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V>>
 where
     E: Context,
@@ -345,7 +352,10 @@ where
         context,
         metadata::Config {
             partition,
-            codec_config: (max_participants, S::certificate_codec_config_unbounded()),
+            codec_config: (
+                epoch_info_codec_config,
+                S::certificate_codec_config_unbounded(),
+            ),
         },
     )
     .await
@@ -421,6 +431,7 @@ mod tests {
         Config {
             partition_prefix: partition.into(),
             max_participants: NZU32!(16),
+            max_supported_mode: crate::dkg::tests::max_supported_mode(),
         }
     }
 

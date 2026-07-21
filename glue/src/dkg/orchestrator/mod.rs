@@ -75,7 +75,7 @@ mod tests {
     use crate::dkg::{
         fence::Fence,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        tests::mocks,
+        tests::{max_supported_mode, mocks},
         types::{EpochInfo, EpochOutcome, Payload},
     };
     use commonware_actor::Feedback;
@@ -380,6 +380,7 @@ mod tests {
                 StateSyncConfig {
                     partition_prefix: partition_prefix.clone(),
                     max_participants: NZU32!(16),
+                    max_supported_mode: max_supported_mode(),
                 },
                 state_sync,
             )

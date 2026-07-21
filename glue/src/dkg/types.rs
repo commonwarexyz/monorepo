@@ -1,6 +1,5 @@
 //! Shared types for the DKG module.
 
-use crate::dkg::reshare::MAX_SUPPORTED_MODE;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
@@ -8,7 +7,11 @@ use commonware_cryptography::{
     PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
-        primitives::{group::Share, sharing::Sharing, variant::Variant},
+        primitives::{
+            group::Share,
+            sharing::{ModeVersion, Sharing},
+            variant::Variant,
+        },
     },
 };
 use commonware_p2p::TrackedPeers;
@@ -406,16 +409,25 @@ impl<V: Variant, P: PublicKey> EncodeSize for EpochInfo<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for EpochInfo<V, P> {
-    /// Maximum number of participants accepted in any single set.
-    type Cfg = NonZeroU32;
+    /// Maximum number of participants and maximum supported sharing mode version.
+    type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(buf: &mut impl Buf, max: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_participants, max_supported_mode): &Self::Cfg,
+    ) -> Result<Self, CodecError> {
         Ok(Self {
             outcome: EpochOutcome::read(buf)?,
             epoch: Epoch::read(buf)?,
-            output: Output::<V, P>::read_cfg(buf, &(*max, MAX_SUPPORTED_MODE))?,
-            players: Set::read_cfg(buf, &(RangeCfg::new(0..=max.get() as usize), ()))?,
-            next_players: Set::read_cfg(buf, &(RangeCfg::new(0..=max.get() as usize), ()))?,
+            output: Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
+            players: Set::read_cfg(
+                buf,
+                &(RangeCfg::new(0..=max_participants.get() as usize), ()),
+            )?,
+            next_players: Set::read_cfg(
+                buf,
+                &(RangeCfg::new(0..=max_participants.get() as usize), ()),
+            )?,
         })
     }
 }
@@ -497,13 +509,13 @@ impl<V: Variant, C: Signer> EncodeSize for Payload<V, C> {
 }
 
 impl<V: Variant, C: Signer> Read for Payload<V, C> {
-    /// Maximum number of participants accepted in decoded artifacts.
-    type Cfg = NonZeroU32;
+    /// Maximum number of participants and maximum supported sharing mode version.
+    type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(reader: &mut impl Buf, max: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, max)?)),
-            1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, max)?)),
+            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, &cfg.0)?)),
+            1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, cfg)?)),
             n => Err(CodecError::InvalidEnum(n)),
         }
     }

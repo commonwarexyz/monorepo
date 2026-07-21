@@ -5,7 +5,10 @@ use crate::{
         orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        tests::mocks::{FilteredReceiver, MemorySecretStore},
+        tests::{
+            max_supported_mode,
+            mocks::{FilteredReceiver, MemorySecretStore},
+        },
         types::*,
     },
     simulate::{
@@ -152,7 +155,7 @@ impl Read for Block {
             range: NonEmptyRange::read(buf)?,
             payload: Option::<Payload<MinPk, ed25519::PrivateKey>>::read_cfg(
                 buf,
-                &MAX_PARTICIPANTS,
+                &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
         })
     }
@@ -927,6 +930,7 @@ impl EngineDefinition for ReshareEngine {
             StateSyncConfig {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
+                max_supported_mode: max_supported_mode(),
             },
             state_sync,
         )

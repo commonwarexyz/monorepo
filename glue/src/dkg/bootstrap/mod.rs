@@ -28,7 +28,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
-    bls12381::primitives::{sharing::Mode as SharingMode, variant::Variant},
+    bls12381::primitives::{
+        sharing::{Mode as SharingMode, ModeVersion},
+        variant::Variant,
+    },
     certificate::{ConstantProvider, Verifier as _},
     ed25519,
     sha256::{self, Digest as Sha256Digest},
@@ -83,6 +86,9 @@ pub struct Config<M, X, SS, T> {
 
     /// Sharing mode used for the generated threshold output.
     pub sharing_mode: SharingMode,
+
+    /// Maximum sharing mode version accepted when decoding blocks.
+    pub max_supported_mode: ModeVersion,
 
     /// Runtime-storage partition prefix.
     pub partition_prefix: String,
@@ -151,14 +157,14 @@ impl<V: Variant> EncodeSize for Block<V> {
 }
 
 impl<V: Variant> Read for Block<V> {
-    type Cfg = NonZeroU32;
+    type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(buf: &mut impl Buf, max_participants: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,
             height: Height::read(buf)?,
-            payload: Option::<Payload<V, ed25519::PrivateKey>>::read_cfg(buf, max_participants)?,
+            payload: Option::<Payload<V, ed25519::PrivateKey>>::read_cfg(buf, cfg)?,
         })
     }
 }
@@ -216,6 +222,10 @@ where
 {
     /// Creates a new engine.
     pub const fn new(context: E, config: Config<M, X, SS, T>) -> Self {
+        assert!(
+            config.max_supported_mode.supports(&config.sharing_mode),
+            "sharing mode must be supported by max supported mode",
+        );
         Self {
             context: ContextCell::new(context),
             config,
@@ -326,6 +336,7 @@ where
             .try_into()
             .expect("too many DKG participants");
         let max_participants = NZU32!(participants);
+        let block_codec_config = (max_participants, self.config.max_supported_mode);
 
         let context = self.context.into_present();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_PAGES);
@@ -354,7 +365,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: 16,
                 priority: false,
-                codec_config: max_participants,
+                codec_config: block_codec_config,
                 peer_provider: self.config.manager.clone(),
             },
         );
@@ -393,7 +404,7 @@ where
                 &self.config.partition_prefix,
                 "blocks",
                 page_cache.clone(),
-                max_participants,
+                block_codec_config,
             ),
         )
         .await
@@ -415,7 +426,7 @@ where
                 replay_buffer: IO_BUFFER_SIZE,
                 key_write_buffer: IO_BUFFER_SIZE,
                 value_write_buffer: IO_BUFFER_SIZE,
-                block_codec_config: max_participants,
+                block_codec_config,
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
                 strategy: self.config.strategy.clone(),
@@ -627,5 +638,31 @@ fn archive_config<C>(
         key_write_buffer: IO_BUFFER_SIZE,
         value_write_buffer: IO_BUFFER_SIZE,
         replay_buffer: IO_BUFFER_SIZE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::bls12381::primitives::variant::MinPk;
+
+    #[test]
+    #[should_panic(expected = "sharing mode must be supported by max supported mode")]
+    fn rejects_unsupported_sharing_mode() {
+        let config = Config {
+            signer: ed25519::PrivateKey::from_seed(0),
+            manager: (),
+            blocker: (),
+            secret_store: (),
+            strategy: (),
+            namespace: b"test",
+            sharing_mode: SharingMode::RootsOfUnity,
+            max_supported_mode: ModeVersion::v0(),
+            partition_prefix: "test".into(),
+            participants: Set::default(),
+            blocks_per_epoch: NZU64!(1),
+        };
+
+        let _ = Engine::<_, MinPk, _, _, _, _>::new((), config);
     }
 }

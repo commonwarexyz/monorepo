@@ -157,28 +157,6 @@
 //! returns an [`EpochInfo`](crate::dkg::types::EpochInfo) suitable for the
 //! genesis artifact of a later reshare-enabled application chain.
 
-use commonware_cryptography::bls12381::primitives::sharing::ModeVersion;
-
-/// The max supported [`ModeVersion`] of this reshare protocol implementation.
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))]
-pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v1();
-
-/// The max supported [`ModeVersion`] of this reshare protocol implementation.
-#[cfg(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-))]
-pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
-
 mod mailbox;
 pub use mailbox::{EpochInfoResponse, LogReservation, Mailbox, Message};
 

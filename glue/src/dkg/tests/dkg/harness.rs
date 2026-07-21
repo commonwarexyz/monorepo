@@ -2,7 +2,10 @@ use super::properties::{DkgOutcome, ExpectedOutcome};
 use crate::{
     dkg::{
         bootstrap,
-        tests::mocks::{FilteredReceiver, MemorySecretStore},
+        tests::{
+            max_supported_mode,
+            mocks::{FilteredReceiver, MemorySecretStore},
+        },
         types::EpochInfo,
     },
     simulate::{
@@ -200,6 +203,7 @@ impl EngineDefinition for DkgEngine {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                max_supported_mode: max_supported_mode(),
                 partition_prefix: format!("dkg-{index}"),
                 participants: self.participants_set(),
                 blocks_per_epoch: EPOCH_LENGTH,
@@ -386,6 +390,7 @@ pub(super) fn run_closed_network_receiver() {
                 strategy: Sequential,
                 namespace: NAMESPACE,
                 sharing_mode: Mode::NonZeroCounter,
+                max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-closed-receiver".into(),
                 participants: engine.participants_set(),
                 blocks_per_epoch: EPOCH_LENGTH,
