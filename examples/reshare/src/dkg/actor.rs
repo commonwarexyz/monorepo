@@ -240,7 +240,7 @@ where
                 output,
                 share,
             };
-            storage.set_epoch(Epoch::zero(), initial_state).await;
+            storage = storage.set_epoch(Epoch::zero(), initial_state).await;
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -254,7 +254,7 @@ where
 
             // Prune everything older than the previous epoch
             if let Some(prev) = epoch.previous() {
-                storage.prune(prev).await;
+                storage = storage.prune(prev).await;
             }
 
             // Initialize dealer and player sets
@@ -381,16 +381,17 @@ where
                             match msg {
                                 Message::Dealer(pub_msg, priv_msg) => {
                                     if let Some(ref mut ps) = player_state {
-                                        match ps
+                                        let verdict;
+                                        (storage, verdict) = ps
                                             .handle::<_, N3f1>(
-                                                &mut storage,
+                                                storage,
                                                 epoch,
                                                 sender_pk.clone(),
                                                 pub_msg,
                                                 priv_msg,
                                             )
-                                            .await
-                                        {
+                                            .await;
+                                        match verdict {
                                             Verdict::Valid(ack) => {
                                                 let _ = self
                                                     .latest_share
@@ -433,10 +434,11 @@ where
                                 }
                                 Message::Ack(ack) => {
                                     if let Some(ref mut ds) = dealer_state {
-                                        match ds
-                                            .handle(&mut storage, epoch, sender_pk.clone(), ack)
-                                            .await
-                                        {
+                                        let verdict;
+                                        (storage, verdict) = ds
+                                            .handle(storage, epoch, sender_pk.clone(), ack)
+                                            .await;
+                                        match verdict {
                                             Verdict::Valid(()) => {
                                                 let _ = self
                                                     .latest_ack
@@ -521,7 +523,7 @@ where
                                 {
                                     ds.take_finalized();
                                 }
-                                storage.append_log(epoch, dealer, dealer_log).await;
+                                (storage, _) = storage.append_log(epoch, dealer, dealer_log).await;
                             }
                         }
 
@@ -529,9 +531,9 @@ where
                         if phase == EpochPhase::Early
                             && let Some(ref mut ds) = dealer_state
                         {
-                            Self::distribute_shares(
+                            storage = Self::distribute_shares(
                                 &self_pk,
-                                &mut storage,
+                                storage,
                                 epoch,
                                 ds,
                                 player_state.as_mut(),
@@ -611,7 +613,7 @@ where
                             warn!(?epoch, "epoch failed");
                             self.failed_epochs.inc();
                         }
-                        storage
+                        storage = storage
                             .set_epoch(
                                 epoch.next(),
                                 EpochState {
@@ -660,26 +662,27 @@ where
 
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
-        storage: &mut Storage<E, V, C::PublicKey>,
+        mut storage: Storage<E, V, C::PublicKey>,
         epoch: Epoch,
         dealer_state: &mut Dealer<V, C>,
         mut player_state: Option<&mut Player<V, C>>,
         sender: &mut S,
-    ) {
+    ) -> Storage<E, V, C::PublicKey> {
         for (player, pub_msg, priv_msg) in dealer_state.shares_to_distribute().collect::<Vec<_>>() {
             // Handle self-dealing if we are both dealer and player
             if player == *self_pk {
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
-                    let Verdict::Valid(ack) = ps
+                    let verdict;
+                    (storage, verdict) = ps
                         .handle::<_, N3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
-                        .await
-                    else {
+                        .await;
+                    let Verdict::Valid(ack) = verdict else {
                         continue;
                     };
 
                     // Handle our own ack as dealer (we never block ourselves).
-                    let _ = dealer_state
+                    (storage, _) = dealer_state
                         .handle(storage, epoch, self_pk.clone(), ack)
                         .await;
                 }
@@ -695,6 +698,7 @@ where
                 debug!(?epoch, ?player, "sent share");
             }
         }
+        storage
     }
 }
 
@@ -808,14 +812,14 @@ mod tests {
 
             // Seed durable state that looks like a completed reshare several rounds in, even
             // though the restarted actor will be given stale bootstrap inputs below.
-            let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
+            let storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
                 context.child("seed_storage"),
                 &partition_prefix,
                 NZU32!(peer_config.max_participants_per_round()),
                 crate::dkg::MAX_SUPPORTED_MODE,
             )
             .await;
-            storage
+            let storage = storage
                 .set_epoch(
                     Epoch::new(RECOVERED_EPOCH),
                     EpochState {

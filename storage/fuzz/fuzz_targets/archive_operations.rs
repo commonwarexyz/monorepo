@@ -91,7 +91,7 @@ fn fuzz(data: FuzzInput) {
                     let value = Value::new(*value_data);
 
                     // Put the item into the archive
-                    archive.put(*index, key, value).await.expect("put failed");
+                    archive = archive.put(*index, key, value).await.expect("put failed");
                     // Only add if not already written (Archive doesn't allow overwrites)
                     if !written_indices.contains(index) {
                         items.push((*index, *key_data, *value_data));
@@ -195,7 +195,7 @@ fn fuzz(data: FuzzInput) {
 
                 ArchiveOperation::Prune(min) => {
                     let min = min - min % cfg.items_per_section.get();
-                    archive.prune(min).await.expect("prune failed");
+                    archive = archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
                             oldest_allowed = Some(min);
@@ -213,7 +213,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Sync => {
-                    archive.sync().await.expect("sync failed");
+                    archive = archive.sync().await.expect("sync failed");
                 }
 
                 ArchiveOperation::NextGap { start } => {
@@ -238,7 +238,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        archive.sync().await.expect("final sync failed");
+        archive = archive.sync().await.expect("final sync failed");
 
         let total_items = items.len();
         let total_written = written_indices.len();

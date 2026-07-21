@@ -8,7 +8,6 @@ use crate::{
     rmap::RMap,
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
-use commonware_macros::boxed;
 use commonware_runtime::{
     Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
@@ -101,8 +100,8 @@ where
     }
 }
 
-/// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> {
+/// The archive's state; boxed so the public [Archive] handle stays pointer-sized.
+struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> {
     items_per_section: u64,
 
     /// Combined index + value storage with crash recovery.
@@ -150,19 +149,49 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    Archive<T, E, K, V>
+    Inner<T, E, K, V>
 {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
     }
 
-    /// Returns true when `index` is below the prune floor.
+    /// See [Archive::pruned].
     const fn pruned(&self, index: u64) -> bool {
         match self.oldest_allowed {
             Some(oldest_allowed) => index < oldest_allowed,
             None => false,
         }
+    }
+
+    /// See [crate::archive::Archive::next_gap].
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.intervals.next_gap(index)
+    }
+
+    /// See [crate::archive::Archive::missing_items].
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.intervals.missing_items(index, max)
+    }
+
+    /// See [crate::archive::Archive::ranges].
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
+    /// See [crate::archive::Archive::ranges_from].
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    }
+
+    /// See [crate::archive::Archive::first_index].
+    fn first_index(&self) -> Option<u64> {
+        self.intervals.first_index()
+    }
+
+    /// See [crate::archive::Archive::last_index].
+    fn last_index(&self) -> Option<u64> {
+        self.intervals.last_index()
     }
 
     /// Iterate over all positions for a given index (first + extras).
@@ -175,11 +204,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         )
     }
 
-    /// Initialize a new `Archive` instance.
-    ///
-    /// The in-memory index for `Archive` is populated during this call
-    /// by replaying only the index journal (no values are read).
-    pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
+    /// See [Archive::init].
+    async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Initialize oversized journal
         let oversized_cfg = OversizedConfig {
             index_partition: cfg.key_partition,
@@ -353,13 +379,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.indices.contains_key(&index)
     }
 
+    // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
     async fn put_internal(
-        &mut self,
+        mut self: Box<Self>,
         index: u64,
         key: K,
         data: V,
         skip_if_index_exists: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Box<Self>, Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -368,13 +395,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Check for existing index when enforcing single-item semantics.
         if skip_if_index_exists && self.indices.contains_key(&index) {
-            return Ok(());
+            return Ok(self);
         }
 
         // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
-        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
+        let position;
+        (self.oversized, position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
         match self.indices.entry(index) {
@@ -398,15 +426,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        Ok(self)
     }
 
-    /// Prune `Archive` to the provided `min` (masked by the configured
-    /// section mask).
-    ///
-    /// If this is called with a min lower than the last pruned, nothing
-    /// will happen.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    /// See [Archive::prune].
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<Box<Self>, Error> {
         // Update `min` to reflect section mask
         let min = self.section(min);
 
@@ -416,12 +440,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         {
             // We don't return an error in this case because the caller
             // shouldn't be burdened with converting `min` to some section.
-            return Ok(());
+            return Ok(self);
         }
         debug!(min, "pruning archive");
 
         // Prune oversized journal (handles both index and values)
-        self.oversized.prune(min).await?;
+        (self.oversized, _) = self.oversized.prune(min).await?;
 
         // Remove pending and requested sync work (no need to call `sync` as we are pruning)
         self.pending = self.pending.split_off(&min);
@@ -446,20 +470,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Update last pruned (to prevent reads from pruned sections)
         self.oldest_allowed = Some(min);
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
-    }
-}
-
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    crate::archive::Archive for Archive<T, E, K, V>
-{
-    type Key = K;
-    type Value = V;
-
-    async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        self.put_internal(index, key, data, true).await
+        Ok(self)
     }
 
+    /// See [crate::archive::Archive::get].
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
@@ -467,6 +481,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
     }
 
+    /// See [crate::archive::Archive::has].
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
         self.has.inc();
         match identifier {
@@ -475,20 +490,22 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    /// See [crate::archive::Archive::sync].
+    async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         // Update metrics (`requested` sections were already counted by `start_sync`)
         self.syncs.inc_by(self.pending.len() as u64);
         self.requested.append(&mut self.pending);
 
         // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
         // also waits for any of their syncs still in flight.
-        self.oversized.sync(&self.requested).await?;
+        self.oversized = self.oversized.sync(&self.requested).await?;
 
         self.requested.clear();
-        Ok(())
+        Ok(self)
     }
 
-    async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+    /// See [crate::archive::Archive::start_sync].
+    async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
 
@@ -496,42 +513,17 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
         // without issuing a new sync.
         self.requested.append(&mut self.pending);
-        Ok(self.oversized.start_sync(&self.requested).await?)
+        let handle;
+        (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
+        Ok((self, handle))
     }
 
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
-    }
-
-    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(index, max)
-    }
-
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
-    }
-
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
-    }
-
-    fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
-    }
-
-    fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
-    }
-
-    #[boxed]
+    /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
     }
-}
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    crate::archive::MultiArchive for Archive<T, E, K, V>
-{
+    /// See [crate::archive::MultiArchive::get_all].
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
         // Update metrics
         self.gets.inc();
@@ -561,10 +553,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(Some(values))
     }
 
-    async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        self.put_internal(index, key, data, false).await
-    }
-
+    /// See [crate::archive::MultiArchive::has_at].
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
@@ -589,6 +578,128 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             self.unnecessary_reads.inc();
         }
         Ok(false)
+    }
+}
+
+/// Implementation of `Archive` storage.
+pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>(
+    Box<Inner<T, E, K, V>>,
+);
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> std::fmt::Debug
+    for Archive<T, E, K, V>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field("first_index", &self.0.first_index())
+            .field("last_index", &self.0.last_index())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+    Archive<T, E, K, V>
+{
+    /// Returns true when `index` is below the prune floor.
+    ///
+    /// Storing at a pruned index fails (and the failure consumes the archive), so callers
+    /// that race puts against pruning should check this before calling a put method.
+    pub fn pruned(&self, index: u64) -> bool {
+        self.0.pruned(index)
+    }
+
+    /// Initialize a new `Archive` instance.
+    ///
+    /// The in-memory index for `Archive` is populated during this call
+    /// by replaying only the index journal (no values are read).
+    pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Prune `Archive` to the provided `min` (masked by the configured
+    /// section mask).
+    ///
+    /// If this is called with a min lower than the last pruned, nothing
+    /// will happen.
+    pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
+        self.0 = self.0.prune(min).await?;
+        Ok(self)
+    }
+}
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+    crate::archive::Archive for Archive<T, E, K, V>
+{
+    type Key = K;
+    type Value = V;
+
+    async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+        self.0 = self.0.put_internal(index, key, data, true).await?;
+        Ok(self)
+    }
+
+    async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        self.0.get(identifier).await
+    }
+
+    async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+        self.0.has(identifier).await
+    }
+
+    async fn sync(mut self) -> Result<Self, Error> {
+        self.0 = self.0.sync().await?;
+        Ok(self)
+    }
+
+    async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let handle;
+        (self.0, handle) = self.0.start_sync().await?;
+        Ok((self, handle))
+    }
+
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.0.next_gap(index)
+    }
+
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.0.missing_items(index, max)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.0.ranges()
+    }
+
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.0.ranges_from(from)
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        self.0.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.0.last_index()
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.0.destroy().await
+    }
+}
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+    crate::archive::MultiArchive for Archive<T, E, K, V>
+{
+    async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
+        self.0.get_all(index).await
+    }
+
+    async fn put_multi(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+        self.0 = self.0.put_internal(index, key, data, false).await?;
+        Ok(self)
+    }
+
+    async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
+        self.0.has_at(index, key).await
     }
 }
 

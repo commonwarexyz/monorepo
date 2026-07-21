@@ -28,8 +28,8 @@
 //! # Sync
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be written to `Storage` using the `sync` method. When
-//! calling `close`, all pending data is automatically synced and any open blobs are dropped.
+//! to determine when to force pending data to be written to `Storage` using the `sync` (or
+//! `sync_all`) method.
 //!
 //! # Pruning
 //!
@@ -64,7 +64,7 @@
 //!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
 //!
 //!     // Create a journal
-//!     let mut journal = Journal::init(context, Config {
+//!     let journal = Journal::init(context, Config {
 //!         partition: "partition".into(),
 //!         compression: None,
 //!         codec_config: (),
@@ -73,7 +73,7 @@
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
-//!     journal.append(1, &128).await.unwrap();
+//!     let (journal, _, _) = journal.append(1, &128).await.unwrap();
 //!
 //!     // Sync the journal
 //!     journal.sync_all().await.unwrap();
@@ -130,20 +130,8 @@ struct ReplayState<'a, B: Blob, C> {
     done: bool,
 }
 
-/// A segmented journal with variable-size entries.
-///
-/// Each section is stored in a separate blob. Items are length-prefixed with a varint.
-///
-/// # Repair
-///
-/// Like
-/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-/// and
-/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// replay (not init) because any blob could have trailing bytes.
-pub struct Journal<E: Storage + Metrics, V: Codec> {
+/// The journal's state; boxed so the public [Journal] handle stays pointer-sized.
+struct Inner<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
     /// Compression level (if enabled).
@@ -153,13 +141,9 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
-    /// Initialize a new `Journal` instance.
-    ///
-    /// All backing blobs are opened but not read during
-    /// initialization. The `replay` method can be used
-    /// to iterate over all items in the `Journal`.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
+    /// See [Journal::init].
+    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: AppendFactory {
@@ -186,10 +170,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         read_frame_at(blob, offset, cfg, compressed).await
     }
 
-    /// Returns an ordered stream of all items in the journal starting with the item at the given
-    /// `start_section` and `offset` into that section. Each item is returned as a tuple of
-    /// (section, offset, size, item).
-    pub async fn replay(
+    /// See [Journal::replay].
+    async fn replay(
         &mut self,
         start_section: u64,
         mut start_offset: u64,
@@ -415,10 +397,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok((buf, item_len))
     }
 
-    /// Appends an item to `Journal` in a given `section`, returning the offset
-    /// where the item was written and the size of the item (which may differ
-    /// from the raw encoded size if compression is enabled).
-    pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
+    /// See [Journal::append].
+    async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         let (buf, item_len) = Self::encode_item(self.compression, item)?;
         self.append_raw(section, IoBuf::from(buf))
             .await
@@ -436,17 +416,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(offset)
     }
 
-    /// Retrieves an item from `Journal` at a given `section` and `offset`.
-    ///
-    /// # Errors
-    ///  - [Error::AlreadyPrunedToSection] if the requested `section` has been pruned during the
-    ///    current execution.
-    ///  - [Error::SectionOutOfRange] if the requested `section` is empty (i.e. has never had any
-    ///    data appended to it, or has been pruned in a previous execution).
-    ///  - An invalid `offset` for a given section (that is, an offset that doesn't correspond to a
-    ///    previously appended item) will result in an error, with the specific type being
-    ///    undefined.
-    pub async fn get(&self, section: u64, offset: u64) -> Result<V, Error> {
+    /// See [Journal::get].
+    async fn get(&self, section: u64, offset: u64) -> Result<V, Error> {
         let blob = self
             .manager
             .get(section)?
@@ -458,10 +429,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(item)
     }
 
-    /// Read multiple items from the same section.
-    ///
-    /// Offsets should be sorted in ascending order.
-    pub async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
+    /// See [Journal::get_many].
+    async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
         if offsets.is_empty() {
             return Ok(Vec::new());
         }
@@ -480,8 +449,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(items)
     }
 
-    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
-    pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
+    /// See [Journal::try_get_sync].
+    fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
         let remaining = blob.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
@@ -536,11 +505,162 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         .ok()
     }
 
+    /// See [Journal::size].
+    fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section)
+    }
+
+    /// See [Journal::rewind].
+    async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.rewind(section, size).await
+    }
+
+    /// See [Journal::rewind_section].
+    async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.rewind_section(section, size).await
+    }
+
+    /// See [Journal::sync].
+    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+        self.manager.sync(sections).await
+    }
+
+    /// See [Journal::start_sync].
+    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(sections).await
+    }
+
+    /// See [Journal::sync_all].
+    async fn sync_all(&mut self) -> Result<(), Error> {
+        self.manager.sync_all().await
+    }
+
+    /// See [Journal::prune].
+    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+        self.manager.prune(min).await
+    }
+
+    /// See [Journal::oldest_section].
+    fn oldest_section(&self) -> Option<u64> {
+        self.manager.oldest_section()
+    }
+
+    /// See [Journal::newest_section].
+    fn newest_section(&self) -> Option<u64> {
+        self.manager.newest_section()
+    }
+
+    /// See [Journal::is_empty].
+    fn is_empty(&self) -> bool {
+        self.manager.is_empty()
+    }
+
+    /// See [Journal::num_sections].
+    fn num_sections(&self) -> usize {
+        self.manager.num_sections()
+    }
+
+    /// See [Journal::destroy].
+    async fn destroy(self) -> Result<(), Error> {
+        self.manager.destroy().await
+    }
+
+    /// See [Journal::clear].
+    async fn clear(&mut self) -> Result<(), Error> {
+        self.manager.clear().await
+    }
+}
+
+/// A segmented journal with variable-size entries.
+///
+/// Each section is stored in a separate blob. Items are length-prefixed with a varint.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// replay (not init) because any blob could have trailing bytes.
+///
+/// Mutating functions consume the journal and return it only on success: an error (or a dropped
+/// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
+/// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
+/// [Journal::oldest_section] first to keep the handle.
+pub struct Journal<E: Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
+
+impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Journal")
+            .field("oldest_section", &self.oldest_section())
+            .field("newest_section", &self.newest_section())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
+    /// Initialize a new `Journal` instance.
+    ///
+    /// All backing blobs are opened but not read during
+    /// initialization. The `replay` method can be used
+    /// to iterate over all items in the `Journal`.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Returns an ordered stream of all items in the journal starting with the item at the given
+    /// `start_section` and `offset` into that section. Each item is returned as a tuple of
+    /// (section, offset, size, item).
+    pub async fn replay(
+        &mut self,
+        start_section: u64,
+        start_offset: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
+        self.0.replay(start_section, start_offset, buffer).await
+    }
+
+    /// Appends an item to `Journal` in a given `section`, returning the offset
+    /// where the item was written and the size of the item (which may differ
+    /// from the raw encoded size if compression is enabled).
+    pub async fn append(mut self, section: u64, item: &V) -> Result<(Self, u64, u32), Error> {
+        let (offset, item_len) = self.0.append(section, item).await?;
+        Ok((self, offset, item_len))
+    }
+
+    /// Retrieves an item from `Journal` at a given `section` and `offset`.
+    ///
+    /// # Errors
+    ///  - [Error::AlreadyPrunedToSection] if the requested `section` has been pruned during the
+    ///    current execution.
+    ///  - [Error::SectionOutOfRange] if the requested `section` is empty (i.e. has never had any
+    ///    data appended to it, or has been pruned in a previous execution).
+    ///  - An invalid `offset` for a given section (that is, an offset that doesn't correspond to a
+    ///    previously appended item) will result in an error, with the specific type being
+    ///    undefined.
+    pub async fn get(&self, section: u64, offset: u64) -> Result<V, Error> {
+        self.0.get(section, offset).await
+    }
+
+    /// Read multiple items from the same section.
+    ///
+    /// Offsets should be sorted in ascending order.
+    pub async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
+        self.0.get_many(section, offsets).await
+    }
+
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
+        self.0.try_get_sync(section, offset)
+    }
+
     /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.
     pub fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section)
+        self.0.size(section)
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -552,8 +672,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * This operation is not guaranteed to survive restarts until sync is called.
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
+    pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.rewind(section, size).await?;
+        Ok(self)
     }
 
     /// Rewinds the `section` to the given `size`.
@@ -563,65 +684,74 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// # Warning
     ///
     /// This operation is not guaranteed to survive restarts until sync is called.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
+    pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.rewind_section(section, size).await?;
+        Ok(self)
     }
 
     /// Ensures the given `sections` are synced to the underlying store.
     ///
     /// If a selected section does not exist, no error will be returned.
-    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        self.0.sync(sections).await?;
+        Ok(self)
     }
 
     /// Start syncing the given `sections` to storage.
+    ///
+    /// An error reported by the returned [Handle] is fatal to the journal: the caller
+    /// must stop using (or destroy) the returned journal and recover by re-initializing.
     pub async fn start_sync(
-        &mut self,
+        mut self,
         sections: impl crate::Sections,
-    ) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    ) -> Result<(Self, Handle<()>), Error> {
+        let handle = self.0.start_sync(sections).await?;
+        Ok((self, handle))
     }
 
     /// Syncs all open sections.
-    pub async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        self.0.sync_all().await?;
+        Ok(self)
     }
 
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        self.manager.prune(min).await
+    pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
+        let pruned = self.0.prune(min).await?;
+        Ok((self, pruned))
     }
 
     /// Returns the number of the oldest section in the journal.
     pub fn oldest_section(&self) -> Option<u64> {
-        self.manager.oldest_section()
+        self.0.oldest_section()
     }
 
     /// Returns the number of the newest section in the journal.
     pub fn newest_section(&self) -> Option<u64> {
-        self.manager.newest_section()
+        self.0.newest_section()
     }
 
     /// Returns true if no sections exist.
     pub fn is_empty(&self) -> bool {
-        self.manager.is_empty()
+        self.0.is_empty()
     }
 
     /// Returns the number of sections.
     pub fn num_sections(&self) -> usize {
-        self.manager.num_sections()
+        self.0.num_sections()
     }
 
     /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+        self.0.destroy().await
     }
 
     /// Clear all data, resetting the journal to an empty state.
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
-    pub async fn clear(&mut self) -> Result<(), Error> {
-        self.manager.clear().await
+    pub async fn clear(mut self) -> Result<Self, Error> {
+        self.0.clear().await?;
+        Ok(self)
     }
 }
 
@@ -660,7 +790,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append an item to the journal
-            journal
+            (journal, _, _) = journal
                 .append(index, &data)
                 .await
                 .expect("Failed to append data");
@@ -670,7 +800,7 @@ mod tests {
             assert!(buffer.contains("first_tracked 1"));
 
             // Drop and re-open the journal to simulate a restart
-            journal.sync(index).await.expect("Failed to sync journal");
+            journal = journal.sync(index).await.expect("Failed to sync journal");
             drop(journal);
             let mut journal = Journal::<_, i32>::init(context.child("second"), cfg)
                 .await
@@ -725,11 +855,11 @@ mod tests {
             // Append multiple items to different blobs
             let data_items = vec![(1u64, 1), (1u64, 2), (2u64, 3), (3u64, 4)];
             for (index, data) in &data_items {
-                journal
+                (journal, _, _) = journal
                     .append(*index, data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                journal = journal.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Check metrics
@@ -796,30 +926,30 @@ mod tests {
 
             // Append items to multiple blobs
             for index in 1u64..=5u64 {
-                journal
+                (journal, _, _) = journal
                     .append(index, &index)
                     .await
                     .expect("Failed to append data");
-                journal.sync(index).await.expect("Failed to sync blob");
+                journal = journal.sync(index).await.expect("Failed to sync blob");
             }
 
             // Add one item out-of-order
             let data = 99;
-            journal
+            (journal, _, _) = journal
                 .append(2u64, &data)
                 .await
                 .expect("Failed to append data");
-            journal.sync(2u64).await.expect("Failed to sync blob");
+            journal = journal.sync(2u64).await.expect("Failed to sync blob");
 
             // Prune blobs with indices less than 3
-            journal.prune(3).await.expect("Failed to prune blobs");
+            (journal, _) = journal.prune(3).await.expect("Failed to prune blobs");
 
             // Check metrics
             let buffer = context.encode();
             assert!(buffer.contains("first_pruned_total 2"));
 
             // Prune again with a section less than the previous one, should be a no-op
-            journal.prune(2).await.expect("Failed to no-op prune");
+            (journal, _) = journal.prune(2).await.expect("Failed to no-op prune");
             let buffer = context.encode();
             assert!(buffer.contains("first_pruned_total 2"));
 
@@ -853,7 +983,7 @@ mod tests {
             }
 
             // Prune all blobs
-            journal.prune(6).await.expect("Failed to prune blobs");
+            (journal, _) = journal.prune(6).await.expect("Failed to prune blobs");
 
             // Drop the journal
             drop(journal);
@@ -891,25 +1021,25 @@ mod tests {
 
             // Append items to sections 1-5
             for section in 1u64..=5u64 {
-                journal
+                (journal, _, _) = journal
                     .append(section, &(section as i32))
                     .await
                     .expect("Failed to append data");
-                journal.sync(section).await.expect("Failed to sync");
+                journal = journal.sync(section).await.expect("Failed to sync");
             }
 
             // Prune sections < 3
-            journal.prune(3).await.expect("Failed to prune");
+            (journal, _) = journal.prune(3).await.expect("Failed to prune");
 
             // Test that accessing pruned sections returns the correct error
 
             // Test append on pruned section
-            match journal.append(1, &100).await {
+            match journal.0.append(1, &100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
-            match journal.append(2, &100).await {
+            match journal.0.append(2, &100).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -927,19 +1057,19 @@ mod tests {
             }
 
             // Test rewind on pruned section
-            match journal.rewind(2, 0).await {
+            match journal.0.rewind(2, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test rewind_section on pruned section
-            match journal.rewind_section(1, 0).await {
+            match journal.0.rewind_section(1, 0).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
             // Test sync on pruned section
-            match journal.sync(2).await {
+            match journal.0.sync(2).await {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -949,16 +1079,16 @@ mod tests {
             assert!(journal.get(4, 0).await.is_ok());
             assert!(journal.get(5, 0).await.is_ok());
             assert!(journal.size(3).is_ok());
-            assert!(journal.sync(4).await.is_ok());
+            assert!(journal.0.sync(4).await.is_ok());
 
             // Append to section at threshold should work
-            journal
+            (journal, _, _) = journal
                 .append(3, &999)
                 .await
                 .expect("Should be able to append to section 3");
 
             // Prune more sections
-            journal.prune(5).await.expect("Failed to prune");
+            (journal, _) = journal.prune(5).await.expect("Failed to prune");
 
             // Verify sections 3 and 4 are now pruned
             match journal.get(3, 0).await {
@@ -996,11 +1126,11 @@ mod tests {
                     .expect("Failed to initialize journal");
 
                 for section in 1u64..=5u64 {
-                    journal
+                    (journal, _, _) = journal
                         .append(section, &(section as i32))
                         .await
                         .expect("Failed to append data");
-                    journal.sync(section).await.expect("Failed to sync");
+                    journal = journal.sync(section).await.expect("Failed to sync");
                 }
 
                 journal.prune(3).await.expect("Failed to prune");
@@ -1141,15 +1271,16 @@ mod tests {
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
-            journal
+            (journal, _, _) = journal
                 .append(section, &item)
                 .await
                 .expect("Failed to append item");
             journal
+                .0
                 .append_raw(section, IoBuf::copy_from_slice(&[0xFF, 0xFF]))
                 .await
                 .expect("Failed to append trailing bytes");
-            journal.sync(section).await.expect("Failed to sync journal");
+            journal = journal.sync(section).await.expect("Failed to sync journal");
             drop(journal);
 
             let mut journal = Journal::init(context.child("second"), cfg)
@@ -1392,20 +1523,20 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append 1 item to the first index
-            journal.append(1, &1).await.expect("Failed to append data");
+            (journal, _, _) = journal.append(1, &1).await.expect("Failed to append data");
 
             // Append multiple items to the second section
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
-                journal
+                (journal, _, _) = journal
                     .append(*index, data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                journal = journal.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Sync all sections and drop the journal
-            journal.sync_all().await.expect("Failed to sync");
+            journal = journal.sync_all().await.expect("Failed to sync");
             drop(journal);
 
             // Manually corrupt the end of the second blob
@@ -1479,8 +1610,8 @@ mod tests {
             assert_eq!(items[0].1, 1);
 
             // Append a new item to truncated partition
-            let (_offset, _) = journal.append(2, &5).await.expect("Failed to append data");
-            journal.sync(2).await.expect("Failed to sync blob");
+            (journal, _, _) = journal.append(2, &5).await.expect("Failed to append data");
+            journal = journal.sync(2).await.expect("Failed to sync blob");
 
             // Get the new item (offset is 0 since blob was truncated)
             let item = journal.get(2, 0).await.expect("Failed to get item");
@@ -1541,20 +1672,20 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append 1 item to the first index
-            journal.append(1, &1).await.expect("Failed to append data");
+            (journal, _, _) = journal.append(1, &1).await.expect("Failed to append data");
 
             // Append multiple items to the second index
             let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
             for (index, data) in &data_items {
-                journal
+                (journal, _, _) = journal
                     .append(*index, data)
                     .await
                     .expect("Failed to append data");
-                journal.sync(*index).await.expect("Failed to sync blob");
+                journal = journal.sync(*index).await.expect("Failed to sync blob");
             }
 
             // Sync all sections and drop the journal
-            journal.sync_all().await.expect("Failed to sync");
+            journal = journal.sync_all().await.expect("Failed to sync");
             drop(journal);
 
             // Manually add extra data to the end of the second blob
@@ -1607,14 +1738,14 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 1
-            journal.append(1, &42i32).await.unwrap();
+            (journal, _, _) = journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
             let size = journal.size(1).unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
-            journal.append(1, &43i32).await.unwrap();
+            (journal, _, _) = journal.append(1, &43i32).await.unwrap();
             let new_size = journal.size(1).unwrap();
             assert!(new_size > size);
 
@@ -1623,14 +1754,14 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 2
-            journal.append(2, &44i32).await.unwrap();
+            (journal, _, _) = journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
             let size = journal.size(2).unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1 and 2
-            journal.rewind(1, 0).await.unwrap();
+            journal = journal.rewind(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
             let size = journal.size(1).unwrap();
@@ -1656,12 +1787,13 @@ mod tests {
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Append to the maximal section. `section + 1` has no representable successor.
-            let (offset, _) = journal.append(u64::MAX, &42i32).await.unwrap();
+            let offset;
+            (journal, offset, _) = journal.append(u64::MAX, &42i32).await.unwrap();
             let size = journal.size(u64::MAX).unwrap();
             assert!(size > 0);
 
             // Rewinding the maximal section removes no sections above it and must not panic.
-            journal.rewind(u64::MAX, size).await.unwrap();
+            journal = journal.rewind(u64::MAX, size).await.unwrap();
 
             // The section is intact and readable.
             assert_eq!(journal.size(u64::MAX).unwrap(), size);
@@ -1689,14 +1821,14 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 1
-            journal.append(1, &42i32).await.unwrap();
+            (journal, _, _) = journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
             let size = journal.size(1).unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
-            journal.append(1, &43i32).await.unwrap();
+            (journal, _, _) = journal.append(1, &43i32).await.unwrap();
             let new_size = journal.size(1).unwrap();
             assert!(new_size > size);
 
@@ -1705,14 +1837,14 @@ mod tests {
             assert_eq!(size, 0);
 
             // Append data to section 2
-            journal.append(2, &44i32).await.unwrap();
+            (journal, _, _) = journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
             let size = journal.size(2).unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1
-            journal.rewind_section(1, 0).await.unwrap();
+            journal = journal.rewind_section(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
             let size = journal.size(1).unwrap();
@@ -1744,14 +1876,16 @@ mod tests {
             let num_items = 100;
             let mut offsets = Vec::new();
             for i in 0..num_items {
-                let (offset, size) = journal
+                let offset;
+                let size;
+                (journal, offset, size) = journal
                     .append(1, &(i as u8))
                     .await
                     .expect("Failed to append data");
                 assert_eq!(size, 1, "u8 should encode to 1 byte");
                 offsets.push(offset);
             }
-            journal.sync(1).await.expect("Failed to sync");
+            journal = journal.sync(1).await.expect("Failed to sync");
 
             // Read each item back via random access
             for (i, &offset) in offsets.iter().enumerate() {
@@ -1802,9 +1936,9 @@ mod tests {
 
             // Create sections 1-10 with data
             for section in 1u64..=10 {
-                journal.append(section, &(section as i32)).await.unwrap();
+                (journal, _, _) = journal.append(section, &(section as i32)).await.unwrap();
             }
-            journal.sync_all().await.unwrap();
+            journal = journal.sync_all().await.unwrap();
 
             // Verify all sections exist
             for section in 1u64..=10 {
@@ -1813,7 +1947,8 @@ mod tests {
             }
 
             // Rewind to section 5 (should remove sections 6-10)
-            journal.rewind(5, journal.size(5).unwrap()).await.unwrap();
+            let size = journal.size(5).unwrap();
+            journal = journal.rewind(5, size).await.unwrap();
 
             // Verify sections 1-5 still exist with correct data
             for section in 1u64..=5 {
@@ -1865,14 +2000,14 @@ mod tests {
             // Append 5 items and record sizes after each
             let mut sizes = Vec::new();
             for i in 0..5 {
-                journal.append(1, &i).await.unwrap();
-                journal.sync(1).await.unwrap();
+                (journal, _, _) = journal.append(1, &i).await.unwrap();
+                journal = journal.sync(1).await.unwrap();
                 sizes.push(journal.size(1).unwrap());
             }
 
             // Rewind to keep only first 3 items
             let target_size = sizes[2];
-            journal.rewind(1, target_size).await.unwrap();
+            journal = journal.rewind(1, target_size).await.unwrap();
 
             // Verify size is correct
             let new_size = journal.size(1).unwrap();
@@ -1914,12 +2049,12 @@ mod tests {
 
             // Create sections 5, 6, 7 (skip 1-4)
             for section in 5u64..=7 {
-                journal.append(section, &(section as i32)).await.unwrap();
+                (journal, _, _) = journal.append(section, &(section as i32)).await.unwrap();
             }
-            journal.sync_all().await.unwrap();
+            journal = journal.sync_all().await.unwrap();
 
             // Rewind to section 3 (doesn't exist)
-            journal.rewind(3, 0).await.unwrap();
+            journal = journal.rewind(3, 0).await.unwrap();
 
             // Verify sections 5, 6, 7 are removed
             for section in 5u64..=7 {
@@ -1956,14 +2091,14 @@ mod tests {
                 .await
                 .unwrap();
             for section in 1u64..=5 {
-                journal.append(section, &(section as i32)).await.unwrap();
+                (journal, _, _) = journal.append(section, &(section as i32)).await.unwrap();
             }
-            journal.sync_all().await.unwrap();
+            journal = journal.sync_all().await.unwrap();
 
             // Rewind to section 2
             let size = journal.size(2).unwrap();
-            journal.rewind(2, size).await.unwrap();
-            journal.sync_all().await.unwrap();
+            journal = journal.rewind(2, size).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
@@ -2018,12 +2153,12 @@ mod tests {
 
             // Create sections 1, 2, 3
             for section in 1u64..=3 {
-                journal.append(section, &(section as i32)).await.unwrap();
+                (journal, _, _) = journal.append(section, &(section as i32)).await.unwrap();
             }
-            journal.sync_all().await.unwrap();
+            journal = journal.sync_all().await.unwrap();
 
             // Rewind section 1 to size 0
-            journal.rewind(1, 0).await.unwrap();
+            journal = journal.rewind(1, 0).await.unwrap();
 
             // Verify section 1 exists but is empty
             let size = journal.size(1).unwrap();
@@ -2065,9 +2200,9 @@ mod tests {
 
             // Append several items to build up valid data
             for i in 0..5i32 {
-                journal.append(1, &i).await.unwrap();
+                (journal, _, _) = journal.append(1, &i).await.unwrap();
             }
-            journal.sync(1).await.unwrap();
+            journal = journal.sync(1).await.unwrap();
             let valid_logical_size = journal.size(1).unwrap();
             drop(journal);
 
@@ -2131,7 +2266,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-            journal.append(1, &7i32).await.unwrap();
+            (journal, _, _) = journal.append(1, &7i32).await.unwrap();
 
             let result = journal.replay(1, u64::MAX, NZUsize!(1024)).await;
             assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
@@ -2171,12 +2306,14 @@ mod tests {
             );
 
             // Append the large item
-            let (offset, size) = journal
+            let offset;
+            let size;
+            (journal, offset, size) = journal
                 .append(1, &large_data)
                 .await
                 .expect("Failed to append large item");
             assert_eq!(size as usize, LARGE_SIZE);
-            journal.sync(1).await.expect("Failed to sync");
+            journal = journal.sync(1).await.expect("Failed to sync");
 
             // Read the item back via random access
             let retrieved: LargeItem = journal
@@ -2248,11 +2385,13 @@ mod tests {
                 *byte = ((i + 7) % 251) as u8;
             }
 
-            let (first_offset, _) = journal
+            let first_offset;
+            (journal, first_offset, _) = journal
                 .append(1, &first)
                 .await
                 .expect("Failed to append first item");
-            let (second_offset, _) = journal
+            let second_offset;
+            (journal, second_offset, _) = journal
                 .append(1, &second)
                 .await
                 .expect("Failed to append second item");
@@ -2264,7 +2403,7 @@ mod tests {
             assert_eq!(retrieved, second);
 
             // Everything survives a sync and reopen.
-            journal.sync(1).await.expect("Failed to sync");
+            journal = journal.sync(1).await.expect("Failed to sync");
             drop(journal);
             let mut journal = Journal::<_, LargeItem>::init(context.child("second"), cfg.clone())
                 .await
@@ -2318,13 +2457,14 @@ mod tests {
             let mut offsets = Vec::new();
 
             for (section, data) in &sections_and_data {
-                let (offset, _) = journal
+                let offset;
+                (journal, offset, _) = journal
                     .append(*section, data)
                     .await
                     .expect("Failed to append");
                 offsets.push(offset);
             }
-            journal.sync_all().await.expect("Failed to sync");
+            journal = journal.sync_all().await.expect("Failed to sync");
 
             // Verify random access to each section
             for (i, (section, expected_data)) in sections_and_data.iter().enumerate() {
@@ -2433,21 +2573,21 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Append to section 1
-            journal.append(1, &100i32).await.expect("Failed to append");
+            (journal, _, _) = journal.append(1, &100i32).await.expect("Failed to append");
 
             // Create section 2 but don't append anything - just sync to create the blob
             // Actually, we need to append something and then rewind to make it empty
-            journal.append(2, &200i32).await.expect("Failed to append");
-            journal.sync(2).await.expect("Failed to sync");
-            journal
+            (journal, _, _) = journal.append(2, &200i32).await.expect("Failed to append");
+            journal = journal.sync(2).await.expect("Failed to sync");
+            journal = journal
                 .rewind_section(2, 0)
                 .await
                 .expect("Failed to rewind");
 
             // Append to section 3
-            journal.append(3, &300i32).await.expect("Failed to append");
+            (journal, _, _) = journal.append(3, &300i32).await.expect("Failed to append");
 
-            journal.sync_all().await.expect("Failed to sync");
+            journal = journal.sync_all().await.expect("Failed to sync");
 
             // Verify section sizes
             assert!(journal.size(1).unwrap() > 0);
@@ -2532,12 +2672,14 @@ mod tests {
             }
 
             // Append the exact-size item
-            let (offset, size) = journal
+            let offset;
+            let size;
+            (journal, offset, size) = journal
                 .append(1, &exact_data)
                 .await
                 .expect("Failed to append exact item");
             assert_eq!(size as usize, ITEM_SIZE);
-            journal.sync(1).await.expect("Failed to sync");
+            journal = journal.sync(1).await.expect("Failed to sync");
 
             // Read the item back via random access
             let retrieved: ExactItem = journal
@@ -2610,11 +2752,14 @@ mod tests {
 
             // Append items - each is 130 bytes (2-byte varint + 128 data)
             // spanning ceil(130/16) = 9 pages worth of logical data
-            let (offset1, _) = journal.append(1, &item1).await.expect("Failed to append");
-            let (offset2, _) = journal.append(1, &item2).await.expect("Failed to append");
-            let (offset3, _) = journal.append(1, &item3).await.expect("Failed to append");
+            let offset1;
+            (journal, offset1, _) = journal.append(1, &item1).await.expect("Failed to append");
+            let offset2;
+            (journal, offset2, _) = journal.append(1, &item2).await.expect("Failed to append");
+            let offset3;
+            (journal, offset3, _) = journal.append(1, &item3).await.expect("Failed to append");
 
-            journal.sync(1).await.expect("Failed to sync");
+            journal = journal.sync(1).await.expect("Failed to sync");
 
             // Read items back via random access
             let retrieved1: [u8; 128] = journal.get(1, offset1).await.expect("Failed to get");
@@ -2674,12 +2819,12 @@ mod tests {
             // Append items across multiple sections
             for section in 0..5u64 {
                 for i in 0..10u64 {
-                    journal
+                    (journal, _, _) = journal
                         .append(section, &(section * 1000 + i))
                         .await
                         .expect("Failed to append");
                 }
-                journal.sync(section).await.expect("Failed to sync");
+                journal = journal.sync(section).await.expect("Failed to sync");
             }
 
             // Verify we have data
@@ -2687,7 +2832,7 @@ mod tests {
             assert_eq!(journal.get(4, 0).await.unwrap(), 4000);
 
             // Clear the journal
-            journal.clear().await.expect("Failed to clear");
+            journal = journal.clear().await.expect("Failed to clear");
 
             // After clear, all reads should fail
             for section in 0..5u64 {
@@ -2699,12 +2844,12 @@ mod tests {
 
             // Append new data after clear
             for i in 0..5u64 {
-                journal
+                (journal, _, _) = journal
                     .append(10, &(i * 100))
                     .await
                     .expect("Failed to append after clear");
             }
-            journal.sync(10).await.expect("Failed to sync after clear");
+            journal = journal.sync(10).await.expect("Failed to sync after clear");
 
             // New data should be readable
             assert_eq!(journal.get(10, 0).await.unwrap(), 0);

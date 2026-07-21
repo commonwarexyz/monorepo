@@ -458,7 +458,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive for seeded restart state");
 
         for block in blocks {
-            finalized_blocks
+            finalized_blocks = finalized_blocks
                 .put(block.height().get(), block.digest(), block.clone())
                 .await
                 .expect("failed to seed finalized block");
@@ -469,7 +469,7 @@ mod tests {
             .expect("failed to sync seeded finalized blocks");
 
         for (height, finalization) in finalizations {
-            finalizations_by_height
+            finalizations_by_height = finalizations_by_height
                 .put(
                     height.get(),
                     finalization.proposal.payload,
@@ -534,7 +534,7 @@ mod tests {
             .expect("failed to sync cache metadata");
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
+        let notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
                 context.child("seed_notarized"),
                 prunable::Config {
@@ -1262,16 +1262,14 @@ mod tests {
 
             // Write a block into the cache.
             {
-                let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
                     context.child("write"),
                     make_cfg(),
                     (),
                 )
                 .await;
-                mgr.put_notarized(round, digest, block.clone())
-                    .await
-                    .await
-                    .expect("failed to sync block");
+                let (_mgr, handle) = mgr.put_notarized(round, digest, block.clone()).await;
+                handle.await.expect("failed to sync block");
             }
 
             // Re-init the cache (simulating restart). find_block should fail
@@ -1285,7 +1283,7 @@ mod tests {
                 "cache should not find block before loading persisted epochs"
             );
 
-            mgr.load_persisted_epochs().await;
+            mgr = mgr.load_persisted_epochs().await;
             assert_eq!(
                 mgr.find_block_matching(digest, |_| true).await,
                 Some(block),
@@ -1324,23 +1322,22 @@ mod tests {
             );
 
             {
-                let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
                     context.child("write"),
                     make_cfg(),
                     (),
                 )
                 .await;
-                drop(mgr.put_notarization(round, digest, notarization).await);
-                mgr.start_sync_notarizations(round)
-                    .await
-                    .await
-                    .expect("failed to sync notarizations");
+                let (mgr, handle) = mgr.put_notarization(round, digest, notarization).await;
+                drop(handle);
+                let (_mgr, sync) = mgr.start_sync_notarizations(round).await;
+                sync.await.expect("failed to sync notarizations");
             }
 
-            let mut mgr =
+            let mgr =
                 cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
                     .await;
-            mgr.load_persisted_epochs().await;
+            let mgr = mgr.load_persisted_epochs().await;
             assert!(
                 mgr.get_notarization(round).await.is_some(),
                 "notarization covered by the barrier must be durable"
@@ -6392,22 +6389,30 @@ mod tests {
         type Block = T::Block;
         type Error = T::Error;
 
-        async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-            self.inner.put(block).await
+        async fn put(mut self, block: Self::Block) -> Result<Self, Self::Error> {
+            self.inner = self.inner.put(block).await?;
+            Ok(self)
         }
 
-        async fn sync(&mut self) -> Result<(), Self::Error> {
+        async fn sync(mut self) -> Result<Self, Self::Error> {
             self.context.sleep(self.pace).await;
-            self.inner.sync().await
+            self.inner = self.inner.sync().await?;
+            Ok(self)
         }
 
-        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
-            let inner = self.inner.start_sync().await?;
+        async fn start_sync(
+            mut self,
+        ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
+            let handle;
+            (self.inner, handle) = self.inner.start_sync().await?;
             let sleep = self.context.sleep(self.pace);
-            Ok(commonware_runtime::Handle::from_future(async move {
-                sleep.await;
-                inner.await
-            }))
+            Ok((
+                self,
+                commonware_runtime::Handle::from_future(async move {
+                    sleep.await;
+                    handle.await
+                }),
+            ))
         }
 
         async fn get(
@@ -6417,8 +6422,9 @@ mod tests {
             self.inner.get(id).await
         }
 
-        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
-            self.inner.prune(min).await
+        async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
+            self.inner = self.inner.prune(min).await?;
+            Ok(self)
         }
 
         fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
@@ -6441,26 +6447,34 @@ mod tests {
         type Error = T::Error;
 
         async fn put(
-            &mut self,
+            mut self,
             height: Height,
             digest: Self::BlockDigest,
             finalization: Finalization<Self::Scheme, Self::Commitment>,
-        ) -> Result<(), Self::Error> {
-            self.inner.put(height, digest, finalization).await
+        ) -> Result<Self, Self::Error> {
+            self.inner = self.inner.put(height, digest, finalization).await?;
+            Ok(self)
         }
 
-        async fn sync(&mut self) -> Result<(), Self::Error> {
+        async fn sync(mut self) -> Result<Self, Self::Error> {
             self.context.sleep(self.pace).await;
-            self.inner.sync().await
+            self.inner = self.inner.sync().await?;
+            Ok(self)
         }
 
-        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
-            let inner = self.inner.start_sync().await?;
+        async fn start_sync(
+            mut self,
+        ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
+            let handle;
+            (self.inner, handle) = self.inner.start_sync().await?;
             let sleep = self.context.sleep(self.pace);
-            Ok(commonware_runtime::Handle::from_future(async move {
-                sleep.await;
-                inner.await
-            }))
+            Ok((
+                self,
+                commonware_runtime::Handle::from_future(async move {
+                    sleep.await;
+                    handle.await
+                }),
+            ))
         }
 
         async fn get(
@@ -6474,8 +6488,9 @@ mod tests {
             self.inner.has(height).await
         }
 
-        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
-            self.inner.prune(min).await
+        async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
+            self.inner = self.inner.prune(min).await?;
+            Ok(self)
         }
 
         fn last_index(&self) -> Option<Height> {

@@ -177,6 +177,9 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
+///
+/// Mutating functions consume the store and return it; storage failures panic, and a
+/// dropped future destroys the handle (recovery is re-initialization).
 pub struct Storage<E, V, P>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
@@ -339,27 +342,29 @@ where
     /// Persists a dealer message for crash recovery.
     /// Returns false if the dealing was already stored.
     pub async fn append_dealing(
-        &mut self,
+        mut self,
         epoch: EpochNum,
         dealer: P,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> bool {
+    ) -> (Self, bool) {
         // Check if already stored
         if self.has_cached(epoch, |c| &c.dealings, &dealer) {
-            return false;
+            return (self, false);
         }
 
         // Persist to journal
         let section = epoch.get();
-        self.msgs
+        (self.msgs, _, _) = self
+            .msgs
             .append(
                 section,
                 &Event::Dealing(dealer.clone(), pub_msg.clone(), priv_msg.clone()),
             )
             .await
             .expect("should be able to write to msgs");
-        self.msgs
+        self.msgs = self
+            .msgs
             .sync(section)
             .await
             .expect("should be able to sync msgs");
@@ -368,92 +373,111 @@ where
         self.get_or_create_epoch(epoch)
             .dealings
             .insert(dealer, (pub_msg, priv_msg));
-        true
+        (self, true)
     }
 
     /// Persists a player acknowledgment we received (as a dealer) for crash recovery.
     /// Returns false if the ack was already stored.
-    pub async fn append_ack(&mut self, epoch: EpochNum, player: P, ack: PlayerAck<P>) -> bool {
+    pub async fn append_ack(
+        mut self,
+        epoch: EpochNum,
+        player: P,
+        ack: PlayerAck<P>,
+    ) -> (Self, bool) {
         // Check if already stored
         if self.has_cached(epoch, |c| &c.acks, &player) {
-            return false;
+            return (self, false);
         }
 
         // Persist to journal
         let section = epoch.get();
-        self.msgs
+        (self.msgs, _, _) = self
+            .msgs
             .append(section, &Event::Ack(player.clone(), ack.clone()))
             .await
             .expect("should be able to write to msgs");
-        self.msgs
+        self.msgs = self
+            .msgs
             .sync(section)
             .await
             .expect("should be able to sync msgs");
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).acks.insert(player, ack);
-        true
+        (self, true)
     }
 
     /// Persists a finalized dealer log.
     /// Returns false if the log was already stored.
-    pub async fn append_log(&mut self, epoch: EpochNum, dealer: P, log: DealerLog<V, P>) -> bool {
+    pub async fn append_log(
+        mut self,
+        epoch: EpochNum,
+        dealer: P,
+        log: DealerLog<V, P>,
+    ) -> (Self, bool) {
         // Check if already stored
         if self.has_cached(epoch, |c| &c.logs, &dealer) {
-            return false;
+            return (self, false);
         }
 
         // Persist to journal
         let section = epoch.get();
-        self.msgs
+        (self.msgs, _, _) = self
+            .msgs
             .append(section, &Event::Log(dealer.clone(), log.clone()))
             .await
             .expect("should be able to write to msgs");
-        self.msgs
+        self.msgs = self
+            .msgs
             .sync(section)
             .await
             .expect("should be able to sync msgs");
 
         // Update in-memory cache
         self.get_or_create_epoch(epoch).logs.insert(dealer, log);
-        true
+        (self, true)
     }
 
     /// Persists epoch state.
-    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) {
+    pub async fn set_epoch(mut self, epoch: EpochNum, state: Epoch<V, P>) -> Self {
         // Persist to metadata using epoch number as key
         let epoch_key = epoch.get();
         if self.states.put(epoch_key, state.clone()).is_some() {
             warn!(%epoch, "overwriting existing epoch state");
         }
-        self.states
+        self.states = self
+            .states
             .sync()
             .await
             .expect("should be able to sync state");
 
         // Update in-memory state
         self.current = Some((epoch, state));
+        self
     }
 
     /// Removes all data from epochs older than `min`.
-    pub async fn prune(&mut self, min: EpochNum) {
+    pub async fn prune(mut self, min: EpochNum) -> Self {
         let min_epoch = min.get();
 
         // Prune msgs journal
-        self.msgs
+        (self.msgs, _) = self
+            .msgs
             .prune(min_epoch)
             .await
             .expect("should be able to prune msgs");
 
         // Prune states metadata - remove all epochs < min
         self.states.retain(|&epoch_key, _| epoch_key >= min_epoch);
-        self.states
+        self.states = self
+            .states
             .sync()
             .await
             .expect("should be able to sync states after prune");
 
         // Remove old epoch caches
         self.epochs.retain(|&epoch, _| epoch >= min);
+        self
     }
 
     /// Create a Dealer for the given epoch, replaying any stored acks.
@@ -548,30 +572,30 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     /// a player of this round, or after dealer finalization).
     pub async fn handle<E>(
         &mut self,
-        storage: &mut Storage<E, V, C::PublicKey>,
+        storage: Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) -> Verdict<()>
+    ) -> (Storage<E, V, C::PublicKey>, Verdict<()>)
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
     {
         if !self.unsent.contains_key(&player) {
-            return Verdict::Skip;
+            return (storage, Verdict::Skip);
         }
         let Some(dealer) = self.dealer.as_mut() else {
-            return Verdict::Skip;
+            return (storage, Verdict::Skip);
         };
         match dealer.receive_player_ack(player.clone(), ack.clone()) {
             Ok(()) => {
                 self.unsent.remove(&player);
-                storage.append_ack(epoch, player, ack).await;
-                Verdict::Valid(())
+                let (storage, _) = storage.append_ack(epoch, player, ack).await;
+                (storage, Verdict::Valid(()))
             }
             // The player signed an ack that does not verify: a provable fault.
-            Err(DkgError::InvalidAck) => Verdict::Fault,
+            Err(DkgError::InvalidAck) => (storage, Verdict::Fault),
             // Benign: the player is not part of this round.
-            Err(_) => Verdict::Skip,
+            Err(_) => (storage, Verdict::Skip),
         }
     }
 
@@ -629,19 +653,22 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// benign no-op (duplicate).
     pub async fn handle<E, M>(
         &mut self,
-        storage: &mut Storage<E, V, C::PublicKey>,
+        storage: Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Verdict<PlayerAck<C::PublicKey>>
+    ) -> (
+        Storage<E, V, C::PublicKey>,
+        Verdict<PlayerAck<C::PublicKey>>,
+    )
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
         M: Faults,
     {
         // If we've already generated an ack, return the cached version.
         if let Some(ack) = self.acks.get(&dealer) {
-            return Verdict::Valid(ack.clone());
+            return (storage, Verdict::Valid(ack.clone()));
         }
 
         // Otherwise process the dealing.
@@ -650,13 +677,13 @@ impl<V: Variant, C: Signer> Player<V, C> {
             .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
         {
             Verdict::Valid(ack) => {
-                storage
+                let (storage, _) = storage
                     .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
                     .await;
                 self.acks.insert(dealer, ack.clone());
-                Verdict::Valid(ack)
+                (storage, Verdict::Valid(ack))
             }
-            verdict => verdict,
+            verdict => (storage, verdict),
         }
     }
 
@@ -724,7 +751,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, _>::init(
+            let storage = Storage::<_, MinPk, _>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -748,8 +775,8 @@ mod tests {
             let fake_ack = PlayerAck::read(&mut signers[1].sign(b"ns", b"msg").encode().as_ref())
                 .expect("valid ack");
 
-            let result = dealer
-                .handle(&mut storage, Epoch::zero(), unknown_player, fake_ack)
+            let (_, result) = dealer
+                .handle(storage, Epoch::zero(), unknown_player, fake_ack)
                 .await;
 
             assert!(
@@ -766,7 +793,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            let storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -790,8 +817,8 @@ mod tests {
             let fake_ack: PlayerAck<ed25519::PublicKey> =
                 PlayerAck::read(&mut sig.encode().as_ref()).expect("valid ack");
 
-            let result = dealer
-                .handle(&mut storage, Epoch::zero(), player, fake_ack)
+            let (_, result) = dealer
+                .handle(storage, Epoch::zero(), player, fake_ack)
                 .await;
 
             assert!(
@@ -808,7 +835,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, _>::init(
+            let storage = Storage::<_, MinPk, _>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -847,9 +874,7 @@ mod tests {
                 panic!("valid ack");
             };
 
-            let result = dealer
-                .handle(&mut storage, Epoch::zero(), player_pk, ack)
-                .await;
+            let (_, result) = dealer.handle(storage, Epoch::zero(), player_pk, ack).await;
 
             assert!(
                 matches!(result, Verdict::Valid(())),
@@ -865,7 +890,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            let storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -905,8 +930,8 @@ mod tests {
             };
 
             // First ack should succeed
-            let result = dealer
-                .handle(&mut storage, Epoch::zero(), player_pk.clone(), ack.clone())
+            let (storage, result) = dealer
+                .handle(storage, Epoch::zero(), player_pk.clone(), ack.clone())
                 .await;
             assert!(
                 matches!(result, Verdict::Valid(())),
@@ -914,9 +939,7 @@ mod tests {
             );
 
             // Second ack from same player should skip (player removed from unsent)
-            let result = dealer
-                .handle(&mut storage, Epoch::zero(), player_pk, ack)
-                .await;
+            let (_, result) = dealer.handle(storage, Epoch::zero(), player_pk, ack).await;
             assert!(matches!(result, Verdict::Skip), "duplicate ack should skip");
         });
     }
@@ -928,7 +951,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
+            let storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -950,8 +973,8 @@ mod tests {
                 PlayerAck::read(&mut signers[1].sign(b"ns", b"not an ack").encode().as_ref())
                     .expect("decodes");
 
-            let result = dealer
-                .handle(&mut storage, Epoch::zero(), player_pk, bad_ack)
+            let (_, result) = dealer
+                .handle(storage, Epoch::zero(), player_pk, bad_ack)
                 .await;
             assert!(
                 matches!(result, Verdict::Fault),

@@ -106,9 +106,25 @@ pub struct Config<C> {
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
+///
+/// Mutating functions consume the journal and return it only on success: an error (or a dropped
+/// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
+/// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
+/// [Oversized::oldest_section] first to keep the handle.
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
+}
+
+impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug
+    for Oversized<E, I, V>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Oversized")
+            .field("oldest_section", &self.oldest_section())
+            .field("newest_section", &self.newest_section())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
@@ -148,13 +164,13 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         };
         let values = Glob::init(context.child("values"), value_cfg).await?;
 
-        let mut oversized = Self { index, values };
+        let oversized = Self { index, values };
 
         // Perform crash recovery
-        match checkpoint {
+        let oversized = match checkpoint {
             Some((section, index_size)) => oversized.restore(section, index_size).await?,
             None => oversized.repair().await?,
-        }
+        };
 
         Ok(oversized)
     }
@@ -165,7 +181,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// are appended sequentially and value offsets are monotonically increasing within a
     /// section, all earlier entries must be range-valid (their value checksums are
     /// verified lazily at read).
-    async fn repair(&mut self) -> Result<(), Error> {
+    async fn repair(mut self) -> Result<Self, Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
@@ -201,7 +217,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     section,
                     index_size, aligned_size, "trailing bytes detected: truncating"
                 );
-                self.index.rewind_section(section, aligned_size).await?;
+                self.index = self.index.rewind_section(section, aligned_size).await?;
                 rewound_index.push(section);
             }
 
@@ -211,7 +227,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     section,
                     index_size, "trailing bytes detected: truncating to 0"
                 );
-                self.values.rewind_section(section, 0).await?;
+                self.values = self.values.rewind_section(section, 0).await?;
                 if glob_size > 0 {
                     rewound_values.push(section);
                 }
@@ -227,7 +243,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             if valid_count < entry_count {
                 let valid_size = valid_count * chunk_size;
                 debug!(section, entry_count, valid_count, "rewinding index");
-                self.index.rewind_section(section, valid_size).await?;
+                self.index = self.index.rewind_section(section, valid_size).await?;
                 rewound_index.push(section);
             }
 
@@ -238,7 +254,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     section,
                     glob_size, glob_target, "truncating glob trailing garbage"
                 );
-                self.values.rewind_section(section, glob_target).await?;
+                self.values = self.values.rewind_section(section, glob_target).await?;
                 rewound_values.push(section);
             }
         }
@@ -248,18 +264,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // referencing whatever bytes a subsequent append placed at its offsets, and stale
         // glob bytes that stayed durable would satisfy a later entry's range with another
         // record's frame.
-        self.values.sync(&rewound_values).await?;
-        self.index.sync(&rewound_index).await?;
+        self.values = self.values.sync(&rewound_values).await?;
+        self.index = self.index.sync(&rewound_index).await?;
 
         // Clean up orphan value sections that don't exist in index
-        self.cleanup_orphan_value_sections().await?;
-
-        Ok(())
+        self.cleanup_orphan_value_sections().await
     }
 
     /// Restore the journals to exactly the durable state `(section, index_size)`
     /// describes (see [Self::init]).
-    async fn restore(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
+    async fn restore(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         // Sections below the checkpoint were durable when it was published and never
         // appended to again, so anything but a fully consistent section is
         // unrecoverable loss, never crash debris. Adopt them unchanged.
@@ -297,13 +311,13 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Truncate to the checkpoint and remove everything after it, durably (see
         // Self::rewind). Later appends can only reuse the freed offsets once the
         // truncations are durable.
-        self.rewind(section, index_size).await?;
+        self = self.rewind(section, index_size).await?;
 
         // The retained glob must cover exactly the committed values.
         let glob_size = self.values.size(section)?;
         self.verify_complete(section, index_size, glob_size).await?;
 
-        Ok(())
+        Ok(self)
     }
 
     /// Verify a section's journals agree: the last entry's value range must end exactly
@@ -351,7 +365,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// writing to index for a new section. Since sections don't have to be
     /// contiguous, we compare the actual sets of sections rather than just
     /// comparing the newest section numbers.
-    async fn cleanup_orphan_value_sections(&mut self) -> Result<(), Error> {
+    async fn cleanup_orphan_value_sections(mut self) -> Result<Self, Error> {
         // Collect index sections into a set for O(1) lookup
         let index_sections: HashSet<u64> = self.index.sections().collect();
 
@@ -365,10 +379,10 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Remove each orphan section
         for section in orphan_sections {
             warn!(section, "removing orphan value section");
-            self.values.remove_section(section).await?;
+            (self.values, _) = self.values.remove_section(section).await?;
         }
 
-        Ok(())
+        Ok(self)
     }
 
     /// Find the number of valid entries and the corresponding glob target size.
@@ -418,20 +432,22 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// - `offset`: Byte offset in glob
     /// - `size`: Size of value in glob (including checksum)
     pub async fn append(
-        &mut self,
+        mut self,
         section: u64,
         entry: I,
         value: &V,
-    ) -> Result<(u64, u64, u32), Error> {
+    ) -> Result<(Self, u64, u64, u32), Error> {
         // Write value first (glob). This will typically write to an in-memory
         // buffer and return quickly (only blocks when the buffer is full).
-        let (offset, size) = self.values.append(section, value).await?;
+        let (offset, size);
+        (self.values, offset, size) = self.values.append(section, value).await?;
 
         // Update entry with actual location and write to index
         let entry_with_location = entry.with_location(offset, size);
-        let position = self.index.append(section, &entry_with_location).await?;
+        let position;
+        (self.index, position) = self.index.append(section, &entry_with_location).await?;
 
-        Ok((position, offset, size))
+        Ok((self, position, offset, size))
     }
 
     /// Get entry at position (index entry only, not value).
@@ -473,37 +489,42 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Sync both journals for the given `sections`.
-    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+    pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
         let sections = sections.sections().collect::<Vec<_>>();
-        try_join(self.index.sync(&sections), self.values.sync(&sections))
-            .await
-            .map(|_| ())
+        (self.index, self.values) =
+            try_join(self.index.sync(&sections), self.values.sync(&sections)).await?;
+        Ok(self)
     }
 
     /// Start syncing both journals for the given `sections`.
     ///
     /// The returned handle completes once both journals' syncs complete, failing with the first
-    /// error encountered.
+    /// error encountered. An error reported by the handle is fatal to the journal: the caller
+    /// must stop using (or destroy) the returned journal and recover by re-initializing.
     pub async fn start_sync(
-        &mut self,
+        mut self,
         sections: impl crate::Sections,
-    ) -> Result<Handle<()>, Error> {
+    ) -> Result<(Self, Handle<()>), Error> {
         let sections = sections.sections().collect::<Vec<_>>();
-        let (index, values) = try_join(
+        let ((index, index_handle), (values, values_handle)) = try_join(
             self.index.start_sync(&sections),
             self.values.start_sync(&sections),
         )
         .await?;
-        Ok(Handle::from_future(async move {
-            try_join(index, values).await.map(|_| ())
-        }))
+        self.index = index;
+        self.values = values;
+        Ok((
+            self,
+            Handle::from_future(
+                async move { try_join(index_handle, values_handle).await.map(|_| ()) },
+            ),
+        ))
     }
 
     /// Sync all sections.
-    pub async fn sync_all(&mut self) -> Result<(), Error> {
-        try_join(self.index.sync_all(), self.values.sync_all())
-            .await
-            .map(|_| ())
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        (self.index, self.values) = try_join(self.index.sync_all(), self.values.sync_all()).await?;
+        Ok(self)
     }
 
     /// Prune both journals. Returns true if any sections were pruned.
@@ -511,10 +532,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Prunes index first, then glob. This order ensures crash safety:
     /// - If crash after index prune but before glob: orphan data in glob (acceptable)
     /// - If crash before index prune: no change, retry works
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        let index_pruned = self.index.prune(min).await?;
-        let value_pruned = self.values.prune(min).await?;
-        Ok(index_pruned || value_pruned)
+    pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
+        let index_pruned;
+        (self.index, index_pruned) = self.index.prune(min).await?;
+        let value_pruned;
+        (self.values, value_pruned) = self.values.prune(min).await?;
+        Ok((self, index_pruned || value_pruned))
     }
 
     /// Rewind both journals to a specific section and index size.
@@ -526,9 +549,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// `section` to either its pre-rewind or its post-rewind state. Each journal removes
     /// its later sections (newest first) before truncating `section`, and those removals
     /// carry the storage layer's removal durability.
-    pub async fn rewind(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
+    pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         // Rewind index first (this also removes sections after `section`)
-        self.index.rewind(section, index_size).await?;
+        self.index = self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = match self.index.last(section).await {
@@ -547,11 +570,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // values frees their ranges for reuse by later appends, and a dropped index entry
         // that stayed durable would be adopted referencing whatever bytes a later append
         // placed at its offsets.
-        self.index.sync(section).await?;
+        self.index = self.index.sync(section).await?;
 
         // Rewind values (this also removes sections after `section`)
-        self.values.rewind(section, value_size).await?;
-        self.values.sync(section).await
+        self.values = self.values.rewind(section, value_size).await?;
+        self.values = self.values.sync(section).await?;
+        Ok(self)
     }
 
     /// Rewind only the given section to a specific index size.
@@ -560,9 +584,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// The value size is derived from the last entry after rewinding the index.
     ///
     /// Both truncations are made durable before returning (see [Self::rewind]).
-    pub async fn rewind_section(&mut self, section: u64, index_size: u64) -> Result<(), Error> {
+    pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         // Rewind index first
-        self.index.rewind_section(section, index_size).await?;
+        self.index = self.index.rewind_section(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = match self.index.last(section).await {
@@ -578,11 +602,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         };
 
         // Make the index truncation durable before the values are rewound (see Self::rewind).
-        self.index.sync(section).await?;
+        self.index = self.index.sync(section).await?;
 
         // Rewind values
-        self.values.rewind_section(section, value_size).await?;
-        self.values.sync(section).await
+        self.values = self.values.rewind_section(section, value_size).await?;
+        self.values = self.values.sync(section).await?;
+        Ok(self)
     }
 
     /// Get index size for checkpoint.
@@ -726,7 +751,8 @@ mod tests {
             // Append entry with value
             let value: TestValue = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
             let entry = TestEntry::new(42, 0, 0);
-            let (position, offset, size) = oversized
+            let (position, offset, size);
+            (oversized, position, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
@@ -765,13 +791,14 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let (position, offset, size) = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
                 locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash: truncate glob to lose last 2 values
@@ -827,11 +854,12 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(123, 0, 0);
-            let (position, offset, size) = oversized
+            let (position, offset, size);
+            (oversized, position, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Reopen and verify
@@ -869,7 +897,8 @@ mod tests {
             for section in 1u64..=3 {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                let (position, offset, size) = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
@@ -878,7 +907,7 @@ mod tests {
 
             // Sync sections 1 and 3 (both index and values); a nonexistent section (99) is
             // skipped, not an error.
-            oversized
+            oversized = oversized
                 .sync(&[1, 3, 99])
                 .await
                 .expect("Failed to sync sections");
@@ -937,23 +966,23 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Rewind entry 1 away and append entry 2 at entry 1's glob offset, then crash
             // between the value sync and the index sync: entry 2's bytes (same size, valid
             // checksum) become durable at the exact range entry 1 referenced. Only the
             // durable truncation in `rewind` prevents recovery from resurrecting entry 1
             // pointing at entry 2's value. The range and checksum checks cannot reject it.
-            oversized.rewind(1, 0).await.expect("Failed to rewind");
-            oversized
+            oversized = oversized.rewind(1, 0).await.expect("Failed to rewind");
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            oversized.values = oversized
                 .values
                 .sync(1)
                 .await
@@ -984,11 +1013,11 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized.index.sync(1).await.expect("Failed to sync index");
+            oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
         });
 
         // Boot 2: recovery rewinds entry 1 (its range is out of bounds) and must make that
@@ -1005,11 +1034,11 @@ mod tests {
                     0,
                     "entry without durable value bytes must be rewound"
                 );
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                     .await
                     .expect("Failed to append");
-                oversized
+                oversized.values = oversized
                     .values
                     .sync(1)
                     .await
@@ -1037,11 +1066,11 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Boot 2: the glob cannot be synced, so `rewind` must fail rather than return
@@ -1051,7 +1080,7 @@ mod tests {
                 inner: context.child("second"),
                 fail_partition: "test-values".into(),
             };
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
+            let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(faulty_values, test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
@@ -1083,23 +1112,23 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            oversized
+            oversized.index = oversized
                 .index
                 .rewind(1, chunk)
                 .await
                 .expect("Failed to rewind index");
-            oversized.index.sync(1).await.expect("Failed to sync index");
+            oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
         });
 
         // Boot 2: recovery truncates the glob to entry 1's end and must make that
@@ -1111,11 +1140,11 @@ mod tests {
                     Oversized::init(context.child("second"), test_cfg(&context), None)
                         .await
                         .expect("Failed to reinit");
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, TestEntry::new(3, 0, 0), &[3; 16])
                     .await
                     .expect("Failed to append");
-                oversized.index.sync(1).await.expect("Failed to sync index");
+                oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
             });
 
         // Boot 3: without a durable glob truncation in recovery, entry 3 would be
@@ -1139,25 +1168,25 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Replay `rewind(1, chunk)`'s steps up to the worst crash point: the index
             // truncation is durable but the freed value bytes are not yet rewound.
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            oversized
+            oversized.index = oversized
                 .index
                 .rewind(1, chunk)
                 .await
                 .expect("Failed to rewind index");
-            oversized.index.sync(1).await.expect("Failed to sync index");
+            oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
         });
 
         // Recovery must truncate the orphaned value bytes and land on the post-rewind
@@ -1189,11 +1218,11 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            let handle = oversized.start_sync(1).await.expect("Failed to start sync");
+            let (_oversized, handle) = oversized.start_sync(1).await.expect("Failed to start sync");
             handle.await.expect("sync must complete");
             // Crash: everything covered by the completed handle must survive.
         });
@@ -1222,7 +1251,7 @@ mod tests {
                 Oversized::init(faulty_values, test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
@@ -1259,14 +1288,14 @@ mod tests {
                 Oversized::init(faulty_values, test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
 
             // The value sync fails, so the handle must surface the failure and the caller
             // is never acknowledged.
-            let handle = oversized.start_sync(1).await.expect("Failed to start sync");
+            let (_oversized, handle) = oversized.start_sync(1).await.expect("Failed to start sync");
             assert!(handle.await.is_err(), "value sync must fail");
         });
 
@@ -1292,14 +1321,14 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
 
             // Drop the handle without observing it: the next sync must wait for the
             // started syncs and complete the work.
-            let handle = oversized.start_sync(1).await.expect("Failed to start sync");
+            let (oversized, handle) = oversized.start_sync(1).await.expect("Failed to start sync");
             drop(handle);
             oversized.sync(1).await.expect("Failed to sync");
         });
@@ -1325,26 +1354,27 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Append entry 2, make its index entry durable, then persist the glob's LENGTH
             // over entry 2's range without its bytes (writeback-mode metadata journaling):
             // overwrite the frame with same-length garbage and sync the values journal.
-            let (_, offset, size) = oversized
+            let (offset, size);
+            (oversized, _, offset, size) = oversized
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized.index.sync(1).await.expect("Failed to sync index");
+            oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
             oversized
                 .values
                 .inject(1, offset, vec![0xFF; size as usize])
                 .await
                 .expect("Failed to overwrite value bytes");
-            oversized
+            oversized.values = oversized
                 .values
                 .sync(1)
                 .await
@@ -1393,12 +1423,12 @@ mod tests {
                     .await
                     .expect("Failed to init");
             for i in 1..=5u8 {
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, TestEntry::new(i as u64, 0, 0), &[i; 16])
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Corrupt the CRC record of the THIRD entry's index page: the backward open
@@ -1454,20 +1484,20 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
-            oversized
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(2, TestEntry::new(3, 0, 0), &[3; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            oversized.index = oversized
                 .index
                 .sync(&[1, 2])
                 .await
@@ -1500,15 +1530,15 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(2, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1's values, simulating lost durable state below the
@@ -1545,15 +1575,16 @@ mod tests {
                 Oversized::init(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
-            let (_, offset, size) = oversized
+            let (offset, size);
+            (oversized, _, offset, size) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(2, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
 
             // Corrupt entry 1's committed value in place (sizes unchanged)
             oversized
@@ -1561,7 +1592,7 @@ mod tests {
                 .inject(1, offset, vec![0xFF; size as usize])
                 .await
                 .expect("Failed to corrupt value");
-            oversized.values.sync(1).await.expect("Failed to sync");
+            oversized.values = oversized.values.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Restore adopts the section without probing its values: the corruption
@@ -1605,15 +1636,15 @@ mod tests {
             for section in 1u64..=5 {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
 
             // Prune sections < 3
-            oversized.prune(3).await.expect("Failed to prune");
+            (oversized, _) = oversized.prune(3).await.expect("Failed to prune");
 
             // Sections 1, 2 should be gone
             assert!(oversized.get(1, 0).await.is_err());
@@ -1643,11 +1674,11 @@ mod tests {
             // Append to section 2 only (section 1 remains empty after being opened)
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(2, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(2).await.expect("Failed to sync");
+            oversized = oversized.sync(2).await.expect("Failed to sync");
             drop(oversized);
 
             // Reinitialize - recovery should handle the empty/non-existent section 1
@@ -1680,12 +1711,12 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate glob to 0 bytes - ALL entries become invalid
@@ -1710,7 +1741,8 @@ mod tests {
             // Should be able to append after recovery
             let value: TestValue = [99; 16];
             let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append after recovery");
@@ -1745,37 +1777,39 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                section1_locations.push(loc);
+                section1_locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Section 2: 5 entries
             let mut section2_locations = Vec::new();
             for i in 0..5u8 {
                 let value: TestValue = [10 + i; 16];
                 let entry = TestEntry::new(10 + i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(2, entry, &value)
                     .await
                     .expect("Failed to append");
-                section2_locations.push(loc);
+                section2_locations.push((position, offset, size));
             }
-            oversized.sync(2).await.expect("Failed to sync");
+            oversized = oversized.sync(2).await.expect("Failed to sync");
 
             // Section 3: 2 entries
             for i in 0..2u8 {
                 let value: TestValue = [20 + i; 16];
                 let entry = TestEntry::new(20 + i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(3, entry, &value)
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(3).await.expect("Failed to sync");
+            oversized = oversized.sync(3).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1 glob to keep only first entry
@@ -1857,12 +1891,12 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Corrupt the last page's CRC to trigger page-level integrity failure
@@ -1899,7 +1933,8 @@ mod tests {
             // Should be able to append after recovery
             let value: TestValue = [99; 16];
             let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append after recovery");
@@ -1934,12 +1969,12 @@ mod tests {
                 for i in 0..10u8 {
                     let value: TestValue = [(section as u8) * 10 + i; 16];
                     let entry = TestEntry::new(section * 100 + i as u64, 0, 0);
-                    oversized
+                    (oversized, _, _, _) = oversized
                         .append(section, entry, &value)
                         .await
                         .expect("Failed to append");
                 }
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -1978,11 +2013,11 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate glob to 0 - single entry becomes invalid
@@ -2023,13 +2058,14 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate glob to be off by 1 byte from last entry
@@ -2062,7 +2098,8 @@ mod tests {
             // Should be able to append after recovery
             let value: TestValue = [99; 16];
             let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append after recovery");
@@ -2095,12 +2132,12 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Delete the glob file entirely
@@ -2140,13 +2177,14 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate glob to keep only first 2 entries
@@ -2174,12 +2212,12 @@ mod tests {
             for i in 10..15u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append after recovery");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Verify new entries at positions 2, 3, 4, 5, 6
             for i in 0..5u8 {
@@ -2209,11 +2247,11 @@ mod tests {
             for section in 1u64..=3 {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -2229,8 +2267,8 @@ mod tests {
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
                 .expect("Failed to init glob");
-            glob.prune(2).await.expect("Failed to prune glob");
-            glob.sync_all().await.expect("Failed to sync glob");
+            (glob, _) = glob.prune(2).await.expect("Failed to prune glob");
+            glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
 
             // Reinitialize - should recover gracefully with warning
@@ -2266,11 +2304,11 @@ mod tests {
             for section in 1u64..=3 {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -2315,19 +2353,20 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Add more entries WITHOUT syncing (simulates unsynced writes)
             for i in 10..15u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
@@ -2397,13 +2436,14 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash: truncate INDEX but leave GLOB intact
@@ -2449,7 +2489,8 @@ mod tests {
             for i in 10..13u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let (position, offset, size) = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append after recovery");
@@ -2470,7 +2511,7 @@ mod tests {
             }
 
             // Sync and restart again to verify persistence with orphan data
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Reinitialize after adding data on top of orphan glob data
@@ -2532,12 +2573,12 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash during write: truncate index to partial entry
@@ -2570,7 +2611,8 @@ mod tests {
             // Append new entry after recovery
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append after recovery");
@@ -2603,11 +2645,11 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate index to only partial data (less than one full entry)
@@ -2631,7 +2673,8 @@ mod tests {
             // Should be able to append after recovery
             let value: TestValue = [99; 16];
             let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append after recovery");
@@ -2681,13 +2724,14 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash during rewind: truncate index to 2 entries but leave glob intact
@@ -2720,7 +2764,8 @@ mod tests {
             assert!(oversized.get(1, 2).await.is_err());
 
             // Should be able to append new entries
-            let (pos, _, _) = oversized
+            let pos;
+            (oversized, pos, _, _) = oversized
                 .append(1, TestEntry::new(100, 0, 0), &[100u8; 16])
                 .await
                 .expect("Failed to append");
@@ -2747,13 +2792,14 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash during rewind: truncate glob to 2 entries but leave index intact
@@ -2785,7 +2831,8 @@ mod tests {
             // Should be able to append after recovery
             let value: TestValue = [99; 16];
             let entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append after recovery");
@@ -2815,11 +2862,12 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            let (_, offset, _size) = oversized
+            let (offset, _size);
+            (oversized, _, offset, _size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Size 0 - should fail
             assert!(oversized.get_value(1, offset, 0).await.is_err());
@@ -2856,11 +2904,12 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            let (_, offset, correct_size) = oversized
+            let (offset, correct_size);
+            (oversized, _, offset, correct_size) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Size too small - will fail to decode or checksum mismatch
             // (checksum mismatch can occur because we read wrong bytes as the checksum)
@@ -2893,11 +2942,11 @@ mod tests {
             for section in 1u64..=2 {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -2912,10 +2961,11 @@ mod tests {
                 .await
                 .expect("Failed to init glob");
             let orphan_value: TestValue = [99; 16];
-            glob.append(3, &orphan_value)
+            (glob, _, _) = glob
+                .append(3, &orphan_value)
                 .await
                 .expect("Failed to append orphan");
-            glob.sync(3).await.expect("Failed to sync glob");
+            glob = glob.sync(3).await.expect("Failed to sync glob");
             drop(glob);
 
             // Reinitialize - should detect and remove the orphan section
@@ -2949,11 +2999,11 @@ mod tests {
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Manually create multiple orphan value sections (2, 3, 4)
@@ -2969,10 +3019,11 @@ mod tests {
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
+                (glob, _, _) = glob
+                    .append(section, &orphan_value)
                     .await
                     .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
+                glob = glob.sync(section).await.expect("Failed to sync glob");
             }
             drop(glob);
 
@@ -3011,10 +3062,11 @@ mod tests {
 
             for section in 1u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
+                (glob, _, _) = glob
+                    .append(section, &orphan_value)
                     .await
                     .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
+                glob = glob.sync(section).await.expect("Failed to sync glob");
             }
             drop(glob);
 
@@ -3046,11 +3098,12 @@ mod tests {
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
-            let (_, offset1, size1) = oversized
+            let (offset1, size1);
+            (oversized, _, offset1, size1) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Manually create orphan value sections (2, 3)
@@ -3066,10 +3119,11 @@ mod tests {
 
             for section in 2u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
+                (glob, _, _) = glob
+                    .append(section, &orphan_value)
                     .await
                     .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
+                glob = glob.sync(section).await.expect("Failed to sync glob");
             }
             drop(glob);
 
@@ -3091,7 +3145,8 @@ mod tests {
             // Should be able to append to section 2 after recovery
             let new_value: TestValue = [42; 16];
             let new_entry = TestEntry::new(42, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(2, new_entry, &new_value)
                 .await
                 .expect("Failed to append after recovery");
@@ -3107,7 +3162,7 @@ mod tests {
             assert_eq!(retrieved_value, new_value);
 
             // Sync and restart to verify persistence
-            oversized.sync(2).await.expect("Failed to sync");
+            oversized = oversized.sync(2).await.expect("Failed to sync");
             drop(oversized);
 
             let oversized: Oversized<_, TestEntry, TestValue> =
@@ -3139,11 +3194,11 @@ mod tests {
             for section in 1u64..=3 {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -3178,11 +3233,11 @@ mod tests {
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Manually create orphan value section 2
@@ -3196,10 +3251,11 @@ mod tests {
                 .await
                 .expect("Failed to init glob");
             let orphan_value: TestValue = [2; 16];
-            glob.append(2, &orphan_value)
+            (glob, _, _) = glob
+                .append(2, &orphan_value)
                 .await
                 .expect("Failed to append orphan");
-            glob.sync(2).await.expect("Failed to sync glob");
+            glob = glob.sync(2).await.expect("Failed to sync glob");
             drop(glob);
 
             // Now truncate index section 1 to 0 (making it empty but still tracked)
@@ -3244,11 +3300,11 @@ mod tests {
             for section in [1u64, 3, 5] {
                 let value: TestValue = [section as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized.sync(section).await.expect("Failed to sync");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -3265,10 +3321,11 @@ mod tests {
 
             for section in [2u64, 4, 6] {
                 let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
+                (glob, _, _) = glob
+                    .append(section, &orphan_value)
                     .await
                     .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
+                glob = glob.sync(section).await.expect("Failed to sync glob");
             }
             drop(glob);
 
@@ -3312,13 +3369,14 @@ mod tests {
             for i in 0..2u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Record where next entry SHOULD start (end of entry 1)
             let expected_next_offset = byte_end(locations[1].1, locations[1].2);
@@ -3361,7 +3419,8 @@ mod tests {
             // Append new entry - should start at expected_next_offset, NOT at garbage end
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
-            let (pos, offset, _size) = oversized
+            let (pos, offset, _size);
+            (oversized, pos, offset, _size) = oversized
                 .append(1, new_entry, &new_value)
                 .await
                 .expect("Failed to append after recovery");
@@ -3409,11 +3468,11 @@ mod tests {
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Build a corrupted entry with offset near u64::MAX that would overflow.
@@ -3463,7 +3522,8 @@ mod tests {
             // Should be able to append after recovery
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
-            let (pos, new_offset, _) = oversized
+            let (pos, new_offset);
+            (oversized, pos, new_offset, _) = oversized
                 .append(1, new_entry, &new_value)
                 .await
                 .expect("Failed to append after recovery");
@@ -3494,21 +3554,21 @@ mod tests {
             for i in 0..3u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                oversized
+                (oversized, _, _, _) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Also create section 2 to ensure it survives
             let value2: TestValue = [10; 16];
             let entry2 = TestEntry::new(10, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(2, entry2, &value2)
                 .await
                 .expect("Failed to append to section 2");
-            oversized.sync(2).await.expect("Failed to sync section 2");
+            oversized = oversized.sync(2).await.expect("Failed to sync section 2");
             drop(oversized);
 
             // Truncate section 1's index to 0 (making it empty)
@@ -3543,14 +3603,15 @@ mod tests {
             // affect correctness - new entries simply append after the orphan data.
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
-            let (pos, offset, size) = oversized
+            let (pos, offset, size);
+            (oversized, pos, offset, size) = oversized
                 .append(1, new_entry, &new_value)
                 .await
                 .expect("Failed to append to empty section");
             assert_eq!(pos, 0);
             // Glob offset is non-zero because orphan data wasn't truncated
             assert!(offset > 0);
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Verify the new entry is readable despite orphan data before it
             let entry = oversized.get(1, 0).await.expect("Failed to get");
@@ -3595,11 +3656,12 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            let (_, offset, _) = oversized
+            let offset;
+            (oversized, _, offset, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Size = 4 (exactly CRC_SIZE) means 0 bytes of actual data
             // This should fail with ChecksumMismatch or decode error
@@ -3624,11 +3686,12 @@ mod tests {
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
-            let (_, offset, _) = oversized
+            let offset;
+            (oversized, _, offset, _) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Size = 5 means 1 byte of actual data (after stripping CRC)
             // This should fail with checksum mismatch since we're reading wrong bytes
@@ -3660,12 +3723,13 @@ mod tests {
             for &section in &large_sections {
                 let value: TestValue = [(section & 0xFF) as u8; 16];
                 let entry = TestEntry::new(section, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push((section, loc));
-                oversized.sync(section).await.expect("Failed to sync");
+                locations.push((section, (position, offset, size)));
+                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
             drop(oversized);
 
@@ -3704,7 +3768,7 @@ mod tests {
             // Verify we can still append to these large sections
             let new_value: TestValue = [0xAB; 16];
             let new_entry = TestEntry::new(999, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(middle_section, new_entry, &new_value)
                 .await
                 .expect("Failed to append after recovery");
@@ -3732,13 +3796,14 @@ mod tests {
             for i in 0..5u8 {
                 let value: TestValue = [i; 16];
                 let entry = TestEntry::new(i as u64, 0, 0);
-                let loc = oversized
+                let (position, offset, size);
+                (oversized, position, offset, size) = oversized
                     .append(1, entry, &value)
                     .await
                     .expect("Failed to append");
-                locations.push(loc);
+                locations.push((position, offset, size));
             }
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Phase 2: Simulate first crash - truncate glob to lose last 2 entries
@@ -3794,7 +3859,8 @@ mod tests {
             // Verify append works after nested crash recovery
             let new_value: TestValue = [0xFF; 16];
             let new_entry = TestEntry::new(100, 0, 0);
-            let (pos, offset, _size) = oversized
+            let (pos, offset, _size);
+            (oversized, pos, offset, _size) = oversized
                 .append(1, new_entry, &new_value)
                 .await
                 .expect("Failed to append");
@@ -3823,11 +3889,12 @@ mod tests {
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
-            let (_, offset1, size1) = oversized
+            let (offset1, size1);
+            (oversized, _, offset1, size1) = oversized
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(1).await.expect("Failed to sync");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
             // Phase 2: Create orphan value sections 2, 3, 4 (no index entries)
@@ -3843,10 +3910,11 @@ mod tests {
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
-                glob.append(section, &orphan_value)
+                (glob, _, _) = glob
+                    .append(section, &orphan_value)
                     .await
                     .expect("Failed to append orphan");
-                glob.sync(section).await.expect("Failed to sync glob");
+                glob = glob.sync(section).await.expect("Failed to sync glob");
             }
             drop(glob);
 
@@ -3879,7 +3947,8 @@ mod tests {
             // Should be able to append to section 2 (now clean)
             let new_value: TestValue = [42; 16];
             let new_entry = TestEntry::new(42, 0, 0);
-            let (pos, _, _) = oversized
+            let pos;
+            (oversized, pos, _, _) = oversized
                 .append(2, new_entry, &new_value)
                 .await
                 .expect("Failed to append to section 2");
@@ -3901,13 +3970,13 @@ mod tests {
 
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(0, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync(0).await.expect("Failed to sync");
+            oversized = oversized.sync(0).await.expect("Failed to sync");
 
-            oversized
+            oversized = oversized
                 .rewind(0, 0)
                 .await
                 .expect("rewind to zero index_size must not fail");
@@ -3930,7 +3999,7 @@ mod tests {
                     .await
                     .expect("Failed to init");
 
-            oversized
+            oversized = oversized
                 .rewind(0, 0)
                 .await
                 .expect("rewind on missing section must not fail");
@@ -3950,18 +4019,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
-                    .await
-                    .expect("Failed to init");
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(context, cfg, None)
+                .await
+                .expect("Failed to init");
 
             let result = oversized.rewind(0, 1).await;
             assert!(
                 matches!(result, Err(Error::SectionOutOfRange(0))),
                 "nonzero index_size on missing section must fail, got: {result:?}"
             );
-
-            oversized.destroy().await.expect("Failed to destroy");
         });
     }
 
@@ -3970,18 +4036,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
-                    .await
-                    .expect("Failed to init");
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(context, cfg, None)
+                .await
+                .expect("Failed to init");
 
             let result = oversized.rewind_section(0, 1).await;
             assert!(
                 matches!(result, Err(Error::SectionOutOfRange(0))),
                 "nonzero index_size on missing section must fail, got: {result:?}"
             );
-
-            oversized.destroy().await.expect("Failed to destroy");
         });
     }
 
@@ -3996,17 +4059,17 @@ mod tests {
                     .expect("Failed to init");
 
             let value: TestValue = [1; 16];
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(0, TestEntry::new(1, 0, 0), &value)
                 .await
                 .expect("Failed to append");
-            oversized
+            (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(2, 0, 0), &value)
                 .await
                 .expect("Failed to append");
-            oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
 
-            oversized.prune(1).await.expect("Failed to prune");
+            (oversized, _) = oversized.prune(1).await.expect("Failed to prune");
 
             assert!(matches!(
                 oversized.last(0).await,

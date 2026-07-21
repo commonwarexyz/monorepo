@@ -10,7 +10,10 @@ use commonware_storage::{
 use std::{error::Error, future::Future};
 
 /// Durable store for [Finalizations](Finalization) keyed by height and block digest.
-pub trait Certificates: Send + Sync + 'static {
+///
+/// Mutating functions consume the store and return it only on success: an error (or a
+/// dropped future) destroys the handle, and recovery is re-initialization.
+pub trait Certificates: Send + Sync + Sized + 'static {
     /// The type of [Digest] used for block digests.
     type BlockDigest: Digest;
 
@@ -38,13 +41,13 @@ pub trait Certificates: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// `Ok(())` on success, or `Err` if the write fails.
+    /// The store on success, or `Err` if the write fails.
     fn put(
-        &mut self,
+        self,
         height: Height,
         digest: Self::BlockDigest,
         finalization: Finalization<Self::Scheme, Self::Commitment>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Buffer a finalization certificate and start syncing the resulting write.
     ///
@@ -52,29 +55,34 @@ pub trait Certificates: Send + Sync + 'static {
     /// reports the durability of all previously accepted writes, including the original write
     /// if its sync is still in flight.
     fn put_start_sync(
-        &mut self,
+        self,
         height: Height,
         digest: Self::BlockDigest,
         finalization: Finalization<Self::Scheme, Self::Commitment>,
-    ) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+    ) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
         async move {
-            self.put(height, digest, finalization).await?;
-            self.start_sync().await
+            self.put(height, digest, finalization)
+                .await?
+                .start_sync()
+                .await
         }
     }
 
     /// Flush all buffered writes to durable storage.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Request that all buffered writes are flushed to durable storage.
     ///
     /// The returned handle completes once every write accepted before this call is durable,
     /// including writes covered by a sync that is still in flight. Implementations without a
     /// non-blocking sync path may complete the sync before returning an already-finished handle.
-    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+    ///
+    /// An error reported by the returned [Handle] is fatal to the store: the caller must
+    /// stop using (or destroy) the returned store and recover by re-initializing.
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
         async move {
-            self.sync().await?;
-            Ok(Handle::ready(Ok(())))
+            let store = self.sync().await?;
+            Ok((store, Handle::ready(Ok(()))))
         }
     }
 
@@ -109,8 +117,8 @@ pub trait Certificates: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when pruning is applied or unnecessary; `Err` if pruning fails.
-    fn prune(&mut self, min: Height) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    /// The store when pruning is applied or unnecessary; `Err` if pruning fails.
+    fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Retrieves the highest stored finalization's application height.
     ///
@@ -123,7 +131,10 @@ pub trait Certificates: Send + Sync + 'static {
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
-pub trait Blocks: Send + Sync + 'static {
+///
+/// Mutating functions consume the store and return it only on success: an error (or a
+/// dropped future) destroys the handle, and recovery is re-initialization.
+pub trait Blocks: Send + Sync + Sized + 'static {
     /// The type of [Block] that is stored.
     type Block: Block;
 
@@ -140,7 +151,7 @@ pub trait Blocks: Send + Sync + 'static {
     /// # Arguments
     ///
     /// * `block`: The finalized block, which provides its `height()` and `digest()`.
-    fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn put(self, block: Self::Block) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Buffer a finalized block and start syncing the resulting write.
     ///
@@ -148,27 +159,27 @@ pub trait Blocks: Send + Sync + 'static {
     /// the durability of all previously accepted writes, including the original write if its
     /// sync is still in flight.
     fn put_start_sync(
-        &mut self,
+        self,
         block: Self::Block,
-    ) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
-        async move {
-            self.put(block).await?;
-            self.start_sync().await
-        }
+    ) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
+        async move { self.put(block).await?.start_sync().await }
     }
 
     /// Flush all buffered writes to durable storage.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Request that all buffered writes are flushed to durable storage.
     ///
     /// The returned handle completes once every write accepted before this call is durable,
     /// including writes covered by a sync that is still in flight. Implementations without a
     /// non-blocking sync path may complete the sync before returning an already-finished handle.
-    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Self::Error>> + Send {
+    ///
+    /// An error reported by the returned [Handle] is fatal to the store: the caller must
+    /// stop using (or destroy) the returned store and recover by re-initializing.
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
         async move {
-            self.sync().await?;
-            Ok(Handle::ready(Ok(())))
+            let store = self.sync().await?;
+            Ok((store, Handle::ready(Ok(()))))
         }
     }
 
@@ -197,8 +208,8 @@ pub trait Blocks: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when pruning is applied or unnecessary; `Err` if pruning fails.
-    fn prune(&mut self, min: Height) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    /// The store when pruning is applied or unnecessary; `Err` if pruning fails.
+    fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Returns up to `max` missing items starting from `start`.
     ///
@@ -260,19 +271,19 @@ where
     type Error = archive::Error;
 
     async fn put(
-        &mut self,
+        self,
         height: Height,
         digest: Self::BlockDigest,
         finalization: Finalization<S, Self::Commitment>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<Self, Self::Error> {
         Archive::put(self, height.get(), digest, finalization).await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(self) -> Result<Self, Self::Error> {
         Archive::sync(self).await
     }
 
-    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
         Archive::start_sync(self).await
     }
 
@@ -287,9 +298,9 @@ where
         <Self as Archive>::has(self, Identifier::Index(height.get())).await
     }
 
-    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
+    async fn prune(self, _: Height) -> Result<Self, Self::Error> {
         // Pruning is a no-op for immutable archives.
-        Ok(())
+        Ok(self)
     }
 
     fn last_index(&self) -> Option<Height> {
@@ -310,15 +321,15 @@ where
     type Block = B;
     type Error = archive::Error;
 
-    async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
+    async fn put(self, block: Self::Block) -> Result<Self, Self::Error> {
         Archive::put(self, block.height().get(), block.digest(), block).await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(self) -> Result<Self, Self::Error> {
         Archive::sync(self).await
     }
 
-    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
         Archive::start_sync(self).await
     }
 
@@ -329,9 +340,9 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
+    async fn prune(self, _: Height) -> Result<Self, Self::Error> {
         // Pruning is a no-op for immutable archives.
-        Ok(())
+        Ok(self)
     }
 
     fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
@@ -365,19 +376,19 @@ where
     type Error = archive::Error;
 
     async fn put(
-        &mut self,
+        self,
         height: Height,
         digest: Self::BlockDigest,
         finalization: Finalization<S, Self::Commitment>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<Self, Self::Error> {
         Archive::put(self, height.get(), digest, finalization).await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(self) -> Result<Self, Self::Error> {
         Archive::sync(self).await
     }
 
-    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
         Archive::start_sync(self).await
     }
 
@@ -392,7 +403,7 @@ where
         <Self as Archive>::has(self, Identifier::Index(height.get())).await
     }
 
-    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+    async fn prune(self, min: Height) -> Result<Self, Self::Error> {
         Self::prune(self, min.get()).await
     }
 
@@ -415,15 +426,15 @@ where
     type Block = B;
     type Error = archive::Error;
 
-    async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
+    async fn put(self, block: Self::Block) -> Result<Self, Self::Error> {
         Archive::put(self, block.height().get(), block.digest(), block).await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(self) -> Result<Self, Self::Error> {
         Archive::sync(self).await
     }
 
-    async fn start_sync(&mut self) -> Result<Handle<()>, Self::Error> {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
         Archive::start_sync(self).await
     }
 
@@ -434,7 +445,7 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+    async fn prune(self, min: Height) -> Result<Self, Self::Error> {
         Self::prune(self, min.get()).await
     }
 

@@ -153,12 +153,18 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations {
             match op {
                 Operation::Put { index, value } => {
-                    if let Some(ref mut cache) = cache_opt {
-                        let result = cache.put(index, value).await;
-                        if result.is_ok() {
+                    if let Some(cache) = cache_opt.take() {
+                        // Skip puts below the pruned floor: they would return
+                        // AlreadyPrunedTo, which consumes the cache.
+                        if !cache.pruned(index) {
+                            let cache =
+                                cache.put(index, value).await.expect("Put should not error");
                             // Cache put only inserts if index doesn't already exist
                             // Only update expected_data if this is a new index
                             expected_data.entry(index).or_insert(value);
+                            cache_opt = Some(cache);
+                        } else {
+                            cache_opt = Some(cache);
                         }
                     }
                 }
@@ -187,6 +193,7 @@ fn fuzz(input: FuzzInput) {
                         let section =
                             (index / input.config.items_per_blob) * input.config.items_per_blob;
                         let not_pruned = pruned_min.is_none_or(|min| section >= min);
+                        assert_eq!(cache.pruned(index), !not_pruned);
                         let should_exist = not_pruned && expected_data.contains_key(&index);
 
                         assert_eq!(has, should_exist);
@@ -237,14 +244,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    if let Some(ref mut cache) = cache_opt {
-                        cache.sync().await.expect("Sync should not error");
+                    if let Some(cache) = cache_opt.take() {
+                        cache_opt = Some(cache.sync().await.expect("Sync should not error"));
                     }
                 }
 
                 Operation::Prune { min } => {
-                    if let Some(ref mut cache) = cache_opt {
-                        cache.prune(min).await.expect("Prune should not error");
+                    if let Some(cache) = cache_opt.take() {
+                        cache_opt = Some(cache.prune(min).await.expect("Prune should not error"));
 
                         let section_min =
                             (min / input.config.items_per_blob) * input.config.items_per_blob;
@@ -272,7 +279,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        if let Some(mut cache) = cache_opt {
+        if let Some(cache) = cache_opt {
             cache.sync().await.ok();
         }
     });

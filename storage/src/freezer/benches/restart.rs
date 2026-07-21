@@ -18,8 +18,8 @@ fn bench_restart(c: &mut Criterion) {
         // Populate the freezer with random keys
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let checkpoint = builder.start(|ctx| async move {
-            let mut store = init(ctx, None).await;
-            append_random(&mut store, items).await;
+            let store = init(ctx, None).await;
+            let (store, _) = append_random(store, items).await;
             store.close().await.unwrap()
         });
 

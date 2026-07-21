@@ -58,8 +58,8 @@ where
     }
 }
 
-/// Implementation of `Cache` storage.
-pub struct Cache<E: Storage + Metrics, V: CodecShared> {
+/// The cache's state; boxed so the public [Cache] handle stays pointer-sized.
+struct Inner<E: Storage + Metrics, V: CodecShared> {
     items_per_blob: u64,
     journal: Journal<E, Record<V>>,
     pending: BTreeSet<u64>,
@@ -75,17 +75,14 @@ pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_blob) * self.items_per_blob
     }
 
-    /// Initialize a new `Cache` instance.
-    ///
-    /// The in-memory index for `Cache` is populated during this call
-    /// by replaying the journal.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+    /// See [Cache::init].
+    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
         let mut journal = Journal::<E, Record<V>>::init(
             context.child("journal"),
@@ -141,8 +138,8 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         })
     }
 
-    /// Retrieve an item from the [Cache].
-    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
+    /// See [Cache::get].
+    async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
@@ -158,26 +155,23 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         Ok(Some(record.value))
     }
 
-    /// Retrieve the next gap in the [Cache].
-    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+    /// See [Cache::next_gap].
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
     }
 
-    /// Returns the first index in the [Cache].
-    pub fn first(&self) -> Option<u64> {
+    /// See [Cache::first].
+    fn first(&self) -> Option<u64> {
         self.intervals.iter().next().map(|(&start, _)| start)
     }
 
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+    /// See [Cache::missing_items].
+    fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         self.intervals.missing_items(start, max)
     }
 
-    /// Check if an item exists in the [Cache].
-    pub fn has(&self, index: u64) -> bool {
+    /// See [Cache::has].
+    fn has(&self, index: u64) -> bool {
         // Update metrics
         self.has.inc();
 
@@ -185,11 +179,18 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         self.indices.contains_key(&index)
     }
 
-    /// Prune [Cache] to the provided `min`.
-    ///
-    /// If this is called with a min lower than the last pruned, nothing
-    /// will happen.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    /// See [Cache::pruned].
+    const fn pruned(&self, index: u64) -> bool {
+        match self.oldest_allowed {
+            Some(oldest_allowed) => index < oldest_allowed,
+            None => false,
+        }
+    }
+
+    /// See [Cache::prune].
+    //
+    // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<Box<Self>, Error> {
         // Update `min` to reflect section mask
         let min = self.section(min);
 
@@ -199,12 +200,12 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         {
             // We don't return an error in this case because the caller
             // shouldn't be burdened with converting `min` to some section.
-            return Ok(());
+            return Ok(self);
         }
         debug!(min, "pruning cache");
 
         // Prune journal
-        self.journal.prune(min).await.map_err(Error::Journal)?;
+        (self.journal, _) = self.journal.prune(min).await.map_err(Error::Journal)?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
@@ -233,13 +234,11 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         // pruned sections)
         self.oldest_allowed = Some(min);
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        Ok(self)
     }
 
-    /// Store an item in the [Cache].
-    ///
-    /// If the index already exists, put does nothing and returns.
-    pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
+    /// See [Cache::put].
+    async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -248,13 +247,14 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
         // Check for existing index
         if self.indices.contains_key(&index) {
-            return Ok(());
+            return Ok(self);
         }
 
         // Store item in journal
         let record = Record::new(index, value);
         let section = self.section(index);
-        let (offset, _) = self.journal.append(section, &record).await?;
+        let offset;
+        (self.journal, offset, _) = self.journal.append(section, &record).await?;
 
         // Store index
         self.indices.insert(index, offset);
@@ -267,28 +267,118 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        Ok(self)
+    }
+
+    /// See [Cache::sync].
+    async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.syncs.inc_by(self.pending.len() as u64);
+        self.journal = self.journal.sync(&self.pending).await?;
+        self.pending.clear();
+        Ok(self)
+    }
+
+    /// See [Cache::destroy].
+    async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await.map_err(Error::Journal)
+    }
+}
+
+/// Implementation of `Cache` storage.
+///
+/// Mutating functions consume the cache and return it only on success: an error (or a dropped
+/// future) destroys the handle, and recovery is re-initialization.
+pub struct Cache<E: Storage + Metrics, V: CodecShared>(Box<Inner<E, V>>);
+
+impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Cache<E, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache")
+            .field("first_index", &self.0.intervals.first_index())
+            .field("last_index", &self.0.intervals.last_index())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
+    /// Initialize a new `Cache` instance.
+    ///
+    /// The in-memory index for `Cache` is populated during this call
+    /// by replaying the journal.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Retrieve an item from the [Cache].
+    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
+        self.0.get(index).await
+    }
+
+    /// Retrieve the next gap in the [Cache].
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.0.next_gap(index)
+    }
+
+    /// Returns the first index in the [Cache].
+    pub fn first(&self) -> Option<u64> {
+        self.0.first()
+    }
+
+    /// Returns true when `index` is below the prune floor.
+    ///
+    /// Storing at a pruned index fails (and the failure consumes the cache), so callers
+    /// that race puts against pruning should check this before calling a put method.
+    pub fn pruned(&self, index: u64) -> bool {
+        self.0.pruned(index)
+    }
+
+    /// Returns up to `max` missing items starting from `start`.
+    ///
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `max` items are found or there are no more gaps to fill.
+    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        self.0.missing_items(start, max)
+    }
+
+    /// Check if an item exists in the [Cache].
+    pub fn has(&self, index: u64) -> bool {
+        self.0.has(index)
+    }
+
+    /// Prune [Cache] to the provided `min`.
+    ///
+    /// If this is called with a min lower than the last pruned, nothing
+    /// will happen.
+    pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
+        self.0 = self.0.prune(min).await?;
+        Ok(self)
+    }
+
+    /// Store an item in the [Cache].
+    ///
+    /// If the index already exists, put does nothing and returns. Storing below the prune
+    /// floor fails with [Error::AlreadyPrunedTo] without mutating; check [Cache::pruned]
+    /// first to keep the handle.
+    pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
+        self.0 = self.0.put(index, value).await?;
+        Ok(self)
     }
 
     /// Sync all pending writes.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.syncs.inc_by(self.pending.len() as u64);
-        self.journal.sync(&self.pending).await?;
-        self.pending.clear();
-        Ok(())
+    pub async fn sync(mut self) -> Result<Self, Error> {
+        self.0 = self.0.sync().await?;
+        Ok(self)
     }
 
     /// Stores an item in the [Cache] and syncs it, plus any other pending writes, to disk.
     ///
     /// If the index already exists, the cache is just synced.
-    pub async fn put_sync(&mut self, index: u64, value: V) -> Result<(), Error> {
-        self.put(index, value).await?;
-        self.sync().await
+    pub async fn put_sync(self, index: u64, value: V) -> Result<Self, Error> {
+        self.put(index, value).await?.sync().await
     }
 
     /// Remove all persistent data created by this [Cache].
     pub async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await.map_err(Error::Journal)
+        self.0.destroy().await
     }
 }
 

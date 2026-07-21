@@ -201,16 +201,23 @@ fn fuzz(input: FuzzInput) {
             for _ in 0..count {
                 let value: TestValue = [entry_id as u8; 16];
                 let entry = TestEntry::new(entry_id);
-                let _ = oversized.append(section, entry, &value).await;
+                oversized = match oversized.append(section, entry, &value).await {
+                    Ok((oversized, _, _, _)) => oversized,
+                    Err(_) => return,
+                };
                 entry_id += 1;
             }
-            let _ = oversized.sync(section).await;
+            oversized = match oversized.sync(section).await {
+                Ok(oversized) => oversized,
+                Err(_) => return,
+            };
         }
 
         if input.sync_before_corrupt {
             let _ = oversized.sync_all().await;
+        } else {
+            drop(oversized);
         }
-        drop(oversized);
 
         // Phase 2: Apply corruptions
         let mut index_page_integrity_may_be_invalidated = false;
@@ -337,6 +344,7 @@ fn fuzz(input: FuzzInput) {
                 append_result.is_ok(),
                 "Should be able to append to section {section} after recovery"
             );
+            (recovered, _, _, _) = append_result.unwrap();
         }
 
         let _ = recovered.destroy().await;

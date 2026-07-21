@@ -71,6 +71,11 @@ pub struct Config<C> {
 /// On restart, `ack_floor` is set to the journal's pruning boundary.
 /// Items that were pruned are gone; everything else is re-delivered.
 /// Applications must handle duplicates (idempotent processing).
+///
+/// Storage-mutating functions consume the queue and return it only on success: an error (or a
+/// dropped future) destroys the handle, and recovery is re-initialization. Methods that only
+/// update in-memory cursors ([Queue::dequeue], [Queue::ack], [Queue::ack_up_to], [Queue::reset])
+/// borrow the queue mutably instead.
 pub struct Queue<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
