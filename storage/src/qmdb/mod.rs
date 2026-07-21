@@ -68,13 +68,14 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::Spawner;
-use commonware_utils::{bitmap::BitMap, cache::Clock, channel::mpsc};
+use commonware_utils::{
+    bitmap::{Atomic, BitMap},
+    cache::Clock,
+    channel::mpsc,
+};
 use core::{num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, future::join_all, pin_mut};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod any;
@@ -466,14 +467,14 @@ type RoutedBatch<K> = Vec<(K, u64, bool)>;
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Sets the bits of the range's active locations in the
-/// shared `active` words (indexed over `activity`, the replayed region) and returns the populated
+/// shared `active` bitmap (indexed over `activity`, the replayed region) and returns the populated
 /// worker index along with the range's active-key count.
 async fn build_snapshot_worker<F, C, R>(
     log: Arc<C>,
     mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
     mut index: R,
     activity: Range<u64>,
-    active: Arc<Vec<AtomicU64>>,
+    active: Arc<Atomic>,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(R, usize), Error<F>>
 where
@@ -506,12 +507,10 @@ where
 
     // Reconstruct this range's share of the activity bitmap (in parallel with the other workers)
     // and count the active keys. Locations are partitioned across workers, so every bit has a
-    // single writer and workers collide only at word granularity (absorbed by the atomic or).
-    // The join publishes the words, so relaxed ordering suffices.
+    // single writer.
     let mut active_keys = 0;
     index.for_each_value(|loc| {
-        let bit = **loc - activity.start;
-        active[(bit / 64) as usize].fetch_or(1 << (bit % 64), Ordering::Relaxed);
+        active.set(**loc - activity.start);
         active_keys += 1;
     });
     Ok((index, active_keys))
@@ -596,10 +595,8 @@ where
     let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
     let end = log.bounds().end;
 
-    // All workers share one vector of (atomically updatable) words to track the activity bits.
-    let bits = end - floor;
-    let active: Arc<Vec<AtomicU64>> =
-        Arc::new((0..bits.div_ceil(64)).map(|_| AtomicU64::new(0)).collect());
+    // All workers share one atomic bitmap to track the activity bits.
+    let active = Arc::new(Atomic::zeroes(end - floor));
 
     // Spawn one worker per contiguous partition range, each owning its own reader and cache.
     let mut senders = Vec::with_capacity(workers);
@@ -688,17 +685,10 @@ where
         total_items += worker_keys;
     }
 
-    // Reassemble the shared word representation into the returned bitmap.
-    let words = Arc::into_inner(active).expect("workers were joined");
-    let mut words = words.into_iter().map(AtomicU64::into_inner);
-    let mut active = BitMap::with_capacity(bits);
-    for _ in 0..bits / 64 {
-        active.push_chunk(&words.next().expect("word per full chunk").to_le_bytes());
-    }
-    let trailing = words.next().unwrap_or_default();
-    for bit in 0..bits % 64 {
-        active.push((trailing >> bit) & 1 == 1);
-    }
+    // The join reclaimed exclusive ownership of the shared bitmap, so it can be read back.
+    let mut active = Arc::into_inner(active)
+        .expect("workers were joined")
+        .into_bitmap();
 
     // The last operation is the final commit (a log always ends with one), which stays active.
     // An empty log has none.
