@@ -102,12 +102,12 @@ where
                     span,
                     context,
                     ancestry,
-                    parent,
+                    upstream,
                     response,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.propose");
                     let input = Input {
-                        upstream: parent,
+                        upstream,
                         provider: self.provider.clone(),
                     };
                     self.processor

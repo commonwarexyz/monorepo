@@ -16,12 +16,12 @@ use tracing::{debug, field};
 
 /// Per-proposal input handed to an application wrapped by [`Application`].
 ///
-/// Carries the wrapper's parent input alongside the reshare `payload` selected
+/// Carries the wrapper's upstream input alongside the reshare `payload` selected
 /// and fetched for the block being proposed. The wrapped application attaches
-/// `payload` to the block it builds and uses `parent` for its own purposes.
-pub struct Input<Parent, V: Variant, C: Signer> {
+/// `payload` to the block it builds and uses `upstream` for its own purposes.
+pub struct Input<Upstream, V: Variant, C: Signer> {
     /// Input forwarded from the application wrapping the reshare wrapper.
-    pub parent: Parent,
+    pub upstream: Upstream,
 
     /// The reshare payload selected for this proposal, if any.
     pub payload: Option<Payload<V, C>>,
@@ -47,8 +47,8 @@ pub struct Input<Parent, V: Variant, C: Signer> {
 ///
 /// The wrapper is a plain [`Application`](commonware_consensus::Application), so
 /// it composes with any consensus application, including one adapted through
-/// [`stateful`](crate::stateful). It forwards its own parent input to the inner
-/// application as [`Input::parent`], so nesting under another
+/// [`stateful`](crate::stateful). It forwards its own upstream input to the inner
+/// application as [`Input::upstream`], so nesting under another
 /// input-providing application still works.
 pub struct Application<A, B, V, C>
 where
@@ -179,7 +179,7 @@ where
                 context,
                 ancestry,
                 Input {
-                    parent: input,
+                    upstream: input,
                     payload,
                 },
             )

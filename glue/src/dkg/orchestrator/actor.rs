@@ -34,10 +34,7 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
-use futures::{
-    FutureExt as _,
-    future::{self, Either},
-};
+use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -466,8 +463,8 @@ where
     /// epoch, no epoch can start until the floor epoch's boundary block
     /// finalizes with the next epoch's info.
     ///
-    /// Returns `None` when marshal becomes unavailable because the context is
-    /// shutting down.
+    /// Returns `None` when startup data cannot be fetched from marshal, which
+    /// requires the orchestrator to shut down.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
@@ -521,8 +518,8 @@ where
     /// startup path, the anchor artifact is the trusted source of boundary
     /// epoch info.
     ///
-    /// Returns `None` when marshal becomes unavailable because the context is
-    /// shutting down.
+    /// Returns `None` when the boundary block cannot be fetched from marshal,
+    /// which requires the orchestrator to shut down.
     async fn resolve_boundary(
         &mut self,
         epoch: Epoch,
@@ -534,13 +531,8 @@ where
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
         let Some(boundary) = self.marshal.get_block(height).await else {
-            // Marshal cancels pending reads when it stops; only an
-            // intact-but-absent boundary block is a retention violation.
-            if self.context.stopped().now_or_never().is_some() {
-                debug!(%height, "boundary block read canceled during shutdown");
-                return None;
-            }
-            panic!("missing finalized boundary block at height {height}");
+            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            return None;
         };
         let commitment = MV::commitment(&boundary);
         let block = MV::into_inner(boundary);
@@ -672,13 +664,8 @@ where
         }
 
         let Some(boundary) = self.marshal.get_block(height).await else {
-            // Marshal cancels pending reads when it stops; only an
-            // intact-but-absent boundary block is a retention violation.
-            if self.context.stopped().now_or_never().is_some() {
-                debug!(%height, "boundary block read canceled during shutdown");
-                return false;
-            }
-            panic!("missing finalized boundary block at height {height}");
+            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            return false;
         };
         let floor = Floor::Genesis(MV::commitment(&boundary));
 

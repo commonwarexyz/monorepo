@@ -30,7 +30,7 @@ where
         span: Span,
         context: (E, A::Context),
         ancestry: BoxedAncestry<A::Block>,
-        parent: A::Input,
+        upstream: A::Input,
         response: oneshot::Sender<Option<A::Block>>,
     },
 
@@ -208,7 +208,7 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        parent: Self::Input,
+        upstream: Self::Input,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -220,7 +220,7 @@ where
             span,
             context,
             ancestry: BoxedAncestry::new(ancestry),
-            parent,
+            upstream,
             response,
         });
         receiver.await.ok().flatten()

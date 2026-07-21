@@ -103,9 +103,10 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact, ordered::Set,
+        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
+        ordered::Set,
     };
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     const BACKFILL_CHANNEL: u64 = 0;
     const VOTE_CHANNEL: u64 = 1;
@@ -270,6 +271,7 @@ mod tests {
 
     struct Node {
         marshal: mocks::TestMarshalMailbox,
+        orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
         application: mocks::MockApplication,
         fence: Fence,
         orchestrator_handle: Handle<()>,
@@ -405,6 +407,7 @@ mod tests {
                     partition_prefix,
                 },
             );
+            let orchestrator = mailbox.clone();
             let reporters = Reporters::from((mocks::MarshalApplication::default(), mailbox));
             let marshal_handle = marshal_actor.start_unbuffered(reporters, resolver);
 
@@ -452,6 +455,7 @@ mod tests {
 
             Self {
                 marshal,
+                orchestrator,
                 application,
                 fence,
                 orchestrator_handle,
@@ -820,6 +824,34 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("orchestrator stayed alive after marshal shutdown");
+                },
+            };
+        });
+    }
+
+    #[test]
+    fn missing_boundary_block_stops_cleanly() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let mut cluster = Cluster::start_with_seeded_first(&mut context, 1, false).await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+            assert_eq!(proposal.round.epoch(), Epoch::zero());
+
+            let boundary = Arc::new(cluster.boundary.clone());
+            let node = &mut cluster.nodes[0];
+            let (acknowledgement, _waiter) = Exact::handle();
+            assert_eq!(
+                node.orchestrator
+                    .report(marshal::Update::Block(boundary, acknowledgement)),
+                Feedback::Ok
+            );
+
+            select! {
+                result = &mut node.orchestrator_handle => {
+                    result.expect("orchestrator should stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator stayed alive after boundary block lookup failed");
                 },
             };
         });

@@ -574,6 +574,8 @@ where
         _: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
+        // The reshare application wrapper validates payload placement and the
+        // final block's epoch info before delegating to this stateless leaf.
         true
     }
 }

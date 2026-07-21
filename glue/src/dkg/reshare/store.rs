@@ -127,17 +127,6 @@ where
     }
 }
 
-#[cfg(all(test, feature = "arbitrary"))]
-mod conformance {
-    use super::*;
-    use commonware_codec::conformance::CodecConformance;
-    use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
-
-    commonware_conformance::conformance_tests! {
-        CodecConformance<Event<MinSig, ed25519::PublicKey>>,
-    }
-}
-
 struct EpochCache<V: Variant, P: PublicKey> {
     dealings: BTreeMap<P, (DealerPubMsg<V>, DealerPrivMsg)>,
     acks: BTreeMap<P, PlayerAck<P>>,
@@ -1092,5 +1081,16 @@ mod tests {
             assert_eq!(secret_store.prunes(), vec![Epoch::new(1)]);
             assert!(!secret_store.has_share(Epoch::zero()));
         });
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Event<MinSig, ed25519::PublicKey>>,
     }
 }
