@@ -311,9 +311,12 @@ mod tests {
 
     #[test]
     fn test_hashset_malicious_allocation() {
+        // A length prefix advertising the maximum wire-encodable length (u32::MAX) with a
+        // single-element payload must fail with [Error::EndOfBuffer] without attempting the
+        // advertised allocation.
         let mut malicious_buf = BytesMut::new();
-        1_000_000usize.write(&mut malicious_buf);
-        1u32.write(&mut malicious_buf); // 1 element payload
+        (u32::MAX as usize).write(&mut malicious_buf);
+        1u32.write(&mut malicious_buf);
 
         let result = HashSet::<u32>::decode_cfg(malicious_buf.freeze(), &((..).into(), ()));
         assert!(matches!(result, Err(Error::EndOfBuffer)));

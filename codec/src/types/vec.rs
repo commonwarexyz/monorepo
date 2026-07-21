@@ -123,10 +123,12 @@ mod tests {
             Err(Error::ExtraData(1))
         ));
 
-        // Construct a buffer advertising a very large length but containing minimal payload.
+        // A length prefix advertising the maximum wire-encodable length (u32::MAX) with a
+        // single-byte payload must fail with [Error::EndOfBuffer] without attempting the
+        // advertised allocation.
         let mut malicious_buf = BytesMut::new();
-        1_000_000usize.write(&mut malicious_buf);
-        malicious_buf.put_u8(0x01); // 1-byte payload
+        (u32::MAX as usize).write(&mut malicious_buf);
+        malicious_buf.put_u8(0x01);
 
         assert!(matches!(
             Vec::<Byte>::decode_range(malicious_buf.clone().freeze(), ..),
@@ -140,11 +142,9 @@ mod tests {
 
     #[test]
     fn test_vec_read_vec_bounds_preallocation() {
+        // A huge requested length must fail with [Error::EndOfBuffer] without attempting the
+        // full pre-allocation (initial capacity is clamped to the bytes remaining).
         let mut buf = [0u8; 1].as_slice();
-
-        // Without the fix, calling read_vec with usize::MAX would call Vec::with_capacity(usize::MAX)
-        // and panic (capacity overflow).
-        // With the fix, capacity is bounded by buf.remaining() (1), so it doesn't panic.
         let result = Byte::read_vec(&mut buf, usize::MAX, &());
         assert!(matches!(result, Err(Error::EndOfBuffer)));
     }

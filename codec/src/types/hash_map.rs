@@ -378,10 +378,13 @@ mod tests {
 
     #[test]
     fn test_hashmap_malicious_allocation() {
+        // A length prefix advertising the maximum wire-encodable length (u32::MAX) with a
+        // single-entry payload must fail with [Error::EndOfBuffer] without attempting the
+        // advertised allocation.
         let mut malicious_buf = BytesMut::new();
-        1_000_000usize.write(&mut malicious_buf);
-        1u32.write(&mut malicious_buf); // 1 key
-        100u64.write(&mut malicious_buf); // 1 value
+        (u32::MAX as usize).write(&mut malicious_buf);
+        1u32.write(&mut malicious_buf);
+        100u64.write(&mut malicious_buf);
 
         let result =
             HashMap::<u32, u64>::decode_cfg(malicious_buf.freeze(), &((..).into(), ((), ())));
