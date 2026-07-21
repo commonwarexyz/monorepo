@@ -59,13 +59,11 @@
 mod common;
 
 use common::{
-    AnyOFixP3Db, AnyUFixP64kDb, Digest, PAGE_SIZE, any_fix_cfg_full, gen_random_kv,
-    make_fixed_value,
+    AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     Runner as _, Spawner as _, Supervisor as _,
-    buffer::paged::CacheRef,
     tokio::{Config, Context, Runner},
 };
 use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny};
@@ -380,11 +378,8 @@ fn get_bench(
         // never hit it, so the cold pass measures the storage layer through the same cache path
         // production runs.
         let cache_pages = cache_pages.unwrap_or(MIN_PAGE_CACHE_SIZE);
-        let page_cache = CacheRef::from_pooler(&ctx, PAGE_SIZE, cache_pages);
         let cache_mode = format!("{cache_pages} pages");
-        let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1));
-        config.merkle_config.page_cache = page_cache.clone();
-        config.journal_config.page_cache = page_cache;
+        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, NZUsize!(1));
 
         let batch_mode = batch.map_or_else(|| "point".to_string(), |b| format!("get_many x{b}"));
         println!(

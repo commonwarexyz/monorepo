@@ -196,7 +196,7 @@ macro_rules! impl_db_any {
             }
 
             async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
-                Self::get_many(self, keys).await
+                <$ty>::get_many(self, keys).await
             }
 
             fn root(&self) -> $dig {
