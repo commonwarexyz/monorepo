@@ -639,17 +639,22 @@ mod tests {
     }
 
     /// Network stress tests
-    pub(super) async fn stress_test_network_trait<N, F>(new_network: F)
+    pub(super) async fn stress_test_network_trait<N, F, S>(new_network: F, context: S)
     where
         F: Fn() -> N,
         N: crate::Network,
+        S: crate::Spawner + crate::Supervisor,
     {
-        stress_concurrent_streams(new_network()).await;
+        stress_concurrent_streams(new_network(), context).await;
     }
 
     /// Creates a large number of concurrent streams and sends messages
     /// back and forth between them.
-    async fn stress_concurrent_streams<N: crate::Network>(network: N) {
+    async fn stress_concurrent_streams<N, S>(network: N, context: S)
+    where
+        N: crate::Network,
+        S: crate::Spawner + crate::Supervisor,
+    {
         const NUM_CLIENTS: usize = 96;
         const NUM_MESSAGES: usize = 16_384;
         const MESSAGE_SIZE: usize = 4096;
@@ -664,16 +669,14 @@ mod tests {
         // Keep every connection alive until both the client and server halves finish.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
 
-        // Server branch: accept every client, echoing on already-accepted
-        // connections concurrently with later accepts so the ring sees a
-        // mixed accept and recv/send workload.
+        // Spawn a server task that echoes messages from many clients.
         let server_barrier = barrier.clone();
-        let server = async move {
-            let mut handlers = FuturesUnordered::new();
+        let server = context.child("server").spawn(move |context| async move {
+            let mut set = Vec::with_capacity(NUM_CLIENTS);
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 let barrier = server_barrier.clone();
-                handlers.push(async move {
+                set.push(context.child("echo").spawn(move |_| async move {
                     // Echo every message back to the connected client.
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE).await.unwrap();
@@ -682,19 +685,19 @@ mod tests {
 
                     // Hold the connection open until every peer has finished.
                     barrier.wait().await;
-                });
-                // Drive ready handlers without blocking the accept loop.
-                while let Some(Some(())) = handlers.next().now_or_never() {}
+                }));
             }
-            while handlers.next().await.is_some() {}
-        };
+            for handle in set {
+                handle.await.unwrap();
+            }
+        });
 
-        // Client branches.
-        let mut clients = Vec::new();
+        // Spawn all clients.
+        let mut set = Vec::with_capacity(NUM_CLIENTS);
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
             let barrier = barrier.clone();
-            clients.push(async move {
+            set.push(context.child("client").spawn(move |_| async move {
                 // Dial the server and repeatedly verify the echoed payload.
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
@@ -706,10 +709,13 @@ mod tests {
 
                 // Hold the connection open until every peer has finished.
                 barrier.wait().await;
-            });
+            }));
         }
 
-        // Wait for the server and all clients to complete.
-        join!(server, join_all(clients));
+        // Wait for all servers and clients to complete.
+        for handle in set {
+            handle.await.unwrap();
+        }
+        server.await.unwrap();
     }
 }

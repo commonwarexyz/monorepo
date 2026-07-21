@@ -383,7 +383,8 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Runner as _, Sink as _,
+        Stream as _,
         network::{tests, tokio as TokioNetwork},
         telemetry::metrics::Registry,
     };
@@ -421,22 +422,22 @@ mod tests {
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        // The stress suite multiplexes every stream inside one task, so a
-        // single recv can legitimately wait a long while between polls on a
-        // slow (e.g. coverage-instrumented) runner. Give it a budget sized
-        // for that: the suite verifies throughput and interleaving, not
-        // timeout enforcement.
-        tests::stress_test_network_trait(|| {
-            TokioNetwork::Network::new(
-                TokioNetwork::Config::default()
-                    .with_read_timeout(Duration::from_secs(120))
-                    .with_write_timeout(Duration::from_secs(120)),
-                test_pool(),
+    #[test]
+    fn test_stress_trait() {
+        crate::tokio::Runner::default().start(|context| async move {
+            tests::stress_test_network_trait(
+                || {
+                    TokioNetwork::Network::new(
+                        TokioNetwork::Config::default()
+                            .with_read_timeout(Duration::from_secs(15))
+                            .with_write_timeout(Duration::from_secs(15)),
+                        test_pool(),
+                    )
+                },
+                context,
             )
-        })
-        .await;
+            .await;
+        });
     }
 
     #[tokio::test]

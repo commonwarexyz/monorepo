@@ -656,7 +656,7 @@ mod tests {
     use super::{RawSocketAddr, Sink, Stream, local_addr, new_socket};
     use crate::{
         BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
-        Sink as _, Stream as _, iouring,
+        Runner as _, Sink as _, Stream as _, Supervisor as _, iouring,
         iouring::testing::{TestLoop, poll_once},
         network::{
             iouring::{Config, Network},
@@ -751,22 +751,21 @@ mod tests {
     #[test_group("slow")]
     #[test]
     fn test_stress_trait() {
-        // Exercise the io_uring backend under the shared stress suite. The
-        // suite multiplexes every stream inside one task, so a single recv
-        // can legitimately wait a long while between polls on a slow (e.g.
-        // coverage-instrumented) runner: give it a budget sized for that.
-        let (mut harness, network) = test_network_with_ring(
-            Config {
-                read_write_timeout: Duration::from_secs(120),
-                ..Default::default()
-            },
+        // Exercise the io_uring backend under the shared stress suite on the
+        // real runtime, with a ring large enough that nearly every stream can
+        // keep an operation in flight.
+        let runner = crate::iouring::Runner::new(crate::iouring::Config::default().with_ring(
             iouring::RingConfig {
                 size: 256,
                 ..Default::default()
             },
-        );
-        harness.block_on(tests::stress_test_network_trait(move || network.clone()));
-        assert_eq!(harness.tracked(), 0, "stress suite leaked waiter slots");
+        ));
+        runner.start(|context| async move {
+            // The context doubles as the network under test; contexts are
+            // only duplicable through the supervision tree.
+            let network = context.child("network");
+            tests::stress_test_network_trait(move || network.child("socket"), context).await;
+        });
     }
 
     #[test]
