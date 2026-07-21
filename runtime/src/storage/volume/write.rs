@@ -82,8 +82,9 @@ enum CrcUpdate {
 }
 
 /// One planned stretch: a single inner write plus its state updates,
-/// published only after the write completes (a failed write publishes
-/// nothing; its bytes land in space no table references).
+/// published only after the write completes. A failed write publishes no
+/// bookkeeping and poisons the volume: an in-place write may already have
+/// changed bytes in an extent the current state references.
 struct Stretch {
     /// First logical byte NOT covered by this stretch.
     end: u64,

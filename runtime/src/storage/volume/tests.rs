@@ -2374,6 +2374,44 @@ async fn test_volume_cancelled_write_after_inner_completion_poisons() {
     assert!(blob.read_at(0, 0).await.is_ok());
 }
 
+/// An inner backend may make partial or even full write progress before
+/// returning an error. If the target was an in-place run, the volume must
+/// poison rather than let a later sync acknowledge stale CRC bookkeeping.
+#[tokio::test]
+async fn test_volume_write_error_after_inner_completion_poisons() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let cfg = Config::default();
+    let volume = Volume::new(gated.clone(), pool.clone(), cfg.clone(), test_driver());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Keep the first run young so the failing overwrite is in-place.
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![b'A'; BLOCK as usize]))
+        .await
+        .unwrap();
+    gated.write_done_gate.arm_fail();
+    assert!(
+        blob.write_at(0, IoBuf::copy_from_slice(&vec![b'B'; BLOCK as usize]))
+            .await
+            .is_err(),
+        "the injected post-write error must reach the caller"
+    );
+    assert!(
+        blob.sync().await.is_err(),
+        "a later sync must not acknowledge bytes written by a failed operation"
+    );
+    drop(blob);
+    drop(volume);
+
+    // Neither uncommitted write may survive the restart; the last valid
+    // commit is the empty creation.
+    let recovered = Volume::new(gated, pool, cfg, test_driver());
+    let (blob, size) = recovered.open("p", b"b").await.unwrap();
+    assert_eq!(size, 0);
+    drop(blob);
+    audit_volume(&recovered, true);
+}
+
 /// A creation publishes its name before its commit completes. Cancelling the
 /// opening caller in that window must release its counted handle and poison
 /// the live volume so no second caller can observe an unconfirmed creation.
