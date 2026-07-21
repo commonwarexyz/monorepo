@@ -1360,7 +1360,11 @@ mod validation_tests {
             table_crc: Crc32::checksum(&older),
         };
         place(&mut image, Superblock::slot_offset(0), &older_sb.encode());
-        place(&mut image, 7 * BLOCK, &Crc32::checksum(&vec![7; BLOCK as usize]).to_be_bytes());
+        place(
+            &mut image,
+            7 * BLOCK,
+            &Crc32::checksum(&vec![7; BLOCK as usize]).to_be_bytes(),
+        );
 
         let mut candidate = partial_table();
         candidate.blobs[0].runs[0].physical = CHECKSUM_AT;

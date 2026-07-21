@@ -2003,10 +2003,9 @@ fn begin_snapshot(
             });
             let values = (0..covered_end)
                 .map(|l| {
-                    b.runs.get(&l).map_or(
-                        (Cell::Zero, Cell::Zero, CELLS_PER_BLOCK),
-                        run_fingerprint,
-                    )
+                    b.runs
+                        .get(&l)
+                        .map_or((Cell::Zero, Cell::Zero, CELLS_PER_BLOCK), run_fingerprint)
                 })
                 .collect::<Vec<_>>();
             (
@@ -2233,10 +2232,7 @@ pub(super) fn step(
         Action::SparseWrite(slot) => {
             let b = &s.volume.blobs[slot as usize];
             let cell = b.size.saturating_add(CELLS_PER_BLOCK);
-            if mutations_blocked
-                || batch_staged(&s, slot)
-                || !b.live
-                || cell >= CHECKSUM_MAX_CELLS
+            if mutations_blocked || batch_staged(&s, slot) || !b.live || cell >= CHECKSUM_MAX_CELLS
             {
                 return Ok(None);
             }
@@ -3128,13 +3124,12 @@ pub(super) fn step(
             // Mutation: install a page loaded through a superseded ref. A
             // subsequent chunk read trusts this cached value, so disagreement
             // with the current committed fingerprint is an I3 violation.
-            let expected =
-                current.and_then(|entry| {
-                    entry
-                        .runs
-                        .get(&page.lblock)
-                        .map(|&(_, c0, c1, span)| (c0, c1, span))
-                });
+            let expected = current.and_then(|entry| {
+                entry
+                    .runs
+                    .get(&page.lblock)
+                    .map(|&(_, c0, c1, span)| (c0, c1, span))
+            });
             if expected.is_some_and(|expected| expected != page.value) {
                 return Err(Violation {
                     trace: trace.to_vec(),
