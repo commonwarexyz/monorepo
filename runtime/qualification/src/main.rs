@@ -15,6 +15,10 @@
 //! ```
 //!
 //! `campaign` sends SIGKILL at reported write/commit/acknowledgement cut points.
+//! `recovery-campaign` repeatedly kills startup recovery, while
+//! `concurrent-campaign` kills after multiple direct and batch durability
+//! requests have started and checks every recovered state against a
+//! model-derived set of allowed group outcomes.
 //! This exercises process teardown and recovery over the real filesystem, but
 //! it does not evict the kernel page cache or device write cache. For VM,
 //! dm-flakey, or physical power-cut testing, run `worker` under the external
@@ -24,7 +28,8 @@
 #[cfg(unix)]
 mod unix {
     use commonware_runtime::{
-        tokio as runtime, Batchable as _, Blob as _, Runner as _, Storage as _, WriteBatch as _,
+        tokio as runtime, Batchable as _, Blob as _, Runner as _, Spawner as _, Storage as _,
+        Supervisor as _, WriteBatch as _,
     };
     use sha2::{Digest as _, Sha256};
     #[cfg(target_os = "macos")]
@@ -42,15 +47,29 @@ mod unix {
     };
 
     const PARTITION: &str = "fuzz";
-    const NAMES: [&[u8]; 3] = [b"large", b"left", b"right"];
+    const NAMES: [&[u8]; 10] = [
+        b"large",
+        b"left",
+        b"right",
+        b"writer-a",
+        b"writer-b",
+        b"writer-c",
+        b"batch-a",
+        b"batch-b",
+        b"recreated",
+        b"namespace-peer",
+    ];
     const JOURNAL: &str = "oracle.journal";
     const ORACLE_ENV: &str = "COMMONWARE_VOLUME_FUZZ_ORACLE";
     const STORAGE: &str = "storage";
     const RECORD_LEN: usize = 64;
     const RECORD_BODY: usize = 48;
-    const MAGIC: &[u8; 4] = b"CVF1";
+    const MAGIC: &[u8; 4] = b"CVF2";
     const READ_CHUNK: usize = 1 << 20;
     const DEFAULT_MAX_BYTES: u64 = 96 << 20;
+    const CONCURRENT_GROUPS: u8 = 6;
+    const CONCURRENT_FULL_MASK: u8 = (1 << CONCURRENT_GROUPS) - 1;
+    const CONCURRENT_WRITE_LEN: usize = 16 << 10;
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -71,13 +90,13 @@ mod unix {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct State {
-        blobs: [BlobState; 3],
+        blobs: [BlobState; NAMES.len()],
     }
 
     impl State {
-        const fn new() -> Self {
+        fn new() -> Self {
             Self {
-                blobs: [BlobState::new(), BlobState::new(), BlobState::new()],
+                blobs: std::array::from_fn(|_| BlobState::new()),
             }
         }
     }
@@ -105,6 +124,9 @@ mod unix {
             second_len: u64,
             salt: u64,
         },
+        ConcurrentEpoch {
+            salt: u64,
+        },
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +135,7 @@ mod unix {
         Begin { tx: u64, op: Op },
         Ack { tx: u64 },
         Abort { tx: u64 },
+        Adopt { tx: u64, mask: u8 },
     }
 
     #[derive(Clone, Debug)]
@@ -162,6 +185,64 @@ mod unix {
             chunk.copy_from_slice(&bytes[..chunk.len()]);
         }
         out
+    }
+
+    fn apply_concurrent_group(state: &mut State, salt: u64, group: u8) -> Result<(), AnyError> {
+        let append = |blob: &mut BlobState, salt| {
+            blob.content
+                .extend_from_slice(&payload(salt, CONCURRENT_WRITE_LEN));
+        };
+        match group {
+            0 => append(&mut state.blobs[3], salt),
+            1 => {
+                let blob = &mut state.blobs[4];
+                let offset = usize::try_from(blob.floor)?;
+                let end = offset
+                    .checked_add(CONCURRENT_WRITE_LEN)
+                    .ok_or("concurrent write end overflow")?;
+                blob.content.resize(blob.content.len().max(end), 0);
+                blob.content[offset..end]
+                    .copy_from_slice(&payload(salt ^ 0xa076_1d64_78bd_642f, CONCURRENT_WRITE_LEN));
+            }
+            2 => {
+                let len = state.blobs[5]
+                    .content
+                    .len()
+                    .checked_add(CONCURRENT_WRITE_LEN)
+                    .ok_or("concurrent resize overflow")?;
+                state.blobs[5].content.resize(len, 0);
+            }
+            3 => {
+                append(&mut state.blobs[6], salt ^ 0xe703_7ed1_a0b4_28db);
+                append(&mut state.blobs[7], salt ^ 0x8ebc_6af0_9c88_c6e3);
+            }
+            4 => {
+                append(&mut state.blobs[6], salt ^ 0x5899_65cc_7537_4cc3);
+                append(&mut state.blobs[7], salt ^ 0x1d8e_4e27_c47d_124f);
+            }
+            5 => {
+                state.blobs[8] = BlobState::new();
+                append(&mut state.blobs[9], salt ^ 0xeb44_acca_b455_d165);
+            }
+            _ => return Err("invalid concurrent group".into()),
+        }
+        Ok(())
+    }
+
+    fn apply_concurrent_mask(state: &mut State, salt: u64, mask: u8) -> Result<(), AnyError> {
+        if mask & !CONCURRENT_FULL_MASK != 0 || mask & (1 << 4) != 0 && mask & (1 << 3) == 0 {
+            return Err("invalid concurrent outcome mask".into());
+        }
+        for group in 0..CONCURRENT_GROUPS {
+            if mask & (1 << group) != 0 {
+                apply_concurrent_group(state, salt, group)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn concurrent_masks() -> impl Iterator<Item = u8> {
+        (0..=CONCURRENT_FULL_MASK).filter(|mask| mask & (1 << 4) == 0 || mask & (1 << 3) != 0)
     }
 
     fn apply(state: &mut State, op: Op) -> Result<(), AnyError> {
@@ -225,6 +306,9 @@ mod unix {
                         .ok_or("batch references an invalid blob")?;
                     blob.content.extend_from_slice(&payload(salt, len as usize));
                 }
+            }
+            Op::ConcurrentEpoch { salt } => {
+                apply_concurrent_mask(state, salt, CONCURRENT_FULL_MASK)?;
             }
         }
         Ok(())
@@ -410,6 +494,10 @@ mod unix {
                         put_u64(&mut out, 24, second_len);
                         put_u64(&mut out, 32, salt);
                     }
+                    Op::ConcurrentEpoch { salt } => {
+                        out[5] = 5;
+                        put_u64(&mut out, 16, salt);
+                    }
                 }
             }
             Event::Ack { tx } => {
@@ -418,6 +506,11 @@ mod unix {
             }
             Event::Abort { tx } => {
                 out[4] = 4;
+                put_u64(&mut out, 8, tx);
+            }
+            Event::Adopt { tx, mask } => {
+                out[4] = 5;
+                out[5] = mask;
                 put_u64(&mut out, 8, tx);
             }
         }
@@ -463,12 +556,19 @@ mod unix {
                         second_len: get_u64(record, 24),
                         salt: get_u64(record, 32),
                     },
+                    5 => Op::ConcurrentEpoch {
+                        salt: get_u64(record, 16),
+                    },
                     _ => return None,
                 };
                 Some(Event::Begin { tx, op })
             }
             3 => Some(Event::Ack { tx }),
             4 => Some(Event::Abort { tx }),
+            5 => Some(Event::Adopt {
+                tx,
+                mask: record[5],
+            }),
             _ => None,
         }
     }
@@ -516,6 +616,16 @@ mod unix {
                     if pending_tx != tx {
                         return Err("abort transaction mismatch".into());
                     }
+                }
+                Event::Adopt { tx, mask } => {
+                    let Some((pending_tx, Op::ConcurrentEpoch { salt })) = pending_event.take()
+                    else {
+                        return Err("adopt without a pending concurrent epoch".into());
+                    };
+                    if pending_tx != tx {
+                        return Err("adopt transaction mismatch".into());
+                    }
+                    apply_concurrent_mask(&mut state, salt, mask)?;
                 }
                 _ => return Err("invalid oracle event order".into()),
             }
@@ -585,10 +695,7 @@ mod unix {
         Ok(())
     }
 
-    async fn inspect(
-        context: &runtime::Context,
-        expected: [&State; 2],
-    ) -> Result<(State, bool), AnyError> {
+    async fn inspect(context: &runtime::Context) -> Result<State, AnyError> {
         let found: BTreeSet<Vec<u8>> = context.scan(PARTITION).await?.into_iter().collect();
         let wanted: BTreeSet<Vec<u8>> = NAMES.iter().map(|name| name.to_vec()).collect();
         if found != wanted {
@@ -612,13 +719,7 @@ mod unix {
             }
         }
 
-        if equivalent(&actual, expected[0]) {
-            Ok((actual, false))
-        } else if equivalent(&actual, expected[1]) {
-            Ok((actual, true))
-        } else {
-            Err(describe_mismatch(&actual, expected[0], expected[1]).into())
-        }
+        Ok(actual)
     }
 
     fn equivalent(left: &State, right: &State) -> bool {
@@ -629,7 +730,7 @@ mod unix {
         })
     }
 
-    fn describe_mismatch(actual: &State, acknowledged: &State, pending: &State) -> String {
+    fn state_summary(state: &State) -> String {
         let summary = |state: &State| {
             state
                 .blobs
@@ -649,12 +750,80 @@ mod unix {
                 .collect::<Vec<_>>()
                 .join("; ")
         };
-        format!(
-            "recovered state is neither acknowledged nor in-flight\n  actual: {}\n  acknowledged: {}\n  in-flight: {}",
-            summary(actual),
-            summary(acknowledged),
-            summary(pending)
+        summary(state)
+    }
+
+    fn concurrent_candidate_equivalent(
+        actual: &State,
+        acknowledged: &State,
+        salt: u64,
+        mask: u8,
+    ) -> Result<bool, AnyError> {
+        if !actual.blobs[..3]
+            .iter()
+            .zip(&acknowledged.blobs[..3])
+            .all(|(left, right)| {
+                left.floor == right.floor
+                    && left.content.len() == right.content.len()
+                    && left.content[left.floor as usize..] == right.content[right.floor as usize..]
+            })
+        {
+            return Ok(false);
+        }
+        let mut expected = State::new();
+        for (expected, acknowledged) in expected.blobs[3..].iter_mut().zip(&acknowledged.blobs[3..])
+        {
+            expected.clone_from(acknowledged);
+        }
+        apply_concurrent_mask(&mut expected, salt, mask)?;
+        Ok(actual.blobs[3..]
+            .iter()
+            .zip(&expected.blobs[3..])
+            .all(|(left, right)| {
+                left.floor == right.floor
+                    && left.content.len() == right.content.len()
+                    && left.content[left.floor as usize..] == right.content[right.floor as usize..]
+            }))
+    }
+
+    fn recovered_mask(
+        actual: &State,
+        acknowledged: &State,
+        pending: Option<&(u64, Op, State)>,
+    ) -> Result<u8, AnyError> {
+        if equivalent(actual, acknowledged) {
+            return Ok(0);
+        }
+        let Some((_, op, full)) = pending else {
+            return Err(format!(
+                "recovered state differs from the acknowledged oracle\n  actual: {}\n  acknowledged: {}",
+                state_summary(actual),
+                state_summary(acknowledged)
+            )
+            .into());
+        };
+        if equivalent(actual, full) {
+            return Ok(match op {
+                Op::ConcurrentEpoch { .. } => CONCURRENT_FULL_MASK,
+                _ => 1,
+            });
+        }
+        if let Op::ConcurrentEpoch { salt } = op {
+            for mask in
+                concurrent_masks().filter(|mask| *mask != 0 && *mask != CONCURRENT_FULL_MASK)
+            {
+                if concurrent_candidate_equivalent(actual, acknowledged, *salt, mask)? {
+                    return Ok(mask);
+                }
+            }
+        }
+        Err(format!(
+            "recovered state is outside the model-derived crash outcomes\n  actual: {}\n  acknowledged: {}\n  fully committed: {}",
+            state_summary(actual),
+            state_summary(acknowledged),
+            state_summary(full)
         )
+        .into())
     }
 
     async fn execute(context: &runtime::Context, tx: u64, op: Op) -> Result<(), AnyError> {
@@ -723,6 +892,130 @@ mod unix {
                 cut(tx, "batch-visible")?;
                 completion.await?;
             }
+            Op::ConcurrentEpoch { salt } => {
+                let (writer_a, writer_a_size) = context.open(PARTITION, NAMES[3]).await?;
+                let (writer_b, _) = context.open(PARTITION, NAMES[4]).await?;
+                let (writer_c, writer_c_size) = context.open(PARTITION, NAMES[5]).await?;
+                let (batch_a, batch_a_size) = context.open(PARTITION, NAMES[6]).await?;
+                let (batch_b, batch_b_size) = context.open(PARTITION, NAMES[7]).await?;
+                let (namespace_peer, namespace_peer_size) =
+                    context.open(PARTITION, NAMES[9]).await?;
+                let writer_c_new_size = writer_c_size
+                    .checked_add(CONCURRENT_WRITE_LEN as u64)
+                    .ok_or("concurrent resize overflow")?;
+                let batch_a_second_offset = batch_a_size
+                    .checked_add(CONCURRENT_WRITE_LEN as u64)
+                    .ok_or("overlapping batch offset overflow")?;
+                let batch_b_second_offset = batch_b_size
+                    .checked_add(CONCURRENT_WRITE_LEN as u64)
+                    .ok_or("overlapping batch offset overflow")?;
+
+                cut(tx, "mutation-start")?;
+                let writer_a = context
+                    .child("writer_a_mutation")
+                    .spawn(move |_| async move {
+                        writer_a
+                            .write_at(writer_a_size, payload(salt, CONCURRENT_WRITE_LEN))
+                            .await?;
+                        Ok::<_, commonware_runtime::Error>(writer_a)
+                    });
+                let writer_b = context
+                    .child("writer_b_mutation")
+                    .spawn(move |_| async move {
+                        writer_b
+                            .write_at(
+                                writer_b.floor(),
+                                payload(salt ^ 0xa076_1d64_78bd_642f, CONCURRENT_WRITE_LEN),
+                            )
+                            .await?;
+                        Ok::<_, commonware_runtime::Error>(writer_b)
+                    });
+                let writer_c = context
+                    .child("writer_c_mutation")
+                    .spawn(move |_| async move {
+                        writer_c.resize(writer_c_new_size).await?;
+                        Ok::<_, commonware_runtime::Error>(writer_c)
+                    });
+                let writer_a = writer_a.await??;
+                let writer_b = writer_b.await??;
+                let writer_c = writer_c.await??;
+
+                let mut first_batch = context.batch().await?;
+                first_batch
+                    .write_at(
+                        &batch_a,
+                        batch_a_size,
+                        payload(salt ^ 0xe703_7ed1_a0b4_28db, CONCURRENT_WRITE_LEN),
+                    )
+                    .await?;
+                first_batch
+                    .write_at(
+                        &batch_b,
+                        batch_b_size,
+                        payload(salt ^ 0x8ebc_6af0_9c88_c6e3, CONCURRENT_WRITE_LEN),
+                    )
+                    .await?;
+
+                let mut namespace_batch = context.batch().await?;
+                namespace_batch.remove(PARTITION, Some(NAMES[8]));
+                let _fresh = namespace_batch.create(PARTITION, NAMES[8]).await?;
+                namespace_batch
+                    .write_at(
+                        &namespace_peer,
+                        namespace_peer_size,
+                        payload(salt ^ 0xeb44_acca_b455_d165, CONCURRENT_WRITE_LEN),
+                    )
+                    .await?;
+                cut(tx, "mutation-done")?;
+
+                cut(tx, "sync-start")?;
+                let namespace_sync = context
+                    .child("namespace_commit")
+                    .spawn(move |_| async move { namespace_batch.apply_sync().await });
+                let writer_a_sync = context.child("writer_a_sync").spawn(move |_| async move {
+                    Ok::<_, commonware_runtime::Error>(writer_a.start_sync().await)
+                });
+                let writer_b_sync = context.child("writer_b_sync").spawn(move |_| async move {
+                    Ok::<_, commonware_runtime::Error>(writer_b.start_sync().await)
+                });
+                let writer_c_sync = context.child("writer_c_sync").spawn(move |_| async move {
+                    Ok::<_, commonware_runtime::Error>(writer_c.start_sync().await)
+                });
+                let first_sync = context
+                    .child("first_batch_sync")
+                    .spawn(move |_| async move { first_batch.apply_start_sync().await });
+                let writer_a_sync = writer_a_sync.await??;
+                let writer_b_sync = writer_b_sync.await??;
+                let writer_c_sync = writer_c_sync.await??;
+                let first_sync = first_sync.await??;
+
+                // Publish a second batch on the same members while the first
+                // durability handle is still pending. Its modeled outcome
+                // therefore depends on the first batch also surviving.
+                let mut overlapping_batch = context.batch().await?;
+                overlapping_batch
+                    .write_at(
+                        &batch_a,
+                        batch_a_second_offset,
+                        payload(salt ^ 0x5899_65cc_7537_4cc3, CONCURRENT_WRITE_LEN),
+                    )
+                    .await?;
+                overlapping_batch
+                    .write_at(
+                        &batch_b,
+                        batch_b_second_offset,
+                        payload(salt ^ 0x1d8e_4e27_c47d_124f, CONCURRENT_WRITE_LEN),
+                    )
+                    .await?;
+                let overlapping_sync = overlapping_batch.apply_start_sync().await?;
+                cut(tx, "concurrent-started")?;
+                writer_a_sync.await?;
+                writer_b_sync.await?;
+                writer_c_sync.await?;
+                first_sync.await?;
+                overlapping_sync.await?;
+                namespace_sync.await??;
+            }
         }
         cut(tx, "sync-ok")?;
         Ok(())
@@ -764,37 +1057,51 @@ mod unix {
         Ok(())
     }
 
-    fn verify(root: &Path, reconcile: bool, transactions: u64) -> Result<(), AnyError> {
+    fn verify(
+        root: &Path,
+        reconcile: bool,
+        transactions: u64,
+        concurrent: bool,
+    ) -> Result<(), AnyError> {
         let journal = oracle_path(root);
         let mut oracle = read_oracle(&journal)?;
+        let recovery_tx = oracle.next_tx;
+        if reconcile {
+            cut(recovery_tx, "recovery-start")?;
+        }
         let storage = root.join(STORAGE);
         runtime::Runner::new(runtime::Config::new().with_storage_directory(storage)).start(
             |context| async move {
-                let pending_state = oracle
-                    .pending
-                    .as_ref()
-                    .map_or(&oracle.acknowledged, |(_, _, state)| state);
-                let (actual, recovered_pending) =
-                    inspect(&context, [&oracle.acknowledged, pending_state]).await?;
-                if let Some((tx, _, candidate)) = oracle.pending.take() {
+                let actual = inspect(&context).await?;
+                let mask = recovered_mask(&actual, &oracle.acknowledged, oracle.pending.as_ref())?;
+                if reconcile {
+                    cut(recovery_tx, "recovery-complete")?;
+                }
+                if let Some((tx, op, _)) = oracle.pending.take() {
                     if reconcile {
-                        let event = if recovered_pending {
-                            oracle.acknowledged = candidate;
-                            Event::Ack { tx }
-                        } else {
-                            Event::Abort { tx }
+                        let full_mask = match op {
+                            Op::ConcurrentEpoch { .. } => CONCURRENT_FULL_MASK,
+                            _ => 1,
+                        };
+                        let event = match mask {
+                            0 => Event::Abort { tx },
+                            mask if mask == full_mask => Event::Ack { tx },
+                            mask => Event::Adopt { tx, mask },
                         };
                         oracle.valid_len = append_event(&journal, oracle.valid_len, event)?;
+                        oracle.acknowledged.clone_from(&actual);
+                        println!("OUTCOME tx={tx} mask={mask:#04x}");
+                        io::stdout().flush()?;
                         cut(tx, "reconciled")?;
                     }
                 }
 
                 if !reconcile {
                     println!(
-                        "verified root={} next_tx={} recovered={} state={}",
+                        "verified root={} next_tx={} recovered={} outcome_mask={mask:#04x} state={}",
                         root.display(),
                         oracle.next_tx,
-                        if recovered_pending {
+                        if mask != 0 {
                             "in-flight"
                         } else {
                             "acknowledged"
@@ -806,7 +1113,16 @@ mod unix {
 
                 for _ in 0..transactions {
                     let tx = oracle.next_tx;
-                    let op = generate(oracle.seed, tx, &oracle.acknowledged, oracle.max_bytes);
+                    let op = if concurrent {
+                        Op::ConcurrentEpoch {
+                            salt: Generator::new(
+                                oracle.seed ^ tx.wrapping_mul(0x6eed_0e9d_a4d9_4a4f),
+                            )
+                            .next(),
+                        }
+                    } else {
+                        generate(oracle.seed, tx, &oracle.acknowledged, oracle.max_bytes)
+                    };
                     let mut candidate = oracle.acknowledged.clone();
                     apply(&mut candidate, op)?;
                     oracle.valid_len =
@@ -857,6 +1173,54 @@ mod unix {
         Err(format!("worker exited before cutpoint {target}: {status}").into())
     }
 
+    fn kill_during_recovery(child: &mut Child, delay_us: u64) -> Result<bool, AnyError> {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("worker stdout was not captured")?;
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            println!("worker: {line}");
+            if line.contains("phase=recovery-start") {
+                if delay_us > 0 {
+                    thread::sleep(Duration::from_micros(delay_us));
+                }
+                if child.try_wait()?.is_none() {
+                    child.kill()?;
+                    child.wait()?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+        }
+        let status = child.wait()?;
+        Err(format!("worker exited before recovery-start: {status}").into())
+    }
+
+    fn kill_during_concurrent_epoch(child: &mut Child, delay_us: u64) -> Result<bool, AnyError> {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("worker stdout was not captured")?;
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            println!("worker: {line}");
+            if line.contains("phase=concurrent-started") {
+                if delay_us > 0 {
+                    thread::sleep(Duration::from_micros(delay_us));
+                }
+                if child.try_wait()?.is_none() {
+                    child.kill()?;
+                    child.wait()?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+        }
+        let status = child.wait()?;
+        Err(format!("worker exited before concurrent-started: {status}").into())
+    }
+
     fn campaign(root: &Path, rounds: u64, max_delay_ms: u64, seed: u64) -> Result<(), AnyError> {
         let exe = env::current_exe()?;
         let mut rng = Generator::new(seed);
@@ -883,6 +1247,95 @@ mod unix {
         Ok(())
     }
 
+    fn recovery_campaign(
+        root: &Path,
+        rounds: u64,
+        recrashes: u64,
+        max_delay_us: u64,
+        seed: u64,
+    ) -> Result<(), AnyError> {
+        if recrashes == 0 {
+            return Err("recrashes must be non-zero".into());
+        }
+        let exe = env::current_exe()?;
+        let mut rng = Generator::new(seed);
+        let mut kills = 0;
+        let mut completed = 0;
+        for round in 0..rounds {
+            for _ in 0..recrashes {
+                let delay = rng.inclusive(0, max_delay_us);
+                let mut child = Command::new(&exe)
+                    .arg("worker")
+                    .arg(root)
+                    .arg("0")
+                    .stdout(Stdio::piped())
+                    .spawn()?;
+                if kill_during_recovery(&mut child, delay)? {
+                    kills += 1;
+                } else {
+                    completed += 1;
+                }
+            }
+
+            let status = Command::new(&exe).arg("verify").arg(root).status()?;
+            if !status.success() {
+                return Err(format!("verification failed after recovery round {round}").into());
+            }
+            println!(
+                "RECOVERY_ROUND {round} ok recrashes={recrashes} kills={kills} completed={completed} root={}",
+                root.display()
+            );
+        }
+        if kills == 0 {
+            return Err("recovery campaign never killed a recovery process".into());
+        }
+        Ok(())
+    }
+
+    fn concurrent_campaign(
+        root: &Path,
+        rounds: u64,
+        max_delay_us: u64,
+        seed: u64,
+    ) -> Result<(), AnyError> {
+        let exe = env::current_exe()?;
+        let mut rng = Generator::new(seed);
+        let mut kills = 0;
+        for round in 0..rounds {
+            let delay = rng.inclusive(0, max_delay_us);
+            let mut child = Command::new(&exe)
+                .arg("concurrent-worker")
+                .arg(root)
+                .arg("1000000")
+                .stdout(Stdio::piped())
+                .spawn()?;
+            if kill_during_concurrent_epoch(&mut child, delay)? {
+                kills += 1;
+            }
+
+            let status = Command::new(&exe)
+                .arg("worker")
+                .arg(root)
+                .arg("0")
+                .status()?;
+            if !status.success() {
+                return Err(format!("reconciliation failed after concurrent round {round}").into());
+            }
+            let status = Command::new(&exe).arg("verify").arg(root).status()?;
+            if !status.success() {
+                return Err(format!("verification failed after concurrent round {round}").into());
+            }
+            println!(
+                "CONCURRENT_ROUND {round} ok delay_us={delay} kills={kills} root={}",
+                root.display()
+            );
+        }
+        if rounds > 0 && kills == 0 {
+            return Err("concurrent campaign never killed a worker".into());
+        }
+        Ok(())
+    }
+
     fn parse_u64(value: Option<&String>, name: &str) -> Result<u64, AnyError> {
         value
             .ok_or_else(|| format!("missing {name}").into())
@@ -894,7 +1347,7 @@ mod unix {
 
     pub fn main() -> Result<(), AnyError> {
         let args: Vec<String> = env::args().collect();
-        let usage = "usage:\n  volume-crash-fuzz init <root> <seed> [max_bytes]\n  volume-crash-fuzz worker <root> [transactions]\n  volume-crash-fuzz verify <root>\n  volume-crash-fuzz campaign <root> <rounds> [max_delay_ms] [seed]";
+        let usage = "usage:\n  volume-crash-fuzz init <root> <seed> [max_bytes]\n  volume-crash-fuzz worker <root> [transactions]\n  volume-crash-fuzz concurrent-worker <root> [transactions]\n  volume-crash-fuzz verify <root>\n  volume-crash-fuzz campaign <root> <rounds> [max_delay_ms] [seed]\n  volume-crash-fuzz recovery-campaign <root> <rounds> [recrashes] [max_delay_us] [seed]\n  volume-crash-fuzz concurrent-campaign <root> <rounds> [max_delay_us] [seed]";
         let command = args.get(1).ok_or(usage)?;
         let root = PathBuf::from(args.get(2).ok_or(usage)?);
         match command.as_str() {
@@ -913,8 +1366,18 @@ mod unix {
                     .map(|value| value.parse())
                     .transpose()?
                     .unwrap_or(u64::MAX),
+                false,
             ),
-            "verify" => verify(&root, false, 0),
+            "concurrent-worker" => verify(
+                &root,
+                true,
+                args.get(3)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or(u64::MAX),
+                true,
+            ),
+            "verify" => verify(&root, false, 0, false),
             "campaign" => campaign(
                 &root,
                 parse_u64(args.get(3), "rounds")?,
@@ -922,6 +1385,34 @@ mod unix {
                     .map(|value| value.parse())
                     .transpose()?
                     .unwrap_or(10),
+                args.get(5)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or(1),
+            ),
+            "recovery-campaign" => recovery_campaign(
+                &root,
+                parse_u64(args.get(3), "rounds")?,
+                args.get(4)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or(3),
+                args.get(5)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or(2_000),
+                args.get(6)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or(1),
+            ),
+            "concurrent-campaign" => concurrent_campaign(
+                &root,
+                parse_u64(args.get(3), "rounds")?,
+                args.get(4)
+                    .map(|value| value.parse())
+                    .transpose()?
+                    .unwrap_or(2_000),
                 args.get(5)
                     .map(|value| value.parse())
                     .transpose()?
@@ -952,6 +1443,10 @@ mod unix {
                     },
                 },
                 Event::Ack { tx: 1 },
+                Event::Adopt {
+                    tx: 1,
+                    mask: 0b10_1111,
+                },
             ];
             for event in events {
                 assert_eq!(decode(&encode(event)), Some(event));
@@ -1003,6 +1498,23 @@ mod unix {
 
             right.blobs[0].content[2] ^= 1;
             assert!(!equivalent(&left, &right));
+        }
+
+        #[test]
+        fn concurrent_outcomes_enforce_overlapping_batch_dependency() {
+            assert_eq!(concurrent_masks().count(), 48);
+            assert!(apply_concurrent_mask(&mut State::new(), 1, 1 << 4).is_err());
+
+            let acknowledged = State::new();
+            for mask in concurrent_masks() {
+                let mut actual = acknowledged.clone();
+                apply_concurrent_mask(&mut actual, 7, mask).expect("valid outcome applies");
+                assert!(
+                    concurrent_candidate_equivalent(&actual, &acknowledged, 7, mask)
+                        .expect("valid outcome compares"),
+                    "mask {mask:#08b} did not match itself"
+                );
+            }
         }
     }
 }

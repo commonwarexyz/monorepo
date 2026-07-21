@@ -1,10 +1,21 @@
 # Runtime storage qualification
 
 `volume-crash-fuzz` drives the production Tokio volume through deterministic
-append, sparse-write, overwrite, resize, prune, and atomic-batch histories. It
-records each transaction in a stable intent journal before mutation and records
-the acknowledgement only after the volume commit returns. Recovery must match
-the last acknowledged state or the single in-flight intent exactly.
+append, sparse-write, overwrite, resize, prune, atomic-batch, recovery-crash,
+and concurrent-commit histories. It records each transaction in a stable intent
+journal before mutation and records the acknowledgement only after the volume
+commit returns.
+
+The sequential oracle accepts exactly the last acknowledged state or the
+single in-flight intent. The concurrent oracle derives the allowed outcomes
+from six durability groups: three direct writers, a two-blob batch, a second
+batch published over those same members while the first sync is pending, and a
+remove/recreate batch with a sibling write. Any recovered group union is
+allowed except one containing the second overlapping batch without the first.
+Partial outcomes are adopted into the stable oracle before another epoch runs.
+`OUTCOME` lines report the adopted mask: bits 0-2 are direct writers, bit 3 is
+the first two-blob batch, bit 4 is its overlapping successor, and bit 5 is the
+namespace batch. The model rejects bit 4 unless bit 3 is also set.
 
 Build and initialize a new qualification directory:
 
@@ -12,6 +23,9 @@ Build and initialize a new qualification directory:
 cargo build --release -p commonware-runtime-crash-fuzz --bin volume-crash-fuzz
 target/release/volume-crash-fuzz init /qualification/volume 1 100663296
 ```
+
+The journal format is `CVF2`; directories initialized by the earlier
+three-blob `CVF1` harness must be reinitialized rather than silently reused.
 
 On Linux, build with `--features iouring` to qualify the io_uring storage
 backend used by that deployment.
@@ -21,6 +35,28 @@ Run a local process-kill campaign:
 ```sh
 target/release/volume-crash-fuzz campaign /qualification/volume 1000 20 1
 ```
+
+Repeatedly kill during startup and recovery, before normal mutations begin:
+
+```sh
+target/release/volume-crash-fuzz recovery-campaign /qualification/volume 1000 5 2000 2
+```
+
+This mode is most valuable after a block fault or power cut has left a commit
+for recovery to repair. A clean local filesystem can still exercise repeated
+startup interruption, but it cannot manufacture torn shadows or interrupted
+slot-zeroing by itself.
+
+Exercise concurrent writers, `start_sync`, sync coalescing, overlapping
+batches, selective commit outcomes, and remove/recreate:
+
+```sh
+target/release/volume-crash-fuzz concurrent-campaign /qualification/volume 1000 2000 3
+```
+
+The lower-level entry points are `concurrent-worker` and `worker`. External
+power controllers should kill only after `phase=concurrent-started` when they
+want every modeled durability request to have been issued.
 
 SIGKILL does not discard the kernel page cache or volatile device cache. For
 power-loss qualification, run `worker` on the device under test, cut VM or
@@ -45,3 +81,109 @@ export COMMONWARE_VOLUME_FUZZ_ORACLE=/trusted-control/volume-oracle.journal
 Run separate campaigns for every deployed filesystem, mount/barrier mode,
 kernel, controller/firmware, sector-size, and volatile-write-cache setting. A
 successful local campaign is process-crash evidence, not power-loss evidence.
+
+## Linux block-fault stack
+
+`scripts/block-fault-stack.sh` creates a safety-limited stack using only sparse
+files and loop devices:
+
+```text
+filesystem -> dm-log-writes -> dm-flakey -> loop-backed data image
+                                  |
+                             loop-backed write log
+```
+
+Run it only in a disposable Linux VM. It requires root, refuses physical block
+devices, creates a new work directory, and leaves the images intact on
+`destroy` for analysis.
+
+```sh
+sudo scripts/block-fault-stack.sh create /var/lib/volume-fault 16
+# Format and mount the printed data_device, then initialize the fuzzer there.
+sudo scripts/block-fault-stack.sh mark /var/lib/volume-fault initialized
+```
+
+The available modes are:
+
+- `io-error`: fail all I/O during the down interval, including flushes.
+- `error-writes`: fail writes while reads continue.
+- `drop-writes`: acknowledge and silently discard writes.
+- `corrupt-byte`: replace the first byte in every write bio.
+- `random-corrupt`: corrupt one random byte in every write bio.
+- `progress-error`: alternate one second healthy and one second failing writes.
+  Large operations spanning a boundary exercise the case where earlier bios
+  make progress before a later bio returns an error.
+
+Every fault table starts with a one-second healthy interval. For a steady fault,
+wait at least one second before starting the worker. For `progress-error`, start
+workers throughout both halves of the cycle and retain both their exit status
+and the external oracle.
+
+An I/O or flush error is expected to make the current storage instance fatal.
+Do not ask that process to verify its own state. Hard-reset the VM, restore the
+loop/mapping stack in healthy mode, mount the filesystem, and run a fresh
+`verify` process:
+
+```sh
+sudo scripts/block-fault-stack.sh restore /var/lib/volume-fault
+sudo scripts/block-fault-stack.sh mode /var/lib/volume-fault healthy
+# Mount the newly printed data_device.
+COMMONWARE_VOLUME_FUZZ_ORACLE=/trusted-control/volume-oracle.journal \
+  target/release/volume-crash-fuzz verify /mnt/qualification/volume
+```
+
+For dropped or corrupted writes, use a QEMU hard power cut rather than a clean
+unmount. A clean unmount can write back or otherwise change the state being
+tested. Keep the oracle on a separate virtual disk with a different failure
+domain. After restoration, combine `recovery-campaign` with `verify` so repair
+itself is repeatedly interrupted.
+
+The dm-log-writes image records durability-ordered writes and supports marks:
+
+```sh
+sudo scripts/block-fault-stack.sh mark /var/lib/volume-fault before_epoch_42
+```
+
+The log image is provisioned at four times the data-image size, but it records
+cumulative traffic rather than live data. Monitor `block-fault-stack.sh status`
+and rotate evidence images before the log fills.
+
+Use `replay-log` on copies of the data and log images to replay through each
+mark, each flush/FUA boundary, and selected write prefixes. Generate additional
+images that omit, reorder, or sector-split writes between durability barriers,
+then boot each image and run `verify`. Never replay into the only evidence copy.
+The stack captures the source trace but intentionally does not choose which
+illegal device guarantees to simulate; that campaign matrix belongs in the
+deployment qualification record.
+
+QEMU's `blkdebug` layer should be a separate campaign for write and flush
+failures at specific block events. `blkdebug/flush-error.conf` fails the first
+host cache flush, while `blkdebug/second-write-error.conf` lets one write make
+progress and fails the next. Attach either configuration in front of a raw test
+image using QEMU's `blkdebug:<config>:<image>` filename syntax. Run each
+deployed QEMU cache configuration, including a volatile write-back cache. An
+ignore-flush or unsafe-cache configuration is a negative control: the oracle
+should detect acknowledged data lost by a hard power cut, and that configuration
+must not qualify.
+
+## Barrier propagation
+
+`scripts/trace-barriers.sh` records block request issue/completion events on a
+selected leaf device while it runs one command. For example, run a one-epoch
+worker against the mounted device and trace the underlying loop or deployment
+device:
+
+```sh
+sudo scripts/trace-barriers.sh /dev/loop0 /var/log/volume-barriers -- \
+  env COMMONWARE_VOLUME_FUZZ_ORACLE=/trusted-control/volume-oracle.journal \
+  target/release/volume-crash-fuzz worker /mnt/qualification/volume 1
+```
+
+The script fails if no request carrying the block trace `F` marker reaches the
+selected leaf device and preserves both the raw `trace-cmd` data and the
+filtered report. Inspect the report to distinguish pure flush requests from FUA
+writes and archive it with the exact filesystem, mount, kernel, controller, and
+cache configuration. Some drivers complete or transform flush flags above the
+leaf device, so a missing leaf marker requires tracing each layer rather than
+assuming the filesystem did nothing. This is supporting evidence only; it does
+not replace a hard power cut.
