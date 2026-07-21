@@ -168,7 +168,7 @@ where
     /// Historical roots from superseded sync targets, keyed by tree size
     /// (target.range.end()). Keys strictly increase across target updates
     /// (enforced by validate_update), so each tree size maps to a unique
-    /// root and the smallest key is the oldest; eviction drops it first.
+    /// root and the smallest key is the oldest. Eviction drops it first.
     /// When a retained request completes, proof.leaves identifies which
     /// historical root to verify against.
     retained_roots: BTreeMap<Location<DB::Family>, DB::Digest>,
