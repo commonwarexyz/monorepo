@@ -1385,6 +1385,11 @@ impl State {
         *self.handles.entry(id).or_insert(0) += 1;
     }
 
+    #[cfg(test)]
+    pub fn handle_count(&self, id: u64) -> usize {
+        self.handles.get(&id).copied().unwrap_or(0)
+    }
+
     /// Publish `core` under `partition`/`name`: the blob becomes served
     /// and the namespace change joins the next table.
     pub fn publish_named(&mut self, partition: &str, name: Vec<u8>, core: Arc<BlobCore>) {

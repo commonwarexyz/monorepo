@@ -36,6 +36,27 @@ fn volume_over_memory() -> Volume<memory::Storage> {
     )
 }
 
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn test_volume_persisted_lengths_are_checked() {
+    let max = u32::MAX as usize;
+    assert_eq!(super::commit::checked_table_len(max).unwrap(), u32::MAX);
+    assert!(matches!(
+        super::commit::checked_table_len(max + 1),
+        Err(Error::OffsetOverflow)
+    ));
+
+    let max_checksum_bytes = max.checked_mul(4).unwrap();
+    assert_eq!(
+        super::commit::checked_checksum_count(max_checksum_bytes).unwrap(),
+        u32::MAX
+    );
+    assert!(matches!(
+        super::commit::checked_checksum_count(max_checksum_bytes + 4),
+        Err(Error::OffsetOverflow)
+    ));
+}
+
 /// Native prefix pruning end to end: the floor is byte-exact (physical
 /// surgery stays chunk-granular — the straddling chunk keeps its dead low
 /// bytes), gates reads, writes, and shrinks, is monotonic, persists
@@ -2187,6 +2208,7 @@ pub(super) struct Gated<S: crate::Storage> {
     inner: S,
     pub(super) read_gate: Gate,
     write_gate: Gate,
+    write_done_gate: Gate,
     pub(super) sync_gate: Gate,
     /// Completed inner syncs (fsyncs that reached the backend).
     syncs: Arc<std::sync::atomic::AtomicU64>,
@@ -2198,6 +2220,7 @@ impl<S: crate::Storage> Gated<S> {
             inner,
             read_gate: Gate::default(),
             write_gate: Gate::default(),
+            write_done_gate: Gate::default(),
             sync_gate: Gate::default(),
             syncs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -2223,6 +2246,7 @@ impl<S: crate::Storage> crate::Storage for Gated<S> {
                 inner: blob,
                 read_gate: self.read_gate.clone(),
                 write_gate: self.write_gate.clone(),
+                write_done_gate: self.write_done_gate.clone(),
                 sync_gate: self.sync_gate.clone(),
                 syncs: self.syncs.clone(),
             },
@@ -2245,6 +2269,7 @@ pub(super) struct GatedBlob<B: crate::Blob> {
     inner: B,
     read_gate: Gate,
     write_gate: Gate,
+    write_done_gate: Gate,
     sync_gate: Gate,
     syncs: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -2267,7 +2292,8 @@ impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.write_gate.pass().await?;
-        self.inner.write_at(offset, bufs).await
+        self.inner.write_at(offset, bufs).await?;
+        self.write_done_gate.pass().await
     }
 
     async fn write_at_sync(
@@ -2303,6 +2329,109 @@ impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
     }
 }
 
+/// A caller can disappear after the inner write completed but before the
+/// volume future is polled again to publish the matching CRC/run metadata.
+/// The volume must latch instead of letting a later sync confirm that split
+/// state under stale metadata.
+#[tokio::test]
+async fn test_volume_cancelled_write_after_inner_completion_poisons() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let cfg = Config::default();
+    let volume = Volume::new(gated.clone(), pool.clone(), cfg.clone(), test_driver());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    // Publish a young, uncommitted run. The overwrite is therefore in-place:
+    // without the cancellation latch, dropping it after the physical write
+    // leaves this run's old CRC in RAM while its bytes already contain `B`.
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![b'A'; BLOCK as usize]))
+        .await
+        .unwrap();
+    gated.write_done_gate.arm();
+    let writer = tokio::spawn({
+        let blob = blob.clone();
+        async move {
+            blob.write_at(0, IoBuf::copy_from_slice(&vec![b'B'; BLOCK as usize]))
+                .await
+        }
+    });
+    gated.write_done_gate.wait_reached().await;
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
+
+    assert!(
+        blob.sync().await.is_err(),
+        "a later sync must not confirm physically-written bytes under stale metadata"
+    );
+    drop(blob);
+    drop(volume);
+
+    // Restart discards both uncommitted writes and returns to the last valid
+    // commit (the empty creation), proving the latch leaves recovery usable.
+    let recovered = Volume::new(gated, pool, cfg, test_driver());
+    let (blob, size) = recovered.open("p", b"b").await.unwrap();
+    assert_eq!(size, 0);
+    assert!(blob.read_at(0, 0).await.is_ok());
+}
+
+/// A creation publishes its name before its commit completes. Cancelling the
+/// opening caller in that window must release its counted handle and poison
+/// the live volume so no second caller can observe an unconfirmed creation.
+#[tokio::test]
+async fn test_volume_cancelled_creation_releases_handle_and_poisons() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let cfg = Config::default();
+    let volume = Volume::new(gated.clone(), pool.clone(), cfg.clone(), test_driver());
+
+    // Complete initial recovery before arming the commit fsync gate.
+    assert!(matches!(
+        volume.scan("missing").await,
+        Err(Error::PartitionMissing(_))
+    ));
+    let before = gated.syncs();
+    gated.sync_gate.arm();
+    let opener = tokio::spawn({
+        let volume = volume.clone();
+        async move { volume.open("p", b"b").await }
+    });
+    gated.sync_gate.wait_reached().await;
+
+    let ready = volume.shared.ready.get().expect("recovered").clone();
+    let id = *ready
+        .state
+        .lock()
+        .open()
+        .keys()
+        .next()
+        .expect("creation published");
+    assert_eq!(ready.state.lock().handle_count(id), 1);
+    opener.abort();
+    assert!(opener.await.is_err_and(|error| error.is_cancelled()));
+    assert_eq!(
+        ready.state.lock().handle_count(id),
+        0,
+        "cancelled creation must not strand a phantom handle"
+    );
+    assert!(
+        volume.open("p", b"b").await.is_err(),
+        "published but unconfirmed creation must not be observable"
+    );
+
+    // The independent driver may still land the creation. Once it does, a
+    // restart can recover it and clear the conservative poison latch.
+    gated.sync_gate.release();
+    while gated.syncs() == before {
+        tokio::task::yield_now().await;
+    }
+    drop(volume);
+    let recovered = Volume::new(gated, pool, cfg, test_driver());
+    let (blob, size) = recovered.open("p", b"b").await.unwrap();
+    assert_eq!(size, 0);
+    drop(blob);
+    audit_volume(&recovered, true);
+}
+
 /// Recovery places the adopted commit behind a fresh durability barrier even
 /// when it has no slot or shadow repairs to write. A process crash may leave
 /// the verified bytes only in lower-layer caches, and a clean blob sync would
@@ -2329,6 +2458,39 @@ async fn test_volume_clean_recovery_syncs_adopted_commit() {
         gated.syncs() - before,
         1,
         "clean recovery must sync the adopted commit"
+    );
+}
+
+/// A recovery barrier failure must fail the open. Because no live Ready state
+/// has been published yet, a later retry may safely repeat recovery and adopt
+/// the same committed bytes once the storage failure clears.
+#[tokio::test]
+async fn test_volume_clean_recovery_sync_failure_is_not_acknowledged() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let cfg = Config::default();
+    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone(), test_driver());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(b"durable"))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+
+    let gated = Gated::new(inner);
+    gated.sync_gate.arm_fail();
+    let reopened = Volume::new(gated, pool, cfg, test_driver());
+    assert!(
+        reopened.open("p", b"b").await.is_err(),
+        "failed recovery fsync must not return a usable blob"
+    );
+
+    let (blob, size) = reopened.open("p", b"b").await.unwrap();
+    assert_eq!(size, 7);
+    assert_eq!(
+        blob.read_at(0, 7).await.unwrap().coalesce().as_ref(),
+        b"durable"
     );
 }
 
@@ -4996,6 +5158,142 @@ async fn test_volume_torn_shadow_rolls_back_one_commit() {
         .unwrap()
         .coalesce();
     assert_eq!(got.as_ref(), &vec![0x11u8; 2 * BLOCK as usize + 100][..]);
+}
+
+/// Recovery repairs are themselves crash-safe. Start from an image whose
+/// newest commit must roll back and whose fallback has a partial frontier,
+/// park recovery at its final fsync, then crash each slot-zeroing and shadow-
+/// splice write as landed, vanished, or block-torn. Every resulting image
+/// must reopen to the same acknowledged fallback bytes.
+#[tokio::test]
+async fn test_volume_second_crash_during_recovery_repairs() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    let cfg = Config::default();
+    let volume = Volume::new(inner.clone(), pool.clone(), cfg.clone(), test_driver());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+
+    let expected = vec![0x11u8; 2 * BLOCK as usize + 100];
+    blob.write_at(0, IoBuf::copy_from_slice(&expected))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(&[0x22u8; 16]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+
+    let (file, len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+    let mut source = file
+        .read_at(0, len as usize)
+        .await
+        .unwrap()
+        .coalesce()
+        .as_ref()
+        .to_vec();
+    let mut slots: Vec<_> = [0u8, 1]
+        .into_iter()
+        .filter_map(|slot| {
+            let at = super::layout::Superblock::slot_offset(slot) as usize;
+            super::layout::Superblock::decode(
+                &source[at..at + super::layout::Superblock::SIZE],
+            )
+            .map(|sb| (slot, sb))
+        })
+        .collect();
+    slots.sort_unstable_by_key(|(_, sb)| sb.seq);
+    let (fallback_slot, fallback) = &slots[0];
+    let (losing_slot, newest) = &slots[1];
+    assert_ne!(fallback_slot, losing_slot);
+    let decode_table = |sb: &super::layout::Superblock| {
+        super::layout::Table::decode(
+            &source[sb.table_offset as usize
+                ..(sb.table_offset + sb.table_len as u64) as usize],
+        )
+        .expect("table decodes")
+    };
+    let fallback_table = decode_table(fallback);
+    let newest_table = decode_table(newest);
+    let fallback_entry = &fallback_table.blobs[0];
+    let fallback_shadow = fallback_entry.shadow.expect("fallback has a shadow");
+    let fallback_physical = fallback_entry.runs.last().unwrap().physical + 2 * BLOCK;
+    let newest_shadow = newest_table.blobs[0]
+        .shadow
+        .expect("newest commit has a shadow");
+    assert_ne!(fallback_shadow, newest_shadow);
+
+    // Make only the newest candidate unverifiable. Its valid slot/table still
+    // force recovery to record and durably zero the losing slot.
+    for byte in &mut source[newest_shadow as usize..newest_shadow as usize + 100] {
+        *byte ^= 0x5a;
+    }
+
+    let tearing = Tearing::from_image(pool.clone(), source.clone()).await;
+    let gated = Gated::new(tearing.clone());
+    let volume = Volume::new(gated.clone(), pool.clone(), cfg.clone(), test_driver());
+    gated.sync_gate.arm();
+    let opening = tokio::spawn({
+        let volume = volume.clone();
+        async move { volume.open("p", b"b").await }
+    });
+    gated.sync_gate.wait_reached().await;
+    let repairs = tearing.unsynced.lock().clone();
+    assert_eq!(repairs.len(), 2, "recovery must issue exactly two repairs");
+    assert!(repairs.iter().any(|(offset, _)| {
+        *offset == super::layout::Superblock::slot_offset(*losing_slot)
+    }));
+    assert!(repairs
+        .iter()
+        .any(|(offset, _)| *offset == fallback_physical));
+    opening.abort();
+    assert!(opening.await.is_err_and(|error| error.is_cancelled()));
+    gated.sync_gate.release();
+    drop(volume);
+
+    // Base-3 enumerates vanished, landed, and block-torn for each repair.
+    for outcome in 0..9usize {
+        let mut image = source.clone();
+        let mut choices = outcome;
+        for (offset, bytes) in &repairs {
+            match choices % 3 {
+                0 => {} // vanished
+                1 => {
+                    let at = *offset as usize;
+                    image[at..at + bytes.len()].copy_from_slice(bytes);
+                }
+                2 => {
+                    let first = (*offset / BLOCK) * BLOCK;
+                    let last = (*offset + bytes.len() as u64).div_ceil(BLOCK) * BLOCK;
+                    if image.len() < last as usize {
+                        image.resize(last as usize, 0);
+                    }
+                    for byte in &mut image[first as usize..last as usize] {
+                        *byte = !*byte ^ 0x5a;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            choices /= 3;
+        }
+
+        let crashed = Tearing::from_image(pool.clone(), image).await;
+        let recovered = Volume::new(crashed, pool.clone(), cfg.clone(), test_driver());
+        let (blob, size) = recovered
+            .open("p", b"b")
+            .await
+            .unwrap_or_else(|error| panic!("repair outcome {outcome} failed: {error}"));
+        assert_eq!(size, expected.len() as u64, "repair outcome {outcome}");
+        let got = blob
+            .read_at(0, expected.len())
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(got.as_ref(), expected.as_slice(), "repair outcome {outcome}");
+        drop(blob);
+        audit_volume(&recovered, true);
+    }
 }
 
 /// A DRIVER task aborted mid-commit (the runtime tearing down while a

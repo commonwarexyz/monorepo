@@ -367,7 +367,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
-        let storage = Storage::new(config, test_pool());
+        let storage = Storage::new(config.clone(), test_pool());
         run_storage_tests(storage).await;
     }
 
@@ -564,6 +564,20 @@ mod tests {
         // The retry must sync past the visible partition and reach its parent.
         // The old missing-header-only barrier would return successfully here.
         inject_dir_sync_failure(storage_directory.clone());
+        let storage = Storage::new(config.clone(), test_pool());
+        assert!(matches!(
+            storage.open("partition", b"retry").await,
+            Err(Error::BlobSyncFailed(..))
+        ));
+        drop(storage);
+
+        // The configured storage root may itself have been created by the
+        // interrupted open, so its parent entry also needs the retry barrier.
+        let storage_parent = storage_directory
+            .parent()
+            .expect("test storage has a parent")
+            .to_path_buf();
+        inject_dir_sync_failure(storage_parent);
         let storage = Storage::new(config, test_pool());
         assert!(matches!(
             storage.open("partition", b"retry").await,

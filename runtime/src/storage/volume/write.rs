@@ -27,6 +27,43 @@ use crate::{Blob as _, Error, IoBuf, IoBufs};
 use bytes::BufMut as _;
 use commonware_cryptography::{Crc32, Hasher as _};
 
+/// Latches the volume if a caller drops a data-plane mutation after it may
+/// have allocated an extent or issued inner I/O. Unlike commits, writes are
+/// caller-driven: the physical write can complete before this future gets its
+/// next poll to publish CRC/run bookkeeping. Continuing from that split state
+/// could let a later sync vouch for bytes under stale metadata.
+struct MutationGuard<'a, S: crate::Storage> {
+    ready: &'a Ready<S>,
+    armed: bool,
+}
+
+impl<'a, S: crate::Storage> MutationGuard<'a, S> {
+    const fn arm(ready: &'a Ready<S>) -> Self {
+        Self { ready, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+
+    fn fail(mut self, error: &Error) {
+        self.ready.poison(error.clone());
+        self.armed = false;
+    }
+}
+
+impl<S: crate::Storage> Drop for MutationGuard<'_, S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        tracing::error!(
+            "volume write future dropped after mutation began; storage poisoned until restart"
+        );
+        self.ready.poison(Error::Aborted);
+    }
+}
+
 /// One chunk's checksum outcome for a planned stretch.
 enum CrcUpdate {
     /// Computed eagerly (with its verified-by-construction bit). Publish
@@ -93,10 +130,17 @@ pub(super) async fn write_locked<S: crate::Storage>(
         .checked_add(data.len() as u64)
         .filter(|&end| end <= u64::MAX - BLOCK)
         .ok_or(Error::OffsetOverflow)?;
+    let guard = MutationGuard::arm(ready);
 
     let mut cursor = offset;
     while cursor < end {
-        let stretch = plan_stretch(ready, blob, None, cursor, end, &data, offset).await?;
+        let stretch = match plan_stretch(ready, blob, None, cursor, end, &data, offset).await {
+            Ok(stretch) => stretch,
+            Err(error) => {
+                guard.fail(&error);
+                return Err(error);
+            }
+        };
         if stretch.replaced.is_some() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
@@ -115,6 +159,7 @@ pub(super) async fn write_locked<S: crate::Storage>(
             // The unpublished stretch's fresh extent would otherwise strand
             // until restart: return it through the deferred-free path.
             free_unpublished(ready, stretch.allocated);
+            guard.fail(&e);
             return Err(e);
         }
         cursor = stretch.end;
@@ -129,6 +174,9 @@ pub(super) async fn write_locked<S: crate::Storage>(
         inner.grow_to(end);
         state.mark_dirty(blob.id);
     }
+    drop(inner);
+    drop(state);
+    guard.disarm();
     Ok(())
 }
 
@@ -154,10 +202,18 @@ pub(super) async fn stage_write<S: crate::Storage>(
         .checked_add(data.len() as u64)
         .filter(|&end| end <= u64::MAX - BLOCK)
         .ok_or(Error::OffsetOverflow)?;
+    let guard = MutationGuard::arm(ready);
 
     let mut cursor = offset;
     while cursor < end {
-        let stretch = plan_stretch(ready, blob, Some(staged), cursor, end, &data, offset).await?;
+        let stretch =
+            match plan_stretch(ready, blob, Some(staged), cursor, end, &data, offset).await {
+                Ok(stretch) => stretch,
+                Err(error) => {
+                    guard.fail(&error);
+                    return Err(error);
+                }
+            };
         if stretch.replaced.is_some() {
             ready.metrics.cow_bytes.inc_by(stretch.bytes.len() as u64);
         }
@@ -176,6 +232,7 @@ pub(super) async fn stage_write<S: crate::Storage>(
             // Not yet recorded in the staged overlay, so the batch's drop
             // path cannot reclaim it either: free it here.
             free_unpublished(ready, stretch.allocated);
+            guard.fail(&e);
             return Err(e);
         }
         cursor = stretch.end;
@@ -183,6 +240,7 @@ pub(super) async fn stage_write<S: crate::Storage>(
         publish_staged(&inner, staged, stretch);
     }
     staged.size = staged.size.max(end);
+    guard.disarm();
     Ok(())
 }
 

@@ -39,6 +39,21 @@ use std::{
 /// many append-shaped commits.
 pub(super) const MAX_CHECKSUM_REFS: usize = 16;
 
+/// Convert a table's encoded length to the on-disk superblock field without
+/// truncation. A commit must fail before acknowledgement if its table cannot
+/// be represented: recovery reads exactly this many bytes for the CRC binding.
+pub(super) fn checked_table_len(len: usize) -> Result<u32, Error> {
+    len.try_into().map_err(|_| Error::OffsetOverflow)
+}
+
+/// Convert a checksum extent's value count to the on-disk ref field.
+pub(super) fn checked_checksum_count(bytes: usize) -> Result<u32, Error> {
+    debug_assert!(bytes.is_multiple_of(4));
+    (bytes / 4)
+        .try_into()
+        .map_err(|_| Error::OffsetOverflow)
+}
+
 /// A planned write for the commit's WRITE phase.
 struct MetaWrite {
     physical: u64,
@@ -479,12 +494,12 @@ async fn take_snapshot<S: crate::Storage>(
             continue;
         };
         drop(write_guard);
-        let entry = stage_meta(ready, id, seq, captured, &mut writes, &mut manifest);
+        let entry = stage_meta(ready, id, seq, captured, &mut writes, &mut manifest)?;
         committed.push((blob, entry));
     }
 
     let (old_table, table_extent) =
-        assemble_table(ready, seq, &mut committed, &mut manifest, &mut writes);
+        assemble_table(ready, seq, &mut committed, &mut manifest, &mut writes)?;
 
     Ok(Snapshot {
         seq,
@@ -765,7 +780,7 @@ fn stage_meta<S: crate::Storage>(
     captured: Captured,
     writes: &mut Vec<MetaWrite>,
     manifest: &mut Vec<(u64, u64)>,
-) -> Entry {
+) -> Result<Entry, Error> {
     let Captured {
         mut entry,
         dirty_chunks,
@@ -781,13 +796,14 @@ fn stage_meta<S: crate::Storage>(
     };
     let wrote_checksum_ref = !cksum_bytes.is_empty();
     if wrote_checksum_ref {
+        let count = checked_checksum_count(cksum_bytes.len())?;
         let extent = {
             let mut state = ready.state.lock();
             state.allocate(block_align(cksum_bytes.len() as u64))
         };
         entry.checksums.push(ChecksumRef {
             first_chunk: array_start,
-            count: (cksum_bytes.len() / 4) as u32,
+            count,
             offset: extent.offset,
             crc: Crc32::checksum(&cksum_bytes),
         });
@@ -844,7 +860,7 @@ fn stage_meta<S: crate::Storage>(
         }
         state.install_committed_meta(id, meta);
     }
-    entry
+    Ok(entry)
 }
 
 /// Assemble the table — captured blobs re-encode; everything else is
@@ -858,17 +874,18 @@ fn assemble_table<S: crate::Storage>(
     committed: &mut [(Arc<BlobCore>, Entry)],
     manifest: &mut [(u64, u64)],
     writes: &mut Vec<MetaWrite>,
-) -> (Option<Extent>, Extent) {
+) -> Result<(Option<Extent>, Extent), Error> {
     let mut state = ready.state.lock();
     let (partitions, entries) = state.table_entries(committed);
     manifest.sort_unstable();
     let bytes = Table::assemble(seq, state.next_id(), &partitions, entries, manifest);
+    let table_len = checked_table_len(bytes.len())?;
     let extent = state.allocate(block_align(bytes.len() as u64));
     let superblock_offset = Superblock::slot_offset(state.standby_slot());
     let sb = Superblock {
         seq,
         table_offset: extent.offset,
-        table_len: bytes.len() as u32,
+        table_len,
         table_crc: Crc32::checksum(&bytes),
     };
     writes.push(MetaWrite {
@@ -879,7 +896,7 @@ fn assemble_table<S: crate::Storage>(
         physical: superblock_offset,
         bytes: IoBuf::from(sb.encode()),
     });
-    (state.table_extent(), extent)
+    Ok((state.table_extent(), extent))
 }
 
 /// Publish a confirmed commit.

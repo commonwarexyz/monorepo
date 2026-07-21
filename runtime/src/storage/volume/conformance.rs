@@ -43,14 +43,14 @@
 //! all-vanished corners plus seeded random samples — the exhaustive
 //! product is used whenever it fits (stated per workload in the stats).
 //!
-//! CANCELLATION INJECTION (the third layer): sync, start-sync, remove,
-//! batch-apply, and apply-start-sync futures are dropped after every
-//! possible poll count (a pass-through storage wrapper turns each inner
-//! I/O into a poll boundary). Callers are pure observers of driver-task
-//! commits, so every drop point must be BENIGN: the operation completes
-//! regardless, nothing poisons, and the recovered state stays trace
-//! conformant. The driver-abort arm of the contract (poison on a task
-//! dropped mid-commit) is pinned by
+//! CANCELLATION INJECTION (the third layer): direct/staged writes, sync,
+//! start-sync, remove, batch-apply, and apply-start-sync futures are dropped
+//! after every possible poll count (a pass-through storage wrapper turns
+//! each inner I/O into a poll boundary). Commit callers are pure observers,
+//! so their drops are benign. Writes are caller-driven: once mutation begins,
+//! a drop must poison the volume so no later commit can acknowledge physical
+//! bytes under stale bookkeeping. In both cases every crash must recover to a
+//! model-allowed state. Driver-task abort is pinned separately by
 //! `tests::test_volume_aborted_commit_task_poisons`.
 
 use super::{
@@ -475,13 +475,12 @@ async fn pause(active: &Arc<AtomicBool>) {
 /// A pass-through storage wrapper that (while `active`) yields once before
 /// every inner operation, turning each inner I/O into a scheduling
 /// boundary that discretizes a driver task's progress: dropping an
-/// observer future after every poll count (polls interleaved with
-/// `yield_now`) samples the drop against each inner-I/O stage — the
-/// await-point analogue of crash-at-every-write, and every stage must be
-/// benign. Concurrently joined I/O shares one boundary (the commit's
-/// metadata writes all yield in one poll of their `try_join_all` and
-/// issue in the next), which costs nothing for the checked contracts
-/// because the joined writes commute.
+/// future after every poll count (polls interleaved with `yield_now`) samples
+/// the drop against each inner-I/O stage — the await-point analogue of
+/// crash-at-every-write. Concurrently joined I/O shares one boundary (the
+/// commit's metadata writes all yield in one poll of their `try_join_all` and
+/// issue in the next), which costs nothing for the checked contracts because
+/// the joined writes commute.
 #[derive(Clone)]
 struct Yielding<S> {
     inner: S,
@@ -2513,6 +2512,139 @@ async fn random_walk(seed: u64) {
 // ---------------------------------------------------------------------------
 // Cancellation injection (the layer below the model)
 // ---------------------------------------------------------------------------
+
+/// Drop a caller-driven direct write after every inner-I/O poll boundary.
+/// Before mutation it may unwind cleanly; after mutation begins it must poison.
+/// Either way, a crash can expose only the last acknowledged model state.
+#[tokio::test]
+async fn conformance_cancel_write() {
+    let mut polls = 0usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        rig.execute(Op::Sync(0b001)).await;
+
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let mut fut = Box::pin(
+                rig.blobs[&0].write_at(0, IoBuf::copy_from_slice(&pattern(1_000_000))),
+            );
+            let mut completed = false;
+            for _ in 0..polls {
+                if let Poll::Ready(result) = futures::poll!(fut.as_mut()) {
+                    result.expect("completed write succeeds");
+                    completed = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            drop(fut);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+
+        let issued = !rig.tearing.unsynced.lock().is_empty();
+        let poisoned = rig
+            .volume
+            .shared
+            .ready
+            .get()
+            .expect("recovered")
+            .poisoned
+            .get()
+            .is_some();
+        assert!(
+            !issued || poisoned || completed,
+            "polls {polls}: an issued cancelled write must poison"
+        );
+        if !completed && poisoned {
+            assert!(
+                rig.blobs[&0].sync().await.is_err(),
+                "polls {polls}: poison must reject later durability claims"
+            );
+        }
+        if !completed && !poisoned {
+            assert!(!issued, "clean cancellation cannot have issued I/O");
+            audit_volume(&rig.volume, true);
+            rig.check_live().await;
+        }
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
+        if completed {
+            println!("cancel_write: enumerated {polls} poll boundaries");
+            break;
+        }
+        polls += 1;
+        assert!(polls < 10_000, "write cancellation enumeration diverged");
+    }
+}
+
+/// The staged write-through path has the same physical/publication split as a
+/// direct write. Dropping the batch afterward must still recover to the last
+/// acknowledged model state at every cancellation boundary.
+#[tokio::test]
+async fn conformance_cancel_staged_write() {
+    let mut polls = 0usize;
+    loop {
+        let mut rig = Rig::new().await;
+        rig.execute(Op::Append(0)).await;
+        rig.execute(Op::Sync(0b001)).await;
+        let mut batch = rig.volume.batch().await.unwrap();
+
+        rig.yields.store(true, Ordering::SeqCst);
+        let completed = {
+            let mut fut = Box::pin(batch.write_at(
+                &rig.blobs[&0],
+                0,
+                IoBuf::copy_from_slice(&pattern(1_000_001)),
+            ));
+            let mut completed = false;
+            for _ in 0..polls {
+                if let Poll::Ready(result) = futures::poll!(fut.as_mut()) {
+                    result.expect("completed staged write succeeds");
+                    completed = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            drop(fut);
+            completed
+        };
+        rig.yields.store(false, Ordering::SeqCst);
+
+        let issued = !rig.tearing.unsynced.lock().is_empty();
+        let poisoned = rig
+            .volume
+            .shared
+            .ready
+            .get()
+            .expect("recovered")
+            .poisoned
+            .get()
+            .is_some();
+        assert!(
+            !issued || poisoned || completed,
+            "polls {polls}: an issued cancelled staged write must poison"
+        );
+        drop(batch);
+        if !completed && !poisoned {
+            assert!(!issued, "clean cancellation cannot have issued I/O");
+            audit_volume(&rig.volume, true);
+            rig.check_live().await;
+        }
+        let mut stats = Stats::default();
+        rig.crash_probe(&[], 256, polls as u64, &mut stats).await;
+        if completed {
+            println!("cancel_staged_write: enumerated {polls} poll boundaries");
+            break;
+        }
+        polls += 1;
+        assert!(
+            polls < 10_000,
+            "staged-write cancellation enumeration diverged"
+        );
+    }
+}
 
 /// Poll `fut` up to `polls` times, yielding between polls so the volume's
 /// driver tasks (spawned onto this test's tokio runtime) make progress.

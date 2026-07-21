@@ -660,14 +660,23 @@ async fn create_blob<S: crate::Storage>(
         state.count_handle(id);
         (id, core)
     };
-    // "An Ok result indicates the blob is durably created." The new
-    // blob is clean (its empty entry is served by assembly), so the
-    // commit captures just the namespace change.
-    commit::commit(ready, &[id]).await?;
+    // Track the counted handle before the first await so cancellation of the
+    // caller cannot strand a phantom handle and indefinitely gate recycling.
     let tracker = Arc::new(HandleTracker {
         ready: ready.clone(),
         id,
     });
+    // Publishing the name is a mutation boundary. If the observer vanishes
+    // before the independent commit driver resolves, the namespace lock is
+    // released and another caller could otherwise observe an unconfirmed
+    // creation. Fail closed until restart in that window.
+    let guard = commit::PoisonOnCancel::arm(ready);
+    // "An Ok result indicates the blob is durably created." The new
+    // blob is clean (its empty entry is served by assembly), so the
+    // commit captures just the namespace change.
+    let result = commit::commit(ready, &[id]).await;
+    guard.disarm();
+    result?;
     Ok((
         Blob {
             ready: ready.clone(),
