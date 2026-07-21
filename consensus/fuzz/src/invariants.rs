@@ -4392,9 +4392,7 @@ mod tests {
         // seed provably elects a different leader to a view-5 nullification.
         let mismatched = (6..=64)
             .map(|view| threshold_nullification(&schemes, view))
-            .find(|certificate| {
-                elector.elect(round(6), Some(&certificate.certificate)) != expected
-            })
+            .find(|certificate| elector.elect(round(6), Some(&certificate.certificate)) != expected)
             .expect("threshold fixture must contain a seed electing another participant");
         let doctored = SimplexNullification::<ThresholdScheme> {
             round: round(5),

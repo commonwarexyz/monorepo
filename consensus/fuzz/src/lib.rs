@@ -2263,12 +2263,8 @@ enum TwinsReporter<P>
 where
     P: simplex::Simplex,
 {
-    Summary(
-        reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>,
-    ),
-    Recording(
-        RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>,
-    ),
+    Summary(reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
+    Recording(RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
 }
 
 impl<P> Clone for TwinsReporter<P>
@@ -2298,9 +2294,8 @@ where
 
     fn recording(
         &self,
-    ) -> Option<
-        RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>,
-    > {
+    ) -> Option<RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>>
+    {
         match self {
             Self::Summary(_) => None,
             Self::Recording(reporter) => Some(reporter.clone()),
@@ -2631,9 +2626,7 @@ fn run_twins<P: simplex::Simplex>(
                 // extraction boundary); `Mutator` retains it as a vote/fault
                 // observer only.
                 match role {
-                    TwinsRole::Campaign => {
-                        reporters.push(TwinsReporter::Summary(reporter.clone()))
-                    }
+                    TwinsRole::Campaign => reporters.push(TwinsReporter::Summary(reporter.clone())),
                     TwinsRole::Mutator => {
                         twin_observers.push(TwinsReporter::Summary(reporter.clone()))
                     }
@@ -2787,16 +2780,7 @@ fn run_twins<P: simplex::Simplex>(
                 };
                 let spawn = || {
                     if record_audit {
-                        TwinsReporter::Recording(spawn_audited_validator::<
-                            P,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                        >(
+                        TwinsReporter::Recording(spawn_audited_validator::<P, _, _, _, _, _, _, _>(
                             ctx,
                             &oracle,
                             participants.as_ref(),
@@ -2816,16 +2800,7 @@ fn run_twins<P: simplex::Simplex>(
                             input.reporting,
                         ))
                     } else {
-                        TwinsReporter::Summary(spawn_honest_validator::<
-                            P,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                        >(
+                        TwinsReporter::Summary(spawn_honest_validator::<P, _, _, _, _, _, _, _>(
                             ctx,
                             &oracle,
                             participants.as_ref(),
@@ -2925,8 +2900,10 @@ fn run_twins<P: simplex::Simplex>(
                     state_cov::observe_tokens(tokens);
                 }
                 let honest_reporters = &reporters[honest_start..];
-                let honest_summaries: Vec<_> =
-                    honest_reporters.iter().map(TwinsReporter::summary).collect();
+                let honest_summaries: Vec<_> = honest_reporters
+                    .iter()
+                    .map(TwinsReporter::summary)
+                    .collect();
                 // Vote/fault checks run over ALL reporters (twin halves and the
                 // Mutator primary included): a twin reporter can be the sole
                 // observer of evidence against a correct signer, and the
@@ -3507,14 +3484,9 @@ mod tests {
         // N4F1C3 twins compromise one identity (two engines, one key): the
         // three honest validators are captured, twin halves contribute no
         // attributed events, and receives from the twin merge nothing.
-        let summary = run_twins::<simplex::SimplexId>(
-            audit_input(),
-            TwinsRole::Campaign,
-            false,
-            true,
-            false,
-        )
-        .expect("happens-before summary");
+        let summary =
+            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true, false)
+                .expect("happens-before summary");
         assert_eq!(summary.node_count(), 3, "only honest validators tracked");
         assert!(!summary.tokens().is_empty());
     }
