@@ -365,7 +365,9 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown() {
         ReshareEngine::new(),
         3,
         Crash::Random {
-            frequency: Duration::from_secs(3),
+            // Leave more uninterrupted uptime than `certification_timeout` so recovery can make
+            // progress before the next total shutdown.
+            frequency: Duration::from_secs(4),
             downtime: Duration::from_secs(1),
             count: 5,
         },
