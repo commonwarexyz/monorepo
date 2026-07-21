@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -50,12 +50,29 @@ enum QmdbOperation {
     Delete { key: RawKey },
     Commit { value: RawValue },
     Get { key: RawKey },
+    BatchGet { key: RawKey },
+    ToBatch { key: RawKey },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     operations: Vec<QmdbOperation>,
     raw_bytes: Vec<u8>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
+        let num_operations = u.int_in_range(1..=MAX_OPS)?;
+        let operations = (0..num_operations)
+            .map(|_| QmdbOperation::arbitrary(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            operations,
+            raw_bytes,
+        })
+    }
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -74,6 +91,15 @@ async fn commit_pending<F: MerkleFamily>(
         batch = batch.write(k, v);
     }
     let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+    assert_eq!(
+        merkleized.bounds().base_size,
+        *db.bounds().end,
+        "batch should start at the current database tip",
+    );
+    assert!(
+        db.validate_batch(&merkleized).is_ok(),
+        "fresh batch should validate",
+    );
     let (db, _) = db
         .apply_batch(merkleized)
         .await
@@ -187,6 +213,66 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             }
                         }
                         all_keys.insert(*key);
+                        db
+                    }
+
+                    QmdbOperation::BatchGet { key } => {
+                        let mut batch = db.new_batch();
+                        for (key, value) in pending_writes.iter().cloned() {
+                            batch = batch.write(key, value);
+                        }
+                        let raw_key = *key;
+                        let key = Key::new(raw_key);
+                        let actual = batch
+                            .get(&key, &db)
+                            .await
+                            .expect("batch get should not fail");
+                        let expected = if pending_deletes.contains(&raw_key) {
+                            None
+                        } else {
+                            pending_inserts
+                                .get(&raw_key)
+                                .or_else(|| committed_state.get(&raw_key))
+                                .map(|value| Value::new(*value))
+                        };
+                        assert_eq!(actual, expected, "batch get disagreed with pending model");
+                        assert_eq!(
+                            batch
+                                .get_many(&[&key, &key], &db)
+                                .await
+                                .expect("batch get many should not fail"),
+                            vec![actual.clone(), actual],
+                            "batch get many disagreed with batch get",
+                        );
+                        db
+                    }
+
+                    QmdbOperation::ToBatch { key } => {
+                        let batch = db.to_batch();
+                        assert_eq!(batch.root(), db.root(), "base batch root differed from DB");
+                        assert_eq!(
+                            batch.bounds().total_size,
+                            *db.bounds().end,
+                            "base batch size differed from DB",
+                        );
+                        let key = Key::new(*key);
+                        let actual = batch
+                            .get(&key, &db)
+                            .await
+                            .expect("merkleized batch get should not fail");
+                        assert_eq!(
+                            actual,
+                            db.get(&key).await.expect("get should not fail"),
+                            "base batch get differed from DB",
+                        );
+                        assert_eq!(
+                            batch
+                                .get_many(&[&key, &key], &db)
+                                .await
+                                .expect("merkleized batch get many should not fail"),
+                            vec![actual.clone(), actual],
+                            "merkleized batch get many disagreed with batch get",
+                        );
                         db
                     }
                 };

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy as _};
 use commonware_runtime::{
     BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -57,17 +57,21 @@ enum Operation {
     OpCount,
     Root,
     SimulateFailure,
+    Rewind,
+    Strategy {
+        values: [u8; 4],
+    },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 14 {
+        match choice % 16 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
-                let value_bytes = u.bytes(actual_len)?.to_vec();
+                let value_bytes = u.bytes(actual_len.min(u.len()))?.to_vec();
                 Ok(Operation::Update { key, value_bytes })
             }
             1 => {
@@ -79,7 +83,7 @@ impl<'a> Arbitrary<'a> for Operation {
                 let metadata_bytes = if has_metadata {
                     let metadata_len: u16 = u.arbitrary()?;
                     let actual_len = ((metadata_len as usize) % 1000) + 1;
-                    Some(u.bytes(actual_len)?.to_vec())
+                    Some(u.bytes(actual_len.min(u.len()))?.to_vec())
                 } else {
                     None
                 };
@@ -112,7 +116,11 @@ impl<'a> Arbitrary<'a> for Operation {
             9 => Ok(Operation::InactivityFloorLoc),
             10 => Ok(Operation::OpCount),
             11 => Ok(Operation::Root),
-            12 | 13 => Ok(Operation::SimulateFailure {}),
+            12 => Ok(Operation::SimulateFailure {}),
+            13 => Ok(Operation::Rewind),
+            14 | 15 => Ok(Operation::Strategy {
+                values: u.arbitrary()?,
+            }),
             _ => unreachable!(),
         }
     }
@@ -126,11 +134,12 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        let raw_bytes = u.bytes(u.len())?.to_vec();
         Ok(FuzzInput { ops, raw_bytes })
     }
 }
@@ -189,16 +198,24 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         > = BTreeMap::new();
 
         let mut pending_writes: Vec<(Key, Option<Vec<u8>>)> = Vec::new();
+        let mut pending_expected: BTreeMap<Key, Option<Vec<u8>>> = BTreeMap::new();
+        let mut committed_state: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+        let mut expected_metadata = None;
+        let mut expected_op_count = db.bounds().end;
 
         for op in &input.ops {
             db = match op {
                 Operation::Update { key, value_bytes } => {
-                    pending_writes.push((Key::new(*key), Some(value_bytes.to_vec())));
+                    let key = Key::new(*key);
+                    pending_writes.push((key.clone(), Some(value_bytes.to_vec())));
+                    pending_expected.insert(key, Some(value_bytes.clone()));
                     db
                 }
 
                 Operation::Delete { key } => {
-                    pending_writes.push((Key::new(*key), None));
+                    let key = Key::new(*key);
+                    pending_writes.push((key.clone(), None));
+                    pending_expected.insert(key, None);
                     db
                 }
 
@@ -208,11 +225,25 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
-                    let (db, _) = db
+                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
+                    assert_eq!(applied, expected_op_count..expected_end);
+                    expected_op_count = expected_end;
                     let db = db.commit().await.expect("Commit should not fail");
+                    for (key, value) in std::mem::take(&mut pending_expected) {
+                        match value {
+                            Some(value) => {
+                                committed_state.insert(key, value);
+                            }
+                            None => {
+                                committed_state.remove(&key);
+                            }
+                        }
+                    }
+                    expected_metadata = metadata_bytes.clone();
                     historical_roots.insert(db.bounds().end, db.root());
                     db
                 }
@@ -223,12 +254,23 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                 }
 
                 Operation::Get { key } => {
-                    let _ = db.get(&Key::new(*key)).await;
+                    let key = Key::new(*key);
+                    assert_eq!(
+                        db.get(&key).await.expect("Get should not fail"),
+                        committed_state.get(&key).cloned(),
+                        "Get disagreed with the committed model",
+                    );
                     db
                 }
 
                 Operation::GetMetadata => {
-                    let _ = db.get_metadata().await;
+                    assert_eq!(
+                        db.get_metadata()
+                            .await
+                            .expect("Metadata read should not fail"),
+                        expected_metadata,
+                        "Metadata disagreed with the committed model",
+                    );
                     db
                 }
 
@@ -239,11 +281,25 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let (db, _) = db
+                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
+                    assert_eq!(applied, expected_op_count..expected_end);
+                    expected_op_count = expected_end;
                     let db = db.commit().await.expect("Commit should not fail");
+                    for (key, value) in std::mem::take(&mut pending_expected) {
+                        match value {
+                            Some(value) => {
+                                committed_state.insert(key, value);
+                            }
+                            None => {
+                                committed_state.remove(&key);
+                            }
+                        }
+                    }
+                    expected_metadata = None;
                     historical_roots.insert(db.bounds().end, db.root());
                     let start_loc = Location::<F>::new(*start_loc % (*F::MAX_LEAVES + 1));
                     let op_count = db.bounds().end;
@@ -269,11 +325,25 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let (db, _) = db
+                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
+                    assert_eq!(applied, expected_op_count..expected_end);
+                    expected_op_count = expected_end;
                     let db = db.commit().await.expect("Commit should not fail");
+                    for (key, value) in std::mem::take(&mut pending_expected) {
+                        match value {
+                            Some(value) => {
+                                committed_state.insert(key, value);
+                            }
+                            None => {
+                                committed_state.remove(&key);
+                            }
+                        }
+                    }
+                    expected_metadata = None;
                     historical_roots.insert(db.bounds().end, db.root());
                     let op_count = {
                         let idx = (*size as usize) % historical_roots.len();
@@ -303,21 +373,72 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let (db, _) = db
+                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
+                    assert_eq!(applied, expected_op_count..expected_end);
+                    expected_op_count = expected_end;
+                    for (key, value) in std::mem::take(&mut pending_expected) {
+                        match value {
+                            Some(value) => {
+                                committed_state.insert(key, value);
+                            }
+                            None => {
+                                committed_state.remove(&key);
+                            }
+                        }
+                    }
+                    expected_metadata = None;
                     historical_roots.insert(db.bounds().end, db.root());
                     db.sync().await.expect("Sync should not fail")
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.sync_boundary();
+                    let bounds = db.bounds();
+                    let boundary = db.sync_boundary();
+                    assert!(bounds.start <= boundary && boundary <= expected_op_count);
                     db
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    assert_eq!(db.bounds().end, expected_op_count);
+                    assert_eq!(db.is_empty(), committed_state.is_empty());
+                    db
+                }
+
+                Operation::Rewind => {
+                    let expected_root = db.root();
+                    let expected_bounds = db.bounds();
+                    let expected_metadata_before = db
+                        .get_metadata()
+                        .await
+                        .expect("Metadata read should not fail");
+                    let db = db
+                        .rewind(expected_bounds.end)
+                        .await
+                        .expect("Rewinding to the current tip should not fail");
+                    assert_eq!(db.root(), expected_root);
+                    assert_eq!(db.bounds(), expected_bounds);
+                    assert_eq!(
+                        db.get_metadata()
+                            .await
+                            .expect("Metadata read should not fail"),
+                        expected_metadata_before,
+                    );
+                    db
+                }
+
+                Operation::Strategy { values } => {
+                    let expected = values.iter().map(|value| u64::from(*value)).sum::<u64>();
+                    let actual = db.strategy().fold(
+                        values,
+                        || 0u64,
+                        |sum, value| sum + u64::from(*value),
+                        |left, right| left + right,
+                    );
+                    assert_eq!(actual, expected, "database strategy produced a wrong fold");
                     db
                 }
 
@@ -328,19 +449,45 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let (db, _) = db
+                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let expected_root = merkleized.root();
+                    let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
+                    assert_eq!(applied, expected_op_count..expected_end);
+                    expected_op_count = expected_end;
                     let db = db.commit().await.expect("Commit should not fail");
+                    for (key, value) in std::mem::take(&mut pending_expected) {
+                        match value {
+                            Some(value) => {
+                                committed_state.insert(key, value);
+                            }
+                            None => {
+                                committed_state.remove(&key);
+                            }
+                        }
+                    }
+                    expected_metadata = None;
                     historical_roots.insert(db.bounds().end, db.root());
-                    let _ = db.root();
+                    assert_eq!(
+                        db.root(),
+                        expected_root,
+                        "Committed root disagreed with its batch"
+                    );
                     db
                 }
 
                 Operation::SimulateFailure => {
                     // Simulate unclean shutdown by dropping the db without committing
+                    let durable_root = db.root();
+                    let durable_bounds = db.bounds();
+                    let durable_metadata = db
+                        .get_metadata()
+                        .await
+                        .expect("Metadata read should not fail");
                     pending_writes.clear();
+                    pending_expected.clear();
                     historical_roots.clear();
                     drop(db);
 
@@ -351,7 +498,25 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     )
                     .await
                     .expect("Failed to init source db");
+                    assert_eq!(db.root(), durable_root, "reopen changed the durable root");
+                    assert_eq!(
+                        db.bounds(),
+                        durable_bounds,
+                        "reopen changed the durable bounds",
+                    );
+                    assert_eq!(
+                        db.get_metadata()
+                            .await
+                            .expect("Metadata read should not fail"),
+                        durable_metadata,
+                        "reopen changed durable metadata",
+                    );
                     restarts += 1;
+                    expected_op_count = db.bounds().end;
+                    expected_metadata = db
+                        .get_metadata()
+                        .await
+                        .expect("Metadata read should not fail");
                     db
                 }
             };
@@ -362,10 +527,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        let (db, _) = db
+        let expected_end = Location::new(merkleized.bounds().total_size);
+        let (db, applied) = db
             .apply_batch(merkleized)
             .await
             .expect("commit should not fail");
+        assert_eq!(applied, expected_op_count..expected_end);
         db.destroy().await.expect("Destroy should not fail");
     });
 }

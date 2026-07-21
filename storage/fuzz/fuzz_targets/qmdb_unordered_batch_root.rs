@@ -55,6 +55,8 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let initial_len = u.int_in_range(0..=MAX_INITIAL_WRITES)?;
         let parent_len = u.int_in_range(1..=MAX_PARENT_MUTATIONS)?;
         let child_len = u.int_in_range(1..=MAX_CHILD_MUTATIONS)?;
@@ -73,7 +75,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             initial,
             parent,
             child,
-            raw_bytes: u.bytes(u.len())?.to_vec(),
+            raw_bytes,
         })
     }
 }
@@ -135,6 +137,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             );
         }
         let initial = batch.merkleize(&db, None).await.unwrap();
+        assert!(
+            db.validate_batch(&initial).is_ok(),
+            "fresh batch should validate"
+        );
         let (db, _) = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -151,6 +157,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             };
         }
         let parent = batch.merkleize(&db, None).await.unwrap();
+        assert!(
+            db.validate_batch(&parent).is_ok(),
+            "fresh parent should validate"
+        );
         let mut batch = parent.new_batch::<Sha256>();
         for mutation in &input.child {
             batch = match mutation {
@@ -160,12 +170,59 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
             };
         }
+        let probe_key = match &input.child[0] {
+            Mutation::Write { key, .. } | Mutation::Delete { key } => key_from_seed(*key),
+        };
+        let unmerkleized_value = batch
+            .get(&probe_key, &db)
+            .await
+            .expect("unmerkleized batch get should not fail");
+        assert_eq!(
+            batch
+                .get_many(&[&probe_key, &probe_key], &db)
+                .await
+                .expect("unmerkleized batch get many should not fail"),
+            vec![unmerkleized_value.clone(), unmerkleized_value.clone()],
+            "unmerkleized batch get many disagreed with batch get",
+        );
         let pending_child = batch.merkleize(&db, None).await.unwrap();
+        assert_eq!(
+            pending_child.bounds().base_size,
+            parent.bounds().total_size,
+            "child should start at its parent tip",
+        );
 
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state. Both speculative roots must match.
         let (db, _) = db.apply_batch(parent).await.unwrap();
         let db = db.commit().await.unwrap();
+        let base = db.to_batch();
+        assert_eq!(base.root(), db.root(), "base batch root differed from DB");
+        assert_eq!(
+            base.bounds().total_size,
+            *db.bounds().end,
+            "base batch size differed from DB",
+        );
+        assert!(
+            db.validate_batch(&pending_child).is_ok(),
+            "child of the applied parent should validate",
+        );
+        assert_eq!(
+            pending_child
+                .get(&probe_key, &db)
+                .await
+                .expect("merkleized batch get should not fail"),
+            unmerkleized_value,
+            "merkleized child read differed from its unmerkleized read",
+        );
+        assert_eq!(
+            pending_child
+                .get_many(&[&probe_key, &probe_key], &db)
+                .await
+                .expect("merkleized batch get many should not fail"),
+            vec![unmerkleized_value.clone(), unmerkleized_value],
+            "merkleized batch get many disagreed with batch get",
+        );
 
         let mut batch = db.new_batch();
         for mutation in &input.child {

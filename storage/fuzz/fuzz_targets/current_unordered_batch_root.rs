@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -54,7 +54,9 @@ struct FuzzInput {
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let initial_len = u.int_in_range(0..=MAX_INITIAL_WRITES)?;
         let parent_len = u.int_in_range(1..=MAX_PARENT_MUTATIONS)?;
         let child_len = u.int_in_range(1..=MAX_CHILD_MUTATIONS)?;
@@ -73,7 +75,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             initial,
             parent,
             child,
-            raw_bytes: u.bytes(u.len())?.to_vec(),
+            raw_bytes,
         })
     }
 }
@@ -150,7 +152,42 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
             };
         }
+        let parent_keys = input
+            .parent
+            .iter()
+            .map(|mutation| match mutation {
+                Mutation::Write { key, .. } | Mutation::Delete { key } => key_from_seed(*key),
+            })
+            .collect::<Vec<_>>();
+        let parent_key_refs = parent_keys.iter().collect::<Vec<_>>();
+        let parent_many = batch.get_many(&parent_key_refs, &db).await.unwrap();
+        let mut parent_single = Vec::with_capacity(parent_keys.len());
+        for key in &parent_keys {
+            parent_single.push(batch.get(key, &db).await.unwrap());
+        }
+        assert_eq!(
+            parent_many, parent_single,
+            "unmerkleized batch get_many diverged from repeated get"
+        );
         let parent = batch.merkleize(&db, None).await.unwrap();
+        assert_eq!(
+            parent.bounds().base_size,
+            *db.bounds().end,
+            "parent batch should start at the committed database size"
+        );
+        assert!(
+            parent.bounds().total_size > parent.bounds().base_size,
+            "merkleized batch should include a commit operation"
+        );
+        let parent_many = parent.get_many(&parent_key_refs, &db).await.unwrap();
+        let mut parent_single = Vec::with_capacity(parent_keys.len());
+        for key in &parent_keys {
+            parent_single.push(parent.get(key, &db).await.unwrap());
+        }
+        assert_eq!(
+            parent_many, parent_single,
+            "merkleized batch get_many diverged from repeated get"
+        );
         let mut batch = parent.new_batch::<Sha256>();
         for mutation in &input.child {
             batch = match mutation {
@@ -166,6 +203,27 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         // committed wrapper state. Both canonical and ops roots must match.
         let (db, _) = db.apply_batch(parent).await.unwrap();
         let db = db.commit().await.unwrap();
+        let snapshot = db.to_batch();
+        assert_eq!(
+            snapshot.root(),
+            db.root(),
+            "snapshot root should match the database"
+        );
+        assert_eq!(
+            snapshot.ops_root(),
+            db.ops_root(),
+            "snapshot ops root should match the database"
+        );
+        assert_eq!(
+            snapshot.bounds().total_size,
+            *db.bounds().end,
+            "snapshot size should match the database"
+        );
+        assert_eq!(
+            snapshot.sync_boundary(),
+            db.sync_boundary(),
+            "snapshot sync boundary should match the database"
+        );
 
         let mut batch = db.new_batch();
         for mutation in &input.child {
@@ -177,6 +235,48 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             };
         }
         let committed_child = batch.merkleize(&db, None).await.unwrap();
+
+        assert_eq!(
+            pending_child.bounds().base_size,
+            committed_child.bounds().base_size,
+            "child base size depended on pending-vs-committed parent path"
+        );
+        assert_eq!(
+            pending_child.bounds().total_size,
+            committed_child.bounds().total_size,
+            "child total size depended on pending-vs-committed parent path"
+        );
+        assert_eq!(
+            pending_child.sync_boundary(),
+            committed_child.sync_boundary(),
+            "child sync boundary depended on pending-vs-committed parent path"
+        );
+        assert!(
+            db.validate_batch(&pending_child).is_ok(),
+            "child of the committed parent should validate"
+        );
+        assert!(
+            db.validate_batch(&committed_child).is_ok(),
+            "fresh child of the committed database should validate"
+        );
+
+        let child_keys = input
+            .child
+            .iter()
+            .map(|mutation| match mutation {
+                Mutation::Write { key, .. } | Mutation::Delete { key } => key_from_seed(*key),
+            })
+            .collect::<Vec<_>>();
+        let child_key_refs = child_keys.iter().collect::<Vec<_>>();
+        let pending_many = pending_child.get_many(&child_key_refs, &db).await.unwrap();
+        let committed_many = committed_child
+            .get_many(&child_key_refs, &db)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_many, committed_many,
+            "child reads depended on pending-vs-committed parent path"
+        );
 
         assert_eq!(
             pending_child.root(),
@@ -200,6 +300,23 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             db.ops_root(),
             committed_child.ops_root(),
             "pending child ops root diverged"
+        );
+        assert_eq!(
+            db.bounds().end,
+            commonware_storage::merkle::Location::<F>::new(committed_child.bounds().total_size),
+            "applied child size should match its batch bounds"
+        );
+        assert_eq!(
+            db.sync_boundary(),
+            committed_child.sync_boundary(),
+            "applied child sync boundary should match its batch"
+        );
+        assert!(
+            matches!(
+                db.validate_batch(&committed_child),
+                Err(commonware_storage::qmdb::Error::StaleBatch { .. })
+            ),
+            "sibling child should be stale after the other branch is applied"
         );
 
         db.destroy().await.unwrap();

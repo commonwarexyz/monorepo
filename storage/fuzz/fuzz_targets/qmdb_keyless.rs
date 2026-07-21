@@ -12,7 +12,7 @@ use commonware_storage::{
     qmdb::{
         Error,
         keyless::variable::{Config, Db as Keyless},
-        verify_proof,
+        verify_proof, verify_proof_and_pinned_nodes,
     },
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
@@ -84,12 +84,25 @@ enum Operation {
     Get {
         loc_offset: u32,
     },
+    GetMany {
+        first_offset: u32,
+        second_offset: u32,
+    },
+    BatchReads {
+        loc_offset: u32,
+    },
     GetMetadata,
     Prune,
     Sync,
     OpCount,
     LastCommitLoc,
     OldestRetainedLoc,
+    SyncBoundary,
+    Rewind {
+        idx: u8,
+    },
+    ValidateBatch,
+    ToBatch,
     Root,
     Proof {
         start_offset: u32,
@@ -101,16 +114,19 @@ enum Operation {
         max_ops: u16,
     },
     SimulateFailure {},
+    Strategy {
+        values: [u8; 4],
+    },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 14 {
+        match choice % 21 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
-                let value_bytes = u.bytes(actual_len)?.to_vec();
+                let value_bytes = u.bytes(actual_len.min(u.len()))?.to_vec();
                 Ok(Operation::Append { value_bytes })
             }
             1 => {
@@ -118,7 +134,7 @@ impl<'a> Arbitrary<'a> for Operation {
                 let metadata_bytes = if has_metadata {
                     let metadata_len: u16 = u.arbitrary()?;
                     let actual_len = ((metadata_len as usize) % 1000) + 1;
-                    Some(u.bytes(actual_len)?.to_vec())
+                    Some(u.bytes(actual_len.min(u.len()))?.to_vec())
                 } else {
                     None
                 };
@@ -166,6 +182,22 @@ impl<'a> Arbitrary<'a> for Operation {
                 };
                 Ok(Operation::BadChainedCommit { ancestor_kind })
             }
+            14 => Ok(Operation::GetMany {
+                first_offset: u.arbitrary()?,
+                second_offset: u.arbitrary()?,
+            }),
+            15 => Ok(Operation::BatchReads {
+                loc_offset: u.arbitrary()?,
+            }),
+            16 => Ok(Operation::SyncBoundary),
+            17 => Ok(Operation::Rewind {
+                idx: u.arbitrary()?,
+            }),
+            18 => Ok(Operation::ValidateBatch),
+            19 => Ok(Operation::ToBatch),
+            20 => Ok(Operation::Strategy {
+                values: u.arbitrary()?,
+            }),
             _ => unreachable!(),
         }
     }
@@ -179,11 +211,12 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        let raw_bytes = u.bytes(u.len())?.to_vec();
         Ok(FuzzInput { ops, raw_bytes })
     }
 }
@@ -256,6 +289,13 @@ fn fuzz_family<F: Family, S: Strategy>(
         let mut restarts = 0usize;
 
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
+        let mut expected_metadata = db.get_metadata().await.unwrap();
+        let mut commit_history = vec![(
+            db.bounds().end,
+            db.root(),
+            db.inactivity_floor_loc(),
+            db.get_metadata().await.unwrap(),
+        )];
 
         for op in &input.ops {
             db = match op {
@@ -298,11 +338,25 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                     match expect_err {
                         None => {
+                            let expected_root = merkleized.root();
+                            let expected_size = Location::new(merkleized.bounds().total_size);
                             let (db, _) = db
                                 .apply_batch(merkleized)
                                 .await
                                 .expect("Commit should not fail");
-                            db.commit().await.expect("Commit should not fail")
+                            let db = db.commit().await.expect("Commit should not fail");
+                            assert_eq!(db.bounds().end, expected_size);
+                            assert_eq!(db.root(), expected_root);
+                            assert_eq!(db.inactivity_floor_loc(), floor);
+                            assert_eq!(db.get_metadata().await.unwrap(), metadata_bytes.clone());
+                            expected_metadata = metadata_bytes.clone();
+                            commit_history.push((
+                                db.bounds().end,
+                                db.root(),
+                                db.inactivity_floor_loc(),
+                                db.get_metadata().await.unwrap(),
+                            ));
+                            db
                         }
                         Some(kind) => {
                             // Snapshot state; the reject must not mutate persisted state.
@@ -378,16 +432,66 @@ fn fuzz_family<F: Family, S: Strategy>(
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().end;
-                    if op_count > 0 {
-                        let loc = (*loc_offset as u64) % op_count.as_u64();
-                        let _ = db.get(loc.into()).await;
+                    let bounds = db.bounds();
+                    if bounds.start < bounds.end {
+                        let retained = (bounds.end - bounds.start).as_u64();
+                        let loc = bounds.start + (*loc_offset as u64 % retained);
+                        let value = db.get(loc).await.expect("retained get should not fail");
+                        assert_eq!(db.get_many(&[loc]).await.unwrap(), vec![value]);
+                    }
+                    db
+                }
+
+                Operation::GetMany {
+                    first_offset,
+                    second_offset,
+                } => {
+                    let bounds = db.bounds();
+                    if bounds.start < bounds.end {
+                        let len = (bounds.end - bounds.start).as_u64();
+                        let mut locs = vec![
+                            bounds.start + (*first_offset as u64 % len),
+                            bounds.start + (*second_offset as u64 % len),
+                        ];
+                        locs.sort();
+                        locs.dedup();
+                        let mut expected = Vec::with_capacity(locs.len());
+                        for loc in &locs {
+                            expected.push(db.get(*loc).await.unwrap());
+                        }
+                        assert_eq!(db.get_many(&locs).await.unwrap(), expected);
+                    }
+                    db
+                }
+
+                Operation::BatchReads { loc_offset } => {
+                    let mut batch = db.new_batch();
+                    for value in &pending_appends {
+                        batch = batch.append(value.clone());
+                    }
+                    let bounds = db.bounds();
+                    if bounds.start < batch.size() {
+                        let len = (batch.size() - bounds.start).as_u64();
+                        let loc = bounds.start + (*loc_offset as u64 % len);
+                        let expected = batch.get(loc, &db).await.unwrap();
+                        assert_eq!(batch.get_many(&[loc], &db).await.unwrap(), vec![expected]);
+                        let merkleized = batch
+                            .merkleize(&db, None, db.inactivity_floor_loc())
+                            .await;
+                        assert_eq!(
+                            merkleized.get_many(&[loc], &db).await.unwrap(),
+                            vec![merkleized.get(loc, &db).await.unwrap()]
+                        );
+                        assert_eq!(
+                            merkleized.bounds().total_size,
+                            db.bounds().end.as_u64() + pending_appends.len() as u64 + 1
+                        );
                     }
                     db
                 }
 
                 Operation::GetMetadata => {
-                    let _ = db.get_metadata().await;
+                    assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
                     db
                 }
 
@@ -403,13 +507,25 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let end = db.bounds().end;
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
                     let merkleized = batch.merkleize(&db, None, floor).await;
+                    let expected_root = merkleized.root();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
+                    expected_metadata = None;
+                    commit_history.push((
+                        db.bounds().end,
+                        db.root(),
+                        db.inactivity_floor_loc(),
+                        db.get_metadata().await.unwrap(),
+                    ));
+                    let size = db.bounds().end;
                     let floor = db.inactivity_floor_loc();
-                    db.prune(floor).await.expect("Prune should not fail")
+                    let db = db.prune(floor).await.expect("Prune should not fail");
+                    assert_eq!(db.bounds().end, size);
+                    assert_eq!(db.root(), expected_root);
+                    db
                 }
 
                 Operation::Sync => {
@@ -422,21 +538,91 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
-                    db.sync().await.expect("Sync should not fail")
+                    let expected_root = db.root();
+                    let expected_size = db.bounds().end;
+                    let expected_floor = db.inactivity_floor_loc();
+                    let db = db.sync().await.expect("Sync should not fail");
+                    assert_eq!(db.root(), expected_root);
+                    assert_eq!(db.bounds().end, expected_size);
+                    assert_eq!(db.inactivity_floor_loc(), expected_floor);
+                    assert_eq!(db.get_metadata().await.unwrap(), None);
+                    expected_metadata = None;
+                    commit_history.push((
+                        db.bounds().end,
+                        db.root(),
+                        db.inactivity_floor_loc(),
+                        db.get_metadata().await.unwrap(),
+                    ));
+                    db
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    assert_eq!(db.bounds().end, db.last_commit_loc() + 1);
                     db
                 }
 
                 Operation::LastCommitLoc => {
-                    let _ = db.last_commit_loc();
+                    assert_eq!(db.last_commit_loc() + 1, db.bounds().end);
                     db
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().start;
+                    assert!(db.bounds().start <= db.inactivity_floor_loc());
+                    assert!(db.bounds().start <= db.bounds().end);
+                    db
+                }
+
+                Operation::SyncBoundary => {
+                    assert_eq!(db.sync_boundary(), db.inactivity_floor_loc());
+                    db
+                }
+
+                Operation::Rewind { idx } => {
+                    let oldest = db.bounds().start;
+                    let candidates = commit_history
+                        .iter()
+                        .filter(|(size, _, _, _)| *size > oldest)
+                        .collect::<Vec<_>>();
+                    if candidates.len() < 2 {
+                        db
+                    } else {
+                        let expected = candidates[*idx as usize % (candidates.len() - 1)];
+                        let target = expected.0;
+                        let db = db.rewind(target).await.expect("Rewind should not fail");
+                        assert_eq!(db.bounds().end, expected.0);
+                        assert_eq!(db.root(), expected.1);
+                        assert_eq!(db.inactivity_floor_loc(), expected.2);
+                        assert_eq!(db.get_metadata().await.unwrap(), expected.3);
+                        expected_metadata = expected.3.clone();
+                        let db = db.commit().await.expect("Rewind commit should not fail");
+                        commit_history.retain(|(size, _, _, _)| *size <= target);
+                        db
+                    }
+                }
+
+                Operation::ValidateBatch => {
+                    let before = (db.bounds(), db.root(), db.inactivity_floor_loc());
+                    let mut batch = db.new_batch();
+                    for value in &pending_appends {
+                        batch = batch.append(value.clone());
+                    }
+                    let merkleized = batch
+                        .merkleize(&db, None, db.inactivity_floor_loc())
+                        .await;
+                    assert!(db.validate_batch(&merkleized).is_ok());
+                    assert_eq!(
+                        (db.bounds(), db.root(), db.inactivity_floor_loc()),
+                        before
+                    );
+                    db
+                }
+
+                Operation::ToBatch => {
+                    let batch = db.to_batch();
+                    assert_eq!(batch.root(), db.root());
+                    assert_eq!(batch.bounds().base_size, db.bounds().end.as_u64());
+                    assert_eq!(batch.bounds().total_size, db.bounds().end.as_u64());
+                    assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
                     db
                 }
 
@@ -446,12 +632,32 @@ fn fuzz_family<F: Family, S: Strategy>(
                         batch = batch.append(v);
                     }
                     let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let expected_root = merkleized.root();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
-                    let _ = db.root();
+                    assert_eq!(db.root(), expected_root);
+                    expected_metadata = None;
+                    commit_history.push((
+                        db.bounds().end,
+                        db.root(),
+                        db.inactivity_floor_loc(),
+                        db.get_metadata().await.unwrap(),
+                    ));
+                    db
+                }
+
+                Operation::Strategy { values } => {
+                    let expected = values.iter().map(|value| u64::from(*value)).sum::<u64>();
+                    let actual = db.strategy().fold(
+                        values,
+                        || 0u64,
+                        |sum, value| sum + u64::from(*value),
+                        |left, right| left + right,
+                    );
+                    assert_eq!(actual, expected, "database strategy produced a wrong fold");
                     db
                 }
 
@@ -473,6 +679,13 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .await
                         .expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
+                    expected_metadata = None;
+                    commit_history.push((
+                        db.bounds().end,
+                        db.root(),
+                        db.inactivity_floor_loc(),
+                        db.get_metadata().await.unwrap(),
+                    ));
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc: Location<F> = Location::new(start_loc);
@@ -486,6 +699,22 @@ fn fuzz_family<F: Family, S: Strategy>(
                                 &root),
                             "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                         );
+                        let pinned = db.pinned_nodes_at(start_loc).await.unwrap();
+                        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                            &proof,
+                            start_loc,
+                            &ops,
+                            &pinned,
+                            &root,
+                        ));
+                        for op in ops {
+                            let floor = op.has_floor();
+                            let value = op.into_value();
+                            assert!(
+                                floor.is_some() || value.is_some(),
+                                "an append must contain a value"
+                            );
+                        }
                     }
                     db
                 }
@@ -495,10 +724,6 @@ fn fuzz_family<F: Family, S: Strategy>(
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
-                    if op_count == 0 {
-                        continue;
-                    }
                     let mut batch = db.new_batch();
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
@@ -509,33 +734,44 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .await
                         .expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
-                    // Use post-commit op_count so it's consistent with the root.
-                    let op_count = db.bounds().end;
-                    let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
-                    let size: Location<F> = Location::new(size);
-                    let start_loc = (*start_offset as u64) % *size;
-                    let start_loc: Location<F> = Location::new(start_loc);
+                    expected_metadata = None;
+                    commit_history.push((
+                        db.bounds().end,
+                        db.root(),
+                        db.inactivity_floor_loc(),
+                        db.get_metadata().await.unwrap(),
+                    ));
+                    let bounds = db.bounds();
+                    let candidates = commit_history
+                        .iter()
+                        .filter(|(size, _, _, _)| *size > bounds.start)
+                        .collect::<Vec<_>>();
+                    let expected = candidates[*size_offset as usize % candidates.len()];
+                    let retained = (expected.0 - bounds.start).as_u64();
+                    let start_loc = bounds.start + (*start_offset as u64 % retained);
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let root = db.root();
-                    if let Ok((proof, ops)) = db
-                        .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
-                            .await {
-                            assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
-                                    start_loc,
-                                    &ops,
-                                    &root),
-                                "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
-                            );
-                        }
+                    let (proof, ops) = db
+                        .historical_proof(expected.0, start_loc, NZU64!(max_ops_value))
+                        .await
+                        .expect("retained commit should produce a historical proof");
+                    assert!(
+                        verify_proof::<Sha256, _, _>(&proof, start_loc, &ops, &expected.1),
+                        "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
+                    );
                     db
                 }
 
                 Operation::SimulateFailure{} => {
                     pending_appends.clear();
                     drop(db);
-                    reopen(&context, suffix, &strategy, &mut restarts).await
+                    let db = reopen(&context, suffix, &strategy, &mut restarts).await;
+                    let expected = commit_history.last().unwrap();
+                    assert_eq!(db.bounds().end, expected.0);
+                    assert_eq!(db.root(), expected.1);
+                    assert_eq!(db.inactivity_floor_loc(), expected.2);
+                    assert_eq!(db.get_metadata().await.unwrap(), expected.3);
+                    expected_metadata = expected.3.clone();
+                    db
                 }
             };
         }

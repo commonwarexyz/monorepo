@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -32,6 +32,7 @@ type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
 const BITMAP_CHUNK_BYTES: usize = 64;
+const MAX_OPERATIONS: usize = 50;
 
 type GenericDb<F> = AnyDb<
     F,
@@ -53,12 +54,28 @@ enum QmdbOperation {
     Root,
     Proof { start_loc: u64, max_ops: u64 },
     Get { key: RawKey },
+    GetMany { keys: [RawKey; 2] },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     operations: Vec<QmdbOperation>,
     raw_bytes: Vec<u8>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
+        let num_operations = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_operations)
+            .map(|_| QmdbOperation::arbitrary(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            operations,
+            raw_bytes,
+        })
+    }
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(223);
@@ -69,16 +86,24 @@ async fn commit_pending<F: MerkleFamily>(
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
+    expected_op_count: &mut Location<F>,
 ) -> GenericDb<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
     let merkleized = batch.merkleize(&db, None).await.unwrap();
-    let (db, _) = db
+    let expected_end = Location::new(merkleized.bounds().total_size);
+    let (db, applied) = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
+    assert_eq!(
+        applied,
+        *expected_op_count..expected_end,
+        "applied operation range disagreed with the modeled log tip",
+    );
+    *expected_op_count = expected_end;
     let db = db.commit().await.expect("commit fsync should not fail");
     committed_state.extend(pending_expected.drain());
     db
@@ -128,6 +153,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
             let mut all_keys: HashSet<RawKey> = HashSet::new();
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+            let mut expected_op_count = db.bounds().end;
 
             for op in &operations {
                 db = match op {
@@ -156,17 +182,39 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::OpCount => {
-                        let _ = db.bounds().end;
+                        assert_eq!(
+                            db.bounds().end,
+                            expected_op_count,
+                            "operation count disagreed with the modeled log tip",
+                        );
                         db
                     }
 
                     QmdbOperation::Commit => {
-                        commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await
+                        commit_pending(
+                            db,
+                            &mut pending_writes,
+                            &mut committed_state,
+                            &mut pending_expected,
+                            &mut expected_op_count,
+                        )
+                        .await
                     }
 
                     QmdbOperation::Root => {
-                        let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
-                        db.root();
+                        let db = commit_pending(
+                            db,
+                            &mut pending_writes,
+                            &mut committed_state,
+                            &mut pending_expected,
+                            &mut expected_op_count,
+                        )
+                        .await;
+                        assert_eq!(
+                            db.root(),
+                            db.to_batch().root(),
+                            "database root disagreed with its base batch view",
+                        );
                         db
                     }
 
@@ -176,7 +224,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             continue;
                         }
 
-                        let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                        let db = commit_pending(
+                            db,
+                            &mut pending_writes,
+                            &mut committed_state,
+                            &mut pending_expected,
+                            &mut expected_op_count,
+                        )
+                        .await;
                         let current_root = db.root();
                         let actual_op_count = db.bounds().end;
                         let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
@@ -227,12 +282,40 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         all_keys.insert(*key);
                         db
                     }
+
+                    QmdbOperation::GetMany { keys } => {
+                        let encoded_keys = keys.map(Key::new);
+                        let key_refs = [&encoded_keys[0], &encoded_keys[1]];
+                        let values = db
+                            .get_many(&key_refs)
+                            .await
+                            .expect("get many should not fail");
+                        for (key, value) in keys.iter().zip(values) {
+                            let expected = committed_state
+                                .get(key)
+                                .and_then(Option::as_ref)
+                                .map(|value| Value::new(*value));
+                            assert_eq!(
+                                value,
+                                expected,
+                                "batched get disagreed with committed model",
+                            );
+                        }
+                        db
+                    }
                 };
             }
 
             // Final commit to ensure all operations are persisted.
             if !pending_writes.is_empty() {
-                db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                db = commit_pending(
+                    db,
+                    &mut pending_writes,
+                    &mut committed_state,
+                    &mut pending_expected,
+                    &mut expected_op_count,
+                )
+                .await;
             }
 
             // Comprehensive final verification - check ALL keys ever touched.

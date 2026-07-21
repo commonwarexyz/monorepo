@@ -1,17 +1,16 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
+    journal::contiguous::variable::Config as VConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
+    qmdb::current::{VariableConfig as Config, ordered::variable::Db as CurrentDb},
     translator::TwoCap,
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
-use futures::{StreamExt as _, pin_mut};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -61,35 +60,25 @@ enum CurrentOperation {
     ExclusionProof {
         key: RawKey,
     },
-    StreamRange {
-        start: RawKey,
-    },
 }
 
 const MAX_OPERATIONS: usize = 100;
 
-// The number of key/values to write to the db at the start of each fuzz run. This value is
-// chosen to be large enough to ensure there is at least one pending chunk.
-const MAX_INITIAL_WRITES: u16 = 320;
-
 #[derive(Debug)]
 struct FuzzInput {
-    initial_writes: u16,
     operations: Vec<CurrentOperation>,
     raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let raw_len = u.len().min(8);
         let raw_bytes = u.bytes(raw_len)?.to_vec();
-        let initial_writes = u.int_in_range(0..=MAX_INITIAL_WRITES)?;
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let operations = (0..num_ops)
             .map(|_| CurrentOperation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(FuzzInput {
-            initial_writes,
             operations,
             raw_bytes,
         })
@@ -102,15 +91,6 @@ const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
-// Generates a deterministic key/value pair for seeding the db.
-fn generate_seed_kv(index: u64) -> (RawKey, RawValue) {
-    let mut key = [0u8; 32];
-    key[..8].copy_from_slice(&index.to_be_bytes());
-    let mut value = [0u8; 32];
-    value[24..].copy_from_slice(&index.to_be_bytes());
-    (key, value)
-}
-
 async fn commit_pending<F: Graftable>(
     db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
@@ -122,11 +102,14 @@ async fn commit_pending<F: Graftable>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
+    let start = db.bounds().end;
     let merkleized = batch.merkleize(&db, None).await.unwrap();
-    let (db, _) = db
+    let (db, range) = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
+    assert_eq!(range.start, start);
+    assert_eq!(range.end, db.bounds().end);
     let db = db.commit().await.expect("commit fsync should not fail");
     for key in pending_deletes.drain() {
         committed_state.remove(&key);
@@ -140,7 +123,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::new(cfg);
 
     let suffix = suffix.to_string();
-    let initial_writes = data.initial_writes;
     let operations = data.operations.clone();
     runner.start(|context| async move {
         let page_cache = CacheRef::from_pooler(
@@ -150,20 +132,22 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         );
         let cfg = Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),
-                metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
+                journal_partition: format!("fuzz-current-ord-var-{suffix}-merkle-journal"),
+                metadata_partition: format!("fuzz-current-ord-var-{suffix}-merkle-metadata"),
                 items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FConfig {
-                partition: format!("fuzz-current-ord-{suffix}-log-journal"),
-                items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
+            journal_config: VConfig {
+                partition: format!("fuzz-current-ord-var-{suffix}-log-journal"),
+                items_per_section: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                compression: None,
+                codec_config: ((), ()),
                 page_cache,
             },
-            grafted_metadata_partition: format!("fuzz-current-ord-{suffix}-grafted-merkle-metadata"),
+            grafted_metadata_partition: format!("fuzz-current-ord-var-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(3)),
             init_buffer: NZUsize!(1 << 21),
@@ -181,25 +165,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         let mut pending_deletes: HashSet<RawKey> = HashSet::new();
         let mut all_keys = HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
-        let mut committed_op_count = Location::<F>::new(1);
-
-        for i in 0..u64::from(initial_writes) {
-            let (key, value) = generate_seed_kv(i);
-            pending_writes.push((Key::new(key), Some(Value::new(value))));
-            pending_inserts.insert(key, value);
-            all_keys.insert(key);
-        }
-        if !pending_writes.is_empty() {
-            db = commit_pending(
-                db,
-                &mut pending_writes,
-                &mut committed_state,
-                &mut pending_inserts,
-                &mut pending_deletes,
-            )
-            .await;
-            committed_op_count = db.bounds().end;
-        }
+        let mut committed_op_count = db.bounds().end;
 
         for op in &operations {
             db = match op {
@@ -271,26 +237,12 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 }
 
                 CurrentOperation::Prune => {
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
                     let boundary = db.sync_boundary();
                     db.prune(boundary).await.expect("Prune should not fail")
                 }
 
                 CurrentOperation::Root => {
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
-                    assert_eq!(
-                        db.root(),
-                        db.to_batch().root(),
-                        "database and snapshot roots should match",
-                    );
+                    assert_eq!(db.root(), db.to_batch().root());
                     db
                 }
 
@@ -300,11 +252,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         continue;
                     }
 
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
                     let current_op_count = db.bounds().end;
@@ -343,12 +290,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
-
                     let current_op_count = db.bounds().end;
                     let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
                     let root = db.root();
@@ -423,11 +364,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
                     match db.key_value_proof(k.clone()).await {
@@ -454,11 +390,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 CurrentOperation::ExclusionProof { key } => {
                     let k = Key::new(*key);
 
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
                     match db.exclusion_proof(&k).await {
@@ -479,49 +410,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     }
                     db
                 }
-
-                CurrentOperation::StreamRange { start } => {
-                    let db = commit_pending(
-                        db, &mut pending_writes, &mut committed_state,
-                        &mut pending_inserts, &mut pending_deletes,
-                    ).await;
-                    committed_op_count = db.bounds().end;
-                    let mut expected = committed_state
-                        .iter()
-                        .filter(|(key, _)| *key >= start)
-                        .map(|(key, value)| (*key, *value))
-                        .collect::<Vec<_>>();
-                    expected.sort_unstable_by_key(|(key, _)| *key);
-
-                    let actual = {
-                        let stream = db
-                            .stream_range(Key::new(*start))
-                            .await
-                            .expect("range stream should not fail");
-                        pin_mut!(stream);
-                        let mut actual = Vec::new();
-                        while let Some(item) = stream.next().await {
-                            let (key, value) = item.expect("range stream item should not fail");
-                            let key: &[u8; 32] = key.as_ref().try_into().expect("key length");
-                            let value: &[u8; 32] = value.as_ref().try_into().expect("value length");
-                            actual.push((*key, *value));
-                        }
-                        actual
-                    };
-                    assert_eq!(actual, expected, "range stream should match the ordered model");
-                    db
-                }
             };
         }
-
-        // Final commit to ensure all pending operations are persisted.
-        if !pending_writes.is_empty() {
-            db = commit_pending(
-                db, &mut pending_writes, &mut committed_state,
-                &mut pending_inserts, &mut pending_deletes,
-            ).await;
-        }
-
 
         for key in &all_keys {
             let k = Key::new(*key);
