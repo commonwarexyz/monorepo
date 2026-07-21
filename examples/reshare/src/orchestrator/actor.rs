@@ -9,7 +9,7 @@ use commonware_actor::mailbox;
 use commonware_consensus::{
     CertifiableAutomaton, Relay,
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, Floor, Plan, elector::Config as Elector, scheme, types::Context},
+    simplex::{self, Floor, Plan, elector, scheme, types::Context},
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
@@ -42,7 +42,7 @@ where
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
 {
     pub oracle: B,
@@ -70,7 +70,7 @@ where
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
@@ -102,7 +102,7 @@ where
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
@@ -352,10 +352,10 @@ where
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(10),
+                timeout_retry: Duration::from_secs(2),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(256),
-                skip_timeout: ViewDelta::new(10),
+                skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),

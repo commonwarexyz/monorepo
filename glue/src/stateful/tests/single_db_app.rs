@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p::standard as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
@@ -54,10 +54,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range,
-    range::NonEmptyRange,
-    sync::{Mutex, TracedAsyncRwLock},
-    test_rng,
+    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
 };
 use futures::{Stream, StreamExt};
 use rand_core::Rng;
@@ -67,7 +64,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,6 +361,8 @@ impl EngineDefinition for SingleDbEngine {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         };
 
         // Destructure the 7 channels.
@@ -591,7 +590,7 @@ impl EngineDefinition for SingleDbEngine {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_millis(500),
             activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,

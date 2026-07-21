@@ -289,12 +289,12 @@ trait FuzzJournal: Sized {
     fn size(&self) -> impl Future<Output = u64> + Send;
     fn bounds(&self) -> Range<u64>;
 
-    fn append(&mut self, item: Item) -> impl Future<Output = Result<u64, Error>> + Send;
+    fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
-    fn rewind(&mut self, size: u64) -> impl Future<Output = Result<(), Error>> + Send;
-    fn prune(&mut self, min_pos: u64) -> impl Future<Output = Result<bool, Error>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
 
     fn replay(
         &self,
@@ -348,7 +348,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         Contiguous::bounds(self)
     }
 
-    async fn append(&mut self, item: Item) -> Result<u64, Error> {
+    async fn append(self, item: Item) -> Result<(Self, u64), Error> {
         FixedJournal::append(self, &item).await
     }
 
@@ -356,19 +356,19 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         Contiguous::read(self, pos).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(self) -> Result<Self, Error> {
         FixedJournal::sync(self).await
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(self) -> Result<Self, Error> {
         FixedJournal::commit(self).await
     }
 
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+    async fn rewind(self, size: u64) -> Result<Self, Error> {
         FixedJournal::rewind(self, size).await
     }
 
-    async fn prune(&mut self, min_pos: u64) -> Result<bool, Error> {
+    async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
         FixedJournal::prune(self, min_pos).await
     }
 
@@ -415,7 +415,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         Contiguous::bounds(self)
     }
 
-    async fn append(&mut self, item: Item) -> Result<u64, Error> {
+    async fn append(self, item: Item) -> Result<(Self, u64), Error> {
         VariableJournal::append(self, &item).await
     }
 
@@ -423,15 +423,15 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         Contiguous::read(self, pos).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(self) -> Result<Self, Error> {
         VariableJournal::sync(self).await
     }
 
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+    async fn rewind(self, size: u64) -> Result<Self, Error> {
         VariableJournal::rewind(self, size).await
     }
 
-    async fn prune(&mut self, min_pos: u64) -> Result<bool, Error> {
+    async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
         VariableJournal::prune(self, min_pos).await
     }
 
@@ -443,7 +443,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         collect_replay(self, start_pos, buffer).await
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(self) -> Result<Self, Error> {
         VariableJournal::commit(self).await
     }
 
@@ -609,28 +609,29 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
 }
 
 /// Run a cycle's ops under faults, updating `expected`. Stops early on any error that may have left
-/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the caller then
-/// drops the journal to crash. Reads never fault, so a bad read panics instead of ending the cycle.
+/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the journal is
+/// then dropped to crash. Reads never fault, so a bad read panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
-    journal: &mut J,
+    mut journal: J,
     expected: &mut Expected,
     ops: &[JournalOperation],
     params: Params,
 ) {
     for op in ops {
-        let should_continue = match op {
+        // A mutation error ends the cycle.
+        journal = match op {
             JournalOperation::Append { value } => {
                 let item = Item::from(*value);
                 let size_before = journal.size().await;
                 match journal.append(item.clone()).await {
-                    Ok(pos) => {
+                    Ok((journal, pos)) => {
                         assert_eq!(pos, size_before, "append returned non-contiguous position");
                         expected.appended(item);
-                        true
+                        journal
                     }
                     Err(_) => {
                         expected.append_failed(size_before);
-                        false
+                        return;
                     }
                 }
             }
@@ -642,29 +643,29 @@ async fn run_ops<J: FuzzJournal>(
                     assert_read(journal.read(target).await, target, &bounds);
                 }
                 assert_read(journal.read(*pos).await, *pos, &bounds);
-                true
+                journal
             }
 
             JournalOperation::Sync => match journal.sync().await {
-                Ok(()) => {
+                Ok(journal) => {
                     expected.synced(journal.bounds());
-                    true
+                    journal
                 }
-                Err(_) => false,
+                Err(_) => return,
             },
 
             JournalOperation::Commit => match journal.commit().await {
-                Ok(()) => {
+                Ok(journal) => {
                     expected.committed(journal.size().await);
-                    true
+                    journal
                 }
-                Err(_) => false,
+                Err(_) => return,
             },
 
             JournalOperation::Rewind { size } => {
                 let bounds = journal.bounds();
                 if bounds.is_empty() {
-                    true
+                    journal
                 } else {
                     // Usually clamp to a valid retained target; occasionally pass the raw value to
                     // exercise the validation paths.
@@ -675,13 +676,16 @@ async fn run_ops<J: FuzzJournal>(
                         bounds.start + (*size % (bounds.end - bounds.start + 1))
                     };
                     match journal.rewind(target).await {
-                        Ok(()) => {
+                        Ok(journal) => {
                             expected.rewound(target, bounds.end);
                             expected.values.truncate(target as usize);
-                            true
+                            journal
                         }
-                        // Validation error: rejected before any mutation, so leave the expectation
-                        // put. Only a raw target can be invalid; on a clamped target this is a bug.
+                        // Any error ends the cycle. Validation errors reject before
+                        // mutating and are only possible for a raw target; seeing one for
+                        // a clamped target is a bug. Any other error
+                        // may have interrupted the truncation and lost data above `target`,
+                        // so lower durable_len conservatively.
                         Err(e @ (Error::InvalidRewind(_) | Error::ItemPruned(_))) => {
                             assert!(
                                 use_raw_target,
@@ -689,13 +693,11 @@ async fn run_ops<J: FuzzJournal>(
                                  returned {e:?}",
                                 bounds.start, bounds.end
                             );
-                            true
+                            return;
                         }
-                        // I/O fault mid-truncation: data above `target` may be lost, so lower
-                        // durable_len conservatively and end the cycle.
                         Err(_) => {
                             expected.rewound(target.min(bounds.end), bounds.end);
-                            false
+                            return;
                         }
                     }
                 }
@@ -705,9 +707,9 @@ async fn run_ops<J: FuzzJournal>(
                 // Raw position: `prune` caps it to size internally, covering prune-past-size.
                 let size = journal.size().await;
                 match journal.prune(*min_pos).await {
-                    Ok(_) => {
+                    Ok((journal, _)) => {
                         expected.pruned(journal.bounds().start);
-                        true
+                        journal
                     }
                     Err(_) => {
                         // A failed prune advances the boundary at most to the section floor.
@@ -715,7 +717,7 @@ async fn run_ops<J: FuzzJournal>(
                         let section_floor =
                             capped / params.items_per_section * params.items_per_section;
                         expected.prune_failed(section_floor);
-                        false
+                        return;
                     }
                 }
             }
@@ -744,21 +746,22 @@ async fn run_ops<J: FuzzJournal>(
                     // Tail-repair I/O fault: end the cycle.
                     Err(_) => false,
                 };
-                clamped_ok
-                    && should_continue_raw_replay(
-                        journal.replay(*start_pos, NZUsize!(*buffer)).await,
-                        *start_pos,
-                        &bounds,
-                    )
+                if !clamped_ok {
+                    return;
+                }
+                if !should_continue_raw_replay(
+                    journal.replay(*start_pos, NZUsize!(*buffer)).await,
+                    *start_pos,
+                    &bounds,
+                ) {
+                    return;
+                }
+                journal
             }
 
             // `split_into_cycles` strips `Crash`; a stray one defensively ends the cycle.
-            JournalOperation::Crash => false,
+            JournalOperation::Crash => return,
         };
-
-        if !should_continue {
-            break;
-        }
     }
 }
 
@@ -778,7 +781,7 @@ where
         // Recover with faults disabled to obtain clean ground truth.
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let cfg = J::config(&partition, &ctx, &params);
-        let mut journal = J::init(ctx.child("journal"), cfg)
+        let journal = J::init(ctx.child("journal"), cfg)
             .await
             .expect("recovery should succeed without panic");
         assert_matches_expected(&journal, &expected).await;
@@ -787,7 +790,7 @@ where
 
         // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(&mut journal, &mut expected, &ops, params).await;
+        run_ops(journal, &mut expected, &ops, params).await;
         expected
     })
 }
@@ -852,7 +855,7 @@ where
     // sentinel to prove the synced state survives restart.
     deterministic::Runner::from(checkpoint).start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let mut journal = J::init(
+        let journal = J::init(
             ctx.child("journal_final"),
             J::config(&partition, &ctx, &params),
         )
@@ -864,13 +867,13 @@ where
         let mut expected = to_expected(&journal).await;
         let size = journal.size().await;
         let sentinel = Item::from([0xEFu8; ITEM_SIZE]);
-        let pos = journal
+        let (journal, pos) = journal
             .append(sentinel.clone())
             .await
             .expect("final append");
         assert_eq!(pos, size);
         expected.appended(sentinel.clone());
-        journal.sync().await.expect("final sync");
+        let journal = journal.sync().await.expect("final sync");
         expected.synced(journal.bounds());
         drop(journal);
 

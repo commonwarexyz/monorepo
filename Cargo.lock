@@ -1413,7 +1413,10 @@ version = "2026.7.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "serde",
+ "serde_json",
  "syn 2.0.119",
+ "toml",
 ]
 
 [[package]]

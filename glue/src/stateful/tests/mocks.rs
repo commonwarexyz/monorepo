@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
+    db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -13,11 +13,10 @@ use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Buf, BufMut, deterministic};
-use commonware_utils::sync::TracedAsyncRwLock;
 use futures::Stream;
 use std::{convert::Infallible, sync::Arc};
 
-pub(crate) type TestDatabases = Arc<TracedAsyncRwLock<TestDb>>;
+pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -67,7 +66,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self)
     }
 
-    async fn new_batch(_db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -75,16 +74,16 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-        Ok(())
+    async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        Ok(self)
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
         0
     }
 
-    async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-        Ok(())
+    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+        Ok(self)
     }
 }
 
@@ -217,7 +216,7 @@ impl Application<deterministic::Context> for TestApp {
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Arc::new(TracedAsyncRwLock::new("test", TestDb))
+    Shared::new("test", TestDb)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

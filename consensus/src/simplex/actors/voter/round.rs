@@ -49,10 +49,14 @@ pub struct Round<S: Scheme, D: Digest> {
     leader: Option<Leader<S::PublicKey>>,
 
     proposal: ProposalSlot<D>,
+    // Deadlines armed when entering a view.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
-    timeout_retry: Option<SystemTime>,
-    timeout_reason: Option<TimeoutReason>,
+    stall_deadline: Option<SystemTime>,
+    retry_deadline: Option<SystemTime>,
+    // First explicit timeout latched for this round (see latch_timeout).
+    // Unlike retry_deadline, this is first-wins and never moves.
+    latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
     notarization: Option<Notarization<S, D>>,
@@ -78,8 +82,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             proposal: ProposalSlot::new(),
             leader_deadline: None,
             certification_deadline: None,
-            timeout_retry: None,
-            timeout_reason: None,
+            stall_deadline: None,
+            retry_deadline: None,
+            latched_timeout: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -217,12 +222,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
-    /// Removes the leader and certification deadlines so timeouts stop firing.
-    pub const fn clear_deadlines(&mut self) {
-        self.leader_deadline = None;
-        self.certification_deadline = None;
-    }
-
     /// Sets the leader for this round using the pre-computed leader index.
     pub fn set_leader(&mut self, leader: Participant) {
         let key = self
@@ -253,6 +252,24 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns true if we have explicitly certified the proposal.
     pub const fn is_certified(&self) -> bool {
         matches!(self.certify, CertifyState::Certified(true))
+    }
+
+    /// Returns the certified proposal for this round, if any (a finalized
+    /// round is implicitly certified).
+    pub const fn certified_proposal(&self) -> Option<&Proposal<D>> {
+        if self.finalization.is_some() || self.is_certified() {
+            return Some(self.proposal().expect("proposal must exist"));
+        }
+        None
+    }
+
+    /// Returns the certified payload for this round, if any (a finalized round
+    /// is implicitly certified).
+    pub const fn certified_payload(&self) -> Option<&D> {
+        match self.certified_proposal() {
+            Some(proposal) => Some(&proposal.payload),
+            None => None,
+        }
     }
 
     /// Returns true if certification was aborted due to finalization.
@@ -327,31 +344,34 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
+    /// Arms the round's deadlines when its view is entered.
+    ///
+    /// Rounds created for bookkeeping (views never entered) deliberately have
+    /// no deadlines; the stall anchor in `State` relies on this to
+    /// skip them.
     pub const fn set_deadlines(
         &mut self,
         leader_deadline: SystemTime,
         certification_deadline: SystemTime,
+        stall_deadline: Option<SystemTime>,
     ) {
         self.leader_deadline = Some(leader_deadline);
         self.certification_deadline = Some(certification_deadline);
+        self.stall_deadline = stall_deadline;
     }
 
-    /// Overrides the timeout retry deadline, allowing callers to reschedule retries deterministically.
-    pub const fn set_timeout_retry(&mut self, when: Option<SystemTime>) {
-        self.timeout_retry = when;
-    }
-
-    /// Records the first timeout reason observed for this round.
+    /// Latches the first explicit timeout for this round, pinning the moment it
+    /// expired. Later latches preserve the original deadline and reason, and
+    /// latching is ignored once a nullify broadcast began (retry cadence
+    /// governs the round from then on).
     ///
-    /// Returns `(canonical_reason, is_first_timeout)` where `is_first_timeout` is true
-    /// only when this call records the first timeout reason for the round.
-    pub const fn set_timeout_reason(&mut self, reason: TimeoutReason) -> (TimeoutReason, bool) {
-        match self.timeout_reason {
-            Some(canonical) => (canonical, false),
-            None => {
-                self.timeout_reason = Some(reason);
-                (reason, true)
-            }
+    /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
+    /// stably across polls, carrying the latched reason) without touching any
+    /// deadline: in particular, the stall deadline anchors term-level
+    /// stall protection and must not be reset by a per-view timeout.
+    pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
+        if self.latched_timeout.is_none() && !self.broadcast_nullify {
+            self.latched_timeout = Some((now, reason));
         }
     }
 
@@ -366,25 +386,58 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         let retry = replace(&mut self.broadcast_nullify, true);
-        self.clear_deadlines();
-        self.set_timeout_retry(None);
+        self.leader_deadline = None;
+        self.certification_deadline = None;
+        self.retry_deadline = None;
+        // The latch governed the first timeout, which has now fired; clear it
+        // so no stale (deadline, reason) outlives the transition (re-latching
+        // is blocked by `broadcast_nullify` in `latch_timeout`).
+        self.latched_timeout = None;
         Some(retry)
     }
 
-    /// Returns the next timeout deadline for the round.
-    pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
-        if let Some(deadline) = self.leader_deadline {
-            return deadline;
+    /// Returns the next round-local timeout and its reason.
+    pub fn next_timeout(
+        &mut self,
+        now: SystemTime,
+        retry_interval: Duration,
+    ) -> Option<(SystemTime, TimeoutReason)> {
+        if self.broadcast_finalize || self.finalization().is_some() {
+            return None;
         }
-        if let Some(deadline) = self.certification_deadline {
-            return deadline;
+        if self.broadcast_nullify {
+            if let Some(deadline) = self.retry_deadline {
+                return Some((deadline, TimeoutReason::Retry));
+            }
+            // Lazily schedule the next retry on first poll after a nullify
+            // broadcast (this also covers rounds restored from replay, which
+            // arrive with no schedule).
+            let next = now + retry_interval;
+            self.retry_deadline = Some(next);
+            return Some((next, TimeoutReason::Retry));
         }
-        if let Some(deadline) = self.timeout_retry {
-            return deadline;
+        if let Some(latched) = self.latched_timeout {
+            return Some(latched);
         }
-        let next = now + retry;
-        self.timeout_retry = Some(next);
-        next
+        if self.proposal().is_none()
+            && let Some(deadline) = self.leader_deadline
+        {
+            return Some((deadline, TimeoutReason::LeaderTimeout));
+        }
+        if !self.is_certified()
+            && let Some(deadline) = self.certification_deadline
+        {
+            return Some((deadline, TimeoutReason::CertificationTimeout));
+        }
+        None
+    }
+
+    /// Returns the same-term stall deadline while the round remains unfinalized.
+    pub const fn stall_deadline(&self) -> Option<SystemTime> {
+        if self.finalization.is_some() {
+            return None;
+        }
+        self.stall_deadline
     }
 
     /// Adds a proposal recovered from a certificate (notarization or finalization).
@@ -429,8 +482,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return (false, None);
         }
 
-        // Unlike nullification and finalization, we do not clear deadlines when adding a notarization (and
-        // instead wait for certification to successfully complete).
+        // Deadlines stay armed: the notarization is not yet certified, so the
+        // round must keep timing out if certification fails.
 
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
@@ -445,7 +498,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.nullification.is_some() {
             return false;
         }
-        self.clear_deadlines();
         self.nullification = Some(nullification);
         true
     }
@@ -463,7 +515,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.finalization.is_some() {
             return (false, None);
         }
-        self.clear_deadlines();
 
         let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
         self.finalization = Some(finalization);
@@ -535,11 +586,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
     pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
         // Ensure we haven't already broadcast a finalize vote or nullify vote.
+        // The nullify check is the never-healing base case of same-term vote
+        // safety (see the module documentation).
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
-        // Even if we've already seen a finalization, we are still willing to broadcast
-        // our finalize vote in case someone is recording our activity.
+        // We do not check for an observed finalization here: the caller only
+        // requests finalize votes for views above the last finalized view,
+        // a premise of the same-term vote safety argument (see the module
+        // documentation).
 
         // If we have a proposal and we have not yet detected equivocation, we are willing
         // to consider constructing a finalize vote.

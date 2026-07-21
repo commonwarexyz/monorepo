@@ -162,6 +162,46 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(value)
     }
 
+    /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.
+    ///
+    /// Returns `Ok(false)` if the frame is smaller than its checksum trailer, the section
+    /// does not exist, the range is not fully covered by the section, or the checksum does
+    /// not match. Other read failures are propagated.
+    pub(super) async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
+        // A frame is at least its checksum trailer.
+        if (size as usize) < crc32::Digest::SIZE {
+            return Ok(false);
+        }
+        let Some(writer) = self.manager.get(section)? else {
+            return Ok(false);
+        };
+
+        let buf = match writer.read_at(offset, size as usize).await {
+            Ok(buf) => buf.coalesce(),
+            Err(RError::BlobInsufficientLength | RError::OffsetOverflow) => return Ok(false),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
+        let data_len = buf.len() - crc32::Digest::SIZE;
+        let stored_checksum = u32::from_be_bytes(
+            buf.as_ref()[data_len..]
+                .try_into()
+                .expect("checksum is 4 bytes"),
+        );
+        Ok(Crc32::checksum(&buf.as_ref()[..data_len]) == stored_checksum)
+    }
+
+    /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.
+    #[cfg(test)]
+    pub(super) async fn inject(
+        &mut self,
+        section: u64,
+        offset: u64,
+        buf: Vec<u8>,
+    ) -> Result<(), Error> {
+        let writer = self.manager.get_or_create(section).await?;
+        writer.write_at(offset, buf).await.map_err(Error::Runtime)
+    }
+
     /// Sync the given `sections` to disk (flushes write buffers).
     pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
         self.manager.sync(sections).await

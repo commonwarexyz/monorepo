@@ -30,23 +30,24 @@ const ITEM_SIZE: usize = 32;
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
 async fn bench_run_serial(
-    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
-) {
-    let reader = journal.snapshot().await.unwrap();
+) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+    let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
     for _ in 0..items_to_read {
         let pos = rng.random_range(0..ITEMS_TO_WRITE);
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
+    journal
 }
 
 /// Concurrently read (via try_join_all) `items_to_read` random items from the given `journal`.
 async fn bench_run_concurrent(
-    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
-) {
-    let reader = journal.snapshot().await.unwrap();
+) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+    let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
@@ -54,14 +55,15 @@ async fn bench_run_concurrent(
         futures.push(reader.read(pos));
     }
     try_join_all(futures).await.expect("failed to read data");
+    journal
 }
 
 /// Batch-read `items_to_read` random items via `read_many`.
 async fn bench_run_read_many(
-    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
-) {
-    let reader = journal.snapshot().await.unwrap();
+) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+    let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
     let mut positions: Vec<u64> = (0..items_to_read)
         .map(|_| rng.random_range(0..ITEMS_TO_WRITE))
@@ -74,6 +76,7 @@ async fn bench_run_read_many(
             .await
             .expect("failed to read data"),
     );
+    journal
 }
 
 fn bench_variable_read_random(c: &mut Criterion) {
@@ -94,10 +97,8 @@ fn bench_variable_read_random(c: &mut Criterion) {
                     // Setup: populate journal (once, on first sample).
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
-                            let mut j =
-                                get_variable_journal(ctx, PARTITION, ITEMS_PER_SECTION).await;
-                            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
-                            j.sync().await.unwrap();
+                            let j = get_variable_journal(ctx, PARTITION, ITEMS_PER_SECTION).await;
+                            append_fixed_random_data::<_, ITEM_SIZE>(j, ITEMS_TO_WRITE).await;
                         });
                         initialized = true;
                     }
@@ -114,12 +115,12 @@ fn bench_variable_read_random(c: &mut Criterion) {
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            match mode {
-                                "serial" => bench_run_serial(&mut j, items_to_read).await,
-                                "concurrent" => bench_run_concurrent(&mut j, items_to_read).await,
-                                "read_many" => bench_run_read_many(&mut j, items_to_read).await,
+                            j = match mode {
+                                "serial" => bench_run_serial(j, items_to_read).await,
+                                "concurrent" => bench_run_concurrent(j, items_to_read).await,
+                                "read_many" => bench_run_read_many(j, items_to_read).await,
                                 _ => unreachable!(),
-                            }
+                            };
                             duration += start.elapsed();
                         }
                         duration
