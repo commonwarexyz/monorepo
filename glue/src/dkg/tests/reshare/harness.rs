@@ -1,8 +1,8 @@
 use crate::{
     dkg::{
-        ParticipantsProvider, Registrar, ReshareBlock, SecretStore, anchor,
+        ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
         fence::Fence,
-        orchestrator,
+        orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::mocks::{FilteredReceiver, MemorySecretStore},
@@ -20,7 +20,6 @@ use crate::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p::standard as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
@@ -54,7 +53,6 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use commonware_p2p::utils::mux::{Builder, Muxer};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
@@ -108,8 +106,7 @@ const BACKFILL_CHANNEL: u64 = 3;
 const BROADCAST_CHANNEL: u64 = 4;
 const QMDB_CHANNEL: u64 = 5;
 const DKG_CHANNEL: u64 = 6;
-const PROBE_CHANNEL: u64 = 7;
-const ANCHOR_BOUNDARY_CHANNEL: u64 = 8;
+const DKG_PROBE_CHANNEL: u64 = 7;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Block {
@@ -220,6 +217,10 @@ struct App {
     genesis: Block,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     public_key: ed25519::PublicKey,
+    // Participant and processed height at which its app parks until crashed
+    // (cleared on restart), so a processed-height crash window cannot be
+    // raced past.
+    hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
 }
 
 impl App {
@@ -293,13 +294,20 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
 
     async fn finalized(
         &mut self,
-        _context: (E, Self::Context),
+        context: (E, Self::Context),
         block: &Self::Block,
         _databases: &Self::Databases,
     ) {
         self.processed
             .lock()
             .insert(self.public_key.clone(), block.height().get());
+        // Park once the held height is reached so the simulator's
+        // processed-height crash trigger observes it deterministically.
+        while self.hold.lock().as_ref().is_some_and(|(held, height)| {
+            *held == self.public_key && block.height().get() >= *height
+        }) {
+            context.0.sleep(Duration::from_millis(25)).await;
+        }
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
@@ -430,7 +438,8 @@ pub(super) struct ReshareEngine {
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     pub(super) state_sync_starts: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     state_sync_floor: Option<Height>,
-    epoch_cross_before_probe: bool,
+    processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
+    epoch_cross_during_sync: bool,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -442,7 +451,6 @@ pub(super) struct ValidatorEngine {
 }
 
 struct ValidatorHandles {
-    anchor: Handle<()>,
     probe: Handle<()>,
     qmdb: Handle<()>,
     reshare: Handle<()>,
@@ -454,7 +462,6 @@ struct ValidatorHandles {
 impl ValidatorHandles {
     async fn join(mut self) {
         futures::try_join!(
-            &mut self.anchor,
             &mut self.probe,
             &mut self.qmdb,
             &mut self.reshare,
@@ -468,7 +475,6 @@ impl ValidatorHandles {
 
 impl Drop for ValidatorHandles {
     fn drop(&mut self) {
-        self.anchor.abort();
         self.probe.abort();
         self.qmdb.abort();
         self.reshare.abort();
@@ -559,7 +565,8 @@ impl ReshareEngine {
             state_syncs: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_starts: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_floor: None,
-            epoch_cross_before_probe: false,
+            processed_hold: Arc::new(Mutex::new(None)),
+            epoch_cross_during_sync: false,
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -581,11 +588,24 @@ impl ReshareEngine {
         self
     }
 
-    /// Hold state-sync bootstrap between anchor and probe until every member
-    /// of the anchored committee has processed into the next epoch, forcing
-    /// probe's floor to land beyond the anchored epoch.
-    pub(super) const fn with_epoch_cross_before_probe(mut self) -> Self {
-        self.epoch_cross_before_probe = true;
+    /// Parks `participant`'s application once it processes `height`, until it
+    /// is crashed and restarted. Combine with a processed-height crash so the
+    /// crash window is entered deterministically rather than sampled.
+    pub(super) fn with_processed_hold(
+        self,
+        participant: ed25519::PublicKey,
+        height: Height,
+    ) -> Self {
+        *self.processed_hold.lock() = Some((participant, height.get()));
+        self
+    }
+
+    /// Hold state-sync bootstrap after the probe artifact resolves until
+    /// every member of the sampled committee has processed into the next
+    /// epoch, so the network crosses an epoch boundary while the node is
+    /// still syncing to its floor.
+    pub(super) const fn with_epoch_cross_during_sync(mut self) -> Self {
+        self.epoch_cross_during_sync = true;
         self
     }
 
@@ -627,8 +647,7 @@ impl EngineDefinition for ReshareEngine {
             (BROADCAST_CHANNEL, TEST_QUOTA),
             (QMDB_CHANNEL, TEST_QUOTA),
             (DKG_CHANNEL, TEST_QUOTA),
-            (PROBE_CHANNEL, TEST_QUOTA),
-            (ANCHOR_BOUNDARY_CHANNEL, TEST_QUOTA),
+            (DKG_PROBE_CHANNEL, TEST_QUOTA),
         ]
     }
 
@@ -647,6 +666,16 @@ impl EngineDefinition for ReshareEngine {
         let signer = self.signers[index].clone();
         let partition_prefix = format!("reshare-e2e-{index}");
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        // A node restarting means its configured processed hold has served its
+        // purpose: release it so the restarted node can progress.
+        {
+            let mut hold = self.processed_hold.lock();
+            if hold.as_ref().is_some_and(|(held, _)| held == public_key)
+                && self.stores.lock().contains_key(public_key)
+            {
+                hold.take();
+            }
+        }
 
         let mut channels = channels.into_iter();
         let vote_network = channels.next().unwrap();
@@ -656,18 +685,8 @@ impl EngineDefinition for ReshareEngine {
         let broadcast_network = channels.next().unwrap();
         let qmdb_network = channels.next().unwrap();
         let dkg_network = channels.next().unwrap();
-        let probe_network = channels.next().unwrap();
-        let anchor_boundary_network = channels.next().unwrap();
+        let probe_boundary_network = channels.next().unwrap();
 
-        let (certificate_mux, certificate_mux_handle, certificate_backup) = Muxer::builder(
-            context.child("certificate_mux"),
-            certificate_network.0.clone(),
-            certificate_network.1,
-            128,
-        )
-        .with_backup()
-        .build();
-        certificate_mux.start();
         let provider = DynamicProvider::new();
         let store = self.store(public_key);
         self.initial.register_epoch_zero(&provider, &store).await;
@@ -714,10 +733,11 @@ impl EngineDefinition for ReshareEngine {
         .expect("blocks archive");
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
-        let (anchor_actor, anchor_mailbox) = anchor::Actor::new(anchor::Config {
-            context: context.child("anchor"),
+        let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
+            context: context.child("dkg_probe"),
             manager: oracle.manager(),
-            peers: Set::from_iter_dedup(self.participants.iter().cloned()),
+            bootstrap_participants: self.initial.info.participants(),
+            bootstrap_epoch: Epoch::zero(),
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
                 *self.initial.info.output.public().public(),
@@ -730,7 +750,7 @@ impl EngineDefinition for ReshareEngine {
             mailbox_size: NZUsize!(100),
             block_codec_config: (),
         });
-        let anchor_handle = anchor_actor.start(certificate_backup, anchor_boundary_network);
+        let probe_handle = probe_actor.start(probe_boundary_network);
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
@@ -742,10 +762,10 @@ impl EngineDefinition for ReshareEngine {
                 .entry(public_key.clone())
                 .or_default() += 1;
         }
-        let anchor_artifact = if should_state_sync {
-            let artifact = anchor_mailbox.subscribe().await.expect("anchor stopped");
+        let probe_artifact = if should_state_sync {
+            let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
             provider.register(
-                artifact.epoch,
+                artifact.info.epoch,
                 Scheme::verifier(
                     NAMESPACE,
                     artifact.info.output.players().clone(),
@@ -756,20 +776,21 @@ impl EngineDefinition for ReshareEngine {
         } else {
             None
         };
-        // Optionally hold bootstrap between anchor and probe until the whole
-        // anchored committee has processed into the next epoch, so probe's
-        // replies carry rounds beyond the anchored epoch.
-        if self.epoch_cross_before_probe && should_state_sync {
-            let artifact = anchor_artifact
+        // Optionally hold bootstrap after the probe artifact resolves until
+        // the whole sampled committee has processed into the next epoch, so
+        // the network crosses an epoch boundary while the node is still
+        // syncing to its (already fixed) floor.
+        if self.epoch_cross_during_sync && should_state_sync {
+            let artifact = probe_artifact
                 .as_ref()
                 .expect("epoch cross hold requires state-sync bootstrap");
             let committee = artifact.info.output.players().clone();
             assert!(
                 committee.position(public_key).is_none(),
-                "delayed node must not be an anchored-committee member for the epoch-cross hold"
+                "delayed node must not be a sampled-committee member for the epoch-cross hold"
             );
             let target = FixedEpocher::new(EPOCH_LENGTH)
-                .first(artifact.epoch.next())
+                .first(artifact.info.epoch.next())
                 .expect("next epoch must be supported")
                 .get();
             loop {
@@ -785,30 +806,6 @@ impl EngineDefinition for ReshareEngine {
                 context.sleep(Duration::from_millis(50)).await;
             }
         }
-        let minimum_probe_epoch = anchor_artifact
-            .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.epoch);
-        // Threshold certificate verification depends only on the constant
-        // group key, so the anchored epoch's verifier judges replies from any
-        // epoch while supplying the committee to solicit.
-        let probe_info = anchor_artifact
-            .as_ref()
-            .map_or(&self.initial.info, |artifact| &artifact.info);
-        let probe_scheme = Scheme::verifier(
-            NAMESPACE,
-            probe_info.output.players().clone(),
-            probe_info.output.public().clone(),
-        );
-        let (probe_actor, probe_mailbox) = Probe::new(ProbeConfig {
-            context: context.child("probe"),
-            provider: ConstantProvider::new(probe_scheme),
-            strategy: Sequential,
-            capacity: NZUsize!(100),
-            blocker: oracle.control(public_key.clone()),
-            minimum_epoch: minimum_probe_epoch,
-            retry_timeout: NZDuration!(Duration::from_millis(100)),
-        });
-        let probe_handle = probe_actor.start(probe_network);
         if should_state_sync {
             let finalization = match self.state_sync_floor {
                 Some(height) => {
@@ -824,7 +821,11 @@ impl EngineDefinition for ReshareEngine {
                         .await
                         .expect("configured state-sync floor must be finalized")
                 }
-                None => probe_mailbox.subscribe().await.expect("probe stopped"),
+                None => probe_artifact
+                    .as_ref()
+                    .expect("state-sync startup must have a probe artifact")
+                    .floor
+                    .clone(),
             };
             plan = plan.with_floor(finalization);
         }
@@ -897,10 +898,10 @@ impl EngineDefinition for ReshareEngine {
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
-        let fence_epoch = anchor_artifact
+        let fence_epoch = probe_artifact
             .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.epoch);
-        let state_sync = anchor_artifact.map(|artifact| {
+            .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
+        let state_sync = probe_artifact.map(|artifact| {
             let floor = plan
                 .floor()
                 .cloned()
@@ -965,6 +966,7 @@ impl EngineDefinition for ReshareEngine {
                     genesis: genesis.clone(),
                     processed: self.processed.clone(),
                     public_key: public_key.clone(),
+                    hold: self.processed_hold.clone(),
                 },
                 db_config,
                 provider: (),
@@ -1002,7 +1004,7 @@ impl EngineDefinition for ReshareEngine {
                 manager: oracle.manager(),
                 provider: provider.clone(),
                 marshal: marshal.clone(),
-                application: deferred.clone(),
+                application: deferred,
                 strategy: Sequential,
                 simplex: orchestrator::SimplexConfig {
                     elector: RoundRobin::<Sha256>::default(),
@@ -1029,10 +1031,10 @@ impl EngineDefinition for ReshareEngine {
             },
         );
         let orchestrator_handle =
-            orchestrator_actor.start(vote_network, certificate_mux_handle, resolver_network);
+            orchestrator_actor.start(vote_network, certificate_network, resolver_network);
 
         let reporters = Reporters::from((
-            stateful_mailbox.clone(),
+            stateful_mailbox,
             Reporters::from((orchestrator_mailbox, reshare_mailbox)),
         ));
         let marshal_handle = marshal_actor.start(
@@ -1040,16 +1042,28 @@ impl EngineDefinition for ReshareEngine {
             buffer,
             resolver,
         );
-        anchor_mailbox.attach(marshal.clone());
         probe_mailbox.attach(marshal.clone());
+        // Record the synced height without blocking init: awaiting the floor
+        // block here would stall the simulator's restart arm (and with it the
+        // crash monitor) until the block is fetched.
         if let Some(finalization) = sync_floor {
-            let block = marshal
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
-                .await
-                .expect("sync floor block must be available");
-            self.state_syncs
-                .lock()
-                .insert(public_key.clone(), block.height().get());
+            let marshal = marshal.clone();
+            let state_syncs = self.state_syncs.clone();
+            let public_key = public_key.clone();
+            context
+                .child("sync_floor_recorder")
+                .spawn(move |_| async move {
+                    let Ok(block) = marshal
+                        .subscribe_by_commitment(
+                            finalization.proposal.payload,
+                            CommitmentFallback::Wait,
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    state_syncs.lock().insert(public_key, block.height().get());
+                });
         }
         let stateful_handle = stateful_actor.start();
 
@@ -1057,7 +1071,6 @@ impl EngineDefinition for ReshareEngine {
             ValidatorEngine {
                 context,
                 handles: ValidatorHandles {
-                    anchor: anchor_handle,
                     probe: probe_handle,
                     qmdb: qmdb_handle,
                     reshare: reshare_handle,

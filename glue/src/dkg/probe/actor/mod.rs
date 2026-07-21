@@ -1,24 +1,31 @@
 use super::mailbox::{Mailbox, Message};
-use crate::dkg::{ReshareBlock, types::EpochInfo};
+use crate::{
+    dkg::{
+        ReshareBlock,
+        types::{EpochInfo, Participants},
+    },
+    stateful::probe::sample::Sample,
+};
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
+use commonware_consensus::{
+    marshal::core::Variant,
+    simplex::scheme::Scheme,
+    types::{Epoch, FixedEpocher},
+};
 use commonware_cryptography::Signer;
-use commonware_p2p::{Blocker, Channel, Manager, Message as P2pMessage, Receiver, Sender};
+use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
-use commonware_utils::{NonZeroDuration, channel::mpsc, ordered::Set};
+use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
 use rand_core::CryptoRng;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod discovery;
-mod serving;
+mod service;
 
-/// Peer-set slot used before epoch-scoped tracking can supersede bootstrap peers.
-const BOOTSTRAP_PEER_SET_INDEX: u64 = 0;
-
-/// Configuration for the anchor actor.
+/// Configuration for the DKG probe actor.
 pub struct Config<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -32,10 +39,29 @@ where
 {
     /// Runtime context.
     pub context: E,
-    /// P2P manager used to track the configured bootstrap peers.
+    /// P2P manager used to track the bootstrap participants when discovery
+    /// begins.
     pub manager: M,
-    /// Bootstrap peers used before epoch-scoped participants are known.
-    pub peers: Set<S::PublicKey>,
+    /// The complete participant snapshot of [`Config::bootstrap_epoch`].
+    ///
+    /// Discovery solicits and samples `f + 1` of the snapshot's dealers,
+    /// which are the epoch's active committee (its share holders and
+    /// certificate signers), so the dealers must be that complete committee:
+    /// a subset mis-derives `f`. See the module docs for the trust model and
+    /// the budgets on faulty, stale, and unreachable members.
+    ///
+    /// The snapshot must match the epoch's canonical [`Participants`]: when
+    /// discovery begins, the actor tracks the snapshot's
+    /// [`tracked_peers`](Participants::tracked_peers) at the epoch's own
+    /// peer-set ID, and all peers must track the same set contents at the
+    /// same ID. The orchestrator tracks the identical contents if it later
+    /// enters the bootstrap epoch, so the duplicate registration is benign.
+    pub bootstrap_participants: Participants<S::PublicKey>,
+    /// Epoch whose participant snapshot is [`Config::bootstrap_participants`].
+    ///
+    /// Latest-finalization replies below this epoch are ignored, so the
+    /// discovered floor is never older than the configured trust point.
+    pub bootstrap_epoch: Epoch,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
     /// Public epoch information carried by genesis.
@@ -54,7 +80,7 @@ where
     pub block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 }
 
-/// Anchor actor.
+/// DKG probe actor.
 pub struct Actor<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -69,7 +95,8 @@ where
     context: ContextCell<E>,
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
-    peers: Set<S::PublicKey>,
+    bootstrap_participants: Participants<S::PublicKey>,
+    bootstrap_epoch: Epoch,
     verifier: S,
     genesis: EpochInfo<<V::ApplicationBlock as ReshareBlock>::Variant, S::PublicKey>,
     strategy: T,
@@ -90,7 +117,7 @@ where
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
-    /// Create a anchor actor and mailbox.
+    /// Create a probe actor and mailbox.
     pub fn new(config: Config<E, M, S, V, T, B>) -> (Self, Mailbox<S, V>) {
         let (sender, mailbox) =
             actor_mailbox::new(config.context.child("mailbox"), config.mailbox_size);
@@ -100,7 +127,8 @@ where
                 context: ContextCell::new(config.context),
                 mailbox,
                 manager: config.manager,
-                peers: config.peers,
+                bootstrap_participants: config.bootstrap_participants,
+                bootstrap_epoch: config.bootstrap_epoch,
                 verifier: config.verifier,
                 genesis: config.genesis,
                 strategy: config.strategy,
@@ -113,39 +141,30 @@ where
         )
     }
 
-    /// Start the anchor actor.
+    /// Start the probe actor.
     ///
-    /// The certificate backup channel is the mux backup receiver for the
-    /// physical Simplex certificate channel. The boundary network is the
-    /// anchor request channel used to fetch and later serve finalized boundary
-    /// finalizations and blocks.
-    pub fn start<BSE, BRE>(
-        mut self,
-        certificates: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
-        boundaries: (BSE, BRE),
-    ) -> Handle<()>
+    /// The boundary network is the probe request channel used to sample the
+    /// configured committee's latest finalizations, fetch the target epoch's
+    /// boundary finalization and block, and later serve the same requests to
+    /// other joining peers.
+    pub fn start<BSE, BRE>(mut self, boundaries: (BSE, BRE)) -> Handle<()>
     where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
-        spawn_cell!(self.context, self.run(certificates, boundaries,))
+        spawn_cell!(self.context, self.run(boundaries,))
     }
 
-    async fn run<BSE, BRE>(
-        mut self,
-        certificate_receiver: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
-        (boundary_sender, boundary_receiver): (BSE, BRE),
-    ) where
+    async fn run<BSE, BRE>(self, (boundary_sender, boundary_receiver): (BSE, BRE))
+    where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
-        let _ = self
-            .manager
-            .track(BOOTSTRAP_PEER_SET_INDEX, self.peers.clone());
-
         Discovery {
             context: self.context,
             mailbox: self.mailbox,
+            manager: self.manager,
+            bootstrap_participants: self.bootstrap_participants,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,
@@ -154,11 +173,11 @@ where
             block_codec_config: self.block_codec_config,
             retry_timeout: self.retry_timeout,
             artifact: None,
-            buffered_finalization: None,
+            sample: Sample::new(self.bootstrap_epoch),
             subscribers: Vec::new(),
             pending: None,
         }
-        .run(certificate_receiver, boundary_sender, boundary_receiver)
+        .run(boundary_sender, boundary_receiver)
         .await;
     }
 }

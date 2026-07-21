@@ -404,13 +404,19 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
     let state_sync_floor = FixedEpocher::new(EPOCH_LENGTH)
         .first(next_player_epoch)
         .expect("test epoch should be supported");
-    let last_before_boundary = FixedEpocher::new(EPOCH_LENGTH)
-        .last(next_player_epoch)
-        .and_then(|height| height.previous())
-        .expect("test epoch should have a pre-boundary height");
     let crash_window_start = state_sync_floor.get() + EPOCH_LENGTH.get() / 2;
+    // The application state sync follows the finalized tip, so the node's
+    // first processed height after sync is bounded only by the next epoch
+    // boundary (block production pauses there, letting sync converge). The
+    // crash window therefore extends to the next epoch's first block, and the
+    // processed hold parks the node at whatever height it lands on so the
+    // crash triggers deterministically instead of sampling a moving value.
+    let crash_window_end = FixedEpocher::new(EPOCH_LENGTH)
+        .first(next_player_epoch.next())
+        .expect("test epoch should be supported");
     let engine = ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor);
     let delayed = engine.participants[5].clone();
+    let engine = engine.with_processed_hold(delayed.clone(), Height::new(crash_window_start));
     let state_sync_starts = engine.state_sync_starts.clone();
     let result = state_sync_next_player_plan_starting_at(
         engine,
@@ -423,7 +429,7 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
     )
     .crash(Crash::ProcessedHeight {
         participant: delayed.clone(),
-        heights: crash_window_start..=last_before_boundary.get(),
+        heights: crash_window_start..=crash_window_end.get(),
         downtime: Duration::from_millis(250),
     })
     .timeout(Duration::from_secs(120))
@@ -438,20 +444,20 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
 
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_state_sync_probe_floor_crosses_epoch() {
-    // The node anchors mid-epoch 1, then the harness holds bootstrap until the
-    // anchored committee finishes epoch 1, so probe's floor lands in epoch 2.
-    // The node must sync inside epoch 2 without epoch 2's boundary info,
-    // follow to the epoch 3 boundary, and participate normally afterward:
-    // dealt to as a player during epoch 3, it registers as a signer for
-    // epoch 4.
-    let anchor_epoch = Epoch::new(1);
-    let floor_epoch = anchor_epoch.next();
+fn reshare_e2e_state_sync_epoch_crosses_during_sync() {
+    // The node probes mid-epoch 1, fixing its floor and epoch info together,
+    // then the harness holds bootstrap until the sampled committee finishes
+    // epoch 1 so the network crosses an epoch boundary while the node is
+    // still syncing. The node must sync at its epoch-1 floor, start the
+    // epoch-1 engine with full info, catch up through ordinary marshal
+    // delivery, and participate normally afterward: dealt to as a player
+    // during epoch 3, it registers as a signer for epoch 4.
+    let probe_epoch = Epoch::new(1);
     let epocher = FixedEpocher::new(EPOCH_LENGTH);
     let start_height = epocher
-        .midpoint(anchor_epoch)
+        .midpoint(probe_epoch)
         .expect("test epoch should be supported");
-    let engine = ReshareEngine::with_committee(6, 4).with_epoch_cross_before_probe();
+    let engine = ReshareEngine::with_committee(6, 4).with_epoch_cross_during_sync();
     let delayed = engine.participants[5].clone();
     let registrations = engine.registrations.clone();
     let state_syncs = engine.state_syncs.clone();
@@ -464,9 +470,9 @@ fn reshare_e2e_state_sync_probe_floor_crosses_epoch() {
         .property(StateSyncedAtHeight::new(
             delayed.clone(),
             epocher
-                .first(floor_epoch)
+                .first(probe_epoch)
                 .expect("test epoch should be supported"),
-            final_height(floor_epoch.get()),
+            final_height(probe_epoch.get()),
             state_syncs.clone(),
         ))
         .property(StateSyncedSigner::new(

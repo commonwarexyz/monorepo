@@ -92,10 +92,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::select;
-    use commonware_p2p::{
-        simulated::{Config as NetworkConfig, Link, Network, Oracle},
-        utils::mux::{Builder, Muxer},
-    };
+    use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Handle, Quota, Runner, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
@@ -273,10 +270,10 @@ mod tests {
         marshal: mocks::TestMarshalMailbox,
         orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
         application: mocks::MockApplication,
-        fence: Fence,
         orchestrator_handle: Handle<()>,
-        certificate_mux_handle: Handle<Result<(), commonware_p2p::simulated::Error>>,
         marshal_handle: Handle<()>,
+        // Held so the epoch gate stays open for the node's lifetime.
+        _fence: Fence,
     }
 
     impl Node {
@@ -439,14 +436,6 @@ mod tests {
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register certificate channel");
-            let (certificate_mux, certificates) = Muxer::builder(
-                context.child("certificate_mux"),
-                certificates.0,
-                certificates.1,
-                16,
-            )
-            .build();
-            let certificate_mux_handle = certificate_mux.start();
             let simplex_resolver = control
                 .register(RESOLVER_CHANNEL, TEST_QUOTA)
                 .await
@@ -457,16 +446,14 @@ mod tests {
                 marshal,
                 orchestrator,
                 application,
-                fence,
                 orchestrator_handle,
-                certificate_mux_handle,
                 marshal_handle,
+                _fence: fence,
             }
         }
 
         fn abort(&mut self) {
             self.orchestrator_handle.abort();
-            self.certificate_mux_handle.abort();
             self.marshal_handle.abort();
         }
     }
@@ -622,61 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn active_engine_channel_close_stops_orchestrator() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(10));
-        runner.start(|mut context| async move {
-            let mut cluster = Cluster::start_with_seeded_first(&mut context, 1, false).await;
-            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
-            assert_eq!(proposal.round.epoch(), Epoch::zero());
-
-            let node = &mut cluster.nodes[0];
-            node.certificate_mux_handle.abort();
-            select! {
-                result = &mut node.orchestrator_handle => {
-                    result.expect("orchestrator should stop cleanly");
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("orchestrator stayed alive after active engine stopped");
-                },
-            };
-        });
-    }
-
-    #[test]
-    fn certificate_mux_close_during_boundary_transition_stops_cleanly() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(10));
-        runner.start(|mut context| async move {
-            let fixture = mocks::scheme_fixture_n(&mut context, 1);
-            let mut cluster =
-                Cluster::start_with_gate_epoch(&mut context, &fixture, true, Epoch::zero()).await;
-            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
-            assert_eq!(proposal.round.epoch(), Epoch::zero());
-
-            // The seeded boundary block parks the orchestrator inside
-            // enter_epoch(1) on the closed gate. Stop the externally owned
-            // certificate mux before releasing the gate so the transition
-            // observes a closed mux when it registers epoch subchannels.
-            // Marshal is stopped alongside it, as during node shutdown:
-            // exiting the transition drops the boundary acknowledgement, which
-            // a still-running marshal intentionally treats as fatal.
-            let node = &mut cluster.nodes[0];
-            node.certificate_mux_handle.abort();
-            node.marshal_handle.abort();
-            context.sleep(Duration::from_millis(10)).await;
-            node.fence.mark(Epoch::new(1));
-
-            select! {
-                result = &mut node.orchestrator_handle => {
-                    result.expect("orchestrator should stop cleanly");
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("orchestrator stayed alive after certificate mux closed");
-                },
-            };
-        });
-    }
-
-    #[test]
     fn shutdown_interrupts_boundary_gate_wait() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
@@ -790,14 +722,6 @@ mod tests {
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register certificate channel");
-            let (certificate_mux, certificates) = Muxer::builder(
-                context.child("certificate_mux"),
-                certificates.0,
-                certificates.1,
-                16,
-            )
-            .build();
-            certificate_mux.start();
             let simplex_resolver = control
                 .register(RESOLVER_CHANNEL, TEST_QUOTA)
                 .await
@@ -858,8 +782,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "state sync artifact epoch must not exceed floor epoch")]
-    fn state_sync_rejects_artifact_beyond_floor_epoch() {
+    #[should_panic(expected = "state sync artifact and floor must be in the same epoch")]
+    fn state_sync_rejects_mismatched_floor_epoch() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);

@@ -1,4 +1,7 @@
-use super::mailbox::{Mailbox, Message};
+use super::{
+    mailbox::{Mailbox, Message},
+    sample::Sample,
+};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::Epoch};
 use commonware_cryptography::{PublicKey, certificate::Provider};
@@ -113,9 +116,8 @@ where
             provider: self.provider,
             strategy: self.strategy,
             blocker: self.blocker,
-            minimum_epoch: self.minimum_epoch,
             retry_timeout: self.retry_timeout,
-            floor: None,
+            sample: Sample::new(self.minimum_epoch),
             floor_subscribers: Vec::new(),
         }
         .run(&mut sender, &mut receiver)

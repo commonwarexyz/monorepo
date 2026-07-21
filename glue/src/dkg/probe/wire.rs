@@ -6,7 +6,7 @@ use commonware_consensus::{
     types::Epoch,
 };
 
-/// First byte of an anchor boundary message.
+/// First byte of a DKG probe message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
@@ -18,6 +18,10 @@ pub(crate) enum Tag {
     BlockRequest,
     /// Response carrying a finalized block.
     BlockResponse,
+    /// Request the receiver's latest finalization.
+    LatestRequest,
+    /// Response carrying the receiver's latest finalization.
+    LatestResponse,
 }
 
 impl FixedSize for Tag {
@@ -31,6 +35,8 @@ impl Write for Tag {
             Self::FinalizationResponse => 1u8.write(writer),
             Self::BlockRequest => 2u8.write(writer),
             Self::BlockResponse => 3u8.write(writer),
+            Self::LatestRequest => 4u8.write(writer),
+            Self::LatestResponse => 5u8.write(writer),
         }
     }
 }
@@ -44,6 +50,8 @@ impl Read for Tag {
             1 => Ok(Self::FinalizationResponse),
             2 => Ok(Self::BlockRequest),
             3 => Ok(Self::BlockResponse),
+            4 => Ok(Self::LatestRequest),
+            5 => Ok(Self::LatestResponse),
             n => Err(Error::InvalidEnum(n)),
         }
     }
@@ -55,6 +63,8 @@ pub(crate) enum Request {
     Finalization(Epoch),
     /// Request the boundary block for an epoch.
     Block(Epoch),
+    /// Request the receiver's latest finalization.
+    Latest,
 }
 
 /// Response decoded from a peer.
@@ -73,9 +83,11 @@ where
         /// Encoded block body.
         body: R,
     },
+    /// Latest finalization response.
+    Latest(Finalization<S, V::Commitment>),
 }
 
-/// Anchor boundary protocol message.
+/// DKG probe protocol message.
 pub(crate) enum Message<S, V>
 where
     S: Scheme<V::Commitment>,
@@ -94,6 +106,10 @@ where
         /// Requested finalized block.
         block: V::Block,
     },
+    /// Request the receiver's latest finalization.
+    LatestRequest,
+    /// Respond with the receiver's latest finalization.
+    LatestResponse(Finalization<S, V::Commitment>),
 }
 
 impl<S, V> Write for Message<S, V>
@@ -120,6 +136,13 @@ where
                 epoch.write(writer);
                 block.write(writer);
             }
+            Self::LatestRequest => {
+                Tag::LatestRequest.write(writer);
+            }
+            Self::LatestResponse(finalization) => {
+                Tag::LatestResponse.write(writer);
+                finalization.write(writer);
+            }
         }
     }
 }
@@ -136,6 +159,8 @@ where
                 Self::FinalizationResponse(finalization) => finalization.encode_size(),
                 Self::BlockRequest(epoch) => epoch.encode_size(),
                 Self::BlockResponse { epoch, block } => epoch.encode_size() + block.encode_size(),
+                Self::LatestRequest => 0,
+                Self::LatestResponse(finalization) => finalization.encode_size(),
             }
     }
 }
@@ -158,6 +183,8 @@ where
                 epoch: Epoch::arbitrary(u)?,
                 block: V::Block::arbitrary(u)?,
             },
+            Tag::LatestRequest => Self::LatestRequest,
+            Tag::LatestResponse => Self::LatestResponse(Finalization::arbitrary(u)?),
         })
     }
 }
@@ -168,7 +195,8 @@ pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Erro
     match tag {
         Tag::FinalizationRequest => Ok(Some(Request::Finalization(Epoch::decode(reader)?))),
         Tag::BlockRequest => Ok(Some(Request::Block(Epoch::decode(reader)?))),
-        Tag::FinalizationResponse | Tag::BlockResponse => Ok(None),
+        Tag::LatestRequest => Ok(Some(Request::Latest)),
+        Tag::FinalizationResponse | Tag::BlockResponse | Tag::LatestResponse => Ok(None),
     }
 }
 
@@ -192,7 +220,11 @@ where
             epoch: Epoch::read(&mut reader)?,
             body: reader,
         })),
-        Tag::FinalizationRequest | Tag::BlockRequest => Ok(None),
+        Tag::LatestResponse => Ok(Some(Response::Latest(Finalization::decode_cfg(
+            reader,
+            certificate_cfg,
+        )?))),
+        Tag::FinalizationRequest | Tag::BlockRequest | Tag::LatestRequest => Ok(None),
     }
 }
 

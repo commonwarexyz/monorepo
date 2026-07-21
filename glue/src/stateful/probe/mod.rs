@@ -124,6 +124,8 @@ pub use actor::{Config, Probe};
 mod mailbox;
 pub use mailbox::Mailbox;
 
+pub(crate) mod sample;
+
 mod wire;
 
 #[cfg(test)]

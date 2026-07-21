@@ -8,14 +8,14 @@ use commonware_consensus::{
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
-/// Messages sent to the anchor actor.
+/// Messages sent to the DKG probe actor.
 pub(crate) enum Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
 {
-    /// Subscribe to the anchor artifact.
+    /// Subscribe to the probe artifact.
     Subscribe {
         /// Channel used to resolve the subscriber.
         response: oneshot::Sender<ActorArtifact<S, V>>,
@@ -41,7 +41,7 @@ where
     }
 }
 
-/// Mailbox for a running anchor actor.
+/// Mailbox for a running DKG probe actor.
 #[derive(Clone)]
 pub struct Mailbox<S, V>
 where
@@ -62,10 +62,10 @@ where
         Self { sender }
     }
 
-    /// Subscribe to the anchor artifact.
+    /// Subscribe to the probe artifact.
     ///
-    /// The first live subscriber causes discovery to pay attention to the
-    /// Simplex certificate channel. Dropping the returned receiver cancels the
+    /// The first live subscriber causes discovery to solicit the configured
+    /// bootstrap committee. Dropping the returned receiver cancels the
     /// subscription. If discovery has already resolved, late subscribers receive
     /// the cached artifact immediately.
     pub fn subscribe(&self) -> oneshot::Receiver<ActorArtifact<S, V>> {

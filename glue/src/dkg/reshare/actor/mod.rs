@@ -74,7 +74,7 @@
 //! current shares, private dealings, and dealer RNG seeds. Public epoch info is
 //! normally re-derived from finalized boundary blocks; state-sync startup
 //! material is retained separately and removed on a later startup after marshal
-//! has advanced beyond its floor's epoch.
+//! has advanced beyond its epoch.
 //!
 //! ```text
 //! restart
@@ -143,7 +143,6 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
-    Epochable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher},
@@ -164,7 +163,6 @@ use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
-use tracing::info;
 
 type DkgCompletion<V, P> = Box<dyn FnOnce(Option<EpochInfo<V, P>>) + Send>;
 
@@ -421,26 +419,8 @@ where
             return;
         }
 
-        let mut current_epoch = None;
-        let mut state_sync_info = None;
-        if let Some(state_sync) = state_sync {
-            let floor_epoch = state_sync.floor.epoch();
-            if floor_epoch > state_sync.info.epoch {
-                // The network crossed an epoch boundary during bootstrap, so
-                // the floor epoch's boundary info is not locally recoverable.
-                // Start at the floor's epoch without info; setup then falls
-                // into follower mode until the next boundary block finalizes.
-                info!(
-                    synced = %state_sync.info.epoch,
-                    floor = %floor_epoch,
-                    "state-sync floor beyond synced epoch, following to next boundary"
-                );
-                current_epoch = Some(floor_epoch);
-            } else {
-                current_epoch = Some(state_sync.info.epoch);
-                state_sync_info = Some(state_sync.info);
-            }
-        }
+        let mut current_epoch = state_sync.as_ref().map(|state_sync| state_sync.info.epoch);
+        let mut state_sync_info = state_sync.map(|state_sync| state_sync.info);
         loop {
             let Some(prepared) = self
                 .setup(&mut store, current_epoch.take(), state_sync_info.take())

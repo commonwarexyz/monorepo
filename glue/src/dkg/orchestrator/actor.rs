@@ -9,7 +9,7 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Epochable as _, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
         self, Floor, ForwardingPolicy, Plan, elector::Config as Elector, scheme, types::Context,
@@ -34,7 +34,6 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
-use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -43,9 +42,6 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, info};
-
-/// Offset leaves peer-set ID zero available for anchor bootstrap peers.
-const EPOCH_PEER_SET_OFFSET: u64 = 1;
 
 struct Channels<C, S, R>
 where
@@ -56,6 +52,7 @@ where
     vote: MuxHandle<S, R>,
     vote_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
     certificate: MuxHandle<S, R>,
+    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
     resolver: MuxHandle<S, R>,
 }
 
@@ -67,23 +64,6 @@ struct ActiveEpoch {
 impl Drop for ActiveEpoch {
     fn drop(&mut self) {
         self.handle.abort();
-    }
-}
-
-enum EpochState {
-    /// No Simplex engine is running because the epoch's public info is not
-    /// available yet. The actor waits for the finalized boundary block of
-    /// `epoch` to introduce the first epoch it can enter.
-    AwaitBoundary(Epoch),
-    Active(ActiveEpoch),
-}
-
-impl EpochState {
-    const fn epoch(&self) -> Epoch {
-        match self {
-            Self::AwaitBoundary(epoch) => *epoch,
-            Self::Active(active) => active.epoch,
-        }
     }
 }
 
@@ -103,20 +83,6 @@ where
     epoch: Epoch,
     floor: Floor<S, D>,
     info: EpochInfo<V, P>,
-}
-
-enum StartState<S, D, V, P>
-where
-    S: scheme::Scheme<D, PublicKey = P>,
-    D: Digest,
-    V: BlsVariant,
-    P: PublicKey,
-{
-    /// The startup epoch's public info is available and an engine can start.
-    Epoch(Box<ResolvedStart<S, D, V, P>>),
-    /// The state-sync floor is beyond the newest known epoch info, so no
-    /// engine can start until the boundary block of `epoch` finalizes.
-    AwaitBoundary(Epoch),
 }
 
 /// Simplex configuration applied to each epoch engine.
@@ -323,14 +289,12 @@ where
 
     /// Spawn the orchestrator with the consensus network channels.
     ///
-    /// Vote and resolver channels are multiplexed by epoch inside the actor.
-    /// The certificate mux must already be running so other actors can observe
-    /// unregistered certificate subchannels before the orchestrator enters an
-    /// epoch.
+    /// Vote, certificate, and resolver channels are multiplexed by epoch
+    /// inside the actor.
     pub fn start<S, R>(
         mut self,
         votes: (S, R),
-        certificates: MuxHandle<S, R>,
+        certificates: (S, R),
         resolver: (S, R),
     ) -> Handle<()>
     where
@@ -342,16 +306,14 @@ where
 
     /// Run the actor event loop.
     ///
-    /// The loop owns at most one active Simplex engine at a time. It listens
-    /// for finalized boundary blocks from marshal and for backup vote traffic
-    /// from future epochs, which is used only to ask marshal for the missing
-    /// boundary finalization. When the state-sync floor is beyond the newest
-    /// known epoch info, the loop starts with no engine and enters its first
-    /// epoch from the floor epoch's finalized boundary block.
+    /// The loop owns one active Simplex engine at a time. It listens for
+    /// finalized boundary blocks from marshal and for backup vote and
+    /// certificate traffic from future epochs, which is used only to ask
+    /// marshal for the missing boundary finalization.
     async fn run<S, R>(
         mut self,
         (vote_sender, vote_receiver): (S, R),
-        certificates: MuxHandle<S, R>,
+        (certificate_sender, certificate_receiver): (S, R),
         (resolver_sender, resolver_receiver): (S, R),
     ) where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -359,7 +321,7 @@ where
     {
         let mut channels = self.create_channels(
             (vote_sender, vote_receiver),
-            certificates,
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         );
         let epocher = FixedEpocher::new(self.blocks_per_epoch);
@@ -367,50 +329,38 @@ where
             debug!("context shutdown while resolving startup epoch");
             return;
         };
-        let mut state = match start {
-            StartState::Epoch(start) => {
-                let start = *start;
-                match self
-                    .enter_epoch(
-                        start.epoch,
-                        start.floor,
-                        start.info.participants().tracked_peers(),
-                        &mut channels,
-                    )
-                    .await
-                {
-                    Ok(active) => EpochState::Active(active),
-                    Err(EnterEpochError::GateClosed) => {
-                        debug!(
-                            epoch = start.epoch.get(),
-                            "epoch gate closed before startup"
-                        );
-                        return;
-                    }
-                    Err(EnterEpochError::MuxClosed) => {
-                        debug!(
-                            epoch = start.epoch.get(),
-                            "consensus mux closed before startup epoch"
-                        );
-                        return;
-                    }
-                    Err(EnterEpochError::Stopped) => {
-                        debug!("context shutdown before startup epoch");
-                        return;
-                    }
-                }
+        let mut active = match self
+            .enter_epoch(
+                start.epoch,
+                start.floor,
+                start.info.participants().tracked_peers(),
+                &mut channels,
+            )
+            .await
+        {
+            Ok(active) => active,
+            Err(EnterEpochError::GateClosed) => {
+                debug!(
+                    epoch = start.epoch.get(),
+                    "epoch gate closed before startup"
+                );
+                return;
             }
-            StartState::AwaitBoundary(epoch) => EpochState::AwaitBoundary(epoch),
+            Err(EnterEpochError::MuxClosed) => {
+                debug!(
+                    epoch = start.epoch.get(),
+                    "consensus mux closed before startup epoch"
+                );
+                return;
+            }
+            Err(EnterEpochError::Stopped) => {
+                debug!("context shutdown before startup epoch");
+                return;
+            }
         };
 
         select_loop! {
             self.context,
-            on_start => {
-                let engine = match &mut state {
-                    EpochState::Active(active) => Either::Left(&mut active.handle),
-                    EpochState::AwaitBoundary { .. } => Either::Right(future::pending()),
-                };
-            },
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
@@ -418,15 +368,21 @@ where
                 debug!("vote mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
-                self.handle_backup_vote(&epocher, state.epoch(), their_epoch, from);
+                self.handle_backup(&epocher, active.epoch, their_epoch, from);
             },
-            result = engine => match result {
+            Some((their_epoch, (from, _))) = channels.certificate_backup.recv() else {
+                debug!("certificate mux backup channel closed, shutting down orchestrator");
+                break;
+            } => {
+                self.handle_backup(&epocher, active.epoch, their_epoch, from);
+            },
+            result = &mut active.handle => match result {
                 Ok(()) => {
-                    debug!(epoch = state.epoch().get(), "simplex engine stopped, shutting down orchestrator");
+                    debug!(epoch = active.epoch.get(), "simplex engine stopped, shutting down orchestrator");
                     break;
                 }
                 Err(error) => {
-                    panic!("simplex engine for epoch {} stopped unexpectedly: {error}", state.epoch());
+                    panic!("simplex engine for epoch {} stopped unexpectedly: {error}", active.epoch);
                 }
             },
             Some(message) = self.mailbox.recv() else {
@@ -440,7 +396,7 @@ where
                     let keep_running = self
                         .handle_finalized(
                             &epocher,
-                            &mut state,
+                            &mut active,
                             block,
                             acknowledgement,
                             &mut channels,
@@ -458,17 +414,16 @@ where
     ///
     /// Normal startup resolves from marshal's local boundary blocks. State-sync
     /// startup and recovery are exceptions: the node may know a recent public
-    /// boundary from `dkg::anchor` without having the previous boundary block in
-    /// local marshal storage. When the state-sync floor is beyond the anchored
-    /// epoch, no epoch can start until the floor epoch's boundary block
-    /// finalizes with the next epoch's info.
+    /// boundary from `dkg::probe` without having the previous boundary block in
+    /// local marshal storage.
     ///
     /// Returns `None` when startup data cannot be fetched from marshal, which
     /// requires the orchestrator to shut down.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
-    ) -> Option<StartState<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>> {
+    ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
+    {
         let recovered_epoch = state_sync::recovered_epoch(&self.marshal, epocher).await;
         if let Some(state_sync) = self
             .state_sync
@@ -478,28 +433,15 @@ where
             )
             .await
         {
-            let floor_epoch = state_sync.floor.epoch();
-            if floor_epoch > state_sync.info.epoch {
-                // The network crossed an epoch boundary during bootstrap. The
-                // floor's epoch cannot be entered without its EpochInfo, which
-                // only the next finalized boundary block supplies.
-                info!(
-                    synced = %state_sync.info.epoch,
-                    floor = %floor_epoch,
-                    "state-sync floor beyond synced epoch, awaiting next boundary"
-                );
-                return Some(StartState::AwaitBoundary(floor_epoch));
-            }
-            return Some(StartState::Epoch(Box::new(ResolvedStart {
+            return Some(ResolvedStart {
                 epoch: state_sync.info.epoch,
                 floor: Floor::Finalized(state_sync.floor),
                 info: state_sync.info,
-            })));
+            });
         }
 
         self.resolve_boundary(recovered_epoch.unwrap_or_else(Epoch::zero), epocher)
             .await
-            .map(|start| StartState::Epoch(Box::new(start)))
     }
 
     /// Resolve a locally recovered epoch from marshal's finalized boundary block.
@@ -513,9 +455,9 @@ where
     /// recovered epoch.
     ///
     /// This is intentionally not used for state-sync startup: during one-time
-    /// state sync, marshal is anchored at a probe-selected finalization while the
+    /// state sync, marshal is anchored at the probe-sampled floor while the
     /// previous epoch boundary block is not locally available yet. In that
-    /// startup path, the anchor artifact is the trusted source of boundary
+    /// startup path, the probe artifact is the trusted source of boundary
     /// epoch info.
     ///
     /// Returns `None` when the boundary block cannot be fetched from marshal,
@@ -561,7 +503,7 @@ where
     fn create_channels<S, R>(
         &self,
         (vote_sender, vote_receiver): (S, R),
-        certificate: MuxHandle<S, R>,
+        (certificate_sender, certificate_receiver): (S, R),
         (resolver_sender, resolver_receiver): (S, R),
     ) -> Channels<P::Scheme, S, R>
     where
@@ -572,6 +514,16 @@ where
             self.context.child("vote_mux"),
             vote_sender,
             vote_receiver,
+            self.muxer_size,
+        )
+        .with_backup()
+        .build();
+        mux.start();
+
+        let (mux, certificate, certificate_backup) = Muxer::builder(
+            self.context.child("certificate_mux"),
+            certificate_sender,
+            certificate_receiver,
             self.muxer_size,
         )
         .with_backup()
@@ -590,17 +542,19 @@ where
             vote,
             vote_backup,
             certificate,
+            certificate_backup,
             resolver,
         }
     }
 
-    /// Handle traffic for an epoch whose vote subchannel is not registered.
+    /// Handle traffic for an epoch whose vote or certificate subchannel is not
+    /// registered.
     ///
-    /// Messages from past or current epochs are ignored. A future-epoch vote is
-    /// evidence that peers have crossed an epoch boundary locally, so the actor
-    /// hints marshal to fetch the current epoch's boundary finalization from the
-    /// sender.
-    fn handle_backup_vote(
+    /// Messages from past or current epochs are ignored. A future-epoch
+    /// message is evidence that peers have crossed an epoch boundary locally,
+    /// so the actor hints marshal to fetch the current epoch's boundary
+    /// finalization from the sender.
+    fn handle_backup(
         &self,
         epocher: &FixedEpocher,
         our_epoch: Epoch,
@@ -631,12 +585,12 @@ where
     ///
     /// Non-boundary blocks are acknowledged immediately. A boundary block must
     /// carry the next epoch's public [`Payload::EpochInfo`]; once it does, the
-    /// actor stops the current Simplex engine (if one is running) and enters
-    /// the next epoch using that public peer set.
+    /// actor stops the current Simplex engine and enters the next epoch using
+    /// that public peer set.
     async fn handle_finalized<S, R>(
         &mut self,
         epocher: &FixedEpocher,
-        state: &mut EpochState,
+        active: &mut ActiveEpoch,
         block: Arc<MV::ApplicationBlock>,
         acknowledgement: ACK,
         channels: &mut Channels<P::Scheme, S, R>,
@@ -646,7 +600,7 @@ where
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         let height = block.height();
-        let current = state.epoch();
+        let current = active.epoch;
         if epocher.last(current) != Some(height) {
             acknowledgement.acknowledge();
             return true;
@@ -693,7 +647,7 @@ where
             }
         };
 
-        *state = EpochState::Active(next);
+        *active = next;
         acknowledgement.acknowledge();
         true
     }
@@ -730,11 +684,7 @@ where
         };
         drop(shutdown);
 
-        let peer_set_id = epoch
-            .get()
-            .checked_add(EPOCH_PEER_SET_OFFSET)
-            .expect("epoch peer-set ID overflow");
-        let _ = self.manager.track(peer_set_id, peers);
+        let _ = self.manager.track(epoch.get(), peers);
         let scheme = self
             .provider
             .scheme(epoch)
@@ -772,9 +722,8 @@ where
         );
 
         // Each epoch is registered exactly once, so a registration failure
-        // means the muxer has stopped: the vote and resolver muxers exit with
-        // this context, and the externally owned certificate mux may be
-        // stopped by its owner at any time. Both are clean-stop conditions.
+        // means the muxer has stopped: the vote, certificate, and resolver
+        // muxers all exit with this context, which is a clean-stop condition.
         let Ok(vote) = channels.vote.register(epoch.get()).await else {
             return Err(EnterEpochError::MuxClosed);
         };

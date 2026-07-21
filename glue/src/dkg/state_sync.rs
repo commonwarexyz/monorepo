@@ -4,7 +4,7 @@
 //! its active epoch. [`Plan`] persists that public material before actors start
 //! and shares one recovery decision between the reshare and orchestrator actors.
 //! A later startup removes the record after marshal's recovered epoch advances
-//! beyond the floor's epoch.
+//! beyond the synced epoch.
 
 use crate::dkg::types::EpochInfo;
 use bytes::{Buf, BufMut};
@@ -44,18 +44,15 @@ pub struct Config {
 /// floor is the finalized block selected for application state sync and gives
 /// marshal a block from which to resume delivery.
 ///
-/// The info may describe an epoch older than the floor's when the network
-/// crossed an epoch boundary between anchor and probe. The actors then start
-/// without the floor epoch's boundary info and follow finalized blocks until
-/// the next boundary supplies it.
+/// The probe fixes the floor and the epoch info atomically, so the info
+/// always describes the epoch containing the floor.
 pub struct StateSync<S, D, V>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
 {
-    /// Public information for the newest epoch known at state sync, at or
-    /// below the epoch containing the state-sync floor.
+    /// Public information for the epoch containing the state-sync floor.
     pub info: EpochInfo<V, S::PublicKey>,
 
     /// Finalized floor selected for application state sync.
@@ -256,7 +253,7 @@ where
     /// # Panics
     ///
     /// Panics if storage cannot be loaded or synchronized, or if provided or
-    /// persisted material has an artifact epoch beyond its floor epoch.
+    /// persisted material has mismatched artifact and floor epochs.
     pub async fn init<E: Context>(
         context: E,
         config: Config,
@@ -362,8 +359,8 @@ where
     V: Variant,
 {
     assert!(
-        state_sync.info.epoch <= state_sync.floor.epoch(),
-        "state sync artifact epoch must not exceed floor epoch"
+        state_sync.info.epoch == state_sync.floor.epoch(),
+        "state sync artifact and floor must be in the same epoch"
     );
 }
 
@@ -530,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "state sync artifact epoch must not exceed floor epoch")]
+    #[should_panic(expected = "state sync artifact and floor must be in the same epoch")]
     fn artifact_beyond_floor_panics_at_init() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut mismatched = state_sync(&mut context, Epoch::new(2));
@@ -539,53 +536,13 @@ mod tests {
         });
     }
 
-    fn crossed_state_sync(context: &mut deterministic::Context) -> TestStateSync {
-        // Floor in epoch 3 with an artifact from epoch 2, as when the network
-        // crosses an epoch boundary between anchor and probe.
-        let mut crossed = state_sync(context, Epoch::new(3));
-        crossed.info.epoch = Epoch::new(2);
-        crossed
-    }
-
     #[test]
-    fn artifact_below_floor_is_accepted() {
+    #[should_panic(expected = "state sync artifact and floor must be in the same epoch")]
+    fn artifact_below_floor_panics_at_init() {
         deterministic::Runner::default().start(|mut context| async move {
-            let expected = crossed_state_sync(&mut context);
-            let initialized =
-                plan(context.child("init"), "below-floor", Some(expected.clone())).await;
-            assert_state_sync(
-                initialized.resolve(context.child("resolve"), None).await,
-                &expected,
-            );
-        });
-    }
-
-    #[test]
-    fn stale_resolution_keyed_on_floor_epoch() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let expected = crossed_state_sync(&mut context);
-            let first = plan(
-                context.child("init"),
-                "floor-staleness",
-                Some(expected.clone()),
-            )
-            .await;
-            // Recovery inside the floor's epoch keeps the record even though
-            // marshal has advanced beyond the artifact's epoch.
-            assert_state_sync(
-                first
-                    .resolve(context.child("first"), Some(Epoch::new(3)))
-                    .await,
-                &expected,
-            );
-
-            let reopened = plan(context.child("reopened"), "floor-staleness", None).await;
-            assert!(
-                reopened
-                    .resolve(context.child("reopened_resolve"), Some(Epoch::new(4)))
-                    .await
-                    .is_none()
-            );
+            let mut mismatched = state_sync(&mut context, Epoch::new(3));
+            mismatched.info.epoch = Epoch::new(2);
+            let _ = plan(context.child("init"), "mismatch-below", Some(mismatched)).await;
         });
     }
 

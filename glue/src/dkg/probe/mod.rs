@@ -1,43 +1,92 @@
 //! Discover the public epoch material a joining node needs before consensus starts.
 //!
 //! A node that is starting fresh cannot construct epoch-scoped state until it learns the current
-//! epoch's participant set. That set lives in the [`EpochInfo`] of
-//! a finalized boundary block. The [`Actor`] discovers that block, publishes the resulting
-//! [`Artifact`], and then serves the same boundary block to other joining peers.
+//! epoch's participant set. That set lives in the [`EpochInfo`] of a finalized boundary block.
+//! The [`Actor`] discovers that block, publishes the resulting [`Artifact`] (which also carries
+//! the state-sync floor), and then serves the same boundary material to other joining peers.
 //!
-//! At startup the node knows only a configured peer set, a constant certificate verifier valid
-//! across all epochs, and the epoch length.
+//! This protocol is an extension of [`stateful::probe`](crate::stateful::probe): it begins with
+//! the same solicit-and-sample floor discovery (built on the same shared sample core) and adds
+//! requests for the floor epoch's boundary finalization and block, which carry the epoch's
+//! public [`EpochInfo`].
 //!
-//! # Weak Subjectivity
+//! At startup the node knows a canonical participant snapshot (the complete dealer, player, and
+//! next-player sets of a configured bootstrap epoch), a constant certificate verifier valid
+//! across all epochs, and the epoch length. When discovery begins, the actor tracks the
+//! snapshot's canonical peer set at the bootstrap epoch's own peer-set ID; the orchestrator
+//! tracks identical contents if it later enters that epoch, so the registrations never
+//! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
+//! dealers: the epoch's active committee of share holders and certificate signers.
 //!
-//! The actor has a deliberately weak subjectivity boundary. Before it has read a boundary block it
-//! does not know the epoch participant set, so it cannot run the `f + 1` peer-sample protocol used
-//! by a stronger scheme such as [`stateful::probe`](crate::stateful::probe). Instead it accepts a
-//! finalization it can verify with the all-epoch verifier, then asks peers for the boundary block
-//! that finalization implies. A verified finalization remains provisional until the corresponding
-//! boundary block is returned; while waiting, a strictly newer verified finalization may replace the
-//! pending candidate. While the resulting [`Artifact`] is guaranteed to be a _valid_ finalized
-//! block, it is not guaranteed that it is _recent_.
+//! # Trust Model
 //!
-//! Operators treat the configured peers and constant verifier as the weakly subjective checkpoint
-//! for startup.
+//! The configured peers and constant verifier are the weakly subjective checkpoint for startup.
+//! For `n` configured members, `f` is the maximum fault count under the `3f + 1` model and the
+//! discovery sample threshold is `f + 1`.
+//!
+//! Rotation out of the active committee is not what the budgets bound: a rotated-out member that
+//! keeps running an honest, chain-following node at its configured identity costs nothing. What
+//! matters is what members do after rotating. At bootstrap time:
+//!
+//! - At most `f` members may be Byzantine or stale, where "stale" means honest but no longer
+//!   following the chain. A frozen node replies honestly with an old finalization, which is
+//!   indistinguishable from an adversarial replay, so it spends the same budget.
+//! - At most `f` members may be unreachable (shut down, address changed, identity retired).
+//!   These cost liveness only; they cannot inject anything.
+//! - The remaining `f + 1` honest, current, reachable members guarantee both liveness (the
+//!   sample completes) and recency (every `f + 1` sample contains at least one of them).
+//!
+//! Both budgets may be fully spent simultaneously. Operators should refresh the configured set
+//! once they can no longer vouch that `f + 1` members remain live and current, exactly as one
+//! refreshes a weak-subjectivity checkpoint. Passing a subset of the committee mis-derives `f`
+//! and cannot be detected at startup; it is the same trust class as a wrong genesis.
+//!
+//! Certificate forgery is impossible regardless of these budgets: the threshold group key is
+//! reshare-invariant and finalizations are self-certifying, so an old committee can never sign
+//! for a round it did not finalize. Recency is the only weak-subjectivity dimension, and the
+//! sample supplies exactly that. See [`stateful::probe`](crate::stateful::probe) for the
+//! extended `f + 1` recency argument this actor inherits.
 //!
 //! # Protocol
 //!
-//! The actor is a two-state machine: it discovers an [`Artifact`], then serves boundary blocks.
+//! The actor is a two-state machine: it discovers an [`Artifact`], then serves boundary material.
 //!
-//! ## Discovery
+//! ## Discovery: solicit and sample
 //!
-//! Once a subscriber appears, [`Actor`] listens on the simplex certificate channel and accepts a
-//! finalization it can verify with the all-epoch verifier:
+//! Once a subscriber appears, [`Actor`] solicits every configured peer's latest finalization:
 //!
 //! ```text
-//!   peer --Finalization--> Actor --verify (all-epoch)--> accepted
+//!                +-- LatestRequest --> peer 1
+//!                |
+//!   Actor -------+-- LatestRequest --> peer 2
+//!                |
+//!                +-- LatestRequest --> peer 3
+//!
+//!   peer 2 --LatestResponse(finalization)--> Actor
 //! ```
 //!
-//! The accepted finalization identifies the target epoch, but not its boundary block. The actor
-//! first asks every peer for the boundary finalization. These responses are small, so peers can
-//! answer in parallel without duplicating the boundary block:
+//! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, only
+//! configured members may reply, and replies below the bootstrap epoch are ignored (the chain
+//! reached that epoch by definition, so any current member holds a finalization at or above its
+//! boundary). Once `f + 1` distinct peers have replied, the highest finalization becomes the
+//! state-sync floor and names the target epoch:
+//!
+//! ```text
+//!   peer 1 --LatestResponse(round 10)-->\               replies
+//!   peer 2 --LatestResponse(round 12)--> +-> Actor {10, 12, 13}
+//!   peer 3 --LatestResponse(round 13)-->/                     |
+//!                                                             v
+//!                          sample reached, highest reply becomes the floor: 13
+//! ```
+//!
+//! If too few peers reply before `retry_timeout`, collected replies are cleared and the
+//! solicitation is re-issued. Retry is a liveness mechanism only.
+//!
+//! ## Discovery: boundary fetch
+//!
+//! The floor's epoch identifies the target epoch, but not its boundary block. The actor asks
+//! every peer for the boundary finalization. These responses are small, so peers can answer in
+//! parallel without duplicating the boundary block:
 //!
 //! ```text
 //!                +-- FinalizationRequest(epoch) --> peer 1
@@ -57,55 +106,36 @@
 //!   peer 2 --BlockResponse(epoch, block)--> Actor
 //! ```
 //!
-//! If boundary discovery remains unanswered and the actor verifies a newer finalization, that
-//! finalization supersedes the pending candidate. The actor then requests the boundary implied by
-//! the newer finalization: the final block of the previous epoch, which carries the newer epoch's
-//! [`EpochInfo`]. Older or equal finalizations are ignored while a request is pending, and late
-//! responses for superseded candidates are ignored without blocking the peer.
+//! The block's [`EpochInfo`] is packaged into an [`Artifact`] together with the sampled floor and
+//! published to subscribers. The floor and the epoch info are fixed atomically, so the artifact's
+//! epoch always equals the floor's epoch:
 //!
 //! ```text
-//!   peer --Finalization(epoch = E + 1)--> Actor --verify (all-epoch)--> supersede
-//!   Actor --FinalizationRequest(E + 1)--> peers
+//!   floor + boundary finalization + boundary block
+//!       --> Artifact { epoch, finalization, info, floor }
 //! ```
 //!
-//! The block's [`EpochInfo`] is packaged into an [`Artifact`] and
-//! published to subscribers:
-//!
-//! ```text
-//!   finalization + boundary block --> Artifact { epoch, finalization, info }
-//! ```
+//! A floor in epoch zero resolves from the locally known genesis info without a boundary fetch.
 //!
 //! ## Serving
 //!
 //! After a source of finalized blocks is attached, the actor enters service and answers peers'
-//! finalization and block requests for the rest of the process lifetime:
+//! latest-finalization, boundary finalization, and boundary block requests for the rest of the
+//! process lifetime:
 //!
 //! ```text
+//!   peer --LatestRequest---------------> Actor --lookup--> LatestResponse -------> peer
 //!   peer --FinalizationRequest(epoch)--> Actor --lookup--> FinalizationResponse --> peer
 //!   peer --BlockRequest(epoch)---------> Actor --lookup--> BlockResponse --------> peer
 //! ```
 //!
-//! An epoch with no known boundary block is answered with nothing.
-//!
-//! While serving, the actor also keeps consuming the Simplex certificate backup channel and
-//! forwards strictly-newer finalizations that verify under the all-epoch verifier to marshal:
-//!
-//! ```text
-//!   peer --Finalization--> Actor --verify (all-epoch)--> marshal
-//! ```
-//!
-//! The backup channel only carries certificates for epochs without a registered consensus
-//! engine, so this forwarding is what keeps marshal's delivery advancing while the node follows
-//! an epoch whose public info it has not learned yet (e.g., after a state-sync bootstrap that
-//! crossed an epoch boundary between anchor and probe). If discovery resolves before marshal is
-//! attached, the actor retains the newest verified finalization received during that handoff and
-//! forwards it when serving begins.
+//! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
+//! request when marshal has no finalization yet.
 
 use crate::dkg::{ReshareBlock, types::EpochInfo};
 use commonware_consensus::{
     marshal::core::Variant as MarshalVariant,
     simplex::{scheme::Scheme, types::Finalization},
-    types::Epoch,
 };
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant as BlsVariant};
 
@@ -117,7 +147,7 @@ pub use mailbox::Mailbox;
 
 mod wire;
 
-/// Concrete anchor artifact for a marshal variant.
+/// Concrete probe artifact for a marshal variant.
 pub(crate) type ActorArtifact<S, V> = Artifact<
     S,
     <V as MarshalVariant>::Commitment,
@@ -132,21 +162,24 @@ where
     D: Digest,
     V: BlsVariant,
 {
-    /// Epoch described by the boundary block's [`EpochInfo`].
-    pub epoch: Epoch,
     /// Finalization of the boundary block that carried the epoch info.
     ///
     /// Epoch zero is anchored by genesis and has no boundary finalization.
     pub finalization: Option<Finalization<S, D>>,
     /// Public epoch information from the finalized boundary block.
     pub info: EpochInfo<V, S::PublicKey>,
+    /// Highest finalization from the `f + 1` peer sample.
+    ///
+    /// This is the state-sync floor: it is at least as recent as the freshest
+    /// honest reply in the sample.
+    pub floor: Finalization<S, D>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Actor, Config, wire};
     use crate::dkg::{
-        anchor::Artifact,
+        probe::Artifact,
         tests::mocks,
         types::{EpochInfo, EpochOutcome, Payload},
     };
@@ -155,7 +188,7 @@ mod tests {
     use commonware_consensus::{
         Epochable as _, Heightable as _, Reporter as _,
         marshal::{self, Start, resolver::p2p as marshal_resolver},
-        simplex::types::{Activity, Certificate, Finalization, Finalize, Proposal},
+        simplex::types::{Activity, Finalization, Finalize, Proposal},
         types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
@@ -177,20 +210,17 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic,
+        Clock as _, Handle, Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
-        channel::{fallible::AsyncFallibleExt as _, mpsc, oneshot},
-        ordered::Set,
+        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
     };
     use std::{num::NonZeroU64, time::Duration};
 
     const BACKFILL_CHANNEL: u64 = 0;
-    const CERTIFICATE_CHANNEL: u64 = 1;
-    const BOUNDARY_CHANNEL: u64 = 2;
+    const BOUNDARY_CHANNEL: u64 = 1;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
     const LINK: Link = Link {
@@ -202,7 +232,6 @@ mod tests {
     struct Harness {
         participants: Vec<mocks::TestPublicKey>,
         schemes: Vec<mocks::TestScheme>,
-        source_certificate_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         source_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         client_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
         client_boundary_receiver: SimReceiver<mocks::TestPublicKey>,
@@ -235,9 +264,16 @@ mod tests {
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
         ) -> Self {
+            Self::start_full(context, source_boundaries, Epoch::zero()).await
+        }
+
+        async fn start_full(
+            context: &mut deterministic::Context,
+            source_boundaries: Vec<Epoch>,
+            bootstrap_epoch: Epoch,
+        ) -> Self {
             let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
-            let peers = Set::from_iter_dedup(participants.iter().cloned());
 
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
@@ -287,20 +323,16 @@ mod tests {
             .await;
 
             let source_control = oracle.control(participants[0].clone());
-            let (source_certificate_sender, _source_certificate_receiver) = source_control
-                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register source certificates");
-            let (_source_certificate_backup_sender, source_certificate_backup) = mpsc::channel(16);
             let source_boundaries = source_control
                 .register(BOUNDARY_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register source boundaries");
             let source_boundary_sender = source_boundaries.0.clone();
             let (source_actor, source_mailbox) = Actor::new(Config {
-                context: context.child("source_anchor"),
+                context: context.child("source_probe"),
                 manager: oracle.manager(),
-                peers: peers.clone(),
+                bootstrap_participants: genesis.participants(),
+                bootstrap_epoch,
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
                 strategy: Sequential,
@@ -311,38 +343,18 @@ mod tests {
                 block_codec_config: (),
             });
             source_mailbox.attach(source_marshal.clone());
-            let source_handle = source_actor.start(source_certificate_backup, source_boundaries);
+            let source_handle = source_actor.start(source_boundaries);
 
             let joiner_control = oracle.control(participants[1].clone());
-            let (_joiner_certificate_sender, mut joiner_certificate_receiver) = joiner_control
-                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register joiner certificates");
-            let (joiner_certificate_backup_sender, joiner_certificate_backup_receiver) =
-                mpsc::channel(16);
-            let joiner_certificate_backup_handle = context
-                .child("joiner_certificate_backup")
-                .spawn(move |_| async move {
-                    loop {
-                        let Ok(message) = joiner_certificate_receiver.recv().await else {
-                            return;
-                        };
-                        if !joiner_certificate_backup_sender
-                            .send_lossy((CERTIFICATE_CHANNEL, message))
-                            .await
-                        {
-                            return;
-                        }
-                    }
-                });
             let joiner_boundaries = joiner_control
                 .register(BOUNDARY_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register joiner boundaries");
             let (joiner_actor, joiner) = Actor::new(Config {
-                context: context.child("joiner_anchor"),
+                context: context.child("joiner_probe"),
                 manager: oracle.manager(),
-                peers,
+                bootstrap_participants: genesis.participants(),
+                bootstrap_epoch,
                 verifier: fixture.schemes[1].clone(),
                 genesis,
                 strategy: Sequential,
@@ -352,8 +364,7 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 block_codec_config: (),
             });
-            let joiner_handle =
-                joiner_actor.start(joiner_certificate_backup_receiver, joiner_boundaries);
+            let joiner_handle = joiner_actor.start(joiner_boundaries);
             let client_boundaries = oracle
                 .control(participants[2].clone())
                 .register(BOUNDARY_CHANNEL, TEST_QUOTA)
@@ -368,7 +379,6 @@ mod tests {
             Self {
                 participants,
                 schemes: fixture.schemes,
-                source_certificate_sender,
                 source_boundary_sender,
                 client_boundary_sender: client_boundaries.0,
                 client_boundary_receiver: client_boundaries.1,
@@ -379,36 +389,67 @@ mod tests {
                 boundary,
                 boundary_finalization: first_boundary_finalization,
                 boundary_sharing,
-                _handles: vec![
-                    marshal_handle,
-                    source_handle,
-                    joiner_certificate_backup_handle,
-                    joiner_handle,
-                ],
+                _handles: vec![marshal_handle, source_handle, joiner_handle],
                 _network: network,
             }
         }
 
-        fn send_target_finalization(
-            &mut self,
-        ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
-            self.send_target_finalization_for(Epoch::new(1), self.boundary.digest())
-        }
-
-        fn send_target_finalization_for(
-            &mut self,
+        /// Builds a latest finalization for `epoch` committing to `digest`.
+        fn latest_finalization(
+            &self,
             epoch: Epoch,
             digest: mocks::TestDigest,
         ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
-            let target = finalization(
+            finalization(
                 Proposal::new(Round::new(epoch, View::new(2)), View::new(1), digest),
                 &self.schemes,
-            );
-            self.source_certificate_sender.send(
+            )
+        }
+
+        /// The default latest reply: a finalization within epoch 1 committing
+        /// to the epoch-1 boundary digest.
+        fn target_finalization(&self) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
+            self.latest_finalization(Epoch::new(1), self.boundary.digest())
+        }
+
+        fn latest_response(
+            finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
+        ) -> Vec<u8> {
+            wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::LatestResponse(
+                finalization,
+            )
+            .encode()
+            .to_vec()
+        }
+
+        fn reply_latest_from_client(
+            &mut self,
+            finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
+        ) {
+            self.client_boundary_sender.send(
                 Recipients::One(self.participants[1].clone()),
-                Certificate::Finalization(target.clone()).encode().to_vec(),
+                Self::latest_response(finalization),
                 false,
             );
+        }
+
+        fn reply_latest_from_backup(
+            &mut self,
+            finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
+        ) {
+            self.backup_boundary_sender.send(
+                Recipients::One(self.participants[1].clone()),
+                Self::latest_response(finalization),
+                false,
+            );
+        }
+
+        /// Completes a sample for the target finalization from the client and
+        /// backup peers.
+        fn complete_target_sample(&mut self) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
+            let target = self.target_finalization();
+            self.reply_latest_from_client(target.clone());
+            self.reply_latest_from_backup(target.clone());
             target
         }
 
@@ -419,23 +460,36 @@ mod tests {
                 .expect("boundary request tag")
         }
 
+        async fn expect_latest_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) {
+            match Self::next_request(receiver).await {
+                wire::Request::Latest => {}
+                wire::Request::Finalization(_) | wire::Request::Block(_) => {
+                    panic!("expected latest request")
+                }
+            }
+        }
+
         async fn next_finalization_request(
             receiver: &mut SimReceiver<mocks::TestPublicKey>,
         ) -> Epoch {
             match Self::next_request(receiver).await {
                 wire::Request::Finalization(epoch) => epoch,
-                wire::Request::Block(_) => panic!("expected finalization request"),
+                wire::Request::Block(_) | wire::Request::Latest => {
+                    panic!("expected finalization request")
+                }
             }
         }
 
         async fn next_block_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) -> Epoch {
             match Self::next_request(receiver).await {
                 wire::Request::Block(epoch) => epoch,
-                wire::Request::Finalization(_) => panic!("expected block request"),
+                wire::Request::Finalization(_) | wire::Request::Latest => {
+                    panic!("expected block request")
+                }
             }
         }
 
-        async fn next_client_request(&mut self) -> Epoch {
+        async fn next_client_finalization_request(&mut self) -> Epoch {
             Self::next_finalization_request(&mut self.client_boundary_receiver).await
         }
     }
@@ -452,7 +506,7 @@ mod tests {
         )>,
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
         let public_key = participants[index].clone();
-        let partition_prefix = format!("anchor-node-{index}");
+        let partition_prefix = format!("probe-node-{index}");
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
         let control = oracle.control(public_key.clone());
         let backfill = control
@@ -667,24 +721,25 @@ mod tests {
     ) {
         let expected_epoch = expected_finalization.epoch().next();
         let participants = Set::from_iter_dedup(participants.iter().cloned());
-        assert_eq!(artifact.epoch, expected_epoch);
         assert_eq!(artifact.finalization.as_ref(), Some(expected_finalization));
         assert_eq!(artifact.info.epoch, expected_epoch);
         assert_eq!(artifact.info.output.public(), expected_sharing);
         assert_eq!(artifact.info.output.players(), &participants);
         assert_eq!(artifact.info.players, participants);
+        assert_eq!(artifact.floor.epoch(), expected_epoch);
     }
 
     #[test]
-    fn discovers_artifact_from_first_finalization() {
+    fn discovers_artifact_from_sample() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
             let mut subscription = harness.joiner.subscribe();
-            harness.send_target_finalization();
+            let target = harness.complete_target_sample();
 
             context.sleep(Duration::from_millis(100)).await;
             let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_eq!(artifact.floor, target);
             assert_artifact(
                 artifact,
                 &harness.boundary_finalization,
@@ -695,14 +750,203 @@ mod tests {
     }
 
     #[test]
+    fn waits_for_full_sample() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            // One reply is below the sample threshold (f + 1 = 2 of 4).
+            let target = harness.target_finalization();
+            harness.reply_latest_from_client(target);
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "a single reply must not complete the sample"
+            );
+        });
+    }
+
+    #[test]
+    fn duplicate_latest_reply_is_ignored() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            // Two different valid replies from the same peer must count once.
+            let first = harness.latest_finalization(Epoch::new(1), Sha256::hash(b"first"));
+            let second = harness.latest_finalization(Epoch::new(2), Sha256::hash(b"second"));
+            harness.reply_latest_from_client(first);
+            harness.reply_latest_from_client(second);
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "duplicate replies must not inflate the sample"
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "a duplicate reply must be ignored, not treated as a fault"
+            );
+        });
+    }
+
+    #[test]
+    fn sample_selects_highest_reply() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // The source can serve the epoch-2 boundary.
+            let mut harness =
+                Harness::start_with_boundaries(&mut context, vec![Epoch::new(2)]).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            let (newer_boundary, newer_sharing) = boundary_block(
+                Epoch::new(2),
+                harness.participants[0].clone(),
+                &harness.participants,
+            );
+            let stale = harness.latest_finalization(Epoch::new(1), Sha256::hash(b"stale"));
+            let newest = harness.latest_finalization(Epoch::new(2), newer_boundary.digest());
+            harness.reply_latest_from_client(stale);
+            harness.reply_latest_from_backup(newest.clone());
+
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_eq!(artifact.floor, newest);
+            assert_artifact(
+                artifact,
+                &boundary_finalization(Epoch::new(2), newer_boundary.digest(), &harness.schemes),
+                &newer_sharing,
+                &harness.participants,
+            );
+        });
+    }
+
+    #[test]
+    fn genesis_floor_resolves_locally() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            // The whole sample reports epoch-zero finalizations: the artifact
+            // resolves from the locally known genesis info without any
+            // boundary fetch.
+            let floor = harness.latest_finalization(Epoch::zero(), Sha256::hash(b"genesis floor"));
+            harness.reply_latest_from_client(floor.clone());
+            harness.reply_latest_from_backup(floor.clone());
+
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("genesis resolved");
+            assert_eq!(artifact.info.epoch, Epoch::zero());
+            assert!(artifact.finalization.is_none());
+            assert_eq!(artifact.info, genesis_info(&harness.participants));
+            assert_eq!(artifact.floor, floor);
+        });
+    }
+
+    #[test]
+    fn resolicits_when_sample_incomplete() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let _subscription = harness.joiner.subscribe();
+
+            // The first solicitation reaches the client, goes unanswered, and
+            // is re-issued after the retry timeout.
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+        });
+    }
+
+    #[test]
+    fn ignores_latest_reply_below_bootstrap_epoch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness =
+                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::new(1)).await;
+            let mut subscription = harness.joiner.subscribe();
+
+            // Valid replies below the bootstrap epoch are stale by definition
+            // and must be ignored without blocking.
+            let stale = harness.latest_finalization(Epoch::zero(), Sha256::hash(b"stale"));
+            harness.reply_latest_from_client(stale.clone());
+            harness.reply_latest_from_backup(stale);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "below-bootstrap replies must not complete the sample"
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "stale replies must not block peers");
+
+            // The same peers may still contribute accepted replies.
+            let target = harness.complete_target_sample();
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_eq!(artifact.floor, target);
+        });
+    }
+
+    #[test]
+    fn invalid_latest_reply_blocks_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start_with(&mut context, false).await;
+            let _subscription = harness.joiner.subscribe();
+
+            // A finalization signed by a foreign key set decodes cleanly but
+            // fails verification against the all-epoch verifier.
+            let foreign = mocks::scheme_fixture_n(&mut context, 4);
+            let invalid = finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(1), View::new(2)),
+                    View::new(1),
+                    Sha256::hash(b"foreign"),
+                ),
+                &foreign.schemes,
+            );
+            harness.reply_latest_from_client(invalid);
+
+            context.sleep(Duration::from_millis(100)).await;
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                blocked.contains(&(
+                    harness.participants[1].clone(),
+                    harness.participants[2].clone(),
+                )),
+                "joiner should block the sender of an invalid reply"
+            );
+        });
+    }
+
+    #[test]
     fn fetches_boundary_block_from_one_responder() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
-            harness.send_target_finalization();
 
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+            Harness::expect_latest_request(&mut harness.backup_boundary_receiver).await;
+            harness.complete_target_sample();
+
+            assert_eq!(
+                harness.next_client_finalization_request().await,
+                Epoch::new(1)
+            );
             assert_eq!(
                 Harness::next_finalization_request(&mut harness.backup_boundary_receiver).await,
                 Epoch::new(1)
@@ -758,9 +1002,15 @@ mod tests {
         runner.start(|mut context| async move {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
-            harness.send_target_finalization();
 
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+            Harness::expect_latest_request(&mut harness.backup_boundary_receiver).await;
+            harness.complete_target_sample();
+
+            assert_eq!(
+                harness.next_client_finalization_request().await,
+                Epoch::new(1)
+            );
             assert_eq!(
                 Harness::next_finalization_request(&mut harness.backup_boundary_receiver).await,
                 Epoch::new(1)
@@ -826,9 +1076,15 @@ mod tests {
         runner.start(|mut context| async move {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
-            harness.send_target_finalization();
 
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+            Harness::expect_latest_request(&mut harness.backup_boundary_receiver).await;
+            harness.complete_target_sample();
+
+            assert_eq!(
+                harness.next_client_finalization_request().await,
+                Epoch::new(1)
+            );
             assert_eq!(
                 Harness::next_finalization_request(&mut harness.backup_boundary_receiver).await,
                 Epoch::new(1)
@@ -921,174 +1177,24 @@ mod tests {
             // unanswered and it must re-request rather than wedging.
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
-            harness.send_target_finalization();
+
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+            harness.complete_target_sample();
 
             // First broadcast: a peer observes the request, but nobody answers.
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            assert_eq!(
+                harness.next_client_finalization_request().await,
+                Epoch::new(1)
+            );
             assert!(matches!(
                 subscription.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
 
             // After the retry timeout the joiner re-broadcasts the same request.
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
-            assert!(matches!(
-                subscription.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-        });
-    }
-
-    #[test]
-    fn newer_finalization_supersedes_unanswered_boundary() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            // The source can serve the newer boundary but not the first one.
-            let mut harness =
-                Harness::start_with_boundaries(&mut context, vec![Epoch::new(2)]).await;
-            let mut subscription = harness.joiner.subscribe();
-
-            harness.send_target_finalization();
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
-            assert!(matches!(
-                subscription.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-
-            let (newer_boundary, newer_sharing) = boundary_block(
-                Epoch::new(2),
-                harness.participants[0].clone(),
-                &harness.participants,
-            );
-            let newer_finalization =
-                harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
-
-            assert_eq!(harness.next_client_request().await, Epoch::new(2));
-            context.sleep(Duration::from_millis(100)).await;
-
-            let artifact = subscription.try_recv().expect("artifact resolved");
-            assert_artifact(
-                artifact,
-                &boundary_finalization(Epoch::new(2), newer_boundary.digest(), &harness.schemes),
-                &newer_sharing,
-                &harness.participants,
-            );
-            assert_eq!(newer_finalization.epoch(), Epoch::new(2));
-        });
-    }
-
-    #[test]
-    fn genesis_resolves_after_retry_grace() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
-            let mut subscription = harness.joiner.subscribe();
-
-            // A lone epoch-zero finalization is only provisional: it must not
-            // resolve until the retry grace elapses, so a newer finalization has
-            // a window to supersede it.
-            harness.send_target_finalization_for(Epoch::zero(), mocks::TestDigest::EMPTY);
-            context.sleep(Duration::from_millis(100)).await;
-            assert!(matches!(
-                subscription.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-
-            // With nothing newer arriving, the grace elapses and genesis resolves
-            // from the locally known artifact.
-            context.sleep(Duration::from_secs(1)).await;
-            let artifact = subscription.try_recv().expect("genesis resolved");
-            assert_eq!(artifact.epoch, Epoch::zero());
-            assert!(artifact.finalization.is_none());
-            assert_eq!(artifact.info, genesis_info(&harness.participants));
-        });
-    }
-
-    #[test]
-    fn newer_finalization_supersedes_genesis() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            // The source can serve the epoch-one boundary.
-            let mut harness = Harness::start(&mut context).await;
-            let mut subscription = harness.joiner.subscribe();
-
-            // A replayed epoch-zero finalization arrives first, but must not
-            // permanently pin the joiner to genesis.
-            harness.send_target_finalization_for(Epoch::zero(), mocks::TestDigest::EMPTY);
-            context.sleep(Duration::from_millis(100)).await;
-            assert!(matches!(
-                subscription.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-
-            // A strictly-newer epoch-one finalization supersedes the genesis
-            // candidate and resolves to the epoch-one boundary artifact.
-            harness.send_target_finalization();
-            context.sleep(Duration::from_millis(100)).await;
-            let artifact = subscription
-                .try_recv()
-                .expect("newer finalization resolved");
-            assert_artifact(
-                artifact,
-                &harness.boundary_finalization,
-                &harness.boundary_sharing,
-                &harness.participants,
-            );
-        });
-    }
-
-    #[test]
-    fn late_response_for_superseded_boundary_does_not_block_peer() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let mut harness = Harness::start_with_boundaries(&mut context, Vec::new()).await;
-            let mut subscription = harness.joiner.subscribe();
-
-            harness.send_target_finalization();
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
-
-            harness.client_boundary_sender.send(
-                Recipients::One(harness.participants[1].clone()),
-                wire::Message::<
-                    mocks::TestScheme,
-                    mocks::TestMarshalVariant,
-                >::FinalizationResponse(harness.boundary_finalization.clone())
-                .encode()
-                .to_vec(),
-                false,
-            );
             assert_eq!(
-                Harness::next_block_request(&mut harness.client_boundary_receiver).await,
+                harness.next_client_finalization_request().await,
                 Epoch::new(1)
-            );
-
-            let (newer_boundary, _) = boundary_block(
-                Epoch::new(2),
-                harness.participants[0].clone(),
-                &harness.participants,
-            );
-            harness.send_target_finalization_for(Epoch::new(2), newer_boundary.digest());
-            assert_eq!(harness.next_client_request().await, Epoch::new(2));
-
-            harness.client_boundary_sender.send(
-                Recipients::One(harness.participants[1].clone()),
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
-                    epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
-                }
-                .encode()
-                .to_vec(),
-                false,
-            );
-            context.sleep(Duration::from_millis(100)).await;
-
-            let blocked = harness.oracle.blocked().await.unwrap();
-            assert!(
-                !blocked.contains(&(
-                    harness.participants[1].clone(),
-                    harness.participants[2].clone()
-                )),
-                "late response for superseded boundary should not block peer"
             );
             assert!(matches!(
                 subscription.try_recv(),
@@ -1104,8 +1210,12 @@ mod tests {
             let mut harness = Harness::start_with_boundaries(&mut context, Vec::new()).await;
             let mut subscription = harness.joiner.subscribe();
 
-            harness.send_target_finalization();
-            assert_eq!(harness.next_client_request().await, Epoch::new(1));
+            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+            harness.complete_target_sample();
+            assert_eq!(
+                harness.next_client_finalization_request().await,
+                Epoch::new(1)
+            );
 
             let terminal_finalization = finalization(
                 Proposal::new(
@@ -1155,29 +1265,16 @@ mod tests {
     }
 
     #[test]
-    fn ignores_certificates_until_subscribed() {
+    fn does_not_solicit_without_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
-            harness.send_target_finalization();
-            context.sleep(Duration::from_millis(100)).await;
-
-            let mut subscription = harness.joiner.subscribe();
-            context.sleep(Duration::from_millis(100)).await;
-            assert!(matches!(
-                subscription.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-
-            harness.send_target_finalization();
-            context.sleep(Duration::from_millis(100)).await;
-            let artifact = subscription.try_recv().expect("artifact resolved");
-            assert_artifact(
-                artifact,
-                &harness.boundary_finalization,
-                &harness.boundary_sharing,
-                &harness.participants,
-            );
+            select! {
+                _ = harness.client_boundary_receiver.recv() => {
+                    panic!("solicitation sent before any subscriber");
+                },
+                _ = context.sleep(Duration::from_millis(700)) => {},
+            }
         });
     }
 
@@ -1187,7 +1284,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
             let mut first = harness.joiner.subscribe();
-            harness.send_target_finalization();
+            harness.complete_target_sample();
 
             context.sleep(Duration::from_millis(100)).await;
             let artifact = first.try_recv().expect("artifact resolved");
@@ -1211,46 +1308,33 @@ mod tests {
     }
 
     #[test]
-    fn forwards_finalization_received_before_marshal_attach() {
+    fn serving_answers_latest_request_from_marshal() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
-            let mut subscription = harness.joiner.subscribe();
-            harness.send_target_finalization();
-
-            context.sleep(Duration::from_millis(100)).await;
-            let artifact = subscription.try_recv().expect("artifact resolved");
-            assert_artifact(
-                artifact,
-                &harness.boundary_finalization,
-                &harness.boundary_sharing,
-                &harness.participants,
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[0].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::LatestRequest
+                    .encode()
+                    .to_vec(),
+                false,
             );
 
-            let (marshal, _marshal_handle) = start_marshal(
-                context.child("joiner_marshal"),
-                &harness.oracle,
-                &harness.participants,
-                &harness.schemes,
-                1,
-                Vec::new(),
+            let (_peer, message) = harness
+                .client_boundary_receiver
+                .recv()
+                .await
+                .expect("latest response delivered");
+            let response = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
+                message,
+                &harness.schemes[2].certificate_codec_config(),
             )
-            .await;
-            assert!(
-                marshal
-                    .certified(harness.boundary.context().round, harness.boundary.clone())
-                    .await
-            );
-
-            let expected = harness.send_target_finalization();
-            context.sleep(Duration::from_millis(100)).await;
-            harness.joiner.attach(marshal.clone());
-            context.sleep(Duration::from_millis(100)).await;
-
-            assert_eq!(
-                marshal.get_finalization(harness.boundary.height()).await,
-                Some(expected)
-            );
+            .expect("latest response decoded")
+            .expect("latest response");
+            let wire::Response::Latest(finalization) = response else {
+                panic!("expected latest response");
+            };
+            assert_eq!(finalization, harness.boundary_finalization);
         });
     }
 
