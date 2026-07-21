@@ -497,8 +497,14 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     // With a genesis floor, observing a certificate at view v > 1 implies
     // that some certificate exists at v-1: a quorum at v contains correct
     // participants, and correct participants can enter v only from a
-    // certificate at v-1. Check the union rather than individual reporters so
-    // that partial observations cause false negatives, never false positives.
+    // certificate at v-1.
+    //
+    // Reporter's `certified` records views carrying any certificate:
+    // notarization, nullification, or finalization. A nullified view is a
+    // member of the contiguous range, not a hole; its nullification is the
+    // certificate proving it was legally skipped. This says nothing about
+    // block ancestry, which legally skips nullified views and is checked by
+    // chain_consistency.
     //
     // Source: the Simplex paper's protocol and safety proof advance a process
     // from a view only with a block or dummy-block certificate. The
