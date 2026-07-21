@@ -1,11 +1,11 @@
 //! Block-aligned extent allocator for the volume.
 //!
 //! The allocator is purely in-memory: it is rebuilt at open from the extents
-//! referenced by the adopted blob table, so no allocation state is ever
-//! persisted and allocator bugs cannot corrupt the volume. Frees are applied
-//! by the caller only after the commit that stops referencing an extent
-//! completes (see the commit protocol in the module docs), which is what makes
-//! rollback to the previous commit safe.
+//! referenced by the adopted blob table, so stale allocator metadata is never
+//! persisted across recovery. Frees are applied by the caller only after the
+//! commit that stops referencing an extent completes (see the commit protocol
+//! in the module docs), which prevents reuse from corrupting either the current
+//! commit or its fallback.
 
 use super::{OrderedMap, BLOCK};
 

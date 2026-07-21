@@ -18,7 +18,7 @@
 
 use super::{
     chunk::{chunk_of, ChunkCrc, RunMeta},
-    paging::{insert_window, load_committed_page, window_value},
+    paging::{insert_window, load_committed_page, window_value, CrcWindow},
     state::{chunk_mismatch, BlobCore, BlobInner, Ready},
     BLOCK,
 };
@@ -100,7 +100,7 @@ fn plan_read(
     inner: &mut BlobInner,
     offset: u64,
     end: u64,
-    loaded: &[(u64, Vec<u32>)],
+    loaded: &[CrcWindow],
     paranoid: bool,
 ) -> Planned {
     // Steady-state fast path: a request covered by one run whose every
@@ -311,7 +311,7 @@ pub(super) async fn read_verified<S: crate::Storage>(
     // Committed-CRC windows loaded for this read (see below), kept across
     // retries: an unloaded chunk's committed value is immutable, so the
     // windows stay valid whatever the retry re-plans.
-    let mut loaded: Vec<(u64, Vec<u32>)> = Vec::new();
+    let mut loaded: Vec<CrcWindow> = Vec::new();
     // Retries caused by concurrent relocations (generation moves under
     // bytes served unchecked). Sustained relocation churn could otherwise
     // starve the reader indefinitely: past the limit, the plan CRC-checks
@@ -534,7 +534,7 @@ async fn requiesce<S: crate::Storage>(
     blob: &BlobCore,
     chunk: u64,
     generation: u64,
-    loaded: &mut Vec<(u64, Vec<u32>)>,
+    loaded: &mut Vec<CrcWindow>,
     checked: &mut Vec<(u64, u32)>,
 ) -> Result<Quiesced, Error> {
     let _quiesce = blob.write_lock.lock().await;

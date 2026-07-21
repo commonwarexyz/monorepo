@@ -35,13 +35,12 @@ use super::{
     alloc::{block_align, checked_block_align, Allocator, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState},
     layout::{ChecksumRef, Entry, Slot, Superblock, Table},
-    paging::{stream_ref_windows, window_value},
+    paging::{stream_ref_windows, window_value, CrcWindow},
     state::{BlobInner, DurableHead, Genesis, Ready, State},
     Config, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
 use commonware_cryptography::Crc32;
-use commonware_utils::sync::{AsyncMutex, Mutex};
 use futures::{stream, StreamExt as _};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -439,13 +438,13 @@ async fn load_ref_windows<B: crate::Blob>(
     file: &B,
     r: &ChecksumRef,
     windows: &[(u64, u64)],
-) -> Result<Option<Vec<(u64, Vec<u32>)>>, Error> {
+) -> Result<Option<Vec<CrcWindow>>, Error> {
     let (values, guard) = stream_ref_windows(file, r, windows).await?;
     Ok((guard == r.crc).then(|| {
         windows
             .iter()
             .zip(values)
-            .map(|(&(w0, _), v)| (r.first_chunk + w0, v))
+            .map(|(&(w0, _), v)| CrcWindow::new(r.first_chunk + w0, v))
             .collect()
     }))
 }
@@ -598,7 +597,7 @@ async fn verify_manifest<B: crate::Blob>(
         // this commit may have torn — and it may cover no manifested chunk
         // at all (dirt confined to the partial frontier, or delta coverage
         // over holes).
-        let mut loaded: Vec<(u64, Vec<u32>)> = Vec::new();
+        let mut loaded: Vec<CrcWindow> = Vec::new();
         for (i, windows) in per_ref.iter().enumerate() {
             if windows.is_empty() && i + 1 != entry.checksums.len() {
                 continue;
@@ -714,7 +713,7 @@ pub(super) async fn recover<S: crate::Storage>(
                 cfg.partition
             )));
         }
-        return init_fresh(inner, pool, cfg, driver, metrics, growth_quantum).await;
+        return init_fresh(file, pool, driver, metrics, growth_quantum).await;
     }
 
     // Candidate order: higher seq first.
@@ -916,7 +915,7 @@ pub(super) async fn recover<S: crate::Storage>(
         fell_back = losing_slot.is_some(),
         "volume recovered"
     );
-    let mut state = State::boot(Genesis {
+    let state = State::boot(Genesis {
         partitions,
         dormant,
         recovery_verified,
@@ -932,20 +931,14 @@ pub(super) async fn recover<S: crate::Storage>(
         next_id: table.next_id,
         provisioned: len,
     });
-    metrics.observe_state(&mut state);
-
-    Ok(Ready {
+    Ok(Ready::new(
         file,
         driver,
         metrics,
-        state: Mutex::new(state),
-        commit_lock: AsyncMutex::new(()),
-        pending: Default::default(),
-        poisoned: Default::default(),
-        pool: pool.clone(),
+        state,
+        pool.clone(),
         growth_quantum,
-        provision_lock: AsyncMutex::new(()),
-    })
+    ))
 }
 
 /// First init: write the empty table, sync, then the seq-0 superblock, sync.
@@ -953,14 +946,12 @@ pub(super) async fn recover<S: crate::Storage>(
 /// init could land the superblock while tearing the table, and with one slot
 /// there is no fallback).
 async fn init_fresh<S: crate::Storage>(
-    inner: &S,
+    file: S::Blob,
     pool: &BufferPool,
-    cfg: &Config,
     driver: super::Driver,
     metrics: std::sync::Arc<super::metrics::Metrics>,
     growth_quantum: u64,
 ) -> Result<Ready<S>, Error> {
-    let (file, _) = inner.open(&cfg.partition, &cfg.name).await?;
     let table = Table::default();
     let bytes = table.encode();
     let table_offset = 2 * BLOCK;
@@ -981,7 +972,7 @@ async fn init_fresh<S: crate::Storage>(
         offset: table_offset,
         len: block_align(bytes.len() as u64),
     };
-    let mut state = State::boot(Genesis {
+    let state = State::boot(Genesis {
         partitions: BTreeMap::new(),
         dormant: BTreeMap::new(),
         recovery_verified: BTreeMap::new(),
@@ -991,19 +982,14 @@ async fn init_fresh<S: crate::Storage>(
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
     });
     metrics.recoveries.inc();
-    metrics.observe_state(&mut state);
-    Ok(Ready {
+    Ok(Ready::new(
         file,
         driver,
         metrics,
-        state: Mutex::new(state),
-        commit_lock: AsyncMutex::new(()),
-        pending: Default::default(),
-        poisoned: Default::default(),
-        pool: pool.clone(),
+        state,
+        pool.clone(),
         growth_quantum,
-        provision_lock: AsyncMutex::new(()),
-    })
+    ))
 }
 
 /// Hydrate a dormant entry into live blob state (dense chunk state + tail

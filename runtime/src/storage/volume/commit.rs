@@ -20,7 +20,7 @@ use super::{
     alloc::{block_align, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkMap},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
-    paging::{load_committed_refs, window_value},
+    paging::{load_committed_refs, window_value, CrcWindow},
     state::{BlobCore, BlobInner, Ready},
     BLOCK,
 };
@@ -460,7 +460,7 @@ fn covered_end(inner: &BlobInner) -> u64 {
 
 /// A captured chunk's exact CRC: its resident value, or the committed
 /// value preloaded from the old extents. Holes encode 0 (never consulted).
-fn resolve_crc(crcs: &ChunkMap, preloaded: &[(u64, Vec<u32>)], chunk: u64) -> u32 {
+fn resolve_crc(crcs: &ChunkMap, preloaded: &[CrcWindow], chunk: u64) -> u32 {
     crcs.get(chunk).map_or(0, |s| match s.crc {
         ChunkCrc::Ready(crc) => crc,
         // Finalized before encoding (every pending chunk is resident).
@@ -562,7 +562,7 @@ enum RefPlan {
 async fn plan_refs<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
-) -> Result<Option<(RefPlan, Vec<(u64, Vec<u32>)>)>, Error> {
+) -> Result<Option<(RefPlan, Vec<CrcWindow>)>, Error> {
     let decision = {
         let inner = blob.inner.lock();
         if inner.removed() {
@@ -630,7 +630,7 @@ fn capture_blob<S: crate::Storage>(
     blob: &BlobCore,
     seq: u64,
     plan: RefPlan,
-    preloaded: &[(u64, Vec<u32>)],
+    preloaded: &[CrcWindow],
 ) -> Captured {
     let id = blob.id;
     let mut state = ready.state.lock();

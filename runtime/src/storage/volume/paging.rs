@@ -17,6 +17,30 @@ use crate::{Blob as _, Error};
 use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_formatting::hex;
 
+/// A contiguous window of committed chunk CRCs.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CrcWindow {
+    first_chunk: u64,
+    values: Vec<u32>,
+}
+
+impl CrcWindow {
+    pub const fn new(first_chunk: u64, values: Vec<u32>) -> Self {
+        Self {
+            first_chunk,
+            values,
+        }
+    }
+
+    /// The committed CRC for `chunk` when it falls within this window.
+    pub fn get(&self, chunk: u64) -> Option<u32> {
+        debug_assert!(chunk >= self.first_chunk);
+        self.values
+            .get((chunk - self.first_chunk) as usize)
+            .copied()
+    }
+}
+
 /// Decode a checksum extent's big-endian CRC values.
 pub(super) fn decode_crcs(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     bytes
@@ -127,7 +151,7 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
     chunk: u64,
-) -> Result<Option<(u64, Vec<u32>)>, Error> {
+) -> Result<Option<CrcWindow>, Error> {
     loop {
         let (r, verify) = {
             let inner = blob.inner.lock();
@@ -176,7 +200,7 @@ pub(super) async fn load_committed_page<S: crate::Storage>(
                 .crc_cache_mut()
                 .insert(r.first_chunk + w0, values.clone());
         }
-        return Ok(Some((r.first_chunk + w0, values)));
+        return Ok(Some(CrcWindow::new(r.first_chunk + w0, values)));
     }
 }
 
@@ -211,8 +235,13 @@ impl CrcMemo {
         blob: &BlobCore,
         chunk: u64,
     ) -> Result<(), Error> {
-        if let Some((first, values)) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
-            self.0 = Some((chunk, values[(chunk - first) as usize]));
+        if let Some(window) = Box::pin(load_committed_page(ready, blob, chunk)).await? {
+            self.0 = Some((
+                chunk,
+                window
+                    .get(chunk)
+                    .expect("loaded window covers requested chunk"),
+            ));
         }
         Ok(())
     }
@@ -229,7 +258,7 @@ pub(super) async fn load_committed_refs<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
     refs: &[ChecksumRef],
-) -> Result<Vec<(u64, Vec<u32>)>, Error> {
+) -> Result<Vec<CrcWindow>, Error> {
     let mut out = Vec::with_capacity(refs.len());
     for r in refs {
         let (values, guard) = read_ref_window(ready, r, 0, r.count as u64, true).await?;
@@ -238,24 +267,26 @@ pub(super) async fn load_committed_refs<S: crate::Storage>(
         }
         let mut inner = blob.inner.lock();
         inner.record_guarded(*r);
-        out.push((r.first_chunk, values));
+        out.push(CrcWindow::new(r.first_chunk, values));
     }
     Ok(out)
 }
 
 /// The committed value of `chunk` within loaded windows (sorted by first
 /// chunk, non-overlapping).
-pub(super) fn window_value(windows: &[(u64, Vec<u32>)], chunk: u64) -> Option<u32> {
-    let i = windows.partition_point(|(first, _)| *first <= chunk);
-    let (first, values) = &windows[i.checked_sub(1)?];
-    values.get((chunk - first) as usize).copied()
+pub(super) fn window_value(windows: &[CrcWindow], chunk: u64) -> Option<u32> {
+    let i = windows.partition_point(|window| window.first_chunk <= chunk);
+    windows.get(i.checked_sub(1)?)?.get(chunk)
 }
 
 /// Insert `window` into a sorted window list (replacing an identical
 /// start).
-pub(super) fn insert_window(windows: &mut Vec<(u64, Vec<u32>)>, window: (u64, Vec<u32>)) {
-    let i = windows.partition_point(|(first, _)| *first < window.0);
-    if windows.get(i).is_some_and(|(first, _)| *first == window.0) {
+pub(super) fn insert_window(windows: &mut Vec<CrcWindow>, window: CrcWindow) {
+    let i = windows.partition_point(|existing| existing.first_chunk < window.first_chunk);
+    if windows
+        .get(i)
+        .is_some_and(|existing| existing.first_chunk == window.first_chunk)
+    {
         windows[i] = window;
     } else {
         windows.insert(i, window);

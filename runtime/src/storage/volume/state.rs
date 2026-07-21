@@ -698,6 +698,31 @@ pub(super) struct Ready<S: crate::Storage> {
 }
 
 impl<S: crate::Storage> Ready<S> {
+    /// Bind recovered state to its volume handle and initialize the runtime
+    /// coordination primitives shared by fresh and existing volumes.
+    pub(super) fn new(
+        file: S::Blob,
+        driver: super::Driver,
+        metrics: std::sync::Arc<super::metrics::Metrics>,
+        mut state: State,
+        pool: BufferPool,
+        growth_quantum: u64,
+    ) -> Self {
+        metrics.observe_state(&mut state);
+        Self {
+            file,
+            driver,
+            metrics,
+            state: Mutex::new(state),
+            commit_lock: AsyncMutex::new(()),
+            pending: Default::default(),
+            poisoned: Default::default(),
+            pool,
+            growth_quantum,
+            provision_lock: AsyncMutex::new(()),
+        }
+    }
+
     pub fn check_poisoned(&self) -> Result<(), Error> {
         self.poisoned.get().map_or(Ok(()), |e| Err(e.clone()))
     }
