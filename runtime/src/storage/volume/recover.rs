@@ -1120,8 +1120,7 @@ pub(super) async fn hydrate<S: crate::Storage>(
 // arbitrary integers and preserve the bounds expected by manifest reads.
 #[cfg(kani)]
 mod verification {
-    use super::super::layout::Run;
-    use super::*;
+    use super::{super::layout::Run, *};
 
     #[kani::proof]
     fn recovery_block_alignment_total() {
