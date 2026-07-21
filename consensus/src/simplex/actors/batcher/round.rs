@@ -255,8 +255,8 @@ impl<
     /// been received, this will also set the leader's proposal (filtering out
     /// votes for other proposals).
     pub fn set_leader(&mut self, leader: Participant) {
-        // The tracker retains the leader's first notarize even if the
-        // verifier's buffers were dropped at certification.
+        // Certification drops the verifier's buffered notarizes, so read the
+        // leader's vote from the tracker, which holds it for the round's lifetime.
         self.verifier
             .set_leader(leader, self.votes.notarize(leader));
     }
