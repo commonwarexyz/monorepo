@@ -947,13 +947,14 @@ where
 /// Spawn an honest validator instrumented with the fuzz-only append-only
 /// reporter and automaton history.
 ///
-/// This is intentionally separate from [`spawn_honest_validator`]. Existing
+/// This is intentionally separate from [`spawn_honest_validator`]. Non-audit
 /// fuzz targets continue to instantiate the consensus mock reporter and mock
 /// application automaton directly; only dedicated audit targets call this
 /// constructor.
 #[allow(clippy::too_many_arguments)]
 fn spawn_audited_validator<
     P,
+    EC,
     PendingSender,
     PendingReceiver,
     RecoveredSender,
@@ -966,6 +967,7 @@ fn spawn_audited_validator<
     participants: &[PublicKeyOf<P>],
     scheme: P::Scheme,
     validator: PublicKeyOf<P>,
+    elector: EC,
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
@@ -977,9 +979,10 @@ fn spawn_audited_validator<
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
     wiring: ReporterWiring,
-) -> RecordingReporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
+) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -987,7 +990,6 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
-    let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
         scheme: scheme.clone(),
@@ -1926,9 +1928,9 @@ fn run_standard_once<P: simplex::Simplex>(
 /// Run the Standard harness with append-only Simplex activity and automaton
 /// recording enabled.
 ///
-/// This path exists only for the dedicated audit fuzz targets. The shared
-/// [`run_standard_once`] path and every other fuzz mode continue to use the
-/// consensus mock reporter and application automaton directly.
+/// This path exists only for the dedicated Standard audit fuzz targets. The
+/// shared [`run_standard_once`] path continues to use the consensus mock
+/// reporter and application automaton directly.
 fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool, bool) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -2004,12 +2006,13 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            let reporter = spawn_audited_validator::<P, _, _, _, _, _, _>(
+            let reporter = spawn_audited_validator::<P, _, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
                 validator.clone(),
+                P::Elector::default(),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -2251,12 +2254,79 @@ enum TwinsRole {
     Campaign,
 }
 
+type TwinsElector<P> = twins::Elector<<P as simplex::Simplex>::Elector>;
+
+/// Observation retained for one Twins engine. Existing Twins targets use the
+/// summary variant; dedicated audit targets use the recording variant only for
+/// correct engines.
+enum TwinsReporter<P>
+where
+    P: simplex::Simplex,
+{
+    Summary(
+        reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>,
+    ),
+    Recording(
+        RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>,
+    ),
+}
+
+impl<P> Clone for TwinsReporter<P>
+where
+    P: simplex::Simplex,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Summary(reporter) => Self::Summary(reporter.clone()),
+            Self::Recording(reporter) => Self::Recording(reporter.clone()),
+        }
+    }
+}
+
+impl<P> TwinsReporter<P>
+where
+    P: simplex::Simplex,
+{
+    fn summary(
+        &self,
+    ) -> reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
+        match self {
+            Self::Summary(reporter) => reporter.clone(),
+            Self::Recording(reporter) => reporter.inner().clone(),
+        }
+    }
+
+    fn recording(
+        &self,
+    ) -> Option<
+        RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>,
+    > {
+        match self {
+            Self::Summary(_) => None,
+            Self::Recording(reporter) => Some(reporter.clone()),
+        }
+    }
+
+    async fn subscribe(&mut self) -> (View, Receiver<View>) {
+        match self {
+            Self::Summary(reporter) => reporter.subscribe().await,
+            Self::Recording(reporter) => reporter.subscribe().await,
+        }
+    }
+}
+
 fn run_with_twins_mutator<P: simplex::Simplex>(
     input: FuzzInput,
     state_coverage: bool,
     happens_before: bool,
 ) {
-    let _ = run_twins::<P>(input, TwinsRole::Mutator, state_coverage, happens_before);
+    let _ = run_twins::<P>(
+        input,
+        TwinsRole::Mutator,
+        state_coverage,
+        happens_before,
+        false,
+    );
 }
 
 fn run_with_twins_campaign<P: simplex::Simplex>(
@@ -2264,7 +2334,13 @@ fn run_with_twins_campaign<P: simplex::Simplex>(
     state_coverage: bool,
     happens_before: bool,
 ) {
-    let _ = run_twins::<P>(input, TwinsRole::Campaign, state_coverage, happens_before);
+    let _ = run_twins::<P>(
+        input,
+        TwinsRole::Campaign,
+        state_coverage,
+        happens_before,
+        false,
+    );
 }
 
 fn twins_resolver_view<P: simplex::Simplex>(
@@ -2296,12 +2372,15 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// Happens-before capture covers honest validators only: twin halves share
 /// one identity across two engines, so neither tracing attribution nor
 /// sender-resolved merges are sound for them; honest receives from a twin
-/// resolve to no sender. Returns the summary when capture is enabled.
+/// resolve to no sender. When `record_audit` is true, only correct engines use
+/// the append-only reporter and automaton wrappers. Returns the summary when
+/// capture is enabled.
 fn run_twins<P: simplex::Simplex>(
     mut input: FuzzInput,
     role: TwinsRole,
     state_coverage: bool,
     happens_before: bool,
+    record_audit: bool,
 ) -> Option<happens_before::Summary> {
     if state_coverage || happens_before {
         state_cov::reset();
@@ -2340,8 +2419,8 @@ fn run_twins<P: simplex::Simplex>(
             .await;
 
             let relay = Arc::new(relay::Relay::new());
-            let mut reporters = Vec::new();
-            let mut twin_observers = Vec::new();
+            let mut reporters: Vec<TwinsReporter<P>> = Vec::new();
+            let mut twin_observers: Vec<TwinsReporter<P>> = Vec::new();
             let config = input.configuration;
 
             // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
@@ -2552,8 +2631,12 @@ fn run_twins<P: simplex::Simplex>(
                 // extraction boundary); `Mutator` retains it as a vote/fault
                 // observer only.
                 match role {
-                    TwinsRole::Campaign => reporters.push(reporter.clone()),
-                    TwinsRole::Mutator => twin_observers.push(reporter.clone()),
+                    TwinsRole::Campaign => {
+                        reporters.push(TwinsReporter::Summary(reporter.clone()))
+                    }
+                    TwinsRole::Mutator => {
+                        twin_observers.push(TwinsReporter::Summary(reporter.clone()))
+                    }
                 }
 
                 // Secondary: depends on role.
@@ -2585,7 +2668,7 @@ fn run_twins<P: simplex::Simplex>(
                             secondary_context.child("reporter"),
                             secondary_reporter_cfg,
                         );
-                        reporters.push(secondary_reporter.clone());
+                        reporters.push(TwinsReporter::Summary(secondary_reporter.clone()));
 
                         let secondary_app_cfg = application::Config {
                             hasher: Sha256::default(),
@@ -2703,25 +2786,65 @@ fn run_twins<P: simplex::Simplex>(
                     )
                 };
                 let spawn = || {
-                    spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                        ctx,
-                        &oracle,
-                        participants.as_ref(),
-                        schemes[idx].clone(),
-                        validator.clone(),
-                        twin_elector.clone(),
-                        relay.clone(),
-                        Duration::from_secs(1),
-                        Duration::from_millis(1_500),
-                        input.mailbox_size,
-                        input.fetch_concurrent,
-                        input.forwarding,
-                        pending,
-                        recovered,
-                        resolver,
-                        input.certify,
-                        input.reporting,
-                    )
+                    if record_audit {
+                        TwinsReporter::Recording(spawn_audited_validator::<
+                            P,
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                        >(
+                            ctx,
+                            &oracle,
+                            participants.as_ref(),
+                            schemes[idx].clone(),
+                            validator.clone(),
+                            twin_elector.clone(),
+                            relay.clone(),
+                            Duration::from_secs(1),
+                            Duration::from_millis(1_500),
+                            input.mailbox_size,
+                            input.fetch_concurrent,
+                            input.forwarding,
+                            pending,
+                            recovered,
+                            resolver,
+                            input.certify,
+                            input.reporting,
+                        ))
+                    } else {
+                        TwinsReporter::Summary(spawn_honest_validator::<
+                            P,
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                            _,
+                        >(
+                            ctx,
+                            &oracle,
+                            participants.as_ref(),
+                            schemes[idx].clone(),
+                            validator.clone(),
+                            twin_elector.clone(),
+                            relay.clone(),
+                            Duration::from_secs(1),
+                            Duration::from_millis(1_500),
+                            input.mailbox_size,
+                            input.fetch_concurrent,
+                            input.forwarding,
+                            pending,
+                            recovered,
+                            resolver,
+                            input.certify,
+                            input.reporting,
+                        ))
+                    }
                 };
                 let reporter = match &hb_log {
                     Some(log) => {
@@ -2802,6 +2925,8 @@ fn run_twins<P: simplex::Simplex>(
                     state_cov::observe_tokens(tokens);
                 }
                 let honest_reporters = &reporters[honest_start..];
+                let honest_summaries: Vec<_> =
+                    honest_reporters.iter().map(TwinsReporter::summary).collect();
                 // Vote/fault checks run over ALL reporters (twin halves and the
                 // Mutator primary included): a twin reporter can be the sole
                 // observer of evidence against a correct signer, and the
@@ -2809,7 +2934,7 @@ fn run_twins<P: simplex::Simplex>(
                 let observers: Vec<_> = twin_observers
                     .iter()
                     .chain(reporters.iter())
-                    .cloned()
+                    .map(TwinsReporter::summary)
                     .collect();
                 invariants::check_vote_invariants_with_byzantine(&compromised, &observers);
                 // Seed uniqueness holds under twins as well: the seed signature
@@ -2818,13 +2943,25 @@ fn run_twins<P: simplex::Simplex>(
                 invariants::check_certificate_seeds::<P, _, _>(&observers);
                 if state_coverage {
                     let reporter_states =
-                        state_cov::encode_reporter_states(honest_reporters, config.n as usize);
+                        state_cov::encode_reporter_states(&honest_summaries, config.n as usize);
                     let metrics = context.encode();
                     state_cov::observe_with_metrics(&reporter_states, &metrics);
                 }
-                let honest: Vec<_> = reporters.into_iter().skip(honest_start).collect();
-                let states = invariants::extract(honest, config.n as usize);
-                invariants::check::<P>(config.n, states);
+                if record_audit {
+                    let recordings: Vec<_> = honest_reporters
+                        .iter()
+                        .filter_map(TwinsReporter::recording)
+                        .collect();
+                    assert_eq!(
+                        recordings.len(),
+                        honest_reporters.len(),
+                        "every correct Twins reporter must record in audit mode"
+                    );
+                    invariants::check::<P>(config.n, recordings.as_slice());
+                } else {
+                    let states = invariants::extract(honest_summaries, config.n as usize);
+                    invariants::check::<P>(config.n, states);
+                }
             }
         });
     };
@@ -3241,6 +3378,27 @@ pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
     }
 }
 
+/// Fuzz a Twins harness while recording append-only activity and automaton
+/// history for correct engines. Compromised twin halves retain the ordinary
+/// summary Reporter and participate only in signer-filtered vote checks.
+pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
+    let role = match M::MODE {
+        Mode::TwinsMutator => TwinsRole::Mutator,
+        Mode::TwinsCampaign => TwinsRole::Campaign,
+        mode => panic!("fuzz_twins_audit requires a Twins mode, got {mode:?}"),
+    };
+    print_fuzz_input(M::MODE, &input);
+
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let _ = run_twins::<P>(input, role, false, false, true);
+    }));
+    if let Err(payload) = run_result {
+        println!("Panicked with raw_bytes: {:?}", raw_bytes);
+        panic::resume_unwind(payload);
+    }
+}
+
 pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
     print_node_fuzz_input(M::MODE, &input);
 
@@ -3297,6 +3455,13 @@ mod tests {
     }
 
     #[test]
+    fn audited_twins_checks_campaign_and_mutator() {
+        for role in [TwinsRole::Campaign, TwinsRole::Mutator] {
+            let _ = run_twins::<simplex::SimplexId>(audit_input(), role, false, false, true);
+        }
+    }
+
+    #[test]
     fn audited_standard_observes_rejected_certification() {
         let mut input = audit_input();
         input.configuration = N4F1C3;
@@ -3342,9 +3507,14 @@ mod tests {
         // N4F1C3 twins compromise one identity (two engines, one key): the
         // three honest validators are captured, twin halves contribute no
         // attributed events, and receives from the twin merge nothing.
-        let summary =
-            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true)
-                .expect("happens-before summary");
+        let summary = run_twins::<simplex::SimplexId>(
+            audit_input(),
+            TwinsRole::Campaign,
+            false,
+            true,
+            false,
+        )
+        .expect("happens-before summary");
         assert_eq!(summary.node_count(), 3, "only honest validators tracked");
         assert!(!summary.tokens().is_empty());
     }
