@@ -808,7 +808,7 @@ fn free_unpublished<S: crate::Storage>(ready: &Ready<S>, extent: Option<Extent>)
     let Some(extent) = extent else { return };
     let mut state = ready.state.lock();
     let seq = state.seq();
-    state.defer_free(extent, seq, None);
+    state.defer_free(extent, seq);
 }
 
 /// CRC32C over `[start, end)` of a logical range assembled from `pieces`:

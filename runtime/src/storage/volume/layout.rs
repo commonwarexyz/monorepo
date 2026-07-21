@@ -33,6 +33,30 @@ use super::{
 use bytes::{Buf, BufMut};
 use commonware_cryptography::Crc32;
 
+/// One of the two superblock slots. A typed slot keeps the sacred/standby
+/// protocol from constructing offsets outside the reserved slot pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Slot {
+    A,
+    B,
+}
+
+impl Slot {
+    pub const fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    pub const fn offset(self) -> u64 {
+        match self {
+            Self::A => 0,
+            Self::B => BLOCK,
+        }
+    }
+}
+
 /// Superblock layout (fixed size, one per slot):
 ///
 /// ```text
@@ -56,9 +80,10 @@ impl Superblock {
     pub const FORMAT_VERSION: u16 = 0;
     pub const SIZE: usize = 4 + 2 + 8 + 8 + 4 + 4 + 4;
 
-    /// Offset of superblock slot `slot` (0 or 1).
+    /// Offset of a raw superblock slot index used by crash-image tests.
+    #[cfg(test)]
     pub fn slot_offset(slot: u8) -> u64 {
-        debug_assert!(slot < 2);
+        assert!(slot < 2);
         slot as u64 * BLOCK
     }
 
@@ -142,6 +167,16 @@ pub(super) struct ChecksumRef {
     pub crc: u32,
 }
 
+impl ChecksumRef {
+    /// The block-aligned allocation holding this ref's encoded CRC values.
+    pub const fn extent(&self) -> Extent {
+        Extent {
+            offset: self.offset,
+            len: block_align(self.count as u64 * 4),
+        }
+    }
+}
+
 /// One blob's entry in the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
@@ -213,6 +248,14 @@ impl Entry {
             tail_crc: 0,
             shadow: None,
         }
+    }
+
+    /// Checksum and shadow allocations referenced by this entry.
+    pub fn metadata_extents(&self) -> impl Iterator<Item = Extent> + '_ {
+        self.checksums
+            .iter()
+            .map(ChecksumRef::extent)
+            .chain(self.shadow.map(|offset| Extent { offset, len: BLOCK }))
     }
 
     /// Encode this entry's byte run within a table.

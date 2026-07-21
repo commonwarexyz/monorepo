@@ -34,7 +34,15 @@ pub(super) struct Allocator {
 
 /// Round `len` up to a whole number of blocks.
 pub(super) const fn block_align(len: u64) -> u64 {
-    len.div_ceil(BLOCK) * BLOCK
+    match checked_block_align(len) {
+        Some(aligned) => aligned,
+        None => panic!("block alignment overflow"),
+    }
+}
+
+/// Round a potentially hostile length up to whole blocks without overflow.
+pub(super) const fn checked_block_align(len: u64) -> Option<u64> {
+    len.div_ceil(BLOCK).checked_mul(BLOCK)
 }
 
 impl Allocator {

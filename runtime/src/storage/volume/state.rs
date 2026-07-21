@@ -23,7 +23,7 @@
 use super::{
     alloc::{block_align, Allocator, Extent},
     chunk::{chunk_of, merge_frozen_runs, ChunkCrc, ChunkMap, ChunkState, CrcCache, RunMeta},
-    layout::{ChecksumRef, Entry},
+    layout::{ChecksumRef, Entry, Slot},
     Config, Driver, OrderedMap, OrderedSet, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error};
@@ -308,25 +308,6 @@ impl BlobInner {
     }
 }
 
-/// Metadata extents referenced by a blob's last confirmed table entry:
-/// one extent per checksum ref (parallel to the entry's `checksums`), plus
-/// the shadow block. Tracked so a commit that supersedes a piece of the
-/// entry frees exactly the extents the new entry stops referencing: the
-/// shadow is rewritten every commit, while checksum extents survive delta
-/// commits and are freed only by a full rewrite (or removal).
-#[derive(Debug, Default)]
-pub(super) struct CommittedMeta {
-    pub checksums: Vec<Extent>,
-    pub shadow: Option<Extent>,
-}
-
-impl CommittedMeta {
-    /// All extents, for wholesale release on removal.
-    pub fn into_extents(self) -> impl Iterator<Item = Extent> {
-        self.checksums.into_iter().chain(self.shadow)
-    }
-}
-
 /// A blob shared between open handles and the volume state.
 #[derive(Debug)]
 pub(super) struct BlobCore {
@@ -337,6 +318,14 @@ pub(super) struct BlobCore {
     /// Serializes writers and the commit snapshotter across inner I/O.
     pub write_lock: AsyncMutex<()>,
     pub inner: Mutex<BlobInner>,
+}
+
+/// An extent that remains unavailable until a commit confirms, optionally
+/// also until every handle to a removed blob drops.
+struct DeferredFree {
+    extent: Extent,
+    after_seq: u64,
+    handle_gate: Option<u64>,
 }
 
 /// Volume-wide mutable state.
@@ -352,8 +341,7 @@ pub(super) struct State {
     /// `open` on first open.
     dormant: BTreeMap<u64, (String, Entry)>,
     alloc: super::alloc::Allocator,
-    /// (extent, free once this seq confirms, optional removed-blob gate).
-    pending_free: Vec<(Extent, u64, Option<u64>)>,
+    pending_free: Vec<DeferredFree>,
     /// Seq of the next commit.
     seq: u64,
     /// Seq of the most recent snapshot (freeze epoch for `RunMeta::born`).
@@ -361,12 +349,9 @@ pub(super) struct State {
     /// Highest confirmed commit seq.
     confirmed_seq: u64,
     /// Superblock slot holding the last confirmed commit.
-    sacred_slot: u8,
+    sacred_slot: Slot,
     /// The last confirmed table's extent (freed when superseded).
     table_extent: Option<Extent>,
-    /// Checksum/shadow extents referenced by the last confirmed table, per
-    /// blob id (freed when a newer entry supersedes them).
-    committed_meta: BTreeMap<u64, CommittedMeta>,
     /// Chunks recovery CRC-checked while verifying the adopted commit's
     /// delta manifest, per blob id. Consumed at hydration to seed verified
     /// bits so first reads skip re-verification.
@@ -401,8 +386,22 @@ pub(super) struct State {
 impl State {
     /// Queue an extent for reuse once `free_at` confirms (and, for removed
     /// blobs' extents, once the last handle drops).
-    pub fn defer_free(&mut self, extent: Extent, free_at: u64, gate: Option<u64>) {
-        self.pending_free.push((extent, free_at, gate));
+    pub fn defer_free(&mut self, extent: Extent, after_seq: u64) {
+        self.pending_free.push(DeferredFree {
+            extent,
+            after_seq,
+            handle_gate: None,
+        });
+    }
+
+    /// Queue an extent from a removed blob for reuse once `after_seq`
+    /// confirms and the blob's last open handle drops.
+    pub fn defer_free_gated(&mut self, extent: Extent, after_seq: u64, blob: u64) {
+        self.pending_free.push(DeferredFree {
+            extent,
+            after_seq,
+            handle_gate: Some(blob),
+        });
     }
 
     /// Expand `roots` across applied-batch groups: the capture set of a
@@ -485,9 +484,8 @@ impl State {
     /// extent is block-aligned, pairwise disjoint, and disjoint from free
     /// space. With `quiesced` (no in-flight commit and no unapplied batch,
     /// both of which hold freshly allocated extents outside this state),
-    /// additionally: committed-metadata parity with the committed entries,
-    /// and the exact partition — referenced extents plus the free index
-    /// cover the allocatable file with nothing left over (no leaks).
+    /// additionally, the exact partition — referenced extents plus the free
+    /// index cover the allocatable file with nothing left over (no leaks).
     #[cfg(test)]
     pub fn audit(&self, quiesced: bool) {
         self.alloc.audit();
@@ -550,20 +548,15 @@ impl State {
         if let Some(extent) = self.table_extent {
             referenced.push((extent, "table".into()));
         }
-        for (extent, _, _) in &self.pending_free {
-            referenced.push((*extent, "pending free".into()));
+        for deferred in &self.pending_free {
+            referenced.push((deferred.extent, "pending free".into()));
         }
         for (&id, (_, entry)) in &self.dormant {
             for r in &entry.runs {
                 referenced.push((r.extent(), format!("dormant {id} run")));
             }
-        }
-        for (&id, meta) in &self.committed_meta {
-            for (i, extent) in meta.checksums.iter().enumerate() {
-                referenced.push((*extent, format!("blob {id} checksum ref {i}")));
-            }
-            if let Some(extent) = meta.shadow {
-                referenced.push((extent, format!("blob {id} shadow")));
+            for (i, extent) in entry.metadata_extents().enumerate() {
+                referenced.push((extent, format!("dormant {id} metadata {i}")));
             }
         }
         for (&id, core) in &self.open {
@@ -578,31 +571,24 @@ impl State {
             for extent in &inner.pending_frees {
                 referenced.push((*extent, format!("open {id} pending free")));
             }
-
-            // Committed-metadata parity: the tracked meta extents are
-            // exactly the extents the committed entry references. Skipped
-            // mid-commit, where the snapshot has already swapped the meta
-            // while the entry swings only at finalize.
+            if let Some(entry) = &inner.committed_entry {
+                for (i, extent) in entry.metadata_extents().enumerate() {
+                    // A capture moves superseded metadata to pending frees
+                    // before the entry swings. Count only the old entry's
+                    // retained extents during that interval; fresh metadata
+                    // remains owned by the prepared commit until finalize.
+                    let superseded = inner.capturing
+                        && self.pending_free.iter().any(|free| free.extent == extent);
+                    if !superseded {
+                        referenced.push((extent, format!("open {id} metadata {i}")));
+                    }
+                }
+            }
             if quiesced {
                 assert_eq!(
                     inner.staged_batches, 0,
                     "blob {id}: staged batch counter leaked"
                 );
-                match (&inner.committed_entry, self.committed_meta.get(&id)) {
-                    (Some(entry), Some(meta)) => assert_meta_parity(id, entry, meta),
-                    (Some(_), None) => panic!("blob {id}: committed entry without meta"),
-                    (None, Some(_)) => panic!("blob {id}: committed meta without entry"),
-                    (None, None) => {}
-                }
-            }
-        }
-        if quiesced {
-            for (&id, (_, entry)) in &self.dormant {
-                let meta = self
-                    .committed_meta
-                    .get(&id)
-                    .unwrap_or_else(|| panic!("dormant blob {id} without committed meta"));
-                assert_meta_parity(id, entry, meta);
             }
         }
 
@@ -659,46 +645,18 @@ impl State {
     pub fn apply_frees(&mut self) {
         let confirmed = self.confirmed_seq;
         let mut kept = Vec::with_capacity(self.pending_free.len());
-        for (extent, free_at, gate) in self.pending_free.drain(..) {
-            let gated = match gate {
+        for deferred in self.pending_free.drain(..) {
+            let gated = match deferred.handle_gate {
                 Some(id) => self.handles.get(&id).copied().unwrap_or(0) > 0,
                 None => false,
             };
-            if free_at <= confirmed && !gated {
-                self.alloc.free(extent);
+            if deferred.after_seq <= confirmed && !gated {
+                self.alloc.free(deferred.extent);
             } else {
-                kept.push((extent, free_at, gate));
+                kept.push(deferred);
             }
         }
         self.pending_free = kept;
-    }
-}
-
-/// Assert `meta` tracks exactly the extents `entry` references (tests only).
-#[cfg(test)]
-fn assert_meta_parity(id: u64, entry: &Entry, meta: &CommittedMeta) {
-    assert_eq!(
-        meta.checksums.len(),
-        entry.checksums.len(),
-        "blob {id}: checksum meta count desynced"
-    );
-    for (extent, r) in meta.checksums.iter().zip(&entry.checksums) {
-        assert_eq!(
-            extent.offset, r.offset,
-            "blob {id}: checksum meta offset desynced"
-        );
-        assert_eq!(
-            extent.len,
-            block_align(r.count as u64 * 4),
-            "blob {id}: checksum meta length desynced"
-        );
-    }
-    match (meta.shadow, entry.shadow) {
-        (Some(extent), Some(offset)) => {
-            assert_eq!(extent.offset, offset, "blob {id}: shadow meta desynced");
-        }
-        (None, None) => {}
-        _ => panic!("blob {id}: shadow meta presence desynced"),
     }
 }
 
@@ -1114,13 +1072,12 @@ impl BlobInner {
 pub(super) struct Genesis {
     pub partitions: BTreeMap<String, BTreeMap<Vec<u8>, u64>>,
     pub dormant: BTreeMap<u64, (String, Entry)>,
-    pub committed_meta: BTreeMap<u64, CommittedMeta>,
     pub recovery_verified: BTreeMap<u64, Vec<u64>>,
     pub alloc: Allocator,
     /// Seq of the adopted commit (the next commit is `adopted_seq + 1`).
     pub adopted_seq: u64,
     /// Superblock slot holding the adopted commit.
-    pub sacred_slot: u8,
+    pub sacred_slot: Slot,
     /// The adopted table's extent.
     pub table_extent: Extent,
     pub next_id: u64,
@@ -1145,7 +1102,6 @@ impl State {
             confirmed_seq: genesis.adopted_seq,
             sacred_slot: genesis.sacred_slot,
             table_extent: Some(genesis.table_extent),
-            committed_meta: genesis.committed_meta,
             recovery_verified: genesis.recovery_verified,
             next_id: genesis.next_id,
             dirty: Default::default(),
@@ -1238,25 +1194,14 @@ impl State {
         self.alloc.allocate(len)
     }
 
-    /// Detach blob `id`'s committed metadata extents (the capture decides
-    /// what is retained and what is superseded).
-    pub fn take_committed_meta(&mut self, id: u64) -> Option<CommittedMeta> {
-        self.committed_meta.remove(&id)
-    }
-
-    /// Install blob `id`'s new committed metadata extents.
-    pub fn install_committed_meta(&mut self, id: u64, meta: CommittedMeta) {
-        self.committed_meta.insert(id, meta);
-    }
-
     /// The last confirmed table's extent (superseded on confirmation).
     pub const fn table_extent(&self) -> Option<Extent> {
         self.table_extent
     }
 
     /// The superblock slot the next commit writes (never the sacred one).
-    pub const fn standby_slot(&self) -> u8 {
-        1 - self.sacred_slot
+    pub const fn standby_slot(&self) -> Slot {
+        self.sacred_slot.other()
     }
 
     /// Capture the namespace into table entries: captured blobs
@@ -1352,10 +1297,10 @@ impl State {
         table: Extent,
         capture: &BTreeSet<u64>,
     ) -> Vec<u64> {
-        self.sacred_slot = 1 - self.sacred_slot;
+        self.sacred_slot = self.sacred_slot.other();
         self.confirmed_seq = seq;
         if let Some(old) = old_table {
-            self.defer_free(old, seq, None);
+            self.defer_free(old, seq);
         }
         self.table_extent = Some(table);
         let mut resolved: Vec<u64> = Vec::new();
@@ -1470,7 +1415,7 @@ impl State {
 
     /// Bytes queued for reuse but not yet released.
     pub fn pending_free_bytes(&self) -> u64 {
-        self.pending_free.iter().map(|(e, _, _)| e.len).sum()
+        self.pending_free.iter().map(|free| free.extent.len).sum()
     }
 }
 
@@ -1530,7 +1475,6 @@ impl<S: crate::Storage> Drop for HandleTracker<S> {
 /// gate for extents still readable through open handles).
 pub(super) fn unlink(state: &mut State, id: u64) {
     let seq = state.seq;
-    let gate = Some(id);
     state.encoded.remove(&id);
     if let Some(core) = state.open.get(&id).cloned() {
         let mut inner = core.inner.lock();
@@ -1542,18 +1486,19 @@ pub(super) fn unlink(state: &mut State, id: u64) {
         // of a removed blob are rejected (see `write::write_locked`), so
         // no new extent can enter the map after this point.
         for run in inner.runs.values() {
-            state.defer_free(run.extent(), seq, gate);
+            state.defer_free_gated(run.extent(), seq, id);
         }
         // Capture-gated frees resolve with the removal commit: the entry
         // that referenced them is dropped (never readable via handles).
         for extent in std::mem::take(&mut inner.pending_frees) {
-            state.defer_free(extent, seq, None);
+            state.defer_free(extent, seq);
         }
         state.dirty.remove(&id);
-        // Committed metadata extents (checksums + shadow).
-        if let Some(meta) = state.committed_meta.remove(&id) {
-            for extent in meta.into_extents() {
-                state.defer_free(extent, seq, gate);
+        // Committed metadata extents (checksums + shadow) are owned by the
+        // committed entry itself.
+        if let Some(entry) = inner.committed_entry() {
+            for extent in entry.metadata_extents() {
+                state.defer_free_gated(extent, seq, id);
             }
         }
         // No handles: nothing can read it; drop immediately.
@@ -1563,12 +1508,10 @@ pub(super) fn unlink(state: &mut State, id: u64) {
         }
     } else if let Some((_, entry)) = state.dormant.remove(&id) {
         for r in &entry.runs {
-            state.defer_free(r.extent(), seq, None);
+            state.defer_free(r.extent(), seq);
         }
-        if let Some(meta) = state.committed_meta.remove(&id) {
-            for extent in meta.into_extents() {
-                state.defer_free(extent, seq, None);
-            }
+        for extent in entry.metadata_extents() {
+            state.defer_free(extent, seq);
         }
     }
     state.recovery_verified.remove(&id);

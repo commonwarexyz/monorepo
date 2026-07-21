@@ -464,6 +464,28 @@ async fn test_volume_growth_quantum() {
     assert_eq!(got.as_ref(), &[7]);
 }
 
+/// A configured growth step must remain representable after block alignment;
+/// overflowing it must fail initialization instead of wrapping to zero and
+/// silently disabling provisioning.
+#[tokio::test]
+async fn test_volume_growth_quantum_overflow_rejected() {
+    let pool = test_pool();
+    let volume = Volume::new(
+        memory::Storage::new(pool.clone()),
+        pool,
+        Config {
+            growth_quantum: u64::MAX,
+            ..Config::default()
+        },
+        test_driver(),
+    );
+
+    assert!(matches!(
+        volume.open("p", b"b").await,
+        Err(Error::OffsetOverflow)
+    ));
+}
+
 /// Eager init runs recovery up front and round-trips across reopen.
 #[tokio::test]
 async fn test_volume_eager_init() {

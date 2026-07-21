@@ -726,7 +726,7 @@ async fn apply_task<S: crate::Storage>(
         let mut state = ready.state.lock();
         let seq = state.seq();
         for extent in st.discarded {
-            state.defer_free(extent, seq, None);
+            state.defer_free(extent, seq);
         }
         let mut inner = st.core.inner.lock();
         inner.unstage_batch();
@@ -737,7 +737,7 @@ async fn apply_task<S: crate::Storage>(
         // freed by the unlink.
         if inner.removed() {
             for extent in st.overlay.fresh {
-                state.defer_free(extent, seq, None);
+                state.defer_free(extent, seq);
             }
             continue;
         }
@@ -794,10 +794,10 @@ fn discard_staged<S: crate::Storage>(ready: &Ready<S>, staged: BTreeMap<u64, Sta
     for st in staged.into_values() {
         st.core.inner.lock().unstage_batch();
         for extent in st.overlay.fresh {
-            state.defer_free(extent, seq, None);
+            state.defer_free(extent, seq);
         }
         for extent in st.discarded {
-            state.defer_free(extent, seq, None);
+            state.defer_free(extent, seq);
         }
     }
 }

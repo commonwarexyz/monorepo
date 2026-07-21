@@ -32,11 +32,11 @@
 //!   crash during recovery.
 
 use super::{
-    alloc::{block_align, Allocator, Extent},
+    alloc::{block_align, checked_block_align, Allocator, Extent},
     chunk::{chunk_of, ChunkCrc, ChunkState},
-    layout::{ChecksumRef, Entry, Superblock, Table},
+    layout::{ChecksumRef, Entry, Slot, Superblock, Table},
     paging::{stream_ref_windows, window_value},
-    state::{BlobInner, CommittedMeta, Genesis, Ready, State},
+    state::{BlobInner, Genesis, Ready, State},
     Config, BLOCK,
 };
 use crate::{telemetry::metrics::GaugeExt as _, Blob as _, BufferPool, Error, IoBuf};
@@ -49,9 +49,9 @@ use std::collections::{BTreeMap, BTreeSet};
 async fn read_slot<B: crate::Blob>(
     file: &B,
     len: u64,
-    slot: u8,
+    slot: Slot,
 ) -> Result<Option<Superblock>, Error> {
-    let offset = Superblock::slot_offset(slot);
+    let offset = slot.offset();
     if offset + Superblock::SIZE as u64 > len {
         return Ok(None);
     }
@@ -86,17 +86,38 @@ async fn read_table<B: crate::Blob>(
     })
 }
 
-/// Round a hostile length up to whole blocks without overflowing.
-fn checked_block_align(len: u64) -> Option<u64> {
-    let blocks = len / BLOCK + u64::from(!len.is_multiple_of(BLOCK));
-    blocks.checked_mul(BLOCK)
+/// A CRC-bound table whose complete semantic and extent geometry has passed
+/// [`validate_table`]. Manifest verification accepts only this state, so
+/// hostile decoded bytes cannot bypass validation on the path to adoption.
+struct ValidatedTable(Table);
+
+impl ValidatedTable {
+    const fn as_table(&self) -> &Table {
+        &self.0
+    }
+
+    fn into_inner(self) -> Table {
+        self.0
+    }
+}
+
+/// A validated table whose manifest and newly referenced checksum metadata
+/// were verified against disk, making it eligible for adoption.
+struct AdoptableTable {
+    table: Table,
+    verified_chunks: Vec<(u64, u64)>,
 }
 
 /// Validate every semantic invariant recovery and allocator rebuilding rely
 /// on before manifest I/O or repair writes. The table CRC authenticates bytes,
 /// not their meaning: a CRC-valid hostile table must be rejected as corruption
 /// instead of reaching unchecked address arithmetic or allocator assertions.
-fn validate_table(partition: &str, len: u64, sb: &Superblock, table: &Table) -> Result<(), Error> {
+fn validate_table(
+    partition: &str,
+    len: u64,
+    sb: &Superblock,
+    table: Table,
+) -> Result<ValidatedTable, Error> {
     let corrupt = |message: String| {
         Error::PartitionCorrupt(format!("{partition}: volume commit {} {message}", sb.seq))
     };
@@ -333,7 +354,7 @@ fn validate_table(partition: &str, len: u64, sb: &Superblock, table: &Table) -> 
             )));
         }
     }
-    Ok(())
+    Ok(ValidatedTable(table))
 }
 
 /// Whether one slot's table allocation aliases content retained by the other
@@ -485,8 +506,9 @@ struct VerifyRead {
 async fn verify_manifest<B: crate::Blob>(
     file: &B,
     len: u64,
-    table: &Table,
-) -> Result<Option<Vec<(u64, u64)>>, Error> {
+    validated: ValidatedTable,
+) -> Result<Option<AdoptableTable>, Error> {
+    let table = validated.as_table();
     // The manifest's order is untrusted input: sort per (blob, chunk) so
     // window and read coalescing below see ascending chunks.
     let mut manifest = table.manifest.clone();
@@ -660,7 +682,10 @@ async fn verify_manifest<B: crate::Blob>(
         };
         verified.extend(checks.into_iter().filter_map(|check| check.seed));
     }
-    Ok(Some(verified))
+    Ok(Some(AdoptableTable {
+        table: validated.into_inner(),
+        verified_chunks: verified,
+    }))
 }
 
 /// Run recovery over the volume file and build the ready state.
@@ -671,11 +696,12 @@ pub(super) async fn recover<S: crate::Storage>(
     driver: super::Driver,
     metrics: std::sync::Arc<super::metrics::Metrics>,
 ) -> Result<Ready<S>, Error> {
+    let growth_quantum = checked_block_align(cfg.growth_quantum).ok_or(Error::OffsetOverflow)?;
     let (file, mut len) = inner.open(&cfg.partition, &cfg.name).await?;
 
     // Slot selection.
-    let slot_a = read_slot(&file, len, 0).await?;
-    let slot_b = read_slot(&file, len, 1).await?;
+    let slot_a = read_slot(&file, len, Slot::A).await?;
+    let slot_b = read_slot(&file, len, Slot::B).await?;
 
     // Fresh volume: no valid slot and nothing beyond the init table block
     // could have been written (see module docs: any volume that ever
@@ -688,11 +714,11 @@ pub(super) async fn recover<S: crate::Storage>(
                 cfg.partition
             )));
         }
-        return init_fresh(inner, pool, cfg, driver, metrics).await;
+        return init_fresh(inner, pool, cfg, driver, metrics, growth_quantum).await;
     }
 
     // Candidate order: higher seq first.
-    let mut slots: Vec<(u8, Superblock)> = [(0u8, slot_a), (1u8, slot_b)]
+    let mut slots: Vec<(Slot, Superblock)> = [(Slot::A, slot_a), (Slot::B, slot_b)]
         .into_iter()
         .filter_map(|(s, sb)| sb.map(|sb| (s, sb)))
         .collect();
@@ -703,10 +729,10 @@ pub(super) async fn recover<S: crate::Storage>(
     // because verification starts with the newer slot.
     let mut bound = Vec::with_capacity(slots.len());
     for (slot, sb) in slots {
-        let table = read_table(&file, len, &sb, &cfg.partition).await?;
-        if let Some(table) = &table {
-            validate_table(&cfg.partition, len, &sb, table)?;
-        }
+        let table = read_table(&file, len, &sb, &cfg.partition)
+            .await?
+            .map(|table| validate_table(&cfg.partition, len, &sb, table))
+            .transpose()?;
         bound.push((slot, sb, table));
     }
     if let [(_, newer, newer_table), (_, older, older_table)] = bound.as_slice() {
@@ -752,10 +778,10 @@ pub(super) async fn recover<S: crate::Storage>(
         }
         if older_table
             .as_ref()
-            .is_some_and(|table| table_overlaps_content(newer, table))
+            .is_some_and(|table| table_overlaps_content(newer, table.as_table()))
             || newer_table
                 .as_ref()
-                .is_some_and(|table| table_overlaps_content(older, table))
+                .is_some_and(|table| table_overlaps_content(older, table.as_table()))
         {
             return Err(Error::PartitionCorrupt(format!(
                 "{}: volume table extent overlaps fallback content",
@@ -764,25 +790,17 @@ pub(super) async fn recover<S: crate::Storage>(
         }
     }
 
-    let mut adopted: Option<(u8, Superblock, Table)> = None;
-    let mut losing_slot: Option<(u8, u64)> = None;
-    // Chunks the adopted slot's manifest verification CRC-checked on disk,
-    // seeded into hydration so first reads skip re-verification.
-    let mut recovery_verified: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut adopted: Option<(Slot, Superblock, AdoptableTable)> = None;
+    let mut losing_slot: Option<(Slot, u64)> = None;
     let bound_len = bound.len();
     for (idx, (slot, sb, bound_table)) in bound.into_iter().enumerate() {
         let is_candidate = idx == 0 && bound_len == 2;
         let table = match bound_table {
-            Some(table) => verify_manifest(&file, len, &table)
-                .await?
-                .map(|verified| (table, verified)),
+            Some(table) => verify_manifest(&file, len, table).await?,
             None => None,
         };
         match table {
-            Some((table, verified)) => {
-                for (id, chunk) in verified {
-                    recovery_verified.entry(id).or_default().push(chunk);
-                }
+            Some(table) => {
                 adopted = Some((slot, sb, table));
                 break;
             }
@@ -798,12 +816,22 @@ pub(super) async fn recover<S: crate::Storage>(
             }
         }
     }
-    let Some((slot, sb, table)) = adopted else {
+    let Some((slot, sb, adoptable)) = adopted else {
         return Err(Error::PartitionCorrupt(format!(
             "{}: no adoptable volume commit",
             cfg.partition
         )));
     };
+    let AdoptableTable {
+        table,
+        verified_chunks,
+    } = adoptable;
+    // Chunks the adopted slot's manifest verification CRC-checked on disk,
+    // seeded into hydration so first reads skip re-verification.
+    let mut recovery_verified: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (id, chunk) in verified_chunks {
+        recovery_verified.entry(id).or_default().push(chunk);
+    }
 
     // Repairs: zero the losing slot, splice every partial frontier chunk
     // from its shadow. The final sync is unconditional: after a process
@@ -825,7 +853,7 @@ pub(super) async fn recover<S: crate::Storage>(
             "newest volume commit failed verification: falling back one commit"
         );
         file.write_at(
-            Superblock::slot_offset(losing),
+            losing.offset(),
             IoBuf::copy_from_slice(&[0u8; Superblock::SIZE]),
         )
         .await?;
@@ -858,7 +886,6 @@ pub(super) async fn recover<S: crate::Storage>(
         partitions.insert(p.clone(), BTreeMap::new());
     }
     let mut dormant = BTreeMap::new();
-    let mut committed_meta = BTreeMap::new();
     for entry in &table.blobs {
         let partition = table
             .partitions
@@ -870,27 +897,12 @@ pub(super) async fn recover<S: crate::Storage>(
             .get_mut(partition)
             .expect("partition exists")
             .insert(entry.name.clone(), entry.id);
-        let mut meta = CommittedMeta::default();
         for r in &entry.runs {
             used.push(r.extent());
         }
-        for c in &entry.checksums {
-            let extent = Extent {
-                offset: c.offset,
-                len: block_align(c.count as u64 * 4),
-            };
+        for extent in entry.metadata_extents() {
             used.push(extent);
-            meta.checksums.push(extent);
         }
-        if let Some(shadow) = entry.shadow {
-            let extent = Extent {
-                offset: shadow,
-                len: BLOCK,
-            };
-            used.push(extent);
-            meta.shadow = Some(extent);
-        }
-        committed_meta.insert(entry.id, meta);
         dormant.insert(entry.id, (partition.clone(), entry.clone()));
     }
 
@@ -907,7 +919,6 @@ pub(super) async fn recover<S: crate::Storage>(
     let mut state = State::boot(Genesis {
         partitions,
         dormant,
-        committed_meta,
         recovery_verified,
         alloc: Allocator::rebuild(2 * BLOCK, used),
         adopted_seq: table.seq,
@@ -930,9 +941,7 @@ pub(super) async fn recover<S: crate::Storage>(
         pending: Default::default(),
         poisoned: Default::default(),
         pool: pool.clone(),
-        // Deliver the Config doc's promise: round the configured step
-        // up to whole blocks.
-        growth_quantum: block_align(cfg.growth_quantum),
+        growth_quantum,
         provision_lock: AsyncMutex::new(()),
     })
 }
@@ -947,6 +956,7 @@ async fn init_fresh<S: crate::Storage>(
     cfg: &Config,
     driver: super::Driver,
     metrics: std::sync::Arc<super::metrics::Metrics>,
+    growth_quantum: u64,
 ) -> Result<Ready<S>, Error> {
     let (file, _) = inner.open(&cfg.partition, &cfg.name).await?;
     let table = Table::default();
@@ -961,11 +971,8 @@ async fn init_fresh<S: crate::Storage>(
         table_len: bytes.len() as u32,
         table_crc: Crc32::checksum(&bytes),
     };
-    file.write_at(
-        Superblock::slot_offset(0),
-        IoBuf::copy_from_slice(&sb.encode()),
-    )
-    .await?;
+    file.write_at(Slot::A.offset(), IoBuf::copy_from_slice(&sb.encode()))
+        .await?;
     file.sync().await?;
 
     let table_extent = Extent {
@@ -975,11 +982,10 @@ async fn init_fresh<S: crate::Storage>(
     let mut state = State::boot(Genesis {
         partitions: BTreeMap::new(),
         dormant: BTreeMap::new(),
-        committed_meta: BTreeMap::new(),
         recovery_verified: BTreeMap::new(),
         alloc: Allocator::rebuild(2 * BLOCK, [table_extent]),
         adopted_seq: 0,
-        sacred_slot: 0,
+        sacred_slot: Slot::A,
         table_extent,
         next_id: 0,
         provisioned: 2 * BLOCK + block_align(bytes.len() as u64),
@@ -995,9 +1001,7 @@ async fn init_fresh<S: crate::Storage>(
         pending: Default::default(),
         poisoned: Default::default(),
         pool: pool.clone(),
-        // Deliver the Config doc's promise: round the configured step
-        // up to whole blocks.
-        growth_quantum: block_align(cfg.growth_quantum),
+        growth_quantum,
         provision_lock: AsyncMutex::new(()),
     })
 }

@@ -21,7 +21,7 @@ use super::{
     chunk::{chunk_of, ChunkCrc, ChunkMap},
     layout::{ChecksumRef, Entry, Run, Superblock, Table},
     paging::{load_committed_refs, window_value},
-    state::{BlobCore, BlobInner, CommittedMeta, Ready},
+    state::{BlobCore, BlobInner, Ready},
     BLOCK,
 };
 use crate::{Blob as _, Error, IoBuf};
@@ -58,8 +58,9 @@ struct MetaWrite {
     bytes: IoBuf,
 }
 
-/// Everything captured by the SNAPSHOT phase.
-struct Snapshot {
+/// A commit whose logical state and metadata writes are fixed, but whose
+/// writes have not yet passed the volume-file durability barrier.
+struct PreparedCommit {
     seq: u64,
     table_extent: Extent,
     writes: Vec<MetaWrite>,
@@ -69,6 +70,51 @@ struct Snapshot {
     capture: BTreeSet<u64>,
     /// The previous confirmed table extent (freed on confirmation).
     old_table: Option<Extent>,
+}
+
+/// A prepared commit whose metadata writes and superblock have completed the
+/// volume-file durability barrier. Only this state may be finalized in RAM.
+struct DurableCommit(PreparedCommit);
+
+impl PreparedCommit {
+    /// Write every prepared extent and cross the one durability barrier that
+    /// makes this commit eligible for publication.
+    async fn write_and_sync<S: crate::Storage>(
+        self,
+        ready: &Ready<S>,
+    ) -> Result<DurableCommit, Error> {
+        let end = self
+            .writes
+            .iter()
+            .map(|write| write.physical + write.bytes.len() as u64)
+            .max()
+            .expect("a commit writes at least its table");
+        super::state::ensure_provisioned(ready, end).await?;
+        futures::future::try_join_all(
+            self.writes
+                .iter()
+                .map(|write| ready.file.write_at(write.physical, write.bytes.clone())),
+        )
+        .await?;
+        // The cfg is a mutation-testing negative control. The assurance gate
+        // must prove that omitting this durability barrier breaks a test.
+        #[cfg(not(commonware_volume_mutation_skip_commit_sync))]
+        {
+            // Wall-clock fsync timing (metrics only; wasm32 has no monotonic
+            // clock).
+            #[cfg(not(target_arch = "wasm32"))]
+            let start = std::time::Instant::now();
+            ready.file.sync().await?;
+            #[cfg(not(target_arch = "wasm32"))]
+            ready
+                .metrics
+                .fsync_duration
+                .observe(start.elapsed().as_secs_f64());
+        }
+        #[cfg(commonware_volume_mutation_skip_commit_sync)]
+        let _ = &ready.metrics.fsync_duration;
+        Ok(DurableCommit(self))
+    }
 }
 
 /// A registration in the pending-commit pool: the shared result of the
@@ -348,7 +394,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
     // From here the commit consumes state, so cancellation must poison
     // (see [`PoisonOnCancel`]).
     let guard = PoisonOnCancel::arm(ready);
-    let snapshot = match take_snapshot(ready, capture).await {
+    let prepared = match take_snapshot(ready, capture).await {
         Ok(s) => s,
         Err(e) => {
             // Snapshot allocates extents and mutates freeze/dirty state; a
@@ -371,54 +417,23 @@ pub(super) async fn commit_locked<S: crate::Storage>(
     // free (the crash model already resolves each dirtied block
     // independently); a small commit pays one write round-trip instead of
     // one per write.
-    let written = async {
-        let end = snapshot
-            .writes
-            .iter()
-            .map(|write| write.physical + write.bytes.len() as u64)
-            .max()
-            .expect("a commit writes at least its table");
-        super::state::ensure_provisioned(ready, end).await?;
-        futures::future::try_join_all(
-            snapshot
-                .writes
-                .iter()
-                .map(|write| ready.file.write_at(write.physical, write.bytes.clone())),
-        )
-        .await?;
-        // The cfg is a mutation-testing negative control. The assurance gate
-        // must prove that omitting this durability barrier breaks a test.
-        #[cfg(not(commonware_volume_mutation_skip_commit_sync))]
-        {
-            // Wall-clock fsync timing (metrics only; wasm32 has no monotonic
-            // clock).
-            #[cfg(not(target_arch = "wasm32"))]
-            let start = std::time::Instant::now();
-            ready.file.sync().await?;
-            #[cfg(not(target_arch = "wasm32"))]
-            ready
-                .metrics
-                .fsync_duration
-                .observe(start.elapsed().as_secs_f64());
+    let durable = match prepared.write_and_sync(ready).await {
+        Ok(durable) => durable,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "volume commit write/fsync failed; storage poisoned until restart"
+            );
+            // The cfg is a mutation-testing negative control. The assurance gate
+            // must prove that losing this fatal latch breaks a test.
+            #[cfg(not(commonware_volume_mutation_skip_commit_poison))]
+            ready.poison(e.clone());
+            guard.disarm();
+            return Err(e);
         }
-        #[cfg(commonware_volume_mutation_skip_commit_sync)]
-        let _ = &ready.metrics.fsync_duration;
-        Ok::<(), Error>(())
     };
-    if let Err(e) = written.await {
-        tracing::error!(
-            error = %e,
-            "volume commit write/fsync failed; storage poisoned until restart"
-        );
-        // The cfg is a mutation-testing negative control. The assurance gate
-        // must prove that losing this fatal latch breaks a test.
-        #[cfg(not(commonware_volume_mutation_skip_commit_poison))]
-        ready.poison(e.clone());
-        guard.disarm();
-        return Err(e);
-    }
 
-    finalize(ready, snapshot);
+    finalize(ready, durable);
     guard.disarm();
     ready.metrics.commits.inc();
     Ok(())
@@ -468,7 +483,7 @@ fn resolve_crc(crcs: &ChunkMap, preloaded: &[(u64, Vec<u32>)], chunk: u64) -> u3
 async fn take_snapshot<S: crate::Storage>(
     ready: &Ready<S>,
     capture: BTreeSet<u64>,
-) -> Result<Snapshot, Error> {
+) -> Result<PreparedCommit, Error> {
     // Assign the seq and advance the freeze epoch before touching blobs:
     // writes racing the snapshot land with `born > snapshot_seq` and are
     // exempt from freezing only until their blob's capture below, which
@@ -509,7 +524,7 @@ async fn take_snapshot<S: crate::Storage>(
     let (old_table, table_extent) =
         assemble_table(ready, seq, &mut committed, &mut manifest, &mut writes)?;
 
-    Ok(Snapshot {
+    Ok(PreparedCommit {
         seq,
         table_extent,
         writes,
@@ -599,8 +614,6 @@ struct Captured {
     cksum_bytes: Vec<u8>,
     /// The frontier chunk's span for the shadow block, when partial.
     shadow_bytes: Option<Vec<u8>>,
-    /// Previous checksum extents the new entry keeps referencing.
-    retained: Vec<Extent>,
     /// Extents the new entry stops referencing (freed on confirmation).
     superseded: Vec<Extent>,
 }
@@ -633,7 +646,7 @@ fn capture_blob<S: crate::Storage>(
     // confirms: its new entry stops referencing them.
     let pending = inner.drain_pending_frees();
     for extent in pending {
-        state.defer_free(extent, seq, None);
+        state.defer_free(extent, seq);
     }
 
     let last_backed = inner
@@ -724,34 +737,23 @@ fn capture_blob<S: crate::Storage>(
     // needs one writes a fresh block), the previous checksum
     // extents only on a full rewrite (a delta commit keeps
     // referencing them).
-    let mut prev_meta = state.take_committed_meta(id).unwrap_or_default();
-    debug_assert_eq!(
-        prev_meta.checksums.len(),
-        prev_refs.len(),
-        "committed_meta out of sync with the committed entry"
-    );
     let mut superseded: Vec<Extent> = Vec::new();
-    superseded.extend(prev_meta.shadow.take());
-    let retained = if delta {
-        // The same liveness filter as the entry's refs above (meta extents
-        // parallel them): extents of refs dropped below the floor
-        // supersede even in a delta commit.
-        let mut live = Vec::with_capacity(prev_meta.checksums.len());
-        for (r, extent) in prev_refs
-            .iter()
-            .zip(std::mem::take(&mut prev_meta.checksums))
-        {
-            if live_ref(r) {
-                live.push(extent);
-            } else {
-                superseded.push(extent);
+    superseded.extend(
+        inner
+            .committed_entry()
+            .and_then(|entry| entry.shadow.map(|offset| Extent { offset, len: BLOCK })),
+    );
+    if delta {
+        // Extents of refs dropped below the floor supersede even in a delta
+        // commit. Retained refs remain owned by the new entry.
+        for r in prev_refs {
+            if !live_ref(r) {
+                superseded.push(r.extent());
             }
         }
-        live
     } else {
-        superseded.append(&mut prev_meta.checksums);
-        Vec::new()
-    };
+        superseded.extend(prev_refs.iter().map(ChecksumRef::extent));
+    }
 
     let entry = Entry {
         id,
@@ -772,15 +774,14 @@ fn capture_blob<S: crate::Storage>(
         array_start,
         cksum_bytes,
         shadow_bytes,
-        retained,
         superseded,
     })
 }
 
 /// Allocate and stage one captured blob's metadata writes — the new
 /// checksum ref (when the capture encoded one), the shadow block, and the
-/// delta-manifest entries — and install its new committed metadata.
-/// Returns the entry, completed with its allocations, for table assembly.
+/// delta-manifest entries. Returns the entry, completed with its allocations,
+/// for table assembly.
 fn stage_meta<S: crate::Storage>(
     ready: &Ready<S>,
     id: u64,
@@ -795,13 +796,8 @@ fn stage_meta<S: crate::Storage>(
         array_start,
         cksum_bytes,
         shadow_bytes,
-        retained,
         superseded,
     } = captured;
-    let mut meta = CommittedMeta {
-        checksums: retained,
-        shadow: None,
-    };
     let wrote_checksum_ref = !cksum_bytes.is_empty();
     if wrote_checksum_ref {
         let count = checked_checksum_count(cksum_bytes.len())?;
@@ -819,7 +815,6 @@ fn stage_meta<S: crate::Storage>(
             physical: extent.offset,
             bytes: IoBuf::from(cksum_bytes),
         });
-        meta.checksums.push(extent);
     }
     if let Some(shadow) = shadow_bytes {
         let extent = {
@@ -831,7 +826,6 @@ fn stage_meta<S: crate::Storage>(
             physical: extent.offset,
             bytes: IoBuf::from(shadow),
         });
-        meta.shadow = Some(extent);
     }
     // A fresh shadow is a metadata write this commit may tear, and
     // recovery's splice is a raw byte copy that cannot tell a torn
@@ -864,9 +858,8 @@ fn stage_meta<S: crate::Storage>(
     {
         let mut state = ready.state.lock();
         for extent in superseded {
-            state.defer_free(extent, seq, None);
+            state.defer_free(extent, seq);
         }
-        state.install_committed_meta(id, meta);
     }
     Ok(entry)
 }
@@ -889,7 +882,7 @@ fn assemble_table<S: crate::Storage>(
     let bytes = Table::assemble(seq, state.next_id(), &partitions, entries, manifest);
     let table_len = checked_table_len(bytes.len())?;
     let extent = state.allocate(block_align(bytes.len() as u64));
-    let superblock_offset = Superblock::slot_offset(state.standby_slot());
+    let superblock_offset = state.standby_slot().offset();
     let sb = Superblock {
         seq,
         table_offset: extent.offset,
@@ -908,7 +901,8 @@ fn assemble_table<S: crate::Storage>(
 }
 
 /// Publish a confirmed commit.
-fn finalize<S: crate::Storage>(ready: &Ready<S>, snapshot: Snapshot) {
+fn finalize<S: crate::Storage>(ready: &Ready<S>, durable: DurableCommit) {
+    let DurableCommit(snapshot) = durable;
     // Swing each captured blob's committed entry BEFORE releasing frees:
     // committed-CRC loads validate their ref against the entry after
     // reading (see `load_committed_page`), so an extent must never become
