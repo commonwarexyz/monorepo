@@ -251,9 +251,9 @@ impl<
         self.verifier.add(message, true);
     }
 
-    /// Sets the leader for this view. If the leader's vote has already been
-    /// received, this will also set the leader's proposal (filtering out votes
-    /// for other proposals).
+    /// Sets the leader for this view. If the leader's notarize has already
+    /// been received, this will also set the leader's proposal (filtering out
+    /// votes for other proposals).
     pub fn set_leader(&mut self, leader: Participant) {
         // The tracker retains the leader's first notarize even if the
         // verifier's buffers were dropped at certification.

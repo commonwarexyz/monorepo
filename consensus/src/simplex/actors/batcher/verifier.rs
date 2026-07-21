@@ -109,14 +109,15 @@ impl<V> Certification<V> {
             return None;
         }
         let State::Incomplete { pending, verified } = &mut self.state else {
-            return None;
+            unreachable!("certification complete despite should_verify");
         };
         let batch = pending.len();
         let (pending, prior) = (mem::take(pending), mem::take(verified));
         let (votes, invalid) = f(pending, prior).await;
-        if let State::Incomplete { verified, .. } = &mut self.state {
-            *verified = votes;
-        }
+        let State::Incomplete { verified, .. } = &mut self.state else {
+            unreachable!("certification completed mid-verification");
+        };
+        *verified = votes;
         Some((batch, invalid))
     }
 
@@ -379,10 +380,16 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// `notarize` carries the leader's already-received vote, if any. Their
     /// proposal is learned from it and votes for other proposals are dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a leader was already set or if `notarize` is not from
+    /// `leader`.
     pub fn set_leader(&mut self, leader: Participant, notarize: Option<&Notarize<S, D>>) {
         assert!(matches!(self.leader, Leader::Unknown));
         self.leader = Leader::Known(leader);
         if let Some(notarize) = notarize {
+            assert_eq!(notarize.signer(), leader, "notarize must be from leader");
             self.try_learn_proposal(notarize);
         }
     }
