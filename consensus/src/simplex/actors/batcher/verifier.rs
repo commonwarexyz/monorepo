@@ -326,9 +326,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Returns the leader and their proposal, once known.
-    pub fn get_leader_proposal(&self) -> Option<(Participant, Proposal<D>)> {
+    pub const fn get_leader_proposal(&self) -> Option<(Participant, &Proposal<D>)> {
         match &self.leader {
-            Leader::Proposed { leader, proposal } => Some((*leader, proposal.clone())),
+            Leader::Proposed { leader, proposal } => Some((*leader, proposal)),
             _ => None,
         }
     }
@@ -666,7 +666,7 @@ mod tests {
         verifier.set_leader(notarize1.signer(), Some(&notarize1));
         assert_eq!(
             verifier.get_leader_proposal(),
-            Some((notarize1.signer(), notarize1.proposal))
+            Some((notarize1.signer(), &notarize1.proposal))
         );
         assert_eq!(verifier.notarize.pending().len(), 1);
 
@@ -693,7 +693,7 @@ mod tests {
         verifier2.add(Vote::Notarize(notarize_leader.clone()), false);
         assert_eq!(
             verifier2.get_leader_proposal(),
-            Some((notarize_leader.signer(), notarize_leader.proposal))
+            Some((notarize_leader.signer(), &notarize_leader.proposal))
         );
         assert_eq!(verifier2.notarize.pending().len(), 2);
     }
@@ -740,7 +740,7 @@ mod tests {
         verifier.add(Vote::Notarize(leader_notarize.clone()), false);
         assert_eq!(
             verifier.get_leader_proposal(),
-            Some((leader, leader_notarize.proposal.clone()))
+            Some((leader, &leader_notarize.proposal))
         );
         assert_eq!(verifier.notarize.pending().len(), 2);
 
@@ -753,7 +753,7 @@ mod tests {
         verifier2.set_leader(leader, Some(&leader_notarize));
         assert_eq!(
             verifier2.get_leader_proposal(),
-            Some((leader, leader_notarize.proposal))
+            Some((leader, &leader_notarize.proposal))
         );
     }
 
@@ -1882,7 +1882,7 @@ mod tests {
         verifier.add(Vote::Notarize(leader_notarize), false);
         assert_eq!(
             verifier.get_leader_proposal(),
-            Some((Participant::new(0), proposal))
+            Some((Participant::new(0), &proposal))
         );
         assert!(verifier.notarize.pending().is_empty());
 
