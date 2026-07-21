@@ -18,6 +18,33 @@ mod fallback;
 #[cfg(unix)]
 mod unix;
 
+#[cfg(all(test, unix))]
+static DIR_SYNC_FAILURE: std::sync::OnceLock<commonware_utils::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+#[cfg(all(test, unix))]
+static OPEN_FILE_SYNC_FAILURE: std::sync::OnceLock<commonware_utils::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(all(test, unix))]
+fn dir_sync_failure() -> &'static commonware_utils::sync::Mutex<Option<PathBuf>> {
+    DIR_SYNC_FAILURE.get_or_init(|| commonware_utils::sync::Mutex::new(None))
+}
+
+#[cfg(all(test, unix))]
+fn open_file_sync_failure() -> &'static commonware_utils::sync::Mutex<Option<PathBuf>> {
+    OPEN_FILE_SYNC_FAILURE.get_or_init(|| commonware_utils::sync::Mutex::new(None))
+}
+
+#[cfg(all(test, unix))]
+fn inject_dir_sync_failure(path: PathBuf) {
+    *dir_sync_failure().lock() = Some(path);
+}
+
+#[cfg(all(test, unix))]
+fn inject_open_file_sync_failure(path: PathBuf) {
+    *open_file_sync_failure().lock() = Some(path);
+}
+
 /// Sync a Tokio file with the platform's stable-media guarantee.
 async fn sync_file(file: &fs::File) -> std::io::Result<()> {
     cfg_if::cfg_if! {
@@ -37,6 +64,18 @@ async fn sync_file(file: &fs::File) -> std::io::Result<()> {
 /// fsynced.
 #[cfg(unix)]
 async fn sync_dir(path: &Path) -> Result<(), Error> {
+    #[cfg(test)]
+    {
+        let mut failure = dir_sync_failure().lock();
+        if failure.as_deref() == Some(path) {
+            *failure = None;
+            return Err(Error::BlobSyncFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                std::io::Error::other("injected directory sync failure").into(),
+            ));
+        }
+    }
     let dir = fs::File::open(path).await.map_err(|e| {
         Error::BlobOpenFailed(
             path.to_string_lossy().to_string(),
@@ -53,14 +92,20 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
-/// Sync `directory` and its ancestors through `existing_ancestor`.
+/// Sync `directory` and every ancestor. A visible directory after process
+/// restart is not proof that its parent entry survived a stable-media loss,
+/// so successful opens repeat the whole chain instead of trusting existence.
 #[cfg(unix)]
-async fn sync_dir_hierarchy(directory: &Path, existing_ancestor: &Path) -> Result<(), Error> {
+async fn sync_dir_hierarchy(directory: &Path) -> Result<(), Error> {
     for directory in directory.ancestors() {
+        // Relative paths end in an empty ancestor, which denotes the current
+        // directory whose entry anchors the relative hierarchy.
+        let directory = if directory.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            directory
+        };
         sync_dir(directory).await?;
-        if directory == existing_ancestor {
-            break;
-        }
     }
     Ok(())
 }
@@ -121,15 +166,6 @@ impl crate::Storage for Storage {
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
 
-        // Remember the nearest existing ancestor. If creation adds directories,
-        // each new directory entry and the file entry must be synced through it.
-        #[cfg(unix)]
-        let existing_ancestor = parent
-            .ancestors()
-            .find(|ancestor| ancestor.exists())
-            .ok_or_else(|| Error::PartitionCreationFailed(partition.into()))?
-            .to_path_buf();
-
         // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
             .await
@@ -164,14 +200,6 @@ impl crate::Storage for Storage {
             file.write_all(&header.encode())
                 .await
                 .map_err(|_| Error::WriteFailed)?;
-            sync_file(&file)
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-            // On Unix, sync every directory entry created for this file. This also
-            // repairs a prior process crash that left a visible partial file whose
-            // name was not yet durable.
-            #[cfg(unix)]
-            sync_dir_hierarchy(parent, &existing_ancestor).await?;
             (blob_version, 0, 0)
         } else {
             // Existing blob - read and validate header
@@ -182,6 +210,32 @@ impl crate::Storage for Storage {
             Header::from(header_bytes, len, &versions, Header::DATA_OFFSET_U64)
                 .map_err(|e| e.into_error(partition, name))?
         };
+
+        // Repeat the file barrier even when an existing header validates. A
+        // prior process may have exposed a complete header in page cache and
+        // died before making those bytes stable.
+        file.flush().await.map_err(|_| Error::WriteFailed)?;
+        #[cfg(all(test, unix))]
+        {
+            let mut failure = open_file_sync_failure().lock();
+            if failure.as_deref() == Some(path.as_path()) {
+                *failure = None;
+                return Err(Error::BlobSyncFailed(
+                    partition.into(),
+                    hex(name),
+                    std::io::Error::other("injected open file sync failure").into(),
+                ));
+            }
+        }
+        sync_file(&file)
+            .await
+            .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+
+        // Repeat directory barriers on every successful open. A previous
+        // process may have crashed after syncing a complete header but before
+        // syncing one of the directory entries that names it.
+        #[cfg(unix)]
+        sync_dir_hierarchy(parent).await?;
 
         #[cfg(unix)]
         {
@@ -462,6 +516,63 @@ mod tests {
 
         // Cleanup
         drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A process can die after a complete header becomes visible but before
+    /// the file or directory barriers. Fresh storage instances must repeat
+    /// both even though the file and partition are visible.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_open_retries_file_and_directory_sync_after_complete_header() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_directory_retry_{}", random_suffix()));
+        let partition = storage_directory.join("partition");
+        let path = partition.join(hex(b"retry"));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+
+        // Fail before the first file barrier. The next instance still sees a
+        // complete header in page cache and must not trust that visibility.
+        inject_open_file_sync_failure(path.clone());
+        let storage = Storage::new(config.clone(), test_pool());
+        assert!(matches!(
+            storage.open("partition", b"retry").await,
+            Err(Error::BlobSyncFailed(..))
+        ));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), Header::SIZE as u64);
+        drop(storage);
+
+        // Prove that the existing-header retry repeats the file barrier.
+        inject_open_file_sync_failure(path.clone());
+        let storage = Storage::new(config.clone(), test_pool());
+        assert!(matches!(
+            storage.open("partition", b"retry").await,
+            Err(Error::BlobSyncFailed(..))
+        ));
+        drop(storage);
+
+        // The file barrier now succeeds, but the process can still die before
+        // the first directory entry is stable.
+        inject_dir_sync_failure(partition.clone());
+        let storage = Storage::new(config.clone(), test_pool());
+        assert!(matches!(
+            storage.open("partition", b"retry").await,
+            Err(Error::BlobSyncFailed(..))
+        ));
+        drop(storage);
+
+        // The retry must sync past the visible partition and reach its parent.
+        // The old missing-header-only barrier would return successfully here.
+        inject_dir_sync_failure(storage_directory.clone());
+        let storage = Storage::new(config, test_pool());
+        assert!(matches!(
+            storage.open("partition", b"retry").await,
+            Err(Error::BlobSyncFailed(..))
+        ));
+
+        let (blob, size) = storage.open("partition", b"retry").await.unwrap();
+        assert_eq!(size, 0);
+        drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 

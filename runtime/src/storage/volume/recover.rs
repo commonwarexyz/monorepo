@@ -709,49 +709,51 @@ pub(super) async fn recover<S: crate::Storage>(
                 cfg.partition
             )));
         }
-        if let (Some(newer_table), Some(older_table)) = (newer_table, older_table) {
-            let newer_end = newer
-                .table_offset
-                .checked_add(checked_block_align(newer.table_len as u64).ok_or_else(|| {
-                    Error::PartitionCorrupt(format!(
-                        "{}: overflowing newer table extent",
-                        cfg.partition
-                    ))
-                })?)
-                .ok_or_else(|| {
-                    Error::PartitionCorrupt(format!(
-                        "{}: overflowing newer table extent",
-                        cfg.partition
-                    ))
-                })?;
-            let older_end = older
-                .table_offset
-                .checked_add(checked_block_align(older.table_len as u64).ok_or_else(|| {
-                    Error::PartitionCorrupt(format!(
-                        "{}: overflowing older table extent",
-                        cfg.partition
-                    ))
-                })?)
-                .ok_or_else(|| {
-                    Error::PartitionCorrupt(format!(
-                        "{}: overflowing older table extent",
-                        cfg.partition
-                    ))
-                })?;
-            if newer.table_offset < older_end && older.table_offset < newer_end {
-                return Err(Error::PartitionCorrupt(format!(
-                    "{}: overlapping volume table extents",
+        let newer_end = newer
+            .table_offset
+            .checked_add(checked_block_align(newer.table_len as u64).ok_or_else(|| {
+                Error::PartitionCorrupt(format!(
+                    "{}: overflowing newer table extent",
                     cfg.partition
-                )));
-            }
-            if table_overlaps_content(newer, older_table)
-                || table_overlaps_content(older, newer_table)
-            {
-                return Err(Error::PartitionCorrupt(format!(
-                    "{}: volume table extent overlaps fallback content",
+                ))
+            })?)
+            .ok_or_else(|| {
+                Error::PartitionCorrupt(format!(
+                    "{}: overflowing newer table extent",
                     cfg.partition
-                )));
-            }
+                ))
+            })?;
+        let older_end = older
+            .table_offset
+            .checked_add(checked_block_align(older.table_len as u64).ok_or_else(|| {
+                Error::PartitionCorrupt(format!(
+                    "{}: overflowing older table extent",
+                    cfg.partition
+                ))
+            })?)
+            .ok_or_else(|| {
+                Error::PartitionCorrupt(format!(
+                    "{}: overflowing older table extent",
+                    cfg.partition
+                ))
+            })?;
+        if newer.table_offset < older_end && older.table_offset < newer_end {
+            return Err(Error::PartitionCorrupt(format!(
+                "{}: overlapping volume table extents",
+                cfg.partition
+            )));
+        }
+        if older_table
+            .as_ref()
+            .is_some_and(|table| table_overlaps_content(newer, table))
+            || newer_table
+                .as_ref()
+                .is_some_and(|table| table_overlaps_content(older, table))
+        {
+            return Err(Error::PartitionCorrupt(format!(
+                "{}: volume table extent overlaps fallback content",
+                cfg.partition
+            )));
         }
     }
 
@@ -1340,12 +1342,10 @@ mod validation_tests {
 
     /// A legal successor cannot allocate its table over content retained by
     /// the fallback slot. Reject this cross-slot Frankenstate before trying
-    /// the candidate manifest or writing fallback repairs.
+    /// the candidate manifest or writing fallback repairs, even when the
+    /// candidate table's outer CRC was torn and fallback would be allowed.
     #[tokio::test]
     async fn candidate_table_over_fallback_data_is_rejected_before_repair() {
-        let pool = test_pool();
-        let inner = memory::Storage::new(pool.clone());
-        let cfg = Config::default();
         let mut image = vec![0u8; IMAGE_LEN as usize];
 
         let mut older = full_table();
@@ -1377,35 +1377,44 @@ mod validation_tests {
         place(&mut image, DATA_AT, &candidate);
         place(&mut image, CHECKSUM_AT, &[8; 100]);
         place(&mut image, SHADOW_AT, &[8; 100]);
-        let candidate_sb = Superblock {
-            seq: 1,
-            table_offset: DATA_AT,
-            table_len: candidate.len() as u32,
-            table_crc: Crc32::checksum(&candidate),
-        };
-        place(
-            &mut image,
-            Superblock::slot_offset(1),
-            &candidate_sb.encode(),
-        );
+        for torn_outer_crc in [false, true] {
+            let pool = test_pool();
+            let inner = memory::Storage::new(pool.clone());
+            let cfg = Config::default();
+            let mut case = image.clone();
+            let candidate_sb = Superblock {
+                seq: 1,
+                table_offset: DATA_AT,
+                table_len: candidate.len() as u32,
+                table_crc: Crc32::checksum(&candidate) ^ u32::from(torn_outer_crc),
+            };
+            place(
+                &mut case,
+                Superblock::slot_offset(1),
+                &candidate_sb.encode(),
+            );
 
-        let (file, _) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
-        file.write_at(0, IoBuf::copy_from_slice(&image))
-            .await
-            .unwrap();
-        file.sync().await.unwrap();
+            let (file, _) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+            file.write_at(0, IoBuf::copy_from_slice(&case))
+                .await
+                .unwrap();
+            file.sync().await.unwrap();
 
-        let result = Volume::init(inner.clone(), pool, cfg.clone(), test_driver()).await;
-        assert!(matches!(result, Err(Error::PartitionCorrupt(_))));
+            let result = Volume::init(inner.clone(), pool, cfg.clone(), test_driver()).await;
+            assert!(
+                matches!(result, Err(Error::PartitionCorrupt(_))),
+                "torn_outer_crc={torn_outer_crc}"
+            );
 
-        let (file, after_len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
-        assert_eq!(after_len, IMAGE_LEN);
-        let after = file
-            .read_at(0, IMAGE_LEN as usize)
-            .await
-            .unwrap()
-            .coalesce();
-        assert_eq!(after.as_ref(), &image, "recovery repaired a hostile image");
+            let (file, after_len) = inner.open(&cfg.partition, &cfg.name).await.unwrap();
+            assert_eq!(after_len, IMAGE_LEN);
+            let after = file
+                .read_at(0, IMAGE_LEN as usize)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(after.as_ref(), &case, "recovery repaired a hostile image");
+        }
     }
 
     /// A table's two CRCs authenticate hostile bytes without validating
