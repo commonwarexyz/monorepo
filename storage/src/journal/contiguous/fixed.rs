@@ -1152,8 +1152,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
     /// crash after this call doesn't require any recovery.
     ///
-    /// At most one commit is in flight at a time: if a prior commit's sync is still pending, this
-    /// call waits for it before starting a new one. Appends and reads proceed while the returned
+    /// At most one commit's sync is in flight at a time: this call waits for the sync the prior
+    /// commit started before starting another. Appends and reads proceed while the returned
     /// handle is pending, and dropping the handle does not cancel the sync.
     pub async fn start_commit(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_commit().await;
