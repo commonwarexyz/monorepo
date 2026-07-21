@@ -73,9 +73,9 @@
 //! A crash while one of those fsyncs is in flight can persist the blob's pages out of order: an
 //! earlier page may be lost while later pages, including a valid last page, survive. Sizing a
 //! blob by its last valid page cannot detect such a hole, so recovery re-reads the two newest
-//! blobs from the front and truncates each at the first missing or corrupt page. A hole in a
-//! blob fully below the recovery watermark is external corruption, and recovery fails without
-//! truncating it.
+//! blobs from the front and truncates each at the first missing or corrupt page. A hole beneath
+//! the recovery watermark is external corruption, and recovery fails without truncating the
+//! damaged blob.
 //!
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
 //! exceeds the recovered size, recovery returns a corruption error. Both the pruning boundary
@@ -435,13 +435,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // a crash during an in-flight fsync can lose an interior page while later pages survive.
         // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Above
         // the watermark, truncate at the first bad page (rounded down to whole items) so
-        // `recover_bounds` sees only intact data. In a blob fully below the watermark the
-        // covering fsync completed, so a hole is external corruption: fail and preserve the
-        // evidence (`recover_bounds` would reject the truncated result anyway).
-        let floor_blob = super::position_to_blob(
-            checkpoint.watermark().unwrap_or(0),
-            cfg.items_per_blob.get(),
-        );
+        // `recover_bounds` sees only intact data. Beneath the watermark the covering fsync
+        // completed, so a hole is external corruption: fail and preserve the evidence
+        // (`recover_bounds` would reject the truncated result anyway).
+        let floor = checkpoint.watermark().unwrap_or(0);
+        let floor_blob = super::position_to_blob(floor, cfg.items_per_blob.get());
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
@@ -450,7 +448,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             if valid == writer.size() {
                 continue;
             }
-            if blob < floor_blob {
+
+            // Bytes this blob must retain: everything in a blob below the watermark's blob, the
+            // watermark's in-blob prefix in the blob containing it, and nothing above.
+            let acknowledged = if blob < floor_blob {
+                writer.size()
+            } else if blob == floor_blob {
+                Self::items_to_bytes(
+                    floor - super::blob_first_position(blob, cfg.items_per_blob.get())?,
+                )?
+            } else {
+                0
+            };
+            if valid < acknowledged {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
                      of size {}",
@@ -807,8 +817,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         let handle = self.blobs.start_sync().await;
-        handle.await?;
-        Ok(())
+        Ok(handle.await?)
     }
 
     /// In-place [Journal::sync].
@@ -3602,6 +3611,50 @@ mod tests {
             );
             let result = Journal::<_, Digest>::init(context.child("third"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A torn page below a mid-blob watermark is rejected without truncating the blob's
+    /// acknowledged prefix, and retries fail identically.
+    #[test_traced]
+    fn test_fixed_recovery_rejects_torn_page_below_mid_blob_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            // The watermark (15) sits mid-blob: blob 1 holds 5 items (160 bytes) across 4 pages.
+            journal.sync().await.unwrap();
+
+            // Tear page 1 of blob 1, beneath the acknowledged bytes ending at 160.
+            corrupt_page(
+                &context,
+                &blob_partition(&cfg),
+                1,
+                1,
+                PAGE_SIZE.get() as u64,
+            )
+            .await;
+            let (_, size_before) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            for child in ["second", "retry"] {
+                let result = Journal::<_, Digest>::init(context.child(child), cfg.clone()).await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
+            }
+
+            // The rejection must not truncate the blob's acknowledged prefix.
+            let (_, size_after) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(size_after, size_before);
         });
     }
 
