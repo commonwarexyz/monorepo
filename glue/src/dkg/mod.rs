@@ -67,6 +67,23 @@
 //! certificate traffic from a future epoch hints marshal to fetch the missing
 //! boundary finalization. See [`probe`] for the bootstrap trust model.
 //!
+//! # Peer Activation
+//!
+//! DKG peer identities remain key-only in [`types::EpochInfo`], probe bootstrap
+//! artifacts, and all wire messages. [`network::Manager`] resolves any
+//! transport-specific reachability only when an epoch is activated:
+//!
+//! - One-shot bootstrap activates epoch zero before registering its DKG channel.
+//! - A fresh-node probe activates its configured bootstrap epoch when the first
+//!   subscriber appears, before requesting a latest finalization.
+//! - Continuous operation activates an epoch after its readiness gate opens and
+//!   before Simplex or its epoch channels start.
+//!
+//! Restart and state-sync entry use the recovered epoch number at the same
+//! activation point as uninterrupted operation. Addressable deployments must
+//! therefore retain historical epoch snapshots rather than substituting current
+//! registry values during recovery.
+//!
 //! # Marshal Retention
 //!
 //! DKG startup relies on marshal's local finalized block archive unless the node
@@ -126,6 +143,7 @@ use std::future::Future;
 
 pub mod bootstrap;
 pub mod fence;
+pub mod network;
 pub mod orchestrator;
 pub mod probe;
 pub mod reshare;

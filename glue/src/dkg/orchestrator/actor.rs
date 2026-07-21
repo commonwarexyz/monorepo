@@ -3,6 +3,7 @@
 use crate::dkg::{
     ReshareBlock,
     fence::Gate,
+    network::Manager,
     orchestrator::{Mailbox, mailbox::Message},
     state_sync::{self, Plan as StateSyncPlan},
     types::{EpochInfo, Payload},
@@ -23,7 +24,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::{select, select_loop};
 use commonware_p2p::{
-    Blocker, Channel, Manager, Message as P2pMessage, Receiver, Sender, TrackedPeers,
+    Blocker, Channel, Message as P2pMessage, Receiver, Sender, TrackedPeers,
     utils::mux::{Builder, MuxHandle, Muxer},
 };
 use commonware_parallel::Strategy;
@@ -41,7 +42,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 struct Channels<C, S, R>
 where
@@ -67,8 +68,9 @@ impl Drop for ActiveEpoch {
     }
 }
 
-enum EnterEpochError {
+enum EnterEpochError<E> {
     GateClosed,
+    PeerSet(E),
     MuxClosed,
     Stopped,
 }
@@ -349,6 +351,10 @@ where
                     epoch = start.epoch.get(),
                     "epoch gate closed before startup"
                 );
+                return;
+            }
+            Err(EnterEpochError::PeerSet(error)) => {
+                warn!(epoch = %start.epoch, %error, "failed to activate startup peer set");
                 return;
             }
             Err(EnterEpochError::MuxClosed) => {
@@ -642,6 +648,10 @@ where
                 debug!(%next_epoch, "epoch gate closed before boundary transition");
                 return false;
             }
+            Err(EnterEpochError::PeerSet(error)) => {
+                warn!(%next_epoch, %error, "failed to activate boundary peer set");
+                return false;
+            }
             Err(EnterEpochError::MuxClosed) => {
                 debug!(%next_epoch, "consensus mux closed before boundary transition");
                 return false;
@@ -669,7 +679,7 @@ where
         floor: Floor<P::Scheme, MV::Commitment>,
         peers: impl Into<TrackedPeers<<P::Scheme as Verifier>::PublicKey>> + Send,
         channels: &mut Channels<P::Scheme, S, R>,
-    ) -> Result<ActiveEpoch, EnterEpochError>
+    ) -> Result<ActiveEpoch, EnterEpochError<M::Error>>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -689,7 +699,10 @@ where
         };
         drop(shutdown);
 
-        let _ = self.manager.track(epoch.get(), peers);
+        self.manager
+            .track(epoch, peers.into())
+            .await
+            .map_err(EnterEpochError::PeerSet)?;
         let scheme = self
             .provider
             .scheme(epoch)

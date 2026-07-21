@@ -1,8 +1,8 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    network::Manager,
     reshare::{
         Actor,
-        actor::Mode,
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
@@ -22,7 +22,7 @@ use commonware_cryptography::{
     certificate::Scheme,
     transcript::Summary,
 };
-use commonware_p2p::{Blocker, Manager};
+use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::metrics::GaugeExt,
@@ -243,11 +243,6 @@ where
         } = preparation;
 
         let round = epoch.get();
-        if matches!(&self.mode, Mode::Dkg { .. }) {
-            let _ = self
-                .manager
-                .track(epoch.get(), participants.tracked_peers());
-        }
         let _ = self.metrics.current_epoch.try_set(epoch.get() as i64);
         let _ = self.metrics.current_round.try_set(round as i64);
 

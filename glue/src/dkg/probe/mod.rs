@@ -17,6 +17,10 @@
 //! tracks identical contents if it later enters that epoch, so the registrations never
 //! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
 //! dealers: the epoch's active committee of share holders and certificate signers.
+//! Addressable deployments must seed the bootstrap epoch's address snapshot alongside this
+//! weak-subjectivity checkpoint. The actor resolves that snapshot only when its first subscriber
+//! appears. If resolution fails, the actor shuts down before sending a request and drops all
+//! pending subscribers.
 //!
 //! # Trust Model
 //!
@@ -1432,6 +1436,56 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
+        });
+    }
+
+    #[test]
+    fn address_failure_stops_probe_and_drops_subscriber() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let participants = fixture.participants.clone();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            let network = network.start();
+            let control = oracle.control(participants[0].clone());
+            let boundaries = control
+                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register boundaries");
+            let genesis = genesis_info(&participants);
+            let (actor, mailbox): (
+                _,
+                super::Mailbox<mocks::TestScheme, mocks::TestMarshalVariant>,
+            ) = Actor::new(Config {
+                context: context.child("probe"),
+                manager: mocks::FailingManager(oracle.manager()),
+                bootstrap: Bootstrap {
+                    epoch: Epoch::zero(),
+                    participants: genesis.participants(),
+                },
+                verifier: fixture.schemes[0].clone(),
+                genesis,
+                strategy: Sequential,
+                blocker: control,
+                blocks_per_epoch: BLOCKS_PER_EPOCH,
+                retry_timeout: NZDuration!(Duration::from_millis(500)),
+                mailbox_size: NZUsize!(16),
+                block_codec_config: (),
+            });
+            let handle = actor.start(boundaries);
+
+            assert!(mailbox.subscribe().await.is_err());
+            handle.await.expect("probe should stop cleanly");
+            network.abort();
         });
     }
 }

@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use crate::dkg::{
-    Registrar, ReshareBlock, SecretStore, orchestrator,
+    Registrar, ReshareBlock, SecretStore,
+    network::Manager as DkgManager,
+    orchestrator,
     types::{Payload, SchemeInfo},
 };
 use bytes::{Buf, BufMut};
@@ -30,7 +32,7 @@ use commonware_cryptography::{
     transcript::Summary,
 };
 use commonware_p2p::{
-    Message as P2pMessage, Receiver,
+    Message as P2pMessage, Provider, Receiver, TrackedPeers,
     simulated::{Control, Manager as SimManager},
     utils::mux,
 };
@@ -63,6 +65,37 @@ pub(crate) type TestBlocker = Control<TestPublicKey, deterministic::Context>;
 pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
 pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("peer set unavailable")]
+pub(crate) struct TrackFailed;
+
+#[derive(Clone, Debug)]
+pub(crate) struct FailingManager<M>(pub(crate) M);
+
+impl<M: Provider> Provider for FailingManager<M> {
+    type PublicKey = M::PublicKey;
+
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.0.peer_set(id).await
+    }
+
+    async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
+        self.0.subscribe().await
+    }
+}
+
+impl<M: Provider> DkgManager for FailingManager<M> {
+    type Error = TrackFailed;
+
+    async fn track(
+        &mut self,
+        _epoch: Epoch,
+        _peers: TrackedPeers<Self::PublicKey>,
+    ) -> Result<Feedback, Self::Error> {
+        Err(TrackFailed)
+    }
+}
 pub(crate) type TestActor = orchestrator::Actor<
     deterministic::Context,
     TestBlocker,

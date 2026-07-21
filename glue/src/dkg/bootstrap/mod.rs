@@ -11,6 +11,7 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
+    network::Manager,
     reshare::{self, DkgConfig},
     state_sync::Plan as StateSyncPlan,
     types::{EpochInfo, Participants, Payload, SchemeInfo},
@@ -36,7 +37,7 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,

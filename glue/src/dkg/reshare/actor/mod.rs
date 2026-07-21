@@ -137,6 +137,7 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
+    network::Manager,
     reshare::{Mailbox, Message, metrics::Metrics as ReshareMetrics, store::Store},
     state_sync::{self, Plan as StateSyncPlan},
     types::EpochInfo,
@@ -152,7 +153,7 @@ use commonware_cryptography::{
     bls12381::primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
     certificate::Scheme,
 };
-use commonware_p2p::{Blocker, Manager, Receiver, Sender, utils::mux::Muxer};
+use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,

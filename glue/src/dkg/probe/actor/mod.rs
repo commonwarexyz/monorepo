@@ -1,13 +1,13 @@
 use super::mailbox::{Mailbox, Message};
 use crate::{
-    dkg::{ReshareBlock, probe::Bootstrap, types::EpochInfo},
+    dkg::{ReshareBlock, network::Manager, probe::Bootstrap, types::EpochInfo},
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
 use commonware_cryptography::Signer;
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::NonZeroDuration;

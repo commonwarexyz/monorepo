@@ -11,7 +11,8 @@
 //! Epoch changes are driven by finalized blocks:
 //!
 //! 1. Startup resolves an epoch, peer set, and floor from marshal or state sync.
-//! 2. The orchestrator tracks the peer set, loads the epoch scheme from its
+//! 2. After the epoch gate opens, the orchestrator resolves and tracks the peer
+//!    set, loads the epoch scheme from its
 //!    [`Provider`](commonware_cryptography::certificate::Provider), opens
 //!    epoch-specific P2P subchannels, and starts Simplex.
 //! 3. Marshal reports finalized blocks through [`Mailbox`].
@@ -45,6 +46,8 @@
 //! anchored by the last finalized block of the previous epoch. Ordinary restart
 //! expects that boundary block to remain in marshal's local finalized block
 //! archive; see [`crate::dkg`] for the marshal retention requirement.
+//! The recovered epoch also selects the peer snapshot, so restart and state-sync
+//! entry use the same epoch-scoped addresses as an uninterrupted node.
 //!
 //! # Catching Up
 //!
@@ -74,6 +77,7 @@ mod tests {
     use super::{Actor, Config};
     use crate::dkg::{
         fence::Fence,
+        network::Manager,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::{max_supported_mode, mocks},
         types::{EpochInfo, EpochOutcome, Payload},
@@ -306,6 +310,33 @@ mod tests {
             state_sync: Option<TestStateSync>,
             gate_epoch: Epoch,
         ) -> Self {
+            Self::start_with_manager(
+                context,
+                oracle,
+                fixture,
+                index,
+                boundary,
+                state_sync,
+                gate_epoch,
+                oracle.manager(),
+            )
+            .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn start_with_manager<M>(
+            context: deterministic::Context,
+            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
+            fixture: &mocks::SchemeFixture,
+            index: usize,
+            boundary: Option<mocks::TestBlock>,
+            state_sync: Option<TestStateSync>,
+            gate_epoch: Epoch,
+            manager: M,
+        ) -> Self
+        where
+            M: Manager<PublicKey = mocks::TestPublicKey>,
+        {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
@@ -391,7 +422,7 @@ mod tests {
                 context.child("orchestrator"),
                 Config {
                     oracle: control.clone(),
-                    manager: oracle.manager(),
+                    manager,
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     marshal: marshal.clone(),
                     application: application.clone(),
@@ -606,6 +637,49 @@ mod tests {
             let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
 
             assert_eq!(proposal.round.epoch(), Epoch::zero());
+        });
+    }
+
+    #[test]
+    fn address_failure_stops_before_consensus_engine_starts() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let participants = fixture.participants.clone();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants,
+            )
+            .await;
+            let network = network.start();
+            let mut node = Node::start_with_manager(
+                context.child("node"),
+                &oracle,
+                &fixture,
+                0,
+                None,
+                None,
+                Epoch::new(1),
+                mocks::FailingManager(oracle.manager()),
+            )
+            .await;
+
+            select! {
+                result = &mut node.orchestrator_handle => {
+                    result.expect("orchestrator should stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator did not stop after peer-set failure");
+                },
+            }
+            assert!(node.application.proposals().is_empty());
+            node.abort();
+            network.abort();
         });
     }
 
