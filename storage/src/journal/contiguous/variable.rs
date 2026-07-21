@@ -1061,56 +1061,59 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
         let mut pending = partition.open_all().await?;
 
+        // Acknowledged floor: every position below it was covered by a completed data fsync
+        // (the pruning boundary covers a watermark gone stale after a prune).
+        let floor = offsets.recovery_watermark().max(offsets.pruning_boundary());
+        let floor_blob = position_to_blob(floor, items_per_blob);
+
+        // Every fully acknowledged blob must be large enough to back its last item (the fixed
+        // journal checks this by walking blob lengths). Positions below the offsets pruning
+        // boundary have nothing to validate: they were pruned, or `align` rejects the state as
+        // corruption. Torn pages in these blobs are left to page CRCs at read time.
+        for (&blob, writer) in pending.range(..floor_blob) {
+            let last_position = super::blob_end_position(blob, items_per_blob, u64::MAX) - 1;
+            if last_position < offsets.pruning_boundary() {
+                continue;
+            }
+            let offset = offsets.read(last_position).await?;
+            if offset >= writer.size() {
+                return Err(Error::Corruption(format!(
+                    "blob {blob} no longer backs acknowledged items: last item at offset \
+                     {offset} exceeds size {}",
+                    writer.size()
+                )));
+            }
+        }
+
         // Check the two newest blobs for interior holes. Only they can hold non-durable data
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `Writer::new` sizes a blob by its last valid page, so it cannot see such a
-        // hole.
-        //
-        // How damage is handled depends on the acknowledged floor: the offsets recovery
-        // watermark, or the offsets pruning boundary when the watermark is stale. At or above
-        // the floor's blob, a hole is a crash artifact: truncate to the last well-formed page,
-        // and replay in `align` repairs a mid-frame cut like torn trailing junk. Below the
-        // floor's blob, every item is acknowledged and its covering fsync completed, so a hole
-        // or shortened extent is external corruption: fail without truncating, so the on-disk
-        // evidence survives and a retry fails identically. The extent check catches a blob
-        // shortened without leaving a torn page, which the forward scan cannot see.
-        let floor = offsets.recovery_watermark().max(offsets.pruning_boundary());
-        let floor_blob = position_to_blob(floor, items_per_blob);
+        // hole. Above the floor, truncate to the last well-formed page (replay in `align`
+        // repairs a mid-frame cut like torn trailing junk). Below the floor, the covering
+        // fsync completed, so a hole is external corruption: fail and preserve the evidence.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
             let valid = writer.recoverable_prefix_len().await?;
-            if blob < floor_blob {
-                let last_position = super::blob_end_position(blob, items_per_blob, u64::MAX) - 1;
-                // A pruning boundary past this blob's positions puts the offsets start in a
-                // strictly newer blob than this retained one, so it is also ahead of the oldest
-                // retained blob: `align` rejects that as corruption whenever any item survives,
-                // and in an all-empty journal every position here was deliberately pruned,
-                // leaving nothing to validate.
-                if last_position < offsets.pruning_boundary() {
-                    continue;
-                }
-                let offset = offsets.read(last_position).await?;
-                if valid < writer.size() || offset >= writer.size() {
-                    return Err(Error::Corruption(format!(
-                        "blob {blob} no longer backs acknowledged items: well-formed prefix \
-                         {valid} of size {}, last item at offset {offset}",
-                        writer.size()
-                    )));
-                }
+            if valid == writer.size() {
                 continue;
             }
-            if valid < writer.size() {
-                warn!(
-                    blob,
-                    valid,
-                    size = writer.size(),
-                    "interior hole detected: truncating to last well-formed page"
-                );
-                writer.resize(valid).await?;
-                writer.sync().await?;
+            if blob < floor_blob {
+                return Err(Error::Corruption(format!(
+                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
+                     of size {}",
+                    writer.size()
+                )));
             }
+            warn!(
+                blob,
+                valid,
+                size = writer.size(),
+                "interior hole detected: truncating to last well-formed page"
+            );
+            writer.resize(valid).await?;
+            writer.sync().await?;
         }
 
         // Validate and align the offsets journal to match the data blobs.
@@ -4422,6 +4425,45 @@ mod tests {
         });
     }
 
+    /// An externally shortened blob below the watermark is rejected even when it is older than
+    /// the two blobs the interior-hole scan reads.
+    #[test_traced]
+    fn test_variable_recovery_rejects_shortened_old_blob_below_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "variable-short-old-below-watermark".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Blob 0 holds 10 9-byte frames (90 bytes) across 2 pages, and is older than both
+            // scan suspects (blobs 1 and 2). Cut it to one whole physical page (64 logical
+            // bytes = 7 whole frames), leaving the surviving page well-formed.
+            let physical_page_size = 64 + 12;
+            let (blob, size) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert!(size > physical_page_size);
+            blob.resize(physical_page_size).await.unwrap();
+            blob.sync().await.unwrap();
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
     /// Test that a durable data blob above the sync watermark, sitting beyond an empty
     /// intermediate blob, is rolled back to the contiguous boundary during recovery.
     ///
@@ -5114,8 +5156,8 @@ mod tests {
                 match Journal::<_, u64>::init(context.child(child), cfg.clone()).await {
                     Err(Error::Corruption(message)) => assert_eq!(
                         message,
-                        "blob 1 no longer backs acknowledged items: well-formed prefix 0 of \
-                         size 0, last item at offset 81"
+                        "blob 1 no longer backs acknowledged items: last item at offset 81 \
+                         exceeds size 0"
                     ),
                     Err(error) => panic!("unexpected error: {error}"),
                     Ok(_) => panic!("missing acknowledged data was accepted"),
