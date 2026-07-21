@@ -168,6 +168,9 @@ where
         let Certificate::Finalization(finalization) = certificate else {
             return;
         };
+        // Older rounds carry nothing marshal cannot derive from the newest:
+        // marshal backfills finalizations and blocks below any reported round.
+        // The gate only suppresses redundant verification and reports.
         if self
             .latest
             .is_some_and(|latest| finalization.round() <= latest)

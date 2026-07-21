@@ -87,6 +87,11 @@
 //! dealt while the node was still bootstrapping. When the floor stays in `E`,
 //! startup is unchanged and the engine for `E` starts immediately.
 //!
+//! This path requires the provider handed to marshal and the probe to answer
+//! unregistered epochs with the all-epoch verifier (see
+//! [`provider::FallbackProvider`]). Without the fallback, marshal panics when
+//! installing a floor for an epoch it cannot verify.
+//!
 //! # Marshal Retention
 //!
 //! DKG startup relies on marshal's local finalized block archive unless the node

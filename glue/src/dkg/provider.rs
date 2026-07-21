@@ -16,6 +16,11 @@ use std::sync::Arc;
 /// Signing scheme lookup never falls back: [`Provider::scheme`] delegates to
 /// `inner` alone, so signing, participant enumeration, and membership checks
 /// are unaffected.
+///
+/// State-sync compositions that allow the probe floor to cross an epoch
+/// boundary MUST wrap the provider handed to marshal and the probe in this
+/// type. Marshal panics when installing a floor for an epoch its provider
+/// cannot verify.
 #[derive(Clone)]
 pub struct FallbackProvider<P: Provider> {
     inner: P,
