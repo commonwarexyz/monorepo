@@ -217,8 +217,6 @@ where
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
         let metrics = StatefulMetrics::new(self.context.as_present());
-        // Persist the in-progress floor before any state-sync work begins, then hand the
-        // metadata to `Syncing` alone: `set_complete` is its only later mutation.
         let sync_metadata = self
             .plan
             .into_sync_metadata()

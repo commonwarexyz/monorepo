@@ -1188,8 +1188,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
-    //
-    // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non-consuming.
     pub async fn sync(mut self) -> Result<(Self, Checkpoint), Error> {
         let checkpoint;
         (self.0, checkpoint) = self.0.sync().await?;

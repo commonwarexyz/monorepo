@@ -106,9 +106,6 @@ where
 }
 
 /// Manages prunable caches and their metadata.
-///
-/// Puts below an archive's prune floor are skipped: storing at a pruned index
-/// consumes the archive.
 pub(crate) struct Manager<R, V, S>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
