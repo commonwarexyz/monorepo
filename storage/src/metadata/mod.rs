@@ -213,8 +213,7 @@ mod tests {
             assert!(previous.is_none());
 
             // Sync and verify persistence
-            metadata = metadata.sync().await.unwrap();
-            drop(metadata);
+            metadata.sync().await.unwrap();
 
             let cfg = Config {
                 partition: "test".into(),
@@ -366,8 +365,7 @@ mod tests {
             metadata.put(key2, foo.clone());
 
             // Sync the metadata store
-            metadata = metadata.sync().await.unwrap();
-            drop(metadata);
+            metadata.sync().await.unwrap();
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
@@ -420,8 +418,7 @@ mod tests {
             metadata.put(key2, foo.clone());
 
             // Sync the metadata store
-            metadata = metadata.sync().await.unwrap();
-            drop(metadata);
+            metadata.sync().await.unwrap();
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
@@ -480,8 +477,7 @@ mod tests {
             metadata.put(key2, foo.clone());
 
             // Sync the metadata store
-            metadata = metadata.sync().await.unwrap();
-            drop(metadata);
+            metadata.sync().await.unwrap();
 
             // Corrupt the metadata store
             let (blob, len) = context.open("test", b"left").await.unwrap();
@@ -533,8 +529,7 @@ mod tests {
             metadata.put(key2, foo.clone());
 
             // Sync the metadata store
-            metadata = metadata.sync().await.unwrap();
-            drop(metadata);
+            metadata.sync().await.unwrap();
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
