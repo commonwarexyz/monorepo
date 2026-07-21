@@ -1897,6 +1897,7 @@ fn run_standard_once<P: simplex::Simplex>(
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
             let reporter_states = (state_coverage || collect_audit)
                 .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
             if state_coverage {
@@ -2080,6 +2081,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
         });
         invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
         invariants::check_vote_invariants(config.faults as usize, &summary_reporters);
+        invariants::check_certificate_seeds::<P, _, _>(&summary_reporters);
         invariants::check::<P>(config.n, reporter_only.as_slice());
         (true, rejected_certification_observed)
     })
@@ -2230,6 +2232,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
         }
@@ -2809,6 +2812,10 @@ fn run_twins<P: simplex::Simplex>(
                     .cloned()
                     .collect();
                 invariants::check_vote_invariants_with_byzantine(&compromised, &observers);
+                // Seed uniqueness holds under twins as well: the seed signature
+                // covers only the round, so even conflicting valid certificates
+                // formed with compromised identities must embed the identical seed.
+                invariants::check_certificate_seeds::<P, _, _>(&observers);
                 if state_coverage {
                     let reporter_states =
                         state_cov::encode_reporter_states(honest_reporters, config.n as usize);
