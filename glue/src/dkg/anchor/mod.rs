@@ -97,7 +97,9 @@
 //! The backup channel only carries certificates for epochs without a registered consensus
 //! engine, so this forwarding is what keeps marshal's delivery advancing while the node follows
 //! an epoch whose public info it has not learned yet (e.g., after a state-sync bootstrap that
-//! crossed an epoch boundary between anchor and probe).
+//! crossed an epoch boundary between anchor and probe). If discovery resolves before marshal is
+//! attached, the actor retains the newest verified finalization received during that handoff and
+//! forwards it when serving begins.
 
 use crate::dkg::{ReshareBlock, types::EpochInfo};
 use commonware_consensus::{
@@ -277,7 +279,8 @@ mod tests {
             let (source_marshal, marshal_handle) = start_marshal(
                 context.child("source_marshal"),
                 &oracle,
-                &fixture,
+                &fixture.participants,
+                &fixture.schemes,
                 0,
                 source_boundaries,
             )
@@ -440,14 +443,15 @@ mod tests {
     async fn start_marshal(
         context: deterministic::Context,
         oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
-        fixture: &mocks::SchemeFixture,
+        participants: &[mocks::TestPublicKey],
+        schemes: &[mocks::TestScheme],
         index: usize,
         boundaries: Vec<(
             mocks::TestBlock,
             Finalization<mocks::TestScheme, mocks::TestDigest>,
         )>,
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
-        let public_key = fixture.participants[index].clone();
+        let public_key = participants[index].clone();
         let partition_prefix = format!("anchor-node-{index}");
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
         let control = oracle.control(public_key.clone());
@@ -499,7 +503,7 @@ mod tests {
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
+                provider: mocks::TestProvider::new(schemes[index].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(mocks::genesis_block(public_key)),
                 partition_prefix,
@@ -1202,6 +1206,50 @@ mod tests {
                 &harness.boundary_finalization,
                 &harness.boundary_sharing,
                 &harness.participants,
+            );
+        });
+    }
+
+    #[test]
+    fn forwards_finalization_received_before_marshal_attach() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start(&mut context).await;
+            let mut subscription = harness.joiner.subscribe();
+            harness.send_target_finalization();
+
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_artifact(
+                artifact,
+                &harness.boundary_finalization,
+                &harness.boundary_sharing,
+                &harness.participants,
+            );
+
+            let (marshal, _marshal_handle) = start_marshal(
+                context.child("joiner_marshal"),
+                &harness.oracle,
+                &harness.participants,
+                &harness.schemes,
+                1,
+                Vec::new(),
+            )
+            .await;
+            assert!(
+                marshal
+                    .certified(harness.boundary.context().round, harness.boundary.clone())
+                    .await
+            );
+
+            let expected = harness.send_target_finalization();
+            context.sleep(Duration::from_millis(100)).await;
+            harness.joiner.attach(marshal.clone());
+            context.sleep(Duration::from_millis(100)).await;
+
+            assert_eq!(
+                marshal.get_finalization(harness.boundary.height()).await,
+                Some(expected)
             );
         });
     }

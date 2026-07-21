@@ -49,6 +49,7 @@ where
     pub(super) blocker: B,
     pub(super) epocher: FixedEpocher,
     pub(super) artifact: Option<ActorArtifact<S, V>>,
+    pub(super) buffered_finalization: Option<Finalization<S, V::Commitment>>,
     pub(super) latest: Option<Round>,
 }
 
@@ -68,6 +69,10 @@ where
         mut sender: impl Sender<PublicKey = S::PublicKey>,
         mut receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
+        if let Some(finalization) = self.buffered_finalization.take() {
+            self.report_finalization(finalization);
+        }
+
         let mut mailbox_drained = false;
         let mut certificates_drained = false;
         select_loop! {
@@ -185,6 +190,10 @@ where
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap finalization");
             return;
         }
+        self.report_finalization(finalization);
+    }
+
+    fn report_finalization(&mut self, finalization: Finalization<S, V::Commitment>) {
         // Advance the gate only once marshal has ingested the finalization.
         // Backoff still ingests through the overflow policy. Closed means the
         // node is shutting down and the gate no longer matters.

@@ -154,6 +154,7 @@ where
             block_codec_config: self.block_codec_config,
             retry_timeout: self.retry_timeout,
             artifact: None,
+            buffered_finalization: None,
             subscribers: Vec::new(),
             pending: None,
         }

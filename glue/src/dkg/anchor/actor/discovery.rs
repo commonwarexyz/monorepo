@@ -63,7 +63,8 @@ where
 /// boundary finalization. It then fetches the committed block from one responder.
 /// Once the boundary block yields the target epoch's public
 /// [`Artifact`], discovery resolves all subscribers and can hand off to
-/// [`Serving`] after marshal is attached.
+/// [`Serving`] after marshal is attached. While waiting for attachment, it
+/// retains the newest verified finalization for [`Serving`] to forward.
 pub(super) struct Discovery<E, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -84,6 +85,7 @@ where
     pub(super) block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     pub(super) retry_timeout: NonZeroDuration,
     pub(super) artifact: Option<ActorArtifact<S, V>>,
+    pub(super) buffered_finalization: Option<Finalization<S, V::Commitment>>,
     pub(super) subscribers: Vec<oneshot::Sender<ActorArtifact<S, V>>>,
     pub(super) pending: Option<Pending<S, V>>,
 }
@@ -185,6 +187,7 @@ where
             blocker: self.blocker,
             epocher: self.epocher,
             artifact: self.artifact,
+            buffered_finalization: self.buffered_finalization,
             latest: None,
         }
         .run(certificate_receiver, boundary_sender, boundary_receiver)
@@ -207,7 +210,7 @@ where
         message: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
-        if self.artifact.is_some() || self.subscribers.is_empty() {
+        if self.artifact.is_none() && self.subscribers.is_empty() {
             return false;
         }
 
@@ -224,10 +227,19 @@ where
         let Certificate::Finalization(finalization) = certificate else {
             return false;
         };
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| finalization.epoch() <= pending.epoch)
+        if self.artifact.is_some()
+            && self
+                .buffered_finalization
+                .as_ref()
+                .is_some_and(|latest| finalization.round() <= latest.round())
+        {
+            return false;
+        }
+        if self.artifact.is_none()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| finalization.epoch() <= pending.epoch)
         {
             return false;
         }
@@ -237,6 +249,10 @@ where
             &self.strategy,
         ) {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap finalization");
+            return false;
+        }
+        if self.artifact.is_some() {
+            self.buffered_finalization = Some(finalization);
             return false;
         }
         if finalization.epoch().is_zero() {
