@@ -3272,7 +3272,6 @@ mod tests {
     const CHECKSUM_REFS: &[Action] = &[
         Action::AppendBlock(0),
         Action::SparseGrowBlock(0),
-        Action::SparseWrite(0),
         Action::ResizeDown(0),
         Action::ResizeUp(0),
         Action::Overwrite(0),
@@ -4118,6 +4117,31 @@ mod tests {
             states = next;
         }
         Ok(())
+    }
+
+    /// An odd shrink followed by a write beyond the frontier persists a
+    /// partial non-final run. Its span remains part of the checksum oracle
+    /// through the sparse commit and the next full checksum rewrite.
+    #[test]
+    fn sparse_partial_non_final_checksum_trace_allowed() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::ResizeDown(0),
+            Action::SparseWrite(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Overwrite(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok());
     }
 
     /// A metadata-only compaction at the scaled ref cap writes a fresh
