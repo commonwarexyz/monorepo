@@ -185,8 +185,17 @@ where
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap finalization");
             return;
         }
-        self.latest = Some(finalization.round());
-        let _ = self.marshal.report(Activity::Finalization(finalization));
+        // Advance the gate only once marshal has ingested the finalization.
+        // Backoff still ingests through the overflow policy. Closed means the
+        // node is shutting down and the gate no longer matters.
+        let round = finalization.round();
+        if self
+            .marshal
+            .report(Activity::Finalization(finalization))
+            .accepted()
+        {
+            self.latest = Some(round);
+        }
     }
 
     async fn produce_finalization(
