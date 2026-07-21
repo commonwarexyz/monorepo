@@ -18,6 +18,7 @@ pub mod primitives;
 pub mod range;
 pub mod tuple;
 pub mod vec;
+pub mod zeroed;
 
 /// Read keyed items from [Buf] in ascending order.
 pub(crate) fn read_ordered_map<K, V, F>(
