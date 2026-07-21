@@ -59,7 +59,7 @@ mod tests {
                 ed25519, secp256r1,
             },
             types::{
-                Activity, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Activity, Certificate, Finalization, Finalize, Kind, Notarization, Notarize,
                 Nullification, Nullify, Proposal, Vote,
             },
         },
@@ -74,7 +74,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
     };
-    use commonware_macros::{select, test_collect_traces, test_traced};
+    use commonware_macros::{select, test_async, test_collect_traces, test_traced};
     use commonware_p2p::{
         Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config as NConfig, Link, Network, Oracle},
@@ -371,21 +371,26 @@ mod tests {
         }
 
         // Batch verify the pending votes on the strategy's pool.
-        assert!(round.ready_notarizes());
-        let (batch, invalid) = round.verify_notarizes(&mut rng, &strategy).await;
+        let (batch, invalid) = round
+            .try_verify(&mut rng, &strategy)
+            .await
+            .expect("quorum of notarizes must be ready");
         assert_eq!(batch, schemes.len());
         assert!(invalid.is_empty());
 
         // Recover the certificate on the strategy's pool.
-        let notarization = round
-            .try_construct_notarization(&strategy)
+        let certificate = round
+            .try_construct_certificate(&strategy)
             .await
-            .expect("verified quorum must construct a notarization");
+            .expect("verified quorum must construct a certificate");
+        let Certificate::Notarization(notarization) = certificate else {
+            panic!("expected a notarization");
+        };
         assert_eq!(notarization.proposal, proposal);
         assert!(notarization.verify(&mut rng, &verifier, &Sequential));
 
         // Construction is one-shot per round.
-        assert!(round.try_construct_notarization(&strategy).await.is_none());
+        assert!(round.try_construct_certificate(&strategy).await.is_none());
     }
 
     /// Deterministic-runtime tests drive `Strategy::spawn` inline: the deterministic runtime's
@@ -406,6 +411,80 @@ mod tests {
             verify_and_construct(ed25519::fixture, strategy.clone()).await;
             verify_and_construct(secp256r1::fixture, strategy).await;
         });
+    }
+
+    /// A certificate observed before the leader is known must not lose the
+    /// leader's buffered vote: the round discovers the proposal from its vote
+    /// tracker even after certification drops the verifier's buffers.
+    #[test]
+    fn test_set_leader_after_certification() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[1].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+        );
+
+        // The leader's notarize arrives before the leader is known
+        let proposal = Proposal::new(round_id, View::new(0), Sha256::hash(b"payload"));
+        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+        assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
+
+        // A notarization certificate drops the verifier's notarize buffers
+        round.record_certificate(Kind::Notarization);
+        assert!(round.has_certificate(Kind::Notarization));
+
+        // The leader's proposal is still discovered when the leader is set
+        round.set_leader(Participant::from_usize(0));
+        assert_eq!(
+            round.try_forward_proposal(Participant::from_usize(1)),
+            Some(proposal)
+        );
+    }
+
+    /// When multiple kinds are verifiable, votes verify in kind order.
+    #[test_async]
+    async fn test_verify_prioritizes_kinds_in_order() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let quorum = quorum(5) as usize;
+        let round_id = Round::new(Epoch::new(333), View::new(1));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+        );
+
+        // A quorum of notarizes and a nullify from every participant
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(b"payload"));
+        for (i, scheme) in schemes.iter().enumerate() {
+            if i < quorum {
+                let vote = Notarize::sign(scheme, proposal.clone()).unwrap();
+                assert!(round.add_network(participants[i].clone(), Vote::Notarize(vote)));
+            }
+            let vote = Nullify::sign::<Sha256Digest>(scheme, round_id).unwrap();
+            assert!(round.add_network(participants[i].clone(), Vote::Nullify(vote)));
+        }
+        round.set_leader(Participant::from_usize(0));
+
+        // Notarizes verify first, then nullifies, then nothing
+        let (batch, _) = round.try_verify(&mut rng, &Sequential).await.unwrap();
+        assert_eq!(batch, quorum);
+        let (batch, _) = round.try_verify(&mut rng, &Sequential).await.unwrap();
+        assert_eq!(batch, schemes.len());
+        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
     }
 
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
@@ -873,7 +952,7 @@ mod tests {
             traces
                 .get_by_level(Level::DEBUG)
                 .expect_event(|event| {
-                    event.metadata.content == "constructed notarization, forwarding to voter"
+                    event.metadata.content == "constructed certificate, forwarding to voter"
                         && event
                             .expect_span_at_index(0, |span| {
                                 span.expect_content_exact("simplex.voter.view")
