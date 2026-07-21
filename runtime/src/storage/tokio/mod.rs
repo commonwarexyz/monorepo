@@ -1,13 +1,12 @@
 use super::Header;
 use crate::{BufferPool, Error};
-use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
@@ -67,6 +66,36 @@ impl Storage {
             pool,
         }
     }
+
+    /// Parses an existing blob's header, returning `None` if the blob is new or its contents
+    /// are those of a creation that was interrupted before its header became durable (the
+    /// caller recreates the blob), and an error if the header is corrupt or unacceptable.
+    async fn resolve_header(
+        file: &mut fs::File,
+        len: u64,
+        versions: &RangeInclusive<u16>,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(u64, u16, u64)>, Error> {
+        if Header::missing(len) {
+            return Ok(None);
+        }
+        let mut raw = vec![0u8; len.min(Header::V1_DATA_OFFSET) as usize];
+        file.read_exact(&mut raw)
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        let err = match Header::parse(&raw, len, versions) {
+            Ok(resolved) => return Ok(Some(resolved)),
+            Err(err) => err,
+        };
+
+        // The header failed to parse: files longer than the creation region hold data and are
+        // never torn creations. Shorter files are already fully represented in `raw`.
+        if !err.may_be_torn_creation() || len > Header::V1_DATA_OFFSET {
+            return Err(err.into_error(partition, name));
+        }
+        super::resolve_unparseable(err, &raw, partition, name)
+    }
 }
 
 impl crate::Storage for Storage {
@@ -112,59 +141,46 @@ impl crate::Storage for Storage {
             .await
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
-
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the file to ensure it is durable
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
-            {
-                // Sync the parent directory to ensure the directory entry is durable.
-                sync_dir(parent).await?;
-
-                // Sync storage directory if parent directory did not exist
-                if !parent_existed {
-                    sync_dir(&self.cfg.storage_directory).await?;
-                }
-            }
-        }
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
-        // Handle header: new/corrupted blobs get a fresh header written,
-        // existing blobs have their header read.
-        let (blob_version, logical_size) = if Header::missing(len) {
-            // New or partially-created blob: reset it and write a fresh header. The
-            // file grows only as header bytes are written, so a create interrupted by
-            // a process crash leaves some prefix of the header, which the next open
-            // resets here instead of rejecting as corrupt below.
-            let (header, blob_version) = Header::new(&versions);
-            file.set_len(0)
-                .await
-                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-            file.write_all(&header.encode())
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-            (blob_version, 0)
-        } else {
-            // Existing blob - read and validate header
-            let mut header_bytes = [0u8; Header::SIZE];
-            file.read_exact(&mut header_bytes)
-                .await
-                .map_err(|_| Error::ReadFailed)?;
-            Header::from(header_bytes, len, &versions).map_err(|e| e.into_error(partition, name))?
+        // Handle header: existing blobs have their header read; new blobs and blobs left torn
+        // by an interrupted creation get a fresh header written.
+        let existing = Self::resolve_header(&mut file, len, &versions, partition, name).await?;
+        let (logical_size, blob_version, data_offset) = match existing {
+            Some(resolved) => resolved,
+            None => {
+                // Truncate to zero before writing, per the [Header::create] contract.
+                let (region, blob_version) = Header::create(&versions);
+                let data_offset = region.len() as u64;
+                file.set_len(0)
+                    .await
+                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
+                file.rewind().await.map_err(|_| Error::WriteFailed)?;
+                file.write_all(&region)
+                    .await
+                    .map_err(|_| Error::WriteFailed)?;
+                file.sync_all()
+                    .await
+                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+
+                // Sync the directories to ensure the directory entry is durable. This must
+                // also run when recreating a torn blob: the creation it is recovering from
+                // may have crashed before its own directory syncs completed. (Windows has
+                // no notion of syncing a directory entry; see
+                // https://github.com/commonwarexyz/monorepo/issues/2026.)
+                #[cfg(unix)]
+                {
+                    sync_dir(parent).await?;
+                    if !parent_existed {
+                        sync_dir(&self.cfg.storage_directory).await?;
+                    }
+                }
+
+                (0, blob_version, data_offset)
+            }
         };
 
         #[cfg(unix)]
@@ -174,7 +190,7 @@ impl crate::Storage for Storage {
 
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
                 logical_size,
                 blob_version,
             ))
@@ -183,7 +199,7 @@ impl crate::Storage for Storage {
         {
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
                 logical_size,
                 blob_version,
             ))
@@ -260,7 +276,7 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
+        Blob, BlobHeaderLayout, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
@@ -321,40 +337,44 @@ mod tests {
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
 
-        // Test 1: New blob returns logical size 0 and correct app version
+        // Test 1: New blob (V1 by default) returns logical size 0 and correct app version
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0, "new blob should have logical size 0");
 
-        // Verify raw file has 8 bytes (header only)
+        // Verify raw file holds one header page
+        let data_offset = Header::V1_DATA_OFFSET;
         let file_path = storage_directory.join("partition").join(hex(b"test"));
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::SIZE_U64,
-            "raw file should have 8-byte header"
+            data_offset,
+            "raw file should have a full header page"
         );
 
-        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
+        // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
         blob.write_at(0, data).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
         let metadata = std::fs::metadata(&file_path).unwrap();
-        assert_eq!(metadata.len(), Header::SIZE_U64 + data.len() as u64);
+        assert_eq!(metadata.len(), data_offset + data.len() as u64);
 
         // Verify raw file layout
         let raw_content = std::fs::read(&file_path).unwrap();
-        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+        assert_eq!(
+            &raw_content[..Header::MAGIC_LENGTH],
+            &BlobHeaderLayout::V1.magic()
+        );
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
-            &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
-            &Header::RUNTIME_VERSION.to_be_bytes()
+            &raw_content[4..6],
+            &BlobHeaderLayout::V1.runtime_version().to_be_bytes()
         );
-        // Data should start at offset 8
-        assert_eq!(&raw_content[Header::SIZE..], data);
+        // Data should start at the data offset
+        assert_eq!(&raw_content[data_offset as usize..], data);
 
-        // Test 3: Read at logical offset 0 returns data from raw offset 8
+        // Test 3: Read at logical offset 0 returns data from the data offset
         let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
@@ -364,18 +384,18 @@ mod tests {
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::SIZE_U64 + 5,
-            "resize(5) should result in 13 raw bytes"
+            data_offset + 5,
+            "resize(5) should leave 5 raw bytes past the header page"
         );
 
-        // resize(0) should leave only header
+        // resize(0) should leave only the header page
         blob.resize(0).await.unwrap();
         blob.sync().await.unwrap();
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::SIZE_U64,
-            "resize(0) should leave only header"
+            data_offset,
+            "resize(0) should leave only the header page"
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
@@ -398,16 +418,196 @@ mod tests {
         let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
         assert_eq!(size3, 0, "corrupted blob should return logical size 0");
 
-        // Verify raw file now has proper 8-byte header
+        // Verify raw file now has a proper header page
         let metadata = std::fs::metadata(&corrupted_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::SIZE_U64,
+            Header::V1_DATA_OFFSET,
             "corrupted blob should be reset to header-only"
         );
 
         // Cleanup
         drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Verify the end-to-end storage-page alignment invariant: paged data written to a V1 blob
+    /// with a 4096-byte physical page size occupies exactly one aligned 4096-byte disk page
+    /// per physical page (header page included), so page reads never straddle a page boundary.
+    #[tokio::test]
+    async fn test_v1_paged_alignment() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_aligned_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        // A logical page size whose physical page is exactly one 4096-byte storage page.
+        const PHYSICAL_PAGE_SIZE: u64 = 4096;
+        let logical = crate::buffer::paged::page_size(PHYSICAL_PAGE_SIZE as u32);
+        let cache = crate::buffer::paged::CacheRef::new(
+            test_pool(),
+            logical,
+            std::num::NonZeroUsize::new(16).unwrap(),
+        );
+
+        // Write several pages of patterned data through the paged writer (V1 blob via open()).
+        let (blob, size) = storage.open("partition", b"aligned").await.unwrap();
+        let mut writer = crate::buffer::paged::Writer::new(blob, size, 1024, cache)
+            .await
+            .unwrap();
+        let item: Vec<u8> = (0..1000u32).flat_map(|i| i.to_be_bytes()).collect();
+        for _ in 0..12 {
+            writer.append(&item).await.unwrap();
+        }
+        let logical_size = writer.size();
+        writer.sync().await.unwrap();
+
+        // The raw file is a whole number of 4096-byte pages: one header page plus one page per
+        // physical page of data (the partial tail page is zero-padded to a full physical page).
+        let file_path = storage_directory.join("partition").join(hex(b"aligned"));
+        let raw = std::fs::read(&file_path).unwrap();
+        let pages = (logical_size as usize).div_ceil(logical.get() as usize);
+        assert_eq!(raw.len() as u64 % PHYSICAL_PAGE_SIZE, 0);
+        assert_eq!(
+            raw.len() as u64,
+            Header::V1_DATA_OFFSET + pages as u64 * PHYSICAL_PAGE_SIZE
+        );
+
+        // Every physical page sits exactly within one aligned 4096-byte disk page, with a valid
+        // CRC record in its final 12 bytes.
+        for page in 0..pages {
+            let start = Header::V1_DATA_OFFSET as usize + page * PHYSICAL_PAGE_SIZE as usize;
+            let physical = &raw[start..start + PHYSICAL_PAGE_SIZE as usize];
+            assert!(
+                crate::buffer::paged::validate_page_for_tests(physical),
+                "page {page} failed CRC validation at aligned boundary"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_creation_recovers() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_torn_creation_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        // Create a durable V1 blob to obtain the canonical header region bytes.
+        let (blob, _) = storage.open("partition", b"torn").await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+        let path = storage_directory.join("partition").join(hex(b"torn"));
+        let region = std::fs::read(&path).unwrap();
+
+        // Simulate torn creations (the full state enumeration lives in the
+        // Header::interrupted_creation unit tables): a file truncated mid-CRC and the same
+        // prefix at a persisted full length.
+        let mut torn_content = vec![0u8; region.len()];
+        torn_content[..10].copy_from_slice(&region[..10]);
+        let states = [region[..10].to_vec(), torn_content];
+        for state in states {
+            std::fs::write(&path, &state).unwrap();
+            let (blob, size) = storage.open("partition", b"torn").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            // The healed blob round-trips through a reopen with its data intact.
+            let (blob, size) = storage.open("partition", b"torn").await.unwrap();
+            assert_eq!(size, 4);
+            let read = blob.read_at(0, 4).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            drop(blob);
+        }
+
+        // Foreign bytes are corruption, not a torn creation: nonzero padding behind a
+        // torn (unparseable) prefix proves the file was never a canonical prefix of a
+        // header region.
+        let mut corrupt = vec![0u8; region.len()];
+        corrupt[..10].copy_from_slice(&region[..10]);
+        corrupt[100] = 0xFF;
+        std::fs::write(&path, &corrupt).unwrap();
+        let result = storage.open("partition", b"torn").await;
+        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_v1_rejects_nonzero_header_padding() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_v1_header_padding_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        let partition_dir = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_dir).unwrap();
+        let path = partition_dir.join(hex(b"dirty_padding"));
+        let mut raw = crate::storage::tests::v1_blob_bytes(0, b"payload");
+        raw[Header::PARSE_LEN] = 0xFF;
+        std::fs::write(&path, raw).unwrap();
+
+        let result = storage.open("partition", b"dirty_padding").await;
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("header padding"))
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_v0_legacy_read() {
+        let storage_directory =
+            env::temp_dir().join(format!("test_v0_legacy_read_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // followed immediately by the payload.
+        let payload = b"hello world";
+        let partition_dir = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_dir).unwrap();
+        let file_path = partition_dir.join(hex(b"v0"));
+        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
+
+        // The blob opens with its data intact and remains readable and writable in place.
+        let (blob, size) = storage.open("partition", b"v0").await.unwrap();
+        assert_eq!(size, payload.len() as u64);
+        assert_eq!(
+            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
+            payload
+        );
+        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        // On disk the payload still sits immediately after the 8-byte V0 header.
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + payload.len() + 1);
+        assert_eq!(
+            &raw_content[..Header::MAGIC_LENGTH],
+            &BlobHeaderLayout::V0.magic()
+        );
+        assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
+
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
@@ -423,11 +623,12 @@ mod tests {
             test_pool(),
         );
 
-        // Create the partition directory and a file with invalid magic bytes
+        // Create the partition directory and a file whose magic bytes are foreign (not a
+        // prefix of any canonical header, so not a torn creation)
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
         let bad_magic_path = partition_path.join(hex(b"bad_magic"));
-        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+        std::fs::write(&bad_magic_path, b"XXXXXXXX").unwrap();
 
         // Opening should fail with corrupt error
         let result = storage.open("partition", b"bad_magic").await;
@@ -438,7 +639,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Any file shorter than a header must reset to a valid, empty blob on open
+    /// Any file shorter than a header prelude must reset to a valid, empty blob on open
     /// rather than fail as corrupt.
     #[tokio::test]
     async fn test_blob_partial_header_reset() {
@@ -454,7 +655,7 @@ mod tests {
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
 
-        for prefix_len in 0..Header::SIZE {
+        for prefix_len in 0..Header::PRELUDE_SIZE {
             let name = format!("short_{prefix_len}");
             let path = partition_path.join(hex(name.as_bytes()));
             // Seed a file shorter than a full header.
@@ -471,10 +672,10 @@ mod tests {
             let raw = std::fs::read(&path).unwrap();
             assert_eq!(
                 raw.len(),
-                Header::SIZE,
+                Header::V1_DATA_OFFSET as usize,
                 "recovered blob should be header-only"
             );
-            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Header::MAGIC);
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &BlobHeaderLayout::V1.magic());
             storage
                 .open("partition", name.as_bytes())
                 .await
