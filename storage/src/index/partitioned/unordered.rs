@@ -78,13 +78,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             self.partitions[lo + local].absorb(slot);
         }
     }
-
-    /// Visits inline and overflow values.
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for partition in &self.partitions {
-            partition.for_each_value(&mut f);
-        }
-    }
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
@@ -117,6 +110,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
     fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Self::Cursor<'_>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.partitions[i - self.offset].get_mut_or_insert(sub, value)
+    }
+
+    fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for partition in &self.partitions {
+            partition.for_each_value(&mut f);
+        }
     }
 }
 
@@ -226,6 +225,34 @@ mod tests {
     /// partition and translated sub-key collide into an overflow chain.
     fn new_index(ctx: impl Metrics) -> Index<OneCap, u64, 1> {
         Index::new(ctx, OneCap)
+    }
+
+    /// A worker's value walk must visit every value it holds exactly once (inline values and
+    /// overflow chains alike), since the snapshot build derives the activity bitmap and
+    /// active-key counts from it.
+    #[test_traced]
+    fn test_range_for_each_value_visits_all_values_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let full = new_index(context.child("full"));
+
+            // Two keys in partition 0x80 that collide on the one-byte translated sub-key (an
+            // overflow chain), one distinct key beside them, and one key in partition 0x81.
+            let mut worker = full.new_range(0x80, 2);
+            assert!(worker.get_mut_or_insert(&[0x80, 0x01, 0xAA], 1).is_none());
+            assert!(worker.get_mut_or_insert(&[0x80, 0x01, 0xBB], 2).is_some());
+            {
+                let mut cursor = worker.get_mut(&[0x80, 0x01, 0xBB]).unwrap();
+                cursor.next();
+                cursor.insert(2);
+            }
+            assert!(worker.get_mut_or_insert(&[0x80, 0x02], 3).is_none());
+            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 4).is_none());
+
+            let mut seen = Vec::new();
+            worker.for_each_value(|v| seen.push(*v));
+            seen.sort_unstable();
+            assert_eq!(seen, vec![1, 2, 3, 4]);
+        });
     }
 
     /// A worker with a nonzero offset must land its slots at the global partitions

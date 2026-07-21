@@ -31,7 +31,7 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
+//!     * If leader `l` has not been active for `skip_timeout`, set `t_l` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -39,7 +39,9 @@
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
-//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!   and we have required nullifications covering the skipped views between `v_parent` and `v`
+//!   (a nullification covers the rest of its term; when `v` is not a term start, `v_parent` must
+//!   be exactly `v-1`), verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
@@ -52,7 +54,7 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//! * Enter `v+1`
+//! * Enter `next_term_start(v)` (equivalent to `v+1` when `term_length = 1`)
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
@@ -61,9 +63,9 @@
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `nullify(v)`
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//!    * Rebroadcast `nullify(v)` and the certificate that advanced us into view `v`
 //!
-//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
 //! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
 //! the protocol._
@@ -71,7 +73,8 @@
 //! ### Joining Consensus
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
+//! finalization). Notarizations advance the view if-and-only-if the application certifies them.
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -106,8 +109,8 @@
 //! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "certification timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Skip "leader timeout" and "certification timeout" if a designated leader has not participated
+//!   for `skip_timeout` (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -116,40 +119,98 @@
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
+//! * With stable leaders (`term_length > 1`), a prior same-term `nullify` vote blocks later `finalize` votes until
+//!   a covering finalization is observed; notarize votes are never withheld (see
+//!   [Same-Term Vote Safety](#same-term-vote-safety)).
+//! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
+//!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
+//!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
+//!   entered in the current term.
+//! * Votes are tracked down to `activity_timeout` views below the highest finalized view: late
+//!   votes in that window are still reported (and equivocation there is still detected), even
+//!   though they are no longer verified or used for certificate construction. Votes below the
+//!   window are ignored on arrival, so downstream systems consuming per-vote activity (rewards,
+//!   slashing) never observe them.
 //!
 //! ## Protocol Properties
 //!
 //! ### Forced Inclusion (Tail-Forking Resistance)
 //!
 //! A notarized payload in view `v` must appear in the canonical chain if no nullification
-//! certificate exists for `v`. This follows directly from the protocol rules:
+//! certificate covers `v`. With stable leaders, a nullification covers the view it was created for
+//! and the rest of that term. This follows directly from the protocol rules:
 //!
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
-//!    and possess nullification certificates for every view between `v_p` and `v+k`.
-//! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
-//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
-//!    or when certification fails.
+//!    and possess required nullifications covering the skipped views from `v_p` to `v+k`.
+//! 2. A nullification certificate requires `2f+1` `nullify` votes for the covered view or an
+//!    earlier view in the same term.
+//! 3. An honest participant only broadcasts `nullify` when a timeout fires or when certification
+//!    fails.
 //!
-//! Therefore, if view `v` completes without timeout and certification succeeds, no honest
-//! participant has broadcast `nullify(v)`. With at most `f` Byzantine participants, at most `f`
-//! `nullify(v)` votes exist, which is insufficient to form a nullification certificate. Without
-//! that certificate, no future leader can skip view `v`, and the notarized payload must be
-//! included as an ancestor in all subsequent proposals.
+//! Therefore, a nullification covering `v` can only form if at least `f+1` honest participants
+//! broadcast `nullify` at a single view `u` in `[term_start(v), v]`. If every view in that term
+//! prefix completes without timeout and with successful certification (just view `v` itself when
+//! `term_length` is 1), no honest participant has broadcast a covering `nullify`: at most `f`
+//! covering votes exist at any single view, which is insufficient to form a nullification
+//! certificate. Without that certificate, no future leader can skip view `v`, and the notarized
+//! payload must be included as an ancestor in all subsequent proposals. Note that a clean view
+//! `v` alone is not enough when `term_length > 1`: an honest `nullify` broadcast at an earlier
+//! view of the term (say, after a transient timeout at a view that later notarized) covers `v`
+//! even though `v` itself never timed out.
+//!
+//! ### Same-Term Vote Safety
+//!
+//! With stable leaders, a nullification covers the view it was created for and the rest of that
+//! term: a later proposal may use it to skip all of those views at once. This is only safe if no
+//! covered view is finalized, so the protocol must maintain the invariant that a finalization at
+//! view `v` rules out a nullification at any view `u <= v` in the same term (otherwise a proposal
+//! could fork around a finalized view).
+//!
+//! The finalize gate maintains this invariant: a participant that voted `nullify(u)` withholds
+//! `finalize` votes for later views in that term until it observes a same-term finalization at or
+//! above its highest `nullify` vote. To see why the invariant holds, suppose both a nullification
+//! at `u` and a finalization at `v >= u` form in the same term. Their quorums intersect in at
+//! least one honest participant that voted both `nullify(u)` and `finalize(c,v)`. If `u = v`,
+//! this is impossible outright: no honest participant votes both `nullify` and `finalize` in a
+//! single view. If `u < v`, the gate means that participant first observed a same-term
+//! finalization at some `v*` with `u <= v* < v`: at or above `u` because the gate requires
+//! covering its highest `nullify` vote, and below `v` because participants only vote `finalize`
+//! for views above their highest observed finalization. Applying this same argument to the
+//! finalization at `v*` shows, by induction, that no nullification can form at or below `v*`,
+//! contradicting the nullification at `u <= v*`.
+//!
+//! The gate also recovers from a `nullify` vote that never became a nullification (e.g., a
+//! transient timeout on an otherwise healthy network): by the invariant, an observed same-term
+//! finalization at or above the vote proves the nullification can never form, so the vote is
+//! inert and the gate reopens ("heals"). This prevents one transient timeout from degrading the
+//! rest of the term. In a healthy network this takes one view: peers broadcast `finalize(v)` when
+//! they certify `v`, so the finalization for `v` typically arrives shortly after entering `v+1`.
+//!
+//! Healing does not proactively revisit earlier views: a `finalize` vote for a view certified
+//! while the gate was blocked is only emitted if a later message (such as a redelivered
+//! notarization) touches that view again. If more than `f` participants were blocked, that view may never
+//! gather its own finalization certificate, and neither may any later view in the term (healing
+//! itself requires a same-term finalization, which cannot assemble while more than `f`
+//! participants withhold `finalize`). Such a view is either finalized transitively by the
+//! finalization of a descendant in a later term or skipped entirely by a covering nullification:
+//! the timeouts that blocked the gate also mean forced inclusion does not apply to it.
 //!
 //! ### Optimistic Finality
 //!
 //! The forced inclusion property provides a weaker but faster form of finality: once a
-//! notarization certificate is observed for view `v` (without any timeout having fired),
-//! the notarized payload can be treated as speculatively final. No future sequence of
-//! proposals can exclude it from the canonical chain.
+//! notarization certificate is observed for view `v` (without any timeout having fired at any
+//! view from `term_start(v)` through `v`), the notarized payload can be treated as speculatively
+//! final. No future sequence of proposals can exclude it from the canonical chain. When
+//! `term_length` is 1, this reduces to observing a notarization for `v` with no timeout at `v`.
 //!
 //! This "speculative finality" is available after just 2 network hops (proposal + notarization),
 //! compared to the 3 hops required for full finalization (proposal + notarization + finalization).
 //! A notarized-but-not-yet-finalized payload can only be excluded in two scenarios:
-//! `f+1` or more honest participants timed out, or certification failed. Because
-//! certification is deterministic, it either fails for all honest participants or none,
-//! so a certification failure always produces a nullification. In the common case
-//! (no faults, no timeouts), exclusion cannot happen.
+//! `f+1` or more honest participants timed out at a single view of the term prefix
+//! `[term_start(v), v]`, or certification failed at one of those views. Because certification is
+//! deterministic, it either
+//! fails for all honest participants or none, so a certification failure always produces a
+//! nullification. In the common case (no faults, no timeouts), exclusion cannot happen.
 //!
 //! ### Unchained Finalization
 //!
@@ -346,7 +407,7 @@ pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use crate::types::{Round, View, ViewDelta};
+        use crate::types::{Round, TermLength, View, ViewDelta};
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
 
@@ -357,32 +418,49 @@ cfg_if::cfg_if! {
         pub use engine::Engine;
         mod metrics;
 
-        /// The minimum view we are tracking both in-memory and on-disk.
-        pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
-            last_finalized.saturating_sub(activity_timeout)
+        /// The window of views an actor tracks, bounded below by retention
+        /// and above by admission policy.
+        #[derive(Clone, Copy)]
+        pub(crate) struct Viewport {
+            /// Highest finalized view observed.
+            pub finalized: View,
+            /// View currently being driven.
+            pub current: View,
+            /// Views retained below `finalized` (for reporting and backfill).
+            pub activity_timeout: ViewDelta,
+            /// Number of views in each leader term.
+            pub term_length: TermLength,
         }
 
-        /// Whether or not a view is interesting to us. This is a function
-        /// of both `min_active` and whether or not the view is too far
-        /// in the future (based on the view we are currently in).
-        pub(crate) fn interesting(
-            activity_timeout: ViewDelta,
-            last_finalized: View,
-            current: View,
-            pending: View,
-            allow_future: bool,
-        ) -> bool {
-            // If the view is genesis, skip it, genesis doesn't have votes
-            if pending.is_zero() {
-                return false;
+        impl Viewport {
+            /// Returns the lowest view retained (genesis is never tracked).
+            pub const fn floor(&self) -> View {
+                self.finalized.saturating_sub(self.activity_timeout)
             }
-            if pending < min_active(activity_timeout, last_finalized) {
-                return false;
+
+            /// Returns whether `view` is retained: at or above the activity
+            /// floor and not genesis. Views up to `activity_timeout` below
+            /// `finalized` are kept so late votes are still reported (even
+            /// when no longer needed for progress).
+            pub const fn retains(&self, view: View) -> bool {
+                !view.is_zero() && view.get() >= self.floor().get()
             }
-            if !allow_future && pending > current.next() {
-                return false;
+
+            /// Returns whether a vote at `view` is tracked: retained and no
+            /// further ahead than the next view or the first view of the next
+            /// term, bounding memory committed to unverified votes (see
+            /// [`View::admits`]).
+            pub const fn admits_vote(&self, view: View) -> bool {
+                self.retains(view) && self.current.admits(view, self.term_length)
             }
-            true
+
+            /// Returns whether a certificate at `view` is tracked: certificates
+            /// are self-certifying and may arrive from arbitrarily far ahead
+            /// (letting a lagging participant fast-forward), so only retention
+            /// bounds them.
+            pub const fn admits_certificate(&self, view: View) -> bool {
+                self.retains(view)
+            }
         }
 
         /// Describes how a payload should be broadcast to the network.
@@ -431,7 +509,7 @@ mod tests {
     use crate::{
         Monitor, Viewable,
         simplex::{
-            elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
+            elector::{self, Config as _, Elector as _, Random, RoundRobin},
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -451,7 +529,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Participant, Round},
+        types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -473,7 +551,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -505,7 +583,7 @@ mod tests {
 
     // Generate one `#[test_group("slow")] #[test_traced]` test per canonical
     // (elector, scheme) fixture, named `test_<callee>_<suffix>`. The helper takes
-    // the elector as its third generic parameter.
+    // the elector config type as its third generic parameter.
     //
     // Supported forms:
     //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
@@ -554,91 +632,6 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    #[test]
-    fn test_interesting() {
-        let activity_timeout = ViewDelta::new(10);
-
-        // Genesis view is never interesting
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::zero(),
-            View::zero(),
-            false
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(1),
-            View::zero(),
-            true
-        ));
-
-        // View below min_active is not interesting
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(5), // below min_active (10)
-            false
-        ));
-
-        // View at min_active boundary is interesting
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(10), // exactly min_active
-            false
-        ));
-
-        // Future view beyond current.next() is not interesting when allow_future is false
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false
-        ));
-
-        // Future view beyond current.next() is interesting when allow_future is true
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            true
-        ));
-
-        // View at current.next() is interesting
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(26),
-            false
-        ));
-
-        // View within valid range is interesting
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(22),
-            false
-        ));
-
-        // When last_finalized is 0 and activity_timeout would underflow
-        // min_active saturates at 0, so view 1 should still be interesting
-        assert!(interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(5),
-            View::new(1),
-            false
-        ));
-    }
 
     /// Register a validator with the oracle.
     async fn register_validator(
@@ -820,7 +813,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
         T: Strategy,
     {
         // Create context
@@ -828,7 +821,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1060,11 +1053,20 @@ mod tests {
         });
     }
 
-    fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
+    fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
+    {
+        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(L::default(), fixture);
+    }
+
+    fn non_genesis_floor_joiner_catches_tip_with_term<S, F, L>(elector: L, mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
     {
         // First let a quorum finalize beyond genesis so the joiner has a real
         // floor certificate and existing tip to catch.
@@ -1072,7 +1074,8 @@ mod tests {
         let active_count = quorum(n) as usize;
         let initial_tip_target = View::new(15);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
+        let timeout_retry = Duration::from_secs(1);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1096,7 +1099,11 @@ mod tests {
             };
             link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
 
-            let elector = L::default();
+            let term_length = elector
+                .clone()
+                .build(schemes[0].participants())
+                .terms()
+                .length();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1148,7 +1155,7 @@ mod tests {
                     )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
-                    timeout_retry: Duration::from_secs(10),
+                    timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
@@ -1189,17 +1196,31 @@ mod tests {
                 .min()
                 .expect("initial validators missing");
 
+            // Prefer a mid-term floor to exercise startup term arithmetic; at
+            // term_length 1 every view is a term start, so fall back to the
+            // minimum eligible view.
             let (floor_view, floor_finalization) = {
                 let finalizations = reporters[0].finalizations.lock();
-                finalizations
+                let mut eligible: Vec<_> = finalizations
                     .iter()
                     .filter(|(view, _)| **view > View::zero() && **view < tip_at_join)
-                    .min_by_key(|(view, _)| view.get())
-                    .map(|(view, finalization)| (*view, finalization.clone()))
+                    .collect();
+                eligible.sort_by_key(|(view, _)| view.get());
+                eligible
+                    .iter()
+                    .find(|(view, _)| !view.is_term_start(term_length))
+                    .or_else(|| eligible.first())
+                    .map(|(view, finalization)| (**view, (*finalization).clone()))
                     .expect("non-genesis floor finalization missing")
             };
             assert!(floor_view > View::zero());
             assert!(floor_view < tip_at_join);
+            if term_length.get() > 1 {
+                assert!(
+                    !floor_view.is_term_start(term_length),
+                    "expected a mid-term floor at view {floor_view}"
+                );
+            }
 
             // Start the extra validator from the non-genesis floor and require
             // it to catch both the existing tip and later cluster progress.
@@ -1255,7 +1276,7 @@ mod tests {
                 floor: config::Floor::Finalized(floor_finalization),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(10),
+                timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
@@ -1291,6 +1312,15 @@ mod tests {
 
     test_for_all_fixtures!(non_genesis_floor_joiner_catches_tip);
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_non_genesis_floor_joiner_catches_tip_stable_leader() {
+        non_genesis_floor_joiner_catches_tip_with_term::<_, _, RoundRobin>(
+            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+            scheme_mocks::fixture,
+        );
+    }
+
     /// A dishonest leader (validator 0) proposes payloads that all honest peers
     /// refuse to certify.
     ///
@@ -1309,12 +1339,12 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        RoundRobin: Elector<S>,
+        RoundRobin: elector::Config<S>,
     {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1450,13 +1480,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n_active = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1603,13 +1633,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -1704,9 +1734,11 @@ mod tests {
                         floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
-                        leader_timeout: Duration::from_secs(1),
-                        certification_timeout: Duration::from_secs(2),
-                        timeout_retry: Duration::from_secs(10),
+                        // Keep the progress timeouts and the timeout retry short to allow for quick
+                        // timeouts upon restart.
+                        leader_timeout: Duration::from_millis(500),
+                        certification_timeout: Duration::from_secs(1),
+                        timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
@@ -1791,13 +1823,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
@@ -2036,18 +2068,27 @@ mod tests {
 
     test_for_all_fixtures!(backfill);
 
-    fn one_offline<S, F, L>(mut fixture: F)
+    fn one_offline<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
+    {
+        one_offline_with_term::<S, F, L>(L::default(), fixture);
+    }
+
+    fn one_offline_with_term<S, F, L>(elector: L, mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -2078,7 +2119,6 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2264,17 +2304,26 @@ mod tests {
 
     test_for_all_fixtures!(one_offline);
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_one_offline_stable_leader() {
+        one_offline_with_term::<_, _, RoundRobin>(
+            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+            scheme_mocks::fixture,
+        );
+    }
+
     fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -2442,13 +2491,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(2);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
@@ -2615,7 +2664,10 @@ mod tests {
                             found += 1;
                         }
                     }
-                    let tolerated_missing = skip_timeout.get().saturating_add(1);
+                    // A few views may still nullify while lagging validators
+                    // catch up after relinking, but a working skip timeout
+                    // bounds that to a handful of views, not the viewport.
+                    let tolerated_missing = 3;
                     assert!(
                         found >= activity_timeout.get().saturating_sub(tolerated_missing),
                         "found: {found}"
@@ -2635,13 +2687,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(3600));
         executor.start(|mut context| async move {
@@ -2871,13 +2923,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 10;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -3050,13 +3102,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3191,7 +3243,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         slow_and_lossy_links_seeded::<_, _, L>(6, fixture)
     }
@@ -3202,7 +3254,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -3241,13 +3293,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3407,13 +3459,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3573,12 +3625,12 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 4;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(0)
@@ -3740,7 +3792,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 4;
         let epoch = Epoch::new(333);
@@ -3859,7 +3911,7 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3881,13 +3933,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4031,13 +4083,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 7;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4268,7 +4320,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let detected = (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture));
         assert!(
@@ -4283,13 +4335,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4432,13 +4484,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4594,17 +4646,17 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
+            .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Register participants
@@ -4736,13 +4788,13 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 10;
         let required_containers = View::new(1_000);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -4873,7 +4925,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 1;
         let namespace = b"consensus".to_vec();
@@ -4943,7 +4995,7 @@ mod tests {
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
-                skip_timeout: ViewDelta::new(2),
+                skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
@@ -5005,7 +5057,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, false);
     }
@@ -5016,7 +5068,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, true);
     }
@@ -5027,12 +5079,12 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 3;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -5211,7 +5263,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -5246,7 +5298,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -5452,7 +5504,7 @@ mod tests {
                             Epoch::new(333),
                         )),
                         leader_timeout: Duration::from_secs(10),
-                        certification_timeout: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(11),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
@@ -5574,13 +5626,13 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
+        L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
         let activity_timeout = ViewDelta::new(100);
-        let skip_timeout = ViewDelta::new(50);
+        let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Register participants
@@ -5720,17 +5772,18 @@ mod tests {
         seed: u64,
         shutdowns: usize,
         interval: ViewDelta,
+        elector: L,
         mut fixture: F,
     ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
@@ -5755,7 +5808,6 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
@@ -6035,15 +6087,38 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         assert_eq!(
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), fixture),
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
         );
     }
 
     test_for_all_fixtures!(hailstorm);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_stable_leader_ed25519() {
+        assert_eq!(
+            run_hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                RoundRobin::default()
+                    .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+                ed25519::fixture
+            ),
+            run_hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                RoundRobin::default()
+                    .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+                ed25519::fixture
+            )
+        );
+    }
 
     /// Configuration for a Twins testing campaign.
     ///
@@ -6093,12 +6168,13 @@ mod tests {
     fn twins_campaign<S, F, L>(
         rng: &mut impl CryptoRng,
         campaign: TwinsCampaign,
+        elector: L,
         link: Link,
         mut fixture: F,
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
@@ -6126,10 +6202,11 @@ mod tests {
             );
 
             let activity_timeout = ViewDelta::new(10);
-            let skip_timeout = ViewDelta::new(5);
+            let skip_timeout = Duration::from_secs(11);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
+            let elector = elector.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
@@ -6150,7 +6227,19 @@ mod tests {
                 let mut registrations = register_validators(&mut oracle, &participants).await;
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-                let elector = TwinsElector::new(L::default(), &scenario, n as usize);
+                // The elector is the single source of the term structure:
+                // twin routing derives its term length from the built elector,
+                // the same way the engine does.
+                let term_length = elector
+                    .clone()
+                    .build(schemes[0].participants())
+                    .terms()
+                    .length();
+                let elector = TwinsElector::new(
+                    elector.clone(),
+                    &scenario,
+                    n as usize,
+                );
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
@@ -6173,7 +6262,7 @@ mod tests {
                         move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                             let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                             let (primary, secondary) =
-                                scenario.partitions(msg.view(), participants.as_ref());
+                                scenario.partitions(msg.view(), term_length, participants.as_ref());
                             match origin {
                                 SplitOrigin::Primary => Some(Recipients::Some(primary)),
                                 SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -6188,7 +6277,7 @@ mod tests {
                             let msg: Certificate<S, D> =
                                 Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                             let (primary, secondary) =
-                                scenario.partitions(msg.view(), participants.as_ref());
+                                scenario.partitions(msg.view(), term_length, participants.as_ref());
                             match origin {
                                 SplitOrigin::Primary => Some(Recipients::Some(primary)),
                                 SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -6200,7 +6289,7 @@ mod tests {
                         let scenario = scenario.clone();
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                            scenario.route(msg.view(), sender, participants.as_ref())
+                            scenario.route(msg.view(), term_length, sender, participants.as_ref())
                         }
                     };
                     let make_certificate_router = || {
@@ -6210,7 +6299,7 @@ mod tests {
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Certificate<S, D> =
                                 Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                            scenario.route(msg.view(), sender, participants.as_ref())
+                            scenario.route(msg.view(), term_length, sender, participants.as_ref())
                         }
                     };
                     let (vote_sender_primary, vote_sender_secondary) =
@@ -6396,7 +6485,10 @@ mod tests {
                 //
                 // Twin halves are Byzantine test machinery and are not required to
                 // make progress for the campaign to establish honest-node liveness.
-                let prefix_end = View::new(scenario.rounds().len() as u64);
+                //
+                // Each scripted round drives one full leader term, so the
+                // adversarial prefix spans `rounds * term_length` views.
+                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
@@ -6438,21 +6530,21 @@ mod tests {
                 }
 
                 // Ensure no honest signer appears under multiple payloads for the same view.
-                let twin_identities: HashSet<_> = twin_indices
+                let twin_keys: HashSet<_> = twin_indices
                     .iter()
                     .map(|idx| participants[*idx].clone())
                     .collect();
-                let mut notarized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                let mut notarized_by_signer: BTreeMap<View, HashMap<PublicKey, D>> =
                     BTreeMap::new();
-                let mut finalized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                let mut finalized_by_signer: BTreeMap<View, HashMap<PublicKey, D>> =
                     BTreeMap::new();
                 for reporter in reporters.iter().skip(honest_start) {
                     let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
-                        let signers = notarized_by_honest_signer.entry(*view).or_default();
+                        let signers = notarized_by_signer.entry(*view).or_default();
                         for (digest, payload_signers) in payloads.iter() {
                             for signer in payload_signers.iter() {
-                                if twin_identities.contains(signer) {
+                                if twin_keys.contains(signer) {
                                     continue;
                                 }
                                 if let Some(existing) = signers.insert(signer.clone(), *digest) {
@@ -6467,10 +6559,10 @@ mod tests {
 
                     let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
-                        let signers = finalized_by_honest_signer.entry(*view).or_default();
+                        let signers = finalized_by_signer.entry(*view).or_default();
                         for (digest, payload_signers) in payloads.iter() {
                             for signer in payload_signers.iter() {
-                                if twin_identities.contains(signer) {
+                                if twin_keys.contains(signer) {
                                     continue;
                                 }
                                 if let Some(existing) = signers.insert(signer.clone(), *digest) {
@@ -6489,7 +6581,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     for faulter in faults.keys() {
                         assert!(
-                            twin_identities.contains(faulter),
+                            twin_keys.contains(faulter),
                             "fault from non-twin participant"
                         );
                     }
@@ -6498,7 +6590,7 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 for (_, faulter) in blocked {
                     assert!(
-                        twin_identities.contains(&faulter),
+                        twin_keys.contains(&faulter),
                         "blocked peer attributed to non-twin participant"
                     );
                 }
@@ -6520,33 +6612,8 @@ mod tests {
         success_rate: 1.0,
     };
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_sampled() {
-        for link in [
-            Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(10),
-                success_rate: 1.0,
-            },
-            TWINS_LINK,
-        ] {
-            twins_campaign::<_, _, RoundRobin>(
-                &mut test_rng(),
-                TWINS_CAMPAIGN,
-                link,
-                scheme_mocks::fixture,
-            );
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_twins_sustained() {
-        let campaign = TwinsCampaign {
-            mode: twins::Mode::Sustained,
-            ..TWINS_CAMPAIGN
-        };
+    /// Runs `campaign` with `elector` over a fast link and the slow [TWINS_LINK].
+    fn twins_campaign_all_links(campaign: TwinsCampaign, elector: RoundRobin) {
         for link in [
             Link {
                 latency: Duration::from_millis(10),
@@ -6558,10 +6625,38 @@ mod tests {
             twins_campaign::<_, _, RoundRobin>(
                 &mut test_rng(),
                 campaign,
+                elector.clone(),
                 link,
                 scheme_mocks::fixture,
             );
         }
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_sampled() {
+        twins_campaign_all_links(TWINS_CAMPAIGN, RoundRobin::default());
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_sustained() {
+        twins_campaign_all_links(
+            TwinsCampaign {
+                mode: twins::Mode::Sustained,
+                ..TWINS_CAMPAIGN
+            },
+            RoundRobin::default(),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_stable_leader() {
+        twins_campaign_all_links(
+            TWINS_CAMPAIGN,
+            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+        );
     }
 
     #[test_group("slow")]
@@ -6575,6 +6670,7 @@ mod tests {
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),
             campaign,
+            RoundRobin::default(),
             TWINS_LINK,
             scheme_mocks::fixture,
         );
@@ -6592,6 +6688,7 @@ mod tests {
         twins_campaign::<_, _, RoundRobin>(
             &mut test_rng(),
             campaign,
+            RoundRobin::default(),
             TWINS_LINK,
             scheme_mocks::fixture,
         );
@@ -6601,10 +6698,48 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
-        twins_campaign::<_, _, L>(&mut test_rng(), TWINS_CAMPAIGN, TWINS_LINK, fixture);
+        twins_campaign::<_, _, L>(
+            &mut test_rng(),
+            TWINS_CAMPAIGN,
+            L::default(),
+            TWINS_LINK,
+            fixture,
+        );
     }
 
     test_for_all_fixtures!(twins, level = "INFO");
+
+    #[test]
+    fn test_viewport() {
+        let viewport = Viewport {
+            finalized: View::new(20),
+            current: View::new(25),
+            activity_timeout: ViewDelta::new(10),
+            term_length: TermLength::new(commonware_utils::NZU32!(10)),
+        };
+
+        // Genesis is never tracked
+        assert!(!viewport.retains(View::zero()));
+
+        // Retention floor is activity_timeout below finalized
+        assert_eq!(viewport.floor(), View::new(10));
+        assert!(!viewport.retains(View::new(9)));
+        assert!(viewport.retains(View::new(10)));
+
+        // Votes are admitted up to the next view or the next term start
+        assert!(viewport.admits_vote(View::new(10)));
+        assert!(viewport.admits_vote(View::new(25)));
+        assert!(viewport.admits_vote(View::new(26)));
+        assert!(viewport.admits_vote(View::new(31)));
+        assert!(!viewport.admits_vote(View::new(5)));
+        assert!(!viewport.admits_vote(View::new(27)));
+        assert!(!viewport.admits_vote(View::new(34)));
+
+        // Certificates are admitted from arbitrarily far ahead but still
+        // respect the retention floor
+        assert!(!viewport.admits_certificate(View::new(9)));
+        assert!(viewport.admits_certificate(View::new(10_000)));
+    }
 }

@@ -1,7 +1,7 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
-    elector::Config as Elector,
+    elector::{self, Elector as _},
     types::{Activity, Context},
 };
 use crate::{
@@ -22,7 +22,7 @@ use tracing::debug;
 pub struct Engine<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -32,7 +32,7 @@ pub struct Engine<
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, L, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L::Elector, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, S, B, D, F, R, T>,
@@ -45,7 +45,7 @@ pub struct Engine<
 impl<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -58,6 +58,15 @@ impl<
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert(&mut context);
+        let elector = cfg.elector.build(cfg.scheme.participants());
+        let terms = elector.terms();
+        let term_length = terms.length();
+        if let Some(stall_timeout) = terms.stall_timeout() {
+            assert!(
+                stall_timeout > cfg.certification_timeout,
+                "stall timeout must be greater than certification timeout"
+            );
+        }
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(
@@ -72,7 +81,9 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                term_length,
                 forwarding: cfg.forwarding,
+                floor: cfg.floor.view(),
             },
         );
 
@@ -81,7 +92,7 @@ impl<
             context.child("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
-                elector: cfg.elector,
+                elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -111,6 +122,7 @@ impl<
                 epoch: cfg.epoch,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
+                term_length,
             },
         );
 

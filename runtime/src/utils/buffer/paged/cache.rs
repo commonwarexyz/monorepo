@@ -399,7 +399,7 @@ impl CacheRef {
         fetch_guard.disarm();
         let page_buf = match fetch_result {
             Ok(page_buf) => page_buf,
-            Err(_) => return Err(Error::ReadFailed),
+            Err(err) => return Err(err.as_ref().clone()),
         };
 
         // Copy the requested portion of the page into the buffer.

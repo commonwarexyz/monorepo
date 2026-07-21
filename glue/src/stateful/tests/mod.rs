@@ -542,13 +542,27 @@ where
 
     PlanBuilder::new(engine)
         .seeds(0..5)
+        // Slow the links so views take long enough that the run spans many
+        // full-cluster outages before reaching the exit height.
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::from_millis(5),
+            success_rate: 1.0,
+        })
         .crash(Crash::Random {
-            frequency: Duration::from_millis(1750),
+            // A full-cluster crash discards all in-flight votes, and a
+            // restarted node that replayed its own proposal waits out the
+            // full certification_timeout before nullifying. Keep frequency -
+            // downtime comfortably above certification_timeout (plus replay
+            // and vote exchange) so the cluster can assemble a certificate
+            // between outages; otherwise the run livelocks, never completing
+            // a view.
+            frequency: Duration::from_millis(5000),
             downtime: Duration::from_millis(500),
             count: total,
         })
-        .exit_condition(ProcessedHeightAtLeast::new(100))
-        .property(BlockAgreementAtHeight::new(100))
+        .exit_condition(ProcessedHeightAtLeast::new(300))
+        .property(BlockAgreementAtHeight::new(300))
         .run()
         .unwrap();
 }
