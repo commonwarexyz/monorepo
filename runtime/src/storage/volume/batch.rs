@@ -57,9 +57,7 @@ use super::{
     commit,
     paging::CrcMemo,
     resize::{read_frontier, FrontierCrc, FrontierRead},
-    state::{
-        check_floor, BlobCore, BlobInner, HandleTracker, Ready, Shared, StagedBlob, StagedRun,
-    },
+    state::{check_floor, BlobCore, BlobInner, Ready, Shared, StagedBlob, StagedRun},
     write::stage_write,
     Blob, BLOCK,
 };
@@ -123,7 +121,7 @@ impl<S: crate::Storage> Batch<S> {
         // ids are per-volume counters, so a foreign blob would silently
         // cross-wire two volumes' allocator, file, and group state.
         assert!(
-            Arc::ptr_eq(&self.ready, &blob.ready),
+            Arc::ptr_eq(&self.ready, blob.ready()),
             "blob belongs to a different volume"
         );
         self.staged.entry(blob.core.id).or_insert_with(|| {
@@ -486,35 +484,27 @@ impl<S: crate::Storage> Batch<S> {
     pub fn create(&mut self, partition: &str, name: &[u8]) -> Result<Blob<S>, Error> {
         super::super::validate_partition_name(partition)?;
         self.ready.check_poisoned()?;
-        let (id, core) = {
+        let core = {
             let mut state = self.ready.state.lock();
             let id = state.reserve_blob_id();
             // Register the handle count now so the returned handle's tracker
             // works whether or not the batch ever applies.
             state.count_handle(id);
-            let core = Arc::new(BlobCore {
+            Arc::new(BlobCore {
                 id,
                 partition: partition.into(),
                 name: name.to_vec(),
                 version: DEFAULT_BLOB_VERSION,
                 write_lock: AsyncMutex::new(()),
                 inner: Mutex::new(BlobInner::default()),
-            });
-            (id, core)
+            })
         };
         self.creations.push(Creation {
             partition: partition.into(),
             name: name.to_vec(),
             core: core.clone(),
         });
-        Ok(Blob {
-            ready: self.ready.clone(),
-            core,
-            _tracker: Arc::new(HandleTracker {
-                ready: self.ready.clone(),
-                id,
-            }),
-        })
+        Ok(Blob::from_counted(core, self.ready.clone()))
     }
 
     /// Publish the staged state: pure RAM, under the commit lock, O(ops).

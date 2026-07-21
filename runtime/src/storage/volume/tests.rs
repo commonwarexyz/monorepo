@@ -4075,7 +4075,7 @@ async fn test_volume_checksum_page_rechecks_ref_after_commit_swap() {
 
     gated.read_gate.arm();
     let loader = tokio::spawn({
-        let ready = blob.ready.clone();
+        let ready = blob.ready().clone();
         let core = blob.core.clone();
         async move { super::paging::load_committed_page(&ready, &core, 0).await }
     });
@@ -5061,7 +5061,7 @@ async fn test_volume_resize_trim_detects_rot() {
     // file handle (memory blobs are per-handle copies: the volume's handle
     // must see the rot).
     let phys = blob.core.inner.lock().runs().get(&0).unwrap().physical;
-    blob.ready
+    blob.ready()
         .file
         .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
         .await
@@ -5103,7 +5103,7 @@ async fn test_volume_batch_resize_trim_detects_rot() {
         .unwrap();
     let (blob, _) = volume.open("p", b"rot").await.unwrap();
     let phys = blob.core.inner.lock().runs().get(&0).unwrap().physical;
-    blob.ready
+    blob.ready()
         .file
         .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
         .await
@@ -5135,7 +5135,7 @@ async fn test_volume_inplace_gap_write_detects_rot() {
         .await
         .unwrap();
     let phys = blob.core.inner.lock().runs().get(&0).unwrap().physical;
-    blob.ready
+    blob.ready()
         .file
         .write_at(phys + 50, IoBuf::copy_from_slice(&[0xFF]))
         .await

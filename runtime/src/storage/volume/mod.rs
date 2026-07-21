@@ -412,18 +412,32 @@ impl<S: crate::Storage> Storage<S> {
 
 /// A handle to a blob stored in a volume.
 pub struct Blob<S: crate::Storage> {
-    ready: Arc<Ready<S>>,
     core: Arc<BlobCore>,
-    _tracker: Arc<HandleTracker<S>>,
+    tracker: Arc<HandleTracker<S>>,
 }
 
 impl<S: crate::Storage> Clone for Blob<S> {
     fn clone(&self) -> Self {
         Self {
-            ready: self.ready.clone(),
             core: self.core.clone(),
-            _tracker: self._tracker.clone(),
+            tracker: self.tracker.clone(),
         }
+    }
+}
+
+impl<S: crate::Storage> Blob<S> {
+    /// Bind a core whose handle count was already incremented to its tracker.
+    fn from_counted(core: Arc<BlobCore>, ready: Arc<Ready<S>>) -> Self {
+        let id = core.id;
+        Self {
+            core,
+            tracker: Arc::new(HandleTracker { ready, id }),
+        }
+    }
+
+    /// The volume this handle belongs to, owned by its handle tracker.
+    fn ready(&self) -> &Arc<Ready<S>> {
+        &self.tracker.ready
     }
 }
 
@@ -606,31 +620,16 @@ async fn open_known<S: crate::Storage>(
         let size = core.inner.lock().size();
         (core, size)
     };
-    if !versions.contains(&core.version) {
-        // Not a match: release the handle we just took.
-        drop(HandleTracker {
-            ready: ready.clone(),
-            id,
-        });
+    let blob = Blob::from_counted(core, ready.clone());
+    if !versions.contains(&blob.core.version) {
+        // Not a match: dropping the bound handle releases the count above.
         return Err(Error::BlobVersionMismatch {
             expected: versions,
-            found: core.version,
+            found: blob.core.version,
         });
     }
-    let version = core.version;
-    let tracker = Arc::new(HandleTracker {
-        ready: ready.clone(),
-        id,
-    });
-    Ok((
-        Blob {
-            ready: ready.clone(),
-            core,
-            _tracker: tracker,
-        },
-        size,
-        version,
-    ))
+    let version = blob.core.version;
+    Ok((blob, size, version))
 }
 
 /// Create a new empty blob: assign an id, publish the name, and make the
@@ -659,10 +658,7 @@ async fn create_blob<S: crate::Storage>(
     };
     // Track the counted handle before the first await so cancellation of the
     // caller cannot strand a phantom handle and indefinitely gate recycling.
-    let tracker = Arc::new(HandleTracker {
-        ready: ready.clone(),
-        id,
-    });
+    let blob = Blob::from_counted(core, ready.clone());
     // Publishing the name is a mutation boundary. If the observer vanishes
     // before the independent commit driver resolves, the namespace lock is
     // released and another caller could otherwise observe an unconfirmed
@@ -674,20 +670,12 @@ async fn create_blob<S: crate::Storage>(
     let result = commit::commit(ready, &[id]).await;
     guard.disarm();
     result?;
-    Ok((
-        Blob {
-            ready: ready.clone(),
-            core,
-            _tracker: tracker,
-        },
-        0,
-        version,
-    ))
+    Ok((blob, 0, version))
 }
 
 impl<S: crate::Storage> crate::Blob for Blob<S> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        read::read_verified(&self.ready, &self.core, offset, len, None).await
+        read::read_verified(self.ready(), &self.core, offset, len, None).await
     }
 
     async fn read_at_buf(
@@ -696,13 +684,13 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        read::read_verified(&self.ready, &self.core, offset, len, Some(bufs.into())).await
+        read::read_verified(self.ready(), &self.core, offset, len, Some(bufs.into())).await
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let data = bufs.into().coalesce();
         let _guard = self.core.write_lock.lock().await;
-        write::write_locked(&self.ready, &self.core, offset, data).await
+        write::write_locked(self.ready(), &self.core, offset, data).await
     }
 
     async fn write_at_sync(
@@ -716,7 +704,7 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
 
     async fn prune(&self, offset: u64) -> Result<(), Error> {
         let _write = self.core.write_lock.lock().await;
-        prune::prune_locked(&self.ready, &self.core, offset)
+        prune::prune_locked(self.ready(), &self.core, offset)
     }
 
     fn floor(&self) -> u64 {
@@ -725,11 +713,11 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let _guard = self.core.write_lock.lock().await;
-        resize::resize_locked(&self.ready, &self.core, len).await
+        resize::resize_locked(self.ready(), &self.core, len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        commit::commit(&self.ready, &[self.core.id]).await
+        commit::commit(self.ready(), &[self.core.id]).await
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -741,7 +729,7 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
         // and dropping or parking it is always benign. A failure is
         // reported through the handle AND the poison latch, so even an
         // unobserved handle cannot hide one.
-        let ticket = commit::request(&self.ready, &[self.core.id]);
+        let ticket = commit::request(self.ready(), &[self.core.id]);
         Handle::from_future(async move { ticket.wait().await })
     }
 }
