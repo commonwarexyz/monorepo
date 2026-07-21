@@ -283,4 +283,21 @@ where
     ) -> impl Future<Output = ()> + Send {
         async {}
     }
+
+    /// Warm the page cache for a block's access set before its state pipeline runs.
+    ///
+    /// Called best-effort by the wrapper on a detached task as soon as a candidate block is
+    /// known, so warming overlaps the rest of verification and stays off the block's critical
+    /// path. Implementations extract the block's touched keys and call `Db::prefetch` on the
+    /// relevant databases; the default does nothing.
+    ///
+    /// Must be safe to run speculatively and to drop mid-flight: a losing fork's task is simply
+    /// abandoned, and `Db::prefetch` never mutates durable state.
+    fn prefetch(
+        &self,
+        _block: &Self::Block,
+        _databases: &Self::Databases,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }

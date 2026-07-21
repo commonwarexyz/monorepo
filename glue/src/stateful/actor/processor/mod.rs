@@ -420,6 +420,19 @@ where
             }
         }
 
+        // Warm this block's access set into the page cache on a detached task, overlapping the
+        // rest of verification (prepare_batches + app.verify) so cold reads land off the critical
+        // path. Best-effort and drop-safe: prefetch never mutates durable state, so an abandoned
+        // task (e.g. a losing fork) is harmless. The app supplies the keys; the default is a no-op.
+        {
+            let app = self.app.clone();
+            let databases = self.databases.clone();
+            let block = block.clone();
+            let _ = context
+                .child("prefetch")
+                .spawn(move |_| async move { app.prefetch(&block, &databases).await });
+        }
+
         let round = consensus_context.round();
         let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
