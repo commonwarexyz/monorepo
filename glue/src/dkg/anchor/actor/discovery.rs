@@ -180,11 +180,14 @@ where
             context: self.context,
             mailbox: self.mailbox,
             marshal: marshal.expect("serving requires attached marshal"),
+            verifier: self.verifier,
+            strategy: self.strategy,
             blocker: self.blocker,
             epocher: self.epocher,
             artifact: self.artifact,
+            latest: None,
         }
-        .run(boundary_sender, boundary_receiver)
+        .run(certificate_receiver, boundary_sender, boundary_receiver)
         .await;
     }
 

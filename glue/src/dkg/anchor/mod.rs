@@ -86,6 +86,18 @@
 //! ```
 //!
 //! An epoch with no known boundary block is answered with nothing.
+//!
+//! While serving, the actor also keeps consuming the Simplex certificate backup channel and
+//! forwards strictly-newer finalizations that verify under the all-epoch verifier to marshal:
+//!
+//! ```text
+//!   peer --Finalization--> Actor --verify (all-epoch)--> marshal
+//! ```
+//!
+//! The backup channel only carries certificates for epochs without a registered consensus
+//! engine, so this forwarding is what keeps marshal's delivery advancing while the node follows
+//! an epoch whose public info it has not learned yet (e.g., after a state-sync bootstrap that
+//! crossed an epoch boundary between anchor and probe).
 
 use crate::dkg::{ReshareBlock, types::EpochInfo};
 use commonware_consensus::{
