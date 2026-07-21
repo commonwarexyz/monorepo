@@ -77,16 +77,14 @@ enum EpochState {
     /// No Simplex engine is running because the epoch's public info is not
     /// available yet. The actor waits for the finalized boundary block of
     /// `epoch` to introduce the first epoch it can enter.
-    AwaitBoundary {
-        epoch: Epoch,
-    },
+    AwaitBoundary(Epoch),
     Active(ActiveEpoch),
 }
 
 impl EpochState {
     const fn epoch(&self) -> Epoch {
         match self {
-            Self::AwaitBoundary { epoch } => *epoch,
+            Self::AwaitBoundary(epoch) => *epoch,
             Self::Active(active) => active.epoch,
         }
     }
@@ -121,7 +119,7 @@ where
     Epoch(Box<ResolvedStart<S, D, V, P>>),
     /// The state-sync floor is beyond the newest known epoch info, so no
     /// engine can start until the boundary block of `epoch` finalizes.
-    AwaitBoundary { epoch: Epoch },
+    AwaitBoundary(Epoch),
 }
 
 /// Simplex configuration applied to each epoch engine.
@@ -405,7 +403,7 @@ where
                     }
                 }
             }
-            StartState::AwaitBoundary { epoch } => EpochState::AwaitBoundary { epoch },
+            StartState::AwaitBoundary(epoch) => EpochState::AwaitBoundary(epoch),
         };
 
         select_loop! {
@@ -493,7 +491,7 @@ where
                     floor = %floor_epoch,
                     "state-sync floor beyond synced epoch, awaiting next boundary"
                 );
-                return Some(StartState::AwaitBoundary { epoch: floor_epoch });
+                return Some(StartState::AwaitBoundary(floor_epoch));
             }
             return Some(StartState::Epoch(Box::new(ResolvedStart {
                 epoch: state_sync.info.epoch,
