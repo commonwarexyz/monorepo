@@ -16,7 +16,7 @@ pub enum Message<S: Scheme, D: Digest> {
         current: View,
         leader: Participant,
         finalized: View,
-        forwardable_proposal: Option<Proposal<D>>,
+        certified_proposal: Option<Proposal<D>>,
     },
     /// A constructed vote (needed for quorum).
     Constructed(Vote<S, D>),
@@ -177,14 +177,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         current: View,
         leader: Participant,
         finalized: View,
-        forwardable_proposal: Option<Proposal<D>>,
+        certified_proposal: Option<Proposal<D>>,
     ) {
         let _ = self.sender.enqueue(Message::Update {
             span,
             current,
             leader,
             finalized,
-            forwardable_proposal,
+            certified_proposal,
         });
     }
 
@@ -246,7 +246,7 @@ mod tests {
             current,
             leader: Participant::new(0),
             finalized,
-            forwardable_proposal: None,
+            certified_proposal: None,
         }
     }
 

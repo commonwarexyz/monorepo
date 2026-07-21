@@ -764,6 +764,131 @@ pub(crate) mod test {
         });
     }
 
+    /// A multi-worker build's activity bitmap must match the serial build's bit for bit: over a
+    /// log with live keys and deletes (the workers' disjoint shares union), and over a log whose
+    /// keys were all deleted (every share empty, leaving only the final commit's bit).
+    #[test_traced("WARN")]
+    fn test_ordered_partitioned_parallel_init_bitmap_equivalence() {
+        deterministic::Runner::default().start(|context| async move {
+            use crate::{
+                journal::contiguous::Contiguous as _,
+                qmdb::{SnapshotBuild as _, operation::Operation as _},
+            };
+            use std::sync::Arc;
+
+            type BitmapDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+
+            /// Rebuild the snapshot from the persisted log serially and with workers, assert the
+            /// `(active_keys, bitmap)` results match, and return the bitmap.
+            async fn assert_builds_match(
+                context: &deterministic::Context,
+                label: &str,
+                expected_active: usize,
+            ) -> commonware_utils::bitmap::BitMap {
+                let mut results = Vec::new();
+                for concurrency in [1usize, 4] {
+                    let cfg =
+                        fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", context);
+                    let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                        context
+                            .child("log")
+                            .with_attribute("label", label)
+                            .with_attribute("concurrency", concurrency),
+                        cfg.journal_config,
+                    )
+                    .await
+                    .unwrap();
+                    let floor = crate::qmdb::find_inactivity_floor_at::<mmr::Family, _>(
+                        &log,
+                        Location::new(log.bounds().end),
+                        |op| op.has_floor(),
+                    )
+                    .await
+                    .unwrap();
+                    let log = Arc::new(log);
+                    let mut index =
+                        crate::index::partitioned::ordered::Index::<OneCap, Location, 1>::new(
+                            context
+                                .child("index")
+                                .with_attribute("label", label)
+                                .with_attribute("concurrency", concurrency),
+                            OneCap,
+                        );
+                    let result = index
+                        .build_snapshot(
+                            context
+                                .child("build")
+                                .with_attribute("label", label)
+                                .with_attribute("concurrency", concurrency),
+                            floor,
+                            &log,
+                            core::num::NonZeroUsize::new(concurrency).unwrap(),
+                            NZUsize!(1 << 21),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(result.0, expected_active, "{label}");
+                    results.push(result);
+                }
+                let parallel = results.pop().unwrap();
+                let serial = results.pop().unwrap();
+                assert_eq!(serial, parallel, "{label}");
+                parallel.1
+            }
+
+            // A log with live keys, updates, and deletes: the bitmap holds one bit per active
+            // key plus the final commit.
+            let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", &context);
+            let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0u64..200 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 7).to_be_bytes());
+                batch = batch.write(k, Some(v));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let mut batch = db.new_batch();
+            for i in (0u64..200).step_by(4) {
+                let k = Sha256::hash(&i.to_be_bytes());
+                batch = batch.write(k, None);
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+            let bitmap = assert_builds_match(&context, "live", 150).await;
+            assert_eq!(bitmap.count_ones(), 151); // 150 active keys + the final commit
+
+            // Delete every remaining key: all worker shares are empty and only the final
+            // commit's bit stays set.
+            let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", &context);
+            let db = BitmapDb::<Sequential>::init(context.child("wipe"), cfg)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0u64..200 {
+                if i % 4 != 0 {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    batch = batch.write(k, None);
+                }
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+            let bitmap = assert_builds_match(&context, "wiped", 0).await;
+            assert_eq!(bitmap.count_ones(), 1); // only the final commit
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_ordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {

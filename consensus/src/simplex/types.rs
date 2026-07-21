@@ -26,10 +26,13 @@ pub struct Context<D: Digest, P: PublicKey> {
     pub leader: P,
     /// Parent the payload is built on.
     ///
-    /// If there is a gap between the current view and the parent view, the participant
-    /// must possess a nullification for each discarded view to safely vote on the proposed
-    /// payload (any view without a nullification may eventually be finalized and skipping
-    /// it would result in a fork).
+    /// When the current view is not a term start, the parent must be the immediately
+    /// previous view. When the current view is a term start, the parent may be an older
+    /// certified view as long as the participant possesses nullifications covering every
+    /// skipped term (a nullification covers the view it was created for and the remainder
+    /// of that term); any uncovered view may eventually be finalized and skipping it would
+    /// result in a fork. The parent remains valid even if a later nullification in its own
+    /// term covers the parent view.
     pub parent: (View, D),
 }
 
@@ -1217,7 +1220,9 @@ where
 }
 
 /// Aggregated nullification certificate recovered from nullify votes.
-/// When a view is nullified, the consensus moves to the next view without finalizing a block.
+/// When a view is nullified, consensus moves to the first view of the next
+/// term without finalizing a block (the next view when `term_length` is 1);
+/// a nullification covers the nullified view and the rest of its term.
 #[derive(Clone, Debug)]
 pub struct Nullification<S: Scheme> {
     /// The round in which this nullification is made.

@@ -1,4 +1,7 @@
-use crate::{simplex::elector, types::Round};
+use crate::{
+    simplex::elector::{self, Terms},
+    types::Round,
+};
 use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
@@ -131,6 +134,10 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    fn terms(&self) -> Terms {
+        self.inner.terms()
+    }
+
     fn elect(
         &self,
         round: Round,
