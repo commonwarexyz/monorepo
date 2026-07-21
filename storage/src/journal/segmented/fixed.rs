@@ -333,6 +333,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         self.manager.prune(min).await
     }
 
+    /// See [Journal::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
+    }
+
     /// See [Journal::oldest_section].
     fn oldest_section(&self) -> Option<u64> {
         self.manager.oldest_section()
@@ -397,7 +402,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
 /// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Journal::oldest_section] first to keep the handle.
+/// [Journal::pruned] first to keep the handle.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed>(Box<Inner<E, A>>);
 
 impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
@@ -513,6 +518,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let pruned = self.0.prune(min).await?;
         Ok((self, pruned))
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// Mutating a pruned section fails (and the failure consumes the journal), so callers that
+    /// race mutations against pruning should check this first.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
     }
 
     /// Returns the oldest section number, if any blobs exist.
@@ -868,6 +881,35 @@ mod tests {
 
             let item = journal.get(3, 0).await.expect("should exist");
             assert_eq!(item, test_digest(3));
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_pruned_after_full_prune() {
+        // `pruned` must keep reporting the floor after every blob is removed, when
+        // `oldest_section` returns None (indistinguishable from a fresh journal).
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            for section in 1u64..=3 {
+                (journal, _) = journal
+                    .append(section, &test_digest(section))
+                    .await
+                    .expect("failed to append");
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+
+            (journal, _) = journal.prune(10).await.expect("failed to prune");
+            assert_eq!(journal.oldest_section(), None);
+            assert!(journal.pruned(3));
+            assert!(journal.pruned(9));
+            assert!(!journal.pruned(10));
 
             journal.destroy().await.expect("failed to destroy");
         });

@@ -164,36 +164,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
     }
 
-    /// See [crate::archive::Archive::next_gap].
-    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
-    }
-
-    /// See [crate::archive::Archive::missing_items].
-    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(index, max)
-    }
-
-    /// See [crate::archive::Archive::ranges].
-    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
-    }
-
-    /// See [crate::archive::Archive::ranges_from].
-    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
-    }
-
-    /// See [crate::archive::Archive::first_index].
-    fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
-    }
-
-    /// See [crate::archive::Archive::last_index].
-    fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
-    }
-
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.indices.get(&index).into_iter().copied().chain(
@@ -518,6 +488,36 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok((self, handle))
     }
 
+    /// See [crate::archive::Archive::next_gap].
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.intervals.next_gap(index)
+    }
+
+    /// See [crate::archive::Archive::missing_items].
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.intervals.missing_items(index, max)
+    }
+
+    /// See [crate::archive::Archive::ranges].
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
+    /// See [crate::archive::Archive::ranges_from].
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    }
+
+    /// See [crate::archive::Archive::first_index].
+    fn first_index(&self) -> Option<u64> {
+        self.intervals.first_index()
+    }
+
+    /// See [crate::archive::Archive::last_index].
+    fn last_index(&self) -> Option<u64> {
+        self.intervals.last_index()
+    }
+
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
@@ -600,20 +600,20 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
     Archive<T, E, K, V>
 {
-    /// Returns true when `index` is below the prune floor.
-    ///
-    /// Storing at a pruned index fails (and the failure consumes the archive), so callers
-    /// that race puts against pruning should check this before calling a put method.
-    pub fn pruned(&self, index: u64) -> bool {
-        self.0.pruned(index)
-    }
-
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying only the index journal (no values are read).
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Returns true when `index` is below the prune floor.
+    ///
+    /// Storing at a pruned index fails (and the failure consumes the archive), so callers
+    /// that race puts against pruning should check this before calling a put method.
+    pub fn pruned(&self, index: u64) -> bool {
+        self.0.pruned(index)
     }
 
     /// Prune `Archive` to the provided `min` (masked by the configured

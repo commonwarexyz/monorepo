@@ -497,8 +497,10 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
 /// Implementation of [Metadata] storage.
 ///
-/// Mutating functions consume the store and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization.
+/// Storage-mutating functions consume the store and return it only on success: an error (or a
+/// dropped future) destroys the handle, and recovery is re-initialization. Methods that only
+/// update in-memory state ([Metadata::put], [Metadata::get_mut], [Metadata::upsert],
+/// [Metadata::remove], [Metadata::retain], [Metadata::clear]) borrow the store mutably instead.
 pub struct Metadata<E: Context, K: Span, V: Codec>(Box<Inner<E, K, V>>);
 
 impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {

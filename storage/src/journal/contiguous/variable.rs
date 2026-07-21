@@ -1598,7 +1598,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// enforced by [Writable::recover]. Repairs mutate `pending` in place.
     ///
     /// Returns the recovered bounds (`pruning_boundary..size`).
-    #[allow(clippy::type_complexity)]
     async fn align(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
@@ -1760,7 +1759,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// At most one (empty) blob remains in `pending` here: the tail of an empty journal, which
     /// is legitimate after a clean restart, or the artifact of a rewind, prune-all, or
     /// first-append crash.
-    #[allow(clippy::type_complexity)]
     async fn align_empty(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
@@ -1868,7 +1866,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// Returns corruption if the data does not reach the anchor. If replay finds a short blob
     /// after the anchor, recovery truncates newer blobs and returns the contiguous data-backed
     /// size.
-    #[allow(clippy::type_complexity)]
     async fn rebuild_offsets_from_anchor(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
@@ -4593,10 +4590,9 @@ mod tests {
             );
             let mut pending = BTreeMap::new();
             pending.insert(0, partition.open(0).await.unwrap());
-            let mut offsets =
-                fixed::Inner::<_, u64>::init(context.child("offsets"), offsets_cfg.clone())
-                    .await
-                    .unwrap();
+            let mut offsets = fixed::Inner::<_, u64>::init(context.child("offsets"), offsets_cfg)
+                .await
+                .unwrap();
 
             let mut encoded = Vec::new();
             encode_frame_into(None, &100u64, &mut encoded).unwrap();
@@ -4622,11 +4618,6 @@ mod tests {
             )
             .await
             .unwrap();
-            // The failed rebuild consumed the offsets journal; reopen it to clean up.
-            let offsets = fixed::Inner::<_, u64>::init(context.child("cleanup"), offsets_cfg)
-                .await
-                .unwrap();
-            offsets.destroy().await.unwrap();
         });
     }
 

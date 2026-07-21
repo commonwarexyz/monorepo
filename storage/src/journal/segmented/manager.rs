@@ -363,6 +363,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(pruned)
     }
 
+    /// Returns true when `section` is below the prune floor.
+    pub const fn pruned(&self, section: u64) -> bool {
+        section < self.oldest_retained_section
+    }
+
     /// Returns the oldest section number, if any blobs exist.
     pub fn oldest_section(&self) -> Option<u64> {
         self.blobs.first_key_value().map(|(&s, _)| s)

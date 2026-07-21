@@ -540,6 +540,11 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.prune(min).await
     }
 
+    /// See [Journal::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
+    }
+
     /// See [Journal::oldest_section].
     fn oldest_section(&self) -> Option<u64> {
         self.manager.oldest_section()
@@ -588,7 +593,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
 /// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Journal::oldest_section] first to keep the handle.
+/// [Journal::pruned] first to keep the handle.
 pub struct Journal<E: Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
@@ -691,7 +696,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Ensures the given `sections` are synced to the underlying store.
     ///
-    /// If a selected section does not exist, no error will be returned.
+    /// If a selected section does not exist (and has not been pruned), no error will be
+    /// returned.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
         self.0.sync(sections).await?;
         Ok(self)
@@ -719,6 +725,14 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let pruned = self.0.prune(min).await?;
         Ok((self, pruned))
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// Mutating a pruned section fails (and the failure consumes the journal), so callers that
+    /// race mutations against pruning should check this first.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
     }
 
     /// Returns the number of the oldest section in the journal.

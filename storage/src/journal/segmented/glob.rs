@@ -217,6 +217,11 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.prune(min).await
     }
 
+    /// See [Glob::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
+    }
+
     /// See [Glob::oldest_section].
     fn oldest_section(&self) -> Option<u64> {
         self.manager.oldest_section()
@@ -252,7 +257,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// Mutating functions consume the glob and return it only on success: an error (or a dropped
 /// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
 /// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Glob::oldest_section] first to keep the handle.
+/// [Glob::pruned] first to keep the handle.
 pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: BufferPooler + Storage + Metrics, V: CodecShared> std::fmt::Debug for Glob<E, V> {
@@ -317,7 +322,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Start syncing the given `sections` to disk.
     ///
     /// An error reported by the returned [Handle] is fatal to the glob: the caller
-    /// must stop using (or destroy) the returned journal and recover by re-initializing.
+    /// must stop using (or destroy) the returned glob and recover by re-initializing.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,
@@ -357,6 +362,14 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let pruned = self.0.prune(min).await?;
         Ok((self, pruned))
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// Mutating a pruned section fails (and the failure consumes the glob), so callers that
+    /// race mutations against pruning should check this first.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
     }
 
     /// Returns the number of the oldest section.

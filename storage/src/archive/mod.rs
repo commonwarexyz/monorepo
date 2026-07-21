@@ -186,6 +186,10 @@ pub trait MultiArchive: Archive {
     /// Multiple items may share the same `index`. If the same key is stored at
     /// multiple indices, any associated value may be returned when queried with
     /// [Identifier::Key].
+    ///
+    /// Pruning implementations reject indices below the prune floor with
+    /// [Error::AlreadyPrunedTo] without mutating; check [prunable::Archive::pruned] first to
+    /// keep the handle.
     fn put_multi(
         self,
         index: u64,

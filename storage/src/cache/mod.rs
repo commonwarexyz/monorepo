@@ -15,9 +15,9 @@
 //!
 //! # Pruning
 //!
-//! [Cache] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
-//! called on a `section`, all interaction with a `section` less than the pruned `section` will
-//! return an error. The pruning granularity is determined by `items_per_blob` in the configuration.
+//! [Cache] supports pruning up to a minimum `index` using the `prune` method. After pruning,
+//! `get` on a pruned index returns `None`, `prune` below the floor is a no-op, and `put` fails
+//! with an error. The pruning granularity is determined by `items_per_blob` in the configuration.
 //!
 //! # Single Operation Reads
 //!

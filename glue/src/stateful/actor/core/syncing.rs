@@ -326,10 +326,8 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, AttachableResolver, AttachableResolverSet, Shared},
-        tests::mocks::{
-            TestApp, TestBlock, TestDatabases, TestScheme, TestVariant, anchor, test_databases,
-        },
+        db::{Anchor, AttachableResolver, Shared},
+        tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
@@ -363,12 +361,6 @@ mod tests {
     struct TestHarness<E>
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
-        TestApp: crate::stateful::Application<
-                E,
-                Block = TestBlock,
-                Databases = TestDatabases,
-                InputProvider = (),
-            >,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver>,
     }
@@ -382,13 +374,6 @@ mod tests {
     impl<E> TestHarness<E>
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
-        TestApp: crate::stateful::Application<
-                E,
-                Block = TestBlock,
-                Databases = TestDatabases,
-                InputProvider = (),
-            >,
-        NoopResolver: AttachableResolverSet<TestDatabases>,
     {
         /// Build the harness with `syncing_context` owning the syncing actor and its
         /// state-sync metadata, while the marshal fixture runs on the plain `context`.

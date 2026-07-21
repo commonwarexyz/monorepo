@@ -110,7 +110,7 @@ pub struct Config<C> {
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
 /// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Oversized::oldest_section] first to keep the handle.
+/// [Oversized::pruned] first to keep the handle.
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
@@ -629,6 +629,14 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             Ok(None) | Err(Error::SectionOutOfRange(_)) => Ok(0),
             Err(e) => Err(e),
         }
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// Mutating a pruned section fails (and the failure consumes the journal), so callers that
+    /// race mutations against pruning should check this first.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.index.pruned(section)
     }
 
     /// Returns the oldest section number, if any exist.
