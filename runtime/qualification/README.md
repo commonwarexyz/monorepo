@@ -177,24 +177,61 @@ must not qualify.
 ## Barrier propagation
 
 `scripts/trace-barriers.sh` records block request issue/completion events on a
-selected leaf device while it runs one command. For example, run a one-epoch
-worker against the mounted device and trace the underlying loop or deployment
-device:
+selected leaf device while it runs one command. Pass `--storage-path` to bind
+the trace to a read-only profile containing the exact kernel, filesystem, mount
+options, block stack, controller and firmware identifiers, sector geometry,
+and guest-visible write-cache/FUA settings. For example, run a one-epoch worker
+against the mounted device and trace the underlying loop or deployment device:
 
 ```sh
-sudo scripts/trace-barriers.sh /dev/loop0 /var/log/volume-barriers -- \
+sudo scripts/trace-barriers.sh /dev/loop0 /var/log/volume-barriers \
+  --storage-path /mnt/qualification/volume -- \
   env COMMONWARE_VOLUME_FUZZ_ORACLE=/trusted-control/volume-oracle.journal \
   target/release/volume-crash-fuzz worker /mnt/qualification/volume 1
 ```
 
 The script fails if no request carrying the block trace `F` marker reaches the
 selected leaf device and preserves both the raw `trace-cmd` data and the
-filtered report. Inspect the report to distinguish pure flush requests from FUA
-writes and archive it with the exact filesystem, mount, kernel, controller, and
-cache configuration. Some drivers complete or transform flush flags above the
-leaf device, so a missing leaf marker requires tracing each layer rather than
-assuming the filesystem did nothing. This is supporting evidence only; it does
-not replace a hard power cut.
+filtered report. It also records the shell-escaped workload, its exit status,
+request counts, and SHA-256 digests for the complete evidence directory. Inspect
+the report to distinguish pure flush requests from FUA writes and archive it
+with the exact filesystem, mount, kernel, controller, and cache configuration.
+Some drivers complete or transform flush flags above the leaf device, so a
+missing leaf marker requires tracing each layer rather than assuming the
+filesystem did nothing. This is supporting evidence only; it does not replace
+a hard power cut.
+
+Capture the deployment matrix without tracing or writing a workload with:
+
+```sh
+sudo scripts/capture-storage-profile.sh /path/to/storage /var/log/storage-profile
+```
+
+Treat profiles as distinct qualification cells whenever any recorded kernel,
+filesystem, mount option, block-stack layer, controller/firmware, sector size,
+or cache/FUA value differs. A profile identifies the cell; it does not qualify
+it until the barrier trace, fault campaign, and hard-power-cut campaign all pass
+on that same configuration.
+
+The deployment matrix is the cross-product of the runtime storage backend
+(`tokio` or `iouring`), the exact binary build, and each observed storage
+profile. The AWS deployer can produce three storage topologies:
+
+- The AMI root filesystem on the configured EBS volume when the instance type
+  has no instance store. The filesystem and mount options come from the AMI and
+  must be observed rather than inferred from the EBS class.
+- One EC2 instance-store NVMe device formatted as ext4 and mounted with the
+  kernel defaults.
+- Multiple EC2 instance-store NVMe devices combined as md RAID0, formatted as
+  ext4, and mounted with the kernel defaults.
+
+Qualify every topology that is actually deployed for each distinct profile
+digest. Record the source revision, binary SHA-256, enabled runtime features,
+and profile `SHA256SUMS` digest in the matrix row. Track barrier tracing, block
+faults, and hard power cuts as separate results; a row passes only when all
+required campaigns pass. Configuration files establish requested EBS class and
+runtime features, but they cannot substitute for the observed filesystem,
+firmware, and cache behavior.
 
 ## Mutation gate
 
