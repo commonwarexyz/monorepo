@@ -1017,7 +1017,7 @@ impl EngineDefinition for ReshareEngine {
                     fetch_timeout: Duration::from_secs(2),
                     fetch_concurrent: NZUsize!(3),
                     activity_timeout: ViewDelta::new(10),
-                    skip_timeout: ViewDelta::new(5),
+                    skip_timeout: Duration::from_secs(5),
                     forwarding: ForwardingPolicy::Disabled,
                 },
                 gate,

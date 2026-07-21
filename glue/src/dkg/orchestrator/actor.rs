@@ -163,8 +163,8 @@ pub struct SimplexConfig<L> {
     /// Number of views behind the finalized tip to retain validator activity.
     pub activity_timeout: ViewDelta,
 
-    /// Recent inactive leader window that triggers immediate nullification.
-    pub skip_timeout: ViewDelta,
+    /// Time a leader may remain inactive before triggering immediate nullification.
+    pub skip_timeout: Duration,
 
     /// Policy for proactively forwarding certified blocks.
     pub forwarding: ForwardingPolicy,

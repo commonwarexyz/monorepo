@@ -493,7 +493,7 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         fetch_timeout: Duration::from_millis(100),
         fetch_concurrent: NZUsize!(2),
         activity_timeout: ViewDelta::new(8),
-        skip_timeout: ViewDelta::new(2),
+        skip_timeout: Duration::from_secs(1),
         forwarding: simplex::ForwardingPolicy::Disabled,
     }
 }
