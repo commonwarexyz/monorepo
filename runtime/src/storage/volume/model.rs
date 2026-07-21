@@ -244,12 +244,16 @@
 //! windows while guarding whole refs (including an empty-window final ref),
 //! delta commits retain prefix refs, compaction rewrites at a scaled two-ref
 //! cap, and superseded extents join confirmation-gated recycling. A split
-//! page-load action also pins the ref-identity recheck across a committed ref
-//! swap. The implementation's physical packing (many CRCs per 4 KiB block),
-//! 16-ref production cap, 1024-checksum pages, and 16-page cache remain scale
-//! parameters rather than exhaustive model dimensions. Directed conformance
-//! tests exercise those production thresholds, while the scale soak samples
-//! larger seeded histories against a history oracle. The same soak covers
+//! page-load action delays a whole scaled page and pins the ref-identity
+//! recheck across a committed ref swap, including stale neighboring values
+//! when the requested value itself did not change. The exhaustive checker
+//! keeps the ref cap and page width scaled, while a directed trace drives the
+//! SAME abstract allocator, commit, compaction, and recovery state machine
+//! through the production 16-ref threshold. The implementation's physical
+//! packing (many CRCs per 4 KiB block), 1024-checksum pages, and 16-page cache
+//! remain scale parameters rather than exhaustive model dimensions. Directed
+//! conformance tests exercise those production thresholds, while the scale
+//! soak samples larger seeded histories against a history oracle. The same soak covers
 //! pruning at scale: its prune arm
 //! and scripted large-floor crashes (committed, regressed, and parked
 //! mid-commit) drive the floor's interaction with checksum-ref dropping,
@@ -275,7 +279,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 mod stateright;
 
-/// Total blocks (blocks 0/1 are superblock slots).
+/// Total blocks in the exhaustive scope (blocks 0/1 are superblock slots).
 const BLOCKS: usize = 16;
 /// First allocatable block.
 const RESERVED: usize = 2;
@@ -285,10 +289,29 @@ pub(super) const CELLS_PER_BLOCK: u8 = 2;
 pub(super) const BLOBS: u8 = 3;
 /// Maximum committed cells per blob (bounds the space).
 pub(super) const MAX_CELLS: u8 = 4;
-/// Scaled checksum-ref cap. Production uses 16; two reaches the same
-/// delta-to-full-compaction transition in a bounded directed workload.
+/// Scaled checksum geometry. Production-threshold traces override these
+/// without widening the exhaustive state space.
 const MAX_CHECKSUM_REFS: usize = 2;
 const CHECKSUM_MAX_CELLS: u8 = 6;
+const CHECKSUM_PAGE_BLOCKS: u8 = 2;
+
+/// Bounds whose values affect protocol transitions. Keeping them in the
+/// state lets directed tests run the exact same transition system at larger
+/// production thresholds while the exhaustive checker retains a small scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Scope {
+    blocks: usize,
+    max_checksum_refs: usize,
+    checksum_max_cells: u8,
+    checksum_page_blocks: u8,
+}
+
+const EXHAUSTIVE_SCOPE: Scope = Scope {
+    blocks: BLOCKS,
+    max_checksum_refs: MAX_CHECKSUM_REFS,
+    checksum_max_cells: CHECKSUM_MAX_CELLS,
+    checksum_page_blocks: CHECKSUM_PAGE_BLOCKS,
+};
 
 /// A logical cell value.
 ///
@@ -405,8 +428,13 @@ struct Disk {
 
 impl Disk {
     fn empty() -> Self {
+        Self::empty_with_blocks(BLOCKS)
+    }
+
+    fn empty_with_blocks(blocks: usize) -> Self {
+        assert!(blocks > RESERVED, "model needs allocatable blocks");
         Self {
-            durable: vec![Block::Virgin; BLOCKS],
+            durable: vec![Block::Virgin; blocks],
             pending: BTreeMap::new(),
             stale_cache: BTreeMap::new(),
         }
@@ -618,9 +646,9 @@ struct InFlight {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct PageRead {
     slot: u8,
-    lblock: u8,
+    first: u8,
     reference: ChecksumRef,
-    value: Fingerprint,
+    values: Vec<Fingerprint>,
 }
 
 /// The volume's RAM state (dies with the process).
@@ -895,7 +923,8 @@ fn run_fingerprint(run: &Run) -> Fingerprint {
 }
 
 impl Volume {
-    fn fresh() -> Self {
+    fn fresh_with_blocks(blocks: usize) -> Self {
+        assert!(blocks > RESERVED, "model needs allocatable blocks");
         Self {
             blobs: (0..BLOBS)
                 .map(|_| BlobState {
@@ -903,7 +932,7 @@ impl Volume {
                     ..Default::default()
                 })
                 .collect(),
-            free: (RESERVED..BLOCKS).collect(),
+            free: (RESERVED..blocks).collect(),
             pending_free: Vec::new(),
             seq: 1,
             sacred: 0,
@@ -1508,9 +1537,9 @@ fn adopt(disk: &Disk, rules: &Rules) -> Result<Adopted, String> {
 /// Build the post-recovery RAM state for an adopted table. `crashed` holds
 /// the crashed process's live (generation, floor) per slot, consumed only
 /// by the [`Rules::floor_from_commit`] mutation.
-fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules) -> Volume {
+fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules, scope: Scope) -> Volume {
     let mut used = vec![adopted.table_block];
-    let mut volume = Volume::fresh();
+    let mut volume = Volume::fresh_with_blocks(scope.blocks);
     volume.blobs = (0..BLOBS)
         .map(|s| {
             let Some(e) = adopted.table.blobs.get(&s) else {
@@ -1572,7 +1601,9 @@ fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules) -> Vo
             }
         })
         .collect();
-    volume.free = (RESERVED..BLOCKS).filter(|b| !used.contains(b)).collect();
+    volume.free = (RESERVED..scope.blocks)
+        .filter(|b| !used.contains(b))
+        .collect();
     volume.seq = adopted.seq + 1;
     volume.sacred = adopted.slot;
     volume.last_table = adopted.table_block;
@@ -1625,6 +1656,7 @@ fn queue_repairs(disk: &mut Disk, adopted: &Adopted, rules: &Rules) {
 pub(super) struct State {
     disk: Disk,
     pub(super) volume: Volume,
+    scope: Scope,
     /// The last logical state observed as durable by this process lineage.
     baseline: Logical,
     /// Snapshots of commits attempted since the baseline was observed.
@@ -1643,6 +1675,13 @@ pub(super) struct Violation {
 }
 
 pub(super) fn initial_state(actions: u8, crashes: u8) -> State {
+    initial_state_with_scope(actions, crashes, EXHAUSTIVE_SCOPE)
+}
+
+fn initial_state_with_scope(actions: u8, crashes: u8, scope: Scope) -> State {
+    assert!(scope.max_checksum_refs > 0);
+    assert!(scope.checksum_max_cells > 0);
+    assert!(scope.checksum_page_blocks > 0);
     // The model starts post-init: seq-0 superblock in slot 0 plus a table
     // containing the workload's (empty) blobs, both durable. Init itself is
     // two syncs — table first, then the superblock pointing at it — so a
@@ -1652,14 +1691,14 @@ pub(super) fn initial_state(actions: u8, crashes: u8) -> State {
     for slot in 0..BLOBS {
         init_table.blobs.insert(slot, Entry::default());
     }
-    let mut disk = Disk::empty();
+    let mut disk = Disk::empty_with_blocks(scope.blocks);
     disk.durable[0] = Block::Super {
         seq: 0,
         table: RESERVED,
         bound: init_table.clone(),
     };
     disk.durable[RESERVED] = Block::Table(init_table);
-    let mut volume = Volume::fresh();
+    let mut volume = Volume::fresh_with_blocks(scope.blocks);
     volume.free.retain(|&b| b != RESERVED);
     volume.last_table = RESERVED;
     for blob in &mut volume.blobs {
@@ -1669,6 +1708,7 @@ pub(super) fn initial_state(actions: u8, crashes: u8) -> State {
     State {
         disk,
         volume,
+        scope,
         baseline,
         attempts: Vec::new(),
         latched: false,
@@ -1709,6 +1749,7 @@ fn recovery_states(
     disk: Disk,
     ctx: &CrashContext<'_>,
     rules: &Rules,
+    scope: Scope,
     crashes_left: u8,
     actions_left: u8,
     trace: &[Action],
@@ -1780,7 +1821,7 @@ fn recovery_states(
 
     // (a) Repairs sync cleanly; recovery returns; adopted state is observed.
     {
-        let volume = rebuild(&adopted, ctx.crashed, rules);
+        let volume = rebuild(&adopted, ctx.crashed, rules, scope);
         // I7 (restore arm): the recovered floor is exactly the adopted
         // commit's — never the crashed process's live floor, whose pruning
         // commit may never have landed.
@@ -1803,6 +1844,7 @@ fn recovery_states(
         out.push(State {
             disk,
             volume,
+            scope,
             baseline: logical,
             attempts: Vec::new(),
             latched: false,
@@ -1822,6 +1864,7 @@ fn recovery_states(
                 outcome,
                 ctx,
                 rules,
+                scope,
                 crashes_left - 1,
                 actions_left,
                 &next_trace,
@@ -2019,7 +2062,7 @@ fn begin_snapshot(
         };
         let prev_end = prev_refs.last().map_or(0, ChecksumRef::end);
         let delta = covered_end >= prev_end
-            && prev_refs.len() < MAX_CHECKSUM_REFS
+            && prev_refs.len() < s.scope.max_checksum_refs
             && dirty_blocks.iter().min().is_none_or(|&l| l >= prev_end);
         let mut superseded = Vec::new();
         let (array_start, mut checksums) = if delta {
@@ -2204,7 +2247,7 @@ pub(super) fn step(
                 || batch_staged(&s, slot)
                 || !b.live
                 || !b.size.is_multiple_of(CELLS_PER_BLOCK)
-                || b.size + CELLS_PER_BLOCK > CHECKSUM_MAX_CELLS
+                || b.size + CELLS_PER_BLOCK > s.scope.checksum_max_cells
             {
                 return Ok(None);
             }
@@ -2221,7 +2264,7 @@ pub(super) fn step(
             if mutations_blocked
                 || batch_staged(&s, slot)
                 || !b.live
-                || b.size + CELLS_PER_BLOCK > CHECKSUM_MAX_CELLS
+                || b.size + CELLS_PER_BLOCK > s.scope.checksum_max_cells
             {
                 return Ok(None);
             }
@@ -2232,7 +2275,10 @@ pub(super) fn step(
         Action::SparseWrite(slot) => {
             let b = &s.volume.blobs[slot as usize];
             let cell = b.size.saturating_add(CELLS_PER_BLOCK);
-            if mutations_blocked || batch_staged(&s, slot) || !b.live || cell >= CHECKSUM_MAX_CELLS
+            if mutations_blocked
+                || batch_staged(&s, slot)
+                || !b.live
+                || cell >= s.scope.checksum_max_cells
             {
                 return Ok(None);
             }
@@ -3101,12 +3147,18 @@ pub(super) fn step(
             let Some(values) = checksum_values(&s.disk, &reference, true) else {
                 return Ok(None);
             };
-            let value = values[(lblock - reference.first) as usize];
+            let page_blocks = s.scope.checksum_page_blocks;
+            let page_first = lblock / page_blocks * page_blocks;
+            let first = page_first.max(reference.first);
+            let end = page_first.saturating_add(page_blocks).min(reference.end());
+            let values = values
+                [(first - reference.first) as usize..(end - reference.first) as usize]
+                .to_vec();
             s.volume.pending_page = Some(PageRead {
                 slot,
-                lblock,
+                first,
                 reference,
-                value,
+                values,
             });
             Ok(Some(vec![s]))
         }
@@ -3124,18 +3176,25 @@ pub(super) fn step(
             // Mutation: install a page loaded through a superseded ref. A
             // subsequent chunk read trusts this cached value, so disagreement
             // with the current committed fingerprint is an I3 violation.
-            let expected = current.and_then(|entry| {
-                entry
-                    .runs
-                    .get(&page.lblock)
-                    .map(|&(_, c0, c1, span)| (c0, c1, span))
+            let stale = page.values.iter().enumerate().any(|(offset, &value)| {
+                let lblock = page.first + offset as u8;
+                current
+                    .and_then(|entry| {
+                        entry
+                            .runs
+                            .get(&lblock)
+                            .map(|&(_, c0, c1, span)| (c0, c1, span))
+                    })
+                    .is_some_and(|expected| expected != value)
             });
-            if expected.is_some_and(|expected| expected != page.value) {
+            if stale {
                 return Err(Violation {
                     trace: trace.to_vec(),
                     reason: format!(
-                        "I3: installed stale checksum page for slot {} block {}",
-                        page.slot, page.lblock
+                        "I3: installed stale checksum page for slot {} blocks {}..{}",
+                        page.slot,
+                        page.first,
+                        page.first + page.values.len() as u8
                     ),
                 });
             }
@@ -3165,6 +3224,7 @@ pub(super) fn step(
                     outcome,
                     &ctx,
                     rules,
+                    s.scope,
                     s.crashes_left,
                     s.actions_left,
                     trace,
@@ -4114,6 +4174,69 @@ mod tests {
         Ok(())
     }
 
+    /// The exhaustive checker uses a two-ref cap to keep crash branching
+    /// finite. This trace drives the same allocator, commit, compaction, and
+    /// recovery transitions through the production cap, pinning the exact
+    /// off-by-one boundary without multiplying the BFS state space.
+    #[test]
+    fn production_checksum_ref_cap_compacts_and_recovers() {
+        let cap = super::super::commit::MAX_CHECKSUM_REFS;
+        let commits = cap + 1;
+        let action_count = commits * 4 + 1;
+        let scope = Scope {
+            // At compaction, fallback and replacement checksum extents must
+            // coexist with every data block and both table/superblock pairs.
+            blocks: RESERVED + 6 + cap + commits * 2,
+            max_checksum_refs: cap,
+            checksum_max_cells: (commits as u8) * CELLS_PER_BLOCK,
+            checksum_page_blocks: CHECKSUM_PAGE_BLOCKS,
+        };
+        let mut states = vec![initial_state_with_scope(
+            action_count.try_into().unwrap(),
+            1,
+            scope,
+        )];
+        let mut trace = Vec::with_capacity(action_count);
+
+        for commit in 1..=commits {
+            for action in [
+                Action::AppendBlock(0),
+                Action::Snapshot(0b001),
+                Action::WriteMeta,
+                Action::FsyncOk,
+            ] {
+                trace.push(action);
+                let mut next = Vec::new();
+                for state in &states {
+                    next.extend(
+                        step(state, action, &SPEC, &trace)
+                            .unwrap_or_else(|violation| panic!("{}", render(violation)))
+                            .unwrap_or_else(|| panic!("action {action:?} disabled")),
+                    );
+                }
+                states = next;
+            }
+            assert_eq!(states.len(), 1, "confirmed commits are deterministic");
+            let ranges = checksum_ref_ranges(&states[0], 0);
+            if commit <= cap {
+                assert_eq!(ranges.len(), commit);
+                assert_eq!(ranges.last(), Some(&((commit - 1) as u8, commit as u8)));
+            } else {
+                assert_eq!(ranges, vec![(0, commits as u8)]);
+            }
+        }
+
+        trace.push(Action::Crash);
+        let recovered = step(&states[0], Action::Crash, &SPEC, &trace)
+            .unwrap_or_else(|violation| panic!("{}", render(violation)))
+            .expect("crash must be enabled");
+        assert!(!recovered.is_empty(), "production-cap state must recover");
+        for state in &recovered {
+            assert_eq!(checksum_ref_ranges(state, 0), vec![(0, commits as u8)]);
+            assert_eq!(state.scope, scope, "recovery must preserve model geometry");
+        }
+    }
+
     /// An odd shrink followed by a write beyond the frontier persists a
     /// partial non-final run. Its span remains part of the checksum oracle
     /// through the sparse commit and the next full checksum rewrite.
@@ -4298,6 +4421,35 @@ mod tests {
         assert!(
             run_trace(trace, &rules).is_err(),
             "checker missed a page installed from a superseded ref"
+        );
+    }
+
+    /// Production installs the whole loaded page, not only the requested
+    /// checksum. Rechecking the ref is still required when the requested
+    /// value stayed stable but another value in that page changed.
+    #[test]
+    fn mutation_paged_ref_recheck_detects_stale_neighbor() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::PageStart(0, 1),
+            Action::Overwrite(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::PageFinish,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            recheck_paged_ref: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed a stale neighboring checksum in an installed page"
         );
     }
 
