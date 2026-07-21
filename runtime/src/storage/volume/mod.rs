@@ -589,17 +589,14 @@ async fn open_known<S: crate::Storage>(
     if let Some(entry) = hydrated {
         let inner = recover::hydrate(ready, &entry, partition).await?;
         let mut state = ready.state.lock();
-        state.wake_dormant(
+        state.wake_dormant(Arc::new(BlobCore {
             id,
-            Arc::new(BlobCore {
-                id,
-                partition: partition.into(),
-                name: name.to_vec(),
-                version: entry.version,
-                write_lock: AsyncMutex::new(()),
-                inner: commonware_utils::sync::Mutex::new(inner),
-            }),
-        );
+            partition: partition.into(),
+            name: name.to_vec(),
+            version: entry.version,
+            write_lock: AsyncMutex::new(()),
+            inner: commonware_utils::sync::Mutex::new(inner),
+        }));
     }
 
     let (core, size) = {

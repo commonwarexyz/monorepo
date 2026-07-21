@@ -100,8 +100,6 @@ pub(super) struct BlobInner {
     crc_guarded: Vec<ChecksumRef>,
     /// Bumped on any relocation/drop of backing (COW, resize-down, remove).
     generation: u64,
-    /// Durable shadow block from the last commit covering this blob.
-    shadow: Option<u64>,
     /// The entry the last confirmed commit wrote for this blob (None until
     /// first committed with content). Used verbatim for blobs a commit does
     /// not capture — never derived from live state, which may already
@@ -351,7 +349,7 @@ pub(super) struct State {
     /// Superblock slot holding the last confirmed commit.
     sacred_slot: Slot,
     /// The last confirmed table's extent (freed when superseded).
-    table_extent: Option<Extent>,
+    table_extent: Extent,
     /// Chunks recovery CRC-checked while verifying the adopted commit's
     /// delta manifest, per blob id. Consumed at hydration to seed verified
     /// bits so first reads skip re-verification.
@@ -545,9 +543,7 @@ impl State {
         // audits along the way. Removed-with-handles blobs are skipped:
         // unlink moved their extents to `pending_free` (counted there).
         let mut referenced: Vec<(Extent, String)> = Vec::new();
-        if let Some(extent) = self.table_extent {
-            referenced.push((extent, "table".into()));
-        }
+        referenced.push((self.table_extent, "table".into()));
         for deferred in &self.pending_free {
             referenced.push((deferred.extent, "pending free".into()));
         }
@@ -960,7 +956,6 @@ impl BlobInner {
     pub fn publish_committed(&mut self, entry: Entry) {
         self.capturing = false;
         self.freeze_size = entry.size;
-        self.shadow = entry.shadow;
         let prev = std::mem::take(&mut self.crc_guarded);
         let old_refs = self
             .committed_entry
@@ -1039,7 +1034,6 @@ impl BlobInner {
             size: entry.size,
             freeze_size: entry.size,
             floor: entry.floor,
-            shadow: entry.shadow,
             committed_entry: Some(entry.clone()),
             ..Default::default()
         };
@@ -1101,7 +1095,7 @@ impl State {
             snapshot_seq: genesis.adopted_seq,
             confirmed_seq: genesis.adopted_seq,
             sacred_slot: genesis.sacred_slot,
-            table_extent: Some(genesis.table_extent),
+            table_extent: genesis.table_extent,
             recovery_verified: genesis.recovery_verified,
             next_id: genesis.next_id,
             dirty: Default::default(),
@@ -1195,7 +1189,7 @@ impl State {
     }
 
     /// The last confirmed table's extent (superseded on confirmation).
-    pub const fn table_extent(&self) -> Option<Extent> {
+    pub const fn table_extent(&self) -> Extent {
         self.table_extent
     }
 
@@ -1293,16 +1287,14 @@ impl State {
     pub fn confirm(
         &mut self,
         seq: u64,
-        old_table: Option<Extent>,
+        old_table: Extent,
         table: Extent,
         capture: &BTreeSet<u64>,
     ) -> Vec<u64> {
         self.sacred_slot = self.sacred_slot.other();
         self.confirmed_seq = seq;
-        if let Some(old) = old_table {
-            self.defer_free(old, seq);
-        }
-        self.table_extent = Some(table);
+        self.defer_free(old_table, seq);
+        self.table_extent = table;
         let mut resolved: Vec<u64> = Vec::new();
         self.groups.retain(|group| {
             let covered = group.iter().any(|id| capture.contains(id));
@@ -1388,8 +1380,9 @@ impl State {
         Ok(ids)
     }
 
-    /// Promote dormant blob `id` to open as `core` (its hydrated state).
-    pub fn wake_dormant(&mut self, id: u64, core: Arc<BlobCore>) {
+    /// Promote dormant `core` to open after hydration.
+    pub fn wake_dormant(&mut self, core: Arc<BlobCore>) {
+        let id = core.id;
         self.dormant.remove(&id);
         self.open.insert(id, core);
     }

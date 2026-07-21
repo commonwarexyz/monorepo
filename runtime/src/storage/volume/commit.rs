@@ -69,7 +69,7 @@ struct PreparedCommit {
     /// The capture set (groups it covers are cleared at finalize).
     capture: BTreeSet<u64>,
     /// The previous confirmed table extent (freed on confirmation).
-    old_table: Option<Extent>,
+    old_table: Extent,
 }
 
 /// A prepared commit whose metadata writes and superblock have completed the
@@ -211,8 +211,8 @@ impl TicketState {
 /// cancel a commit (pinned by the conformance cancellation injector).
 ///
 /// A leader dropped mid-commit has already swapped the pool's ticket and
-/// may have consumed snapshot state (dirty marks, deferred frees,
-/// committed-meta swaps, cached entry encodings) or issued metadata
+/// may have consumed snapshot state (dirty marks, deferred frees, cached
+/// entry encodings) or issued metadata
 /// writes. The half-driven commit can neither be completed nor unwound
 /// from a `Drop` impl, and a later commit would vouch for state it cannot
 /// prove landed — so the abort latches the same poison as a failed
@@ -250,8 +250,8 @@ impl<S: crate::Storage> Drop for CancelGuard<'_, S> {
 ///
 /// [`commit_locked`] runs inside the removal and batch-apply driver tasks
 /// with no pooled ticket, so [`CancelGuard`] never sees them. Once the
-/// snapshot starts consuming state — dirty marks, committed-meta swaps,
-/// deferred frees, cached encodings — a dropped task can neither complete
+/// snapshot starts consuming state — dirty marks, deferred frees, cached
+/// encodings — a dropped task can neither complete
 /// the commit nor unwind it, and the next confirming commit would publish
 /// the half-snapshot (a durable table referencing never-written extents).
 /// The batch apply task arms one across its publish for the same reason
@@ -394,7 +394,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
     // From here the commit consumes state, so cancellation must poison
     // (see [`PoisonOnCancel`]).
     let guard = PoisonOnCancel::arm(ready);
-    let prepared = match take_snapshot(ready, capture).await {
+    let prepared = match prepare_commit(ready, capture).await {
         Ok(s) => s,
         Err(e) => {
             // Snapshot allocates extents and mutates freeze/dirty state; a
@@ -403,7 +403,7 @@ pub(super) async fn commit_locked<S: crate::Storage>(
             // mutable storage-op failures are fatal).
             tracing::error!(
                 error = %e,
-                "volume commit snapshot failed; storage poisoned until restart"
+                "volume commit preparation failed; storage poisoned until restart"
             );
             ready.poison(e.clone());
             guard.disarm();
@@ -480,7 +480,7 @@ fn resolve_crc(crcs: &ChunkMap, preloaded: &[(u64, Vec<u32>)], chunk: u64) -> u3
 /// ([`plan_refs`]), capture the value snapshot under the write lock
 /// ([`capture_blob`]), allocate and stage its metadata ([`stage_meta`]),
 /// then assemble the table over every entry ([`assemble_table`]).
-async fn take_snapshot<S: crate::Storage>(
+async fn prepare_commit<S: crate::Storage>(
     ready: &Ready<S>,
     capture: BTreeSet<u64>,
 ) -> Result<PreparedCommit, Error> {
@@ -513,11 +513,11 @@ async fn take_snapshot<S: crate::Storage>(
         // value snapshot, and the freeze boundary protects it thereafter).
         let write_guard = blob.write_lock.lock().await;
         let (plan, preloaded) = plan_refs(ready, &blob).await?;
-        let Some(captured) = capture_blob(ready, &blob, id, seq, plan, &preloaded) else {
+        let Some(captured) = capture_blob(ready, &blob, seq, plan, &preloaded) else {
             continue;
         };
         drop(write_guard);
-        let entry = stage_meta(ready, id, seq, captured, &mut writes, &mut manifest)?;
+        let entry = stage_meta(ready, seq, captured, &mut writes, &mut manifest)?;
         committed.push((blob, entry));
     }
 
@@ -626,11 +626,11 @@ struct Captured {
 fn capture_blob<S: crate::Storage>(
     ready: &Ready<S>,
     blob: &BlobCore,
-    id: u64,
     seq: u64,
     plan: Option<RefPlan>,
     preloaded: &[(u64, Vec<u32>)],
 ) -> Option<Captured> {
+    let id = blob.id;
     let mut state = ready.state.lock();
     let mut inner = blob.inner.lock();
     if inner.removed() {
@@ -784,7 +784,6 @@ fn capture_blob<S: crate::Storage>(
 /// for table assembly.
 fn stage_meta<S: crate::Storage>(
     ready: &Ready<S>,
-    id: u64,
     seq: u64,
     captured: Captured,
     writes: &mut Vec<MetaWrite>,
@@ -798,6 +797,7 @@ fn stage_meta<S: crate::Storage>(
         shadow_bytes,
         superseded,
     } = captured;
+    let id = entry.id;
     let wrote_checksum_ref = !cksum_bytes.is_empty();
     if wrote_checksum_ref {
         let count = checked_checksum_count(cksum_bytes.len())?;
@@ -875,7 +875,7 @@ fn assemble_table<S: crate::Storage>(
     committed: &mut [(Arc<BlobCore>, Entry)],
     manifest: &mut [(u64, u64)],
     writes: &mut Vec<MetaWrite>,
-) -> Result<(Option<Extent>, Extent), Error> {
+) -> Result<(Extent, Extent), Error> {
     let mut state = ready.state.lock();
     let (partitions, entries) = state.table_entries(committed);
     manifest.sort_unstable();
@@ -902,22 +902,22 @@ fn assemble_table<S: crate::Storage>(
 
 /// Publish a confirmed commit.
 fn finalize<S: crate::Storage>(ready: &Ready<S>, durable: DurableCommit) {
-    let DurableCommit(snapshot) = durable;
+    let DurableCommit(prepared) = durable;
     // Swing each captured blob's committed entry BEFORE releasing frees:
     // committed-CRC loads validate their ref against the entry after
     // reading (see `load_committed_page`), so an extent must never become
     // reusable while an entry referencing it is still visible.
-    let captured_ids: Vec<u64> = snapshot.committed.iter().map(|(blob, _)| blob.id).collect();
-    for (blob, entry) in snapshot.committed {
+    let captured_ids: Vec<u64> = prepared.committed.iter().map(|(blob, _)| blob.id).collect();
+    for (blob, entry) in prepared.committed {
         blob.inner.lock().publish_committed(entry);
     }
 
     let mut state = ready.state.lock();
     let resolved_members = state.confirm(
-        snapshot.seq,
-        snapshot.old_table,
-        snapshot.table_extent,
-        &snapshot.capture,
+        prepared.seq,
+        prepared.old_table,
+        prepared.table_extent,
+        &prepared.capture,
     );
     state.apply_frees();
     // Captured blobs whose last handle dropped mid-commit could not demote
