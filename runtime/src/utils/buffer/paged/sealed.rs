@@ -4,7 +4,7 @@
 //! # Sealing
 //!
 //! [`super::Writer::seal`] returns a [`Sealed`] read handle and starts an fsync. Reads observe
-//! flushed bytes immediately; durability waits for the sync handle.
+//! flushed bytes immediately, while durability waits for the sync handle.
 //!
 //! # Cheap sharing
 //!

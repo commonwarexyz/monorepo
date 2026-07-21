@@ -34,7 +34,7 @@
 //!   and byte offset.
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail. When the
-//!   tail fills, it is sealed and an fsync of it begins; `Writable` tracks that in-flight sync
+//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync
 //!   along with any started sync of the new tail.
 //!
 //! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
@@ -68,7 +68,7 @@
 //! When an append fills the tail blob, the journal rolls over: it seals the full blob, starts an
 //! fsync of it, and opens the next blob as the new tail. Each rollover first waits for the
 //! previous rollover's fsync, so only the tail and its predecessor (the blob sealed by the last
-//! rollover) can ever hold non-durable data; every older blob is fully durable.
+//! rollover) can ever hold non-durable data. Every older blob is fully durable.
 //!
 //! A crash while one of those fsyncs is in flight can persist the blob's pages out of order: an
 //! earlier page may be lost while later pages, including a valid last page, survive. Sizing a
@@ -1152,9 +1152,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
     /// crash after this call doesn't require any recovery.
     ///
-    /// At most one commit is in flight at a time: if a prior commit's sync is still pending, this
-    /// call waits for it before starting a new one. Appends and reads proceed while the returned
-    /// handle is pending, and dropping the handle does not cancel the sync.
+    /// At most one tail fsync is in flight at a time: if a prior commit's fsync is still pending,
+    /// this call waits for it before starting a new one. It does not wait for a pending rollover
+    /// fsync: the returned handle joins it, so an earlier commit's handle may still be pending
+    /// when this call returns. Reads always proceed while the returned handle is pending, and
+    /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
+    /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_commit(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_commit().await;
         (self, handle)
@@ -3707,7 +3710,7 @@ mod tests {
     }
 
     /// A crash right after pruning must not lose retained items that were appended but never
-    /// synced. Blob removal is durable, so prune flushes every dirty blob first: otherwise the
+    /// synced. Blob removal is durable, so prune makes all data durable first: otherwise the
     /// unsynced tail would vanish with the crash and recovery would truncate the journal to
     /// empty even though the removal survived.
     #[test_traced]

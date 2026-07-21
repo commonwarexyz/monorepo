@@ -12,7 +12,7 @@ use commonware_runtime::{
 };
 use futures::{
     FutureExt as _,
-    future::{self, BoxFuture, Shared},
+    future::{self, BoxFuture, Shared, try_join_all},
 };
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
@@ -180,6 +180,7 @@ impl<E: Context> Writable<E> {
         }
         let oldest = pending.keys().next().copied();
         let mut sealed = Vec::with_capacity(pending.len());
+        let mut syncs = Vec::with_capacity(pending.len());
         let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
@@ -193,10 +194,11 @@ impl<E: Context> Writable<E> {
                 tail = Some(writer);
             } else {
                 let (sealed_blob, sync) = writer.seal().await?;
-                sync.await?;
+                syncs.push(sync);
                 sealed.push(sealed_blob);
             }
         }
+        try_join_all(syncs).await?;
         let tail = match tail {
             Some(writer) => writer,
             None => partition.open(tail_blob).await?,
@@ -424,7 +426,8 @@ impl<E: Context> Writable<E> {
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
     pub(super) async fn start_sync(&mut self) -> Handle<()> {
-        // Keep one tail sync in flight.
+        // Keep at most one tail sync in flight. A pending predecessor sync is not awaited here:
+        // the returned handle joins it, so handles from consecutive calls can be pending at once.
         if let Some(prior) = self.tail_sync.clone()
             && let Err(err) = prior.await
         {
