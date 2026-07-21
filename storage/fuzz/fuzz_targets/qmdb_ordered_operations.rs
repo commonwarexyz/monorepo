@@ -1,6 +1,7 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
+use commonware_codec::Encode as _;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -10,13 +11,15 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
+        self,
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
             ordered::{Operation, Update},
             value::FixedEncoding,
         },
-        verify_proof,
+        create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
+        verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
     },
     translator::EightCap,
 };
@@ -76,10 +79,25 @@ enum QmdbOperation {
     },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     operations: Vec<QmdbOperation>,
     raw_bytes: Vec<u8>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
+        let num_operations = u.int_in_range(1..=MAX_OPS)?;
+        let operations = (0..num_operations)
+            .map(|_| QmdbOperation::arbitrary(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            operations,
+            raw_bytes,
+        })
+    }
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(555);
@@ -220,6 +238,100 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                     &current_root),
                                 "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                             );
+
+                            let hasher = qmdb::hasher::<Sha256>();
+                            let elements = log.iter().map(|op| op.encode()).collect::<Vec<_>>();
+                            let pinned_nodes = proof.digests.as_slice();
+                            assert_eq!(
+                                verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                                    &proof,
+                                    adjusted_start,
+                                    &log,
+                                    pinned_nodes,
+                                    &current_root,
+                                ),
+                                proof.verify_proof_and_pinned_nodes(
+                                    &hasher,
+                                    &elements,
+                                    adjusted_start,
+                                    pinned_nodes,
+                                    &current_root,
+                                ),
+                                "Pinned proof wrapper disagreed with the Merkle verifier",
+                            );
+
+                            let extracted = verify_proof_and_extract_digests::<Sha256, _, _>(
+                                &proof,
+                                adjusted_start,
+                                &log,
+                                &current_root,
+                            )
+                            .expect("Verified proof should yield authenticated digests");
+                            assert_eq!(
+                                extracted,
+                                proof
+                                    .verify_range_inclusion_and_extract_digests(
+                                        &hasher,
+                                        &elements,
+                                        adjusted_start,
+                                        &current_root,
+                                    )
+                                    .expect("Verified Merkle proof should yield authenticated digests"),
+                                "Extracted proof digests differed from the Merkle verifier",
+                            );
+
+                            let proof_store = create_proof_store::<Sha256, _, _>(
+                                &proof,
+                                adjusted_start,
+                                &log,
+                                &current_root,
+                            )
+                            .expect("Verified proof should create a proof store");
+                            let locations = (0..log.len())
+                                .map(|offset| {
+                                    adjusted_start
+                                        .checked_add(offset as u64)
+                                        .expect("Proven operation location should not overflow")
+                                })
+                                .collect::<Vec<_>>();
+                            assert!(!locations.is_empty(), "Generated proof should contain operations");
+
+                            let multi_proof =
+                                create_multi_proof(&proof_store, &locations, &extracted);
+                            let expected_multi_proof =
+                                proof_store.multi_proof(&locations, &extracted);
+                            assert_eq!(
+                                multi_proof.as_ref().ok(),
+                                expected_multi_proof.as_ref().ok(),
+                                "Multi-proof wrapper disagreed with the proof store",
+                            );
+                            assert_eq!(
+                                multi_proof
+                                    .as_ref()
+                                    .err()
+                                    .map(core::mem::discriminant),
+                                expected_multi_proof
+                                    .as_ref()
+                                    .err()
+                                    .map(core::mem::discriminant),
+                                "Multi-proof wrapper returned a different error",
+                            );
+
+                            if let Ok(multi_proof) = multi_proof {
+                                let selected_ops = locations
+                                    .iter()
+                                    .copied()
+                                    .zip(log.iter().cloned())
+                                    .collect::<Vec<_>>();
+                                assert!(
+                                    verify_multi_proof::<Sha256, _, _>(
+                                        &multi_proof,
+                                        &selected_ops,
+                                        &current_root,
+                                    ),
+                                    "Generated multi-proof should verify",
+                                );
+                            }
                         }
                         db
                     }
@@ -244,12 +356,23 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             if let Ok(res) = db
                                 .proof(adjusted_start, *max_ops)
                                 .await {
-                                    let _ = verify_proof::<Sha256, _, _>(
+                                let elements =
+                                    res.1.iter().map(|op| op.encode()).collect::<Vec<_>>();
+                                assert_eq!(
+                                    verify_proof::<Sha256, _, _>(
                                         &proof,
                                         adjusted_start,
                                         &res.1,
-                                        &current_root);
-
+                                        &current_root,
+                                    ),
+                                    proof.verify_range_inclusion(
+                                        &qmdb::hasher::<Sha256>(),
+                                        &elements,
+                                        adjusted_start,
+                                        &current_root,
+                                    ),
+                                    "Proof wrapper disagreed with the Merkle verifier",
+                                );
                             }
                         }
                         db
