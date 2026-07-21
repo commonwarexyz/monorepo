@@ -47,14 +47,14 @@ struct Certification<V> {
 
 /// The state of a [Certification].
 enum State<V> {
-    /// No certificate yet; votes accumulate toward a quorum.
+    /// No certificate yet. Votes accumulate toward a quorum.
     Incomplete {
         /// Votes awaiting signature verification.
         pending: Vec<V>,
         /// Votes with verified signatures, held for certificate recovery.
         verified: Vec<V>,
     },
-    /// A certificate exists; further votes are dropped.
+    /// A certificate exists. Further votes are dropped.
     Complete,
 }
 
@@ -157,9 +157,9 @@ impl<V> Certification<V> {
 enum Leader<D: Digest> {
     /// Not yet announced by the voter.
     Unknown,
-    /// Announced; their proposal is not yet known.
+    /// Announced, but their proposal is not yet known.
     Known(Participant),
-    /// Their proposal is known; notarize and finalize votes filter to it.
+    /// Their proposal is known. Notarize and finalize votes filter to it.
     Proposed {
         leader: Participant,
         proposal: Proposal<D>,
@@ -377,7 +377,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
     /// Sets the leader for the current consensus view.
     ///
-    /// `notarize` carries the leader's already-received vote, if any; their
+    /// `notarize` carries the leader's already-received vote, if any. Their
     /// proposal is learned from it and votes for other proposals are dropped.
     pub fn set_leader(&mut self, leader: Participant, notarize: Option<&Notarize<S, D>>) {
         assert!(matches!(self.leader, Leader::Unknown));
@@ -1817,8 +1817,8 @@ mod tests {
         votes.add(3, false);
         assert!(votes.should_verify());
 
-        // Verification consumes both buffers and stores the new verified set;
-        // below quorum, recovery is refused
+        // Verification consumes both buffers and stores the new verified set.
+        // Below quorum, recovery is refused.
         let (batch, invalid) = votes
             .try_verify(|pending, verified| async move {
                 assert_eq!(pending, vec![1, 3]);
@@ -1832,8 +1832,8 @@ mod tests {
         assert!(votes.pending().is_empty());
         assert!(votes.try_complete().is_none());
 
-        // At quorum, recovery surrenders the votes and completes; all later
-        // votes are dropped
+        // At quorum, recovery surrenders the votes and completes. All later
+        // votes are dropped.
         votes.add(3, true);
         assert_eq!(votes.try_complete(), Some(vec![1, 2, 3]));
         assert!(votes.is_complete());

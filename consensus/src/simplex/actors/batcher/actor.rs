@@ -635,8 +635,9 @@ where
                     // Batch verify votes if ready
                     let timer = self.verify_latency.timer(self.context.as_ref());
                     if let Some((batch, failed)) = round
-                    .try_verify(self.context.as_mut(), &self.strategy)
-                    .await {
+                        .try_verify(self.context.as_mut(), &self.strategy)
+                        .await
+                    {
                         timer.observe(self.context.as_ref());
 
                         // Process verified votes.
@@ -665,11 +666,18 @@ where
                     // Construct and forward every certificate with a verified quorum
                     while let Some(certificate) = self
                         .recover_latency
-                        .time_some(self.context.as_ref(), round.try_construct_certificate(&self.strategy))
+                        .time_some(
+                            self.context.as_ref(),
+                            round.try_construct_certificate(&self.strategy),
+                        )
                         .await
                     {
                         let kind = certificate.kind();
-                        debug!(%updated_view, %kind, "constructed certificate, forwarding to voter");
+                        debug!(
+                            %updated_view,
+                            %kind,
+                            "constructed certificate, forwarding to voter"
+                        );
                         voter.recovered(certificate);
                     }
                 }
