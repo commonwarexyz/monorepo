@@ -2,30 +2,35 @@ use crate::{
     application::App,
     config::{NetworkConfig, NodeConfig},
     types::{
-        self, Block, DynamicProvider, FileSecretStore, LogReporter, Participants, Registrar,
-        Scheme, ANCHOR_BOUNDARY_CHANNEL, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL,
-        CERTIFICATE_CHANNEL, DKG_CHANNEL, IO_BUFFER_SIZE, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
-        MAX_PARTICIPANTS, MESSAGE_BACKLOG, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, PROBE_CHANNEL,
-        QMDB_CHANNEL, RESOLVER_CHANNEL, VOTE_CHANNEL,
+        self, ANCHOR_BOUNDARY_CHANNEL, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL,
+        Block, CERTIFICATE_CHANNEL, DKG_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
+        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MESSAGE_BACKLOG, NAMESPACE,
+        PAGE_CACHE_SIZE, PAGE_SIZE, PROBE_CHANNEL, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL,
+        Registrar, Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
+    Reporters,
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
     simplex::{config::ForwardingPolicy, elector::RoundRobin},
     types::{Epoch, FixedEpocher, ViewDelta},
-    Reporters,
 };
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519, sha256::Sha256};
 use commonware_glue::{
-    dkg::{anchor, fence::Fence, orchestrator, reshare, SecretStore as _, state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync}, },
+    dkg::{
+        SecretStore as _, anchor,
+        fence::Fence,
+        orchestrator, reshare,
+        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+    },
     stateful::{
+        Config as StatefulConfig, Stateful, SyncPlan,
         db::{DatabaseSet, p2p::standard as qmdb_resolver},
         probe::{Config as ProbeConfig, Probe},
-        Config as StatefulConfig, Stateful, SyncPlan,
     },
 };
 use commonware_p2p::{
@@ -33,9 +38,9 @@ use commonware_p2p::{
     utils::mux::{Builder, Muxer},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Quota, Supervisor as _};
+use commonware_runtime::{Quota, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{ordered::Set, NZDuration, NZUsize, NZU32, NZU64};
+use commonware_utils::{NZDuration, NZU32, NZU64, NZUsize, ordered::Set};
 use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -389,7 +394,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 fetch_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(3),
                 activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 forwarding: ForwardingPolicy::Disabled,
             },
             gate,
