@@ -506,8 +506,8 @@ where
 
     // Reconstruct this range's share of the activity bitmap (in parallel with the other workers)
     // and count the active keys. Locations are partitioned across workers, so every bit has a
-    // single writer; workers collide only at word granularity (absorbed by the atomic or), and the
-    // join publishes the words, so relaxed ordering suffices.
+    // single writer and workers collide only at word granularity (absorbed by the atomic or).
+    // The join publishes the words, so relaxed ordering suffices.
     let mut active_keys = 0;
     index.for_each_value(|loc| {
         let bit = **loc - activity.start;
