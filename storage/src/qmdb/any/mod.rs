@@ -616,6 +616,41 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// Test that state committed via an awaited start_commit handle is recovered on reopen.
+    pub(crate) async fn test_any_db_start_commit_recovery<F: Family, D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        V: Clone + CodecShared + Eq + std::fmt::Debug,
+    {
+        let key0 = Sha256::hash(&0u64.to_be_bytes());
+        let value0 = make_value(100);
+
+        // Apply a batch and begin committing it, awaiting the handle for durability.
+        let merkleized = db
+            .new_batch()
+            .write(key0, Some(value0.clone()))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let (db, handle) = db.start_commit().await.unwrap();
+        handle.await.unwrap();
+        let committed_root = db.root();
+        let committed_size = db.size();
+        drop(db);
+
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        assert_eq!(db.root(), committed_root);
+        assert_eq!(db.size(), committed_size);
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+
+        db.destroy().await.unwrap();
+    }
+
     /// Pruning to a floor advanced by an applied-but-uncommitted batch must not durably outrun
     /// the last durable commit: after a crash, the recovered commit's floor would lie below the
     /// pruned boundary and the database could never reopen.
@@ -1570,6 +1605,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_start_commit_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 

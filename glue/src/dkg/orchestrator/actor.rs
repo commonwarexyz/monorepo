@@ -122,7 +122,7 @@ pub struct SimplexConfig<L> {
     pub fetch_concurrent: NonZeroUsize,
 
     /// Number of views behind the finalized tip to retain validator activity.
-    pub activity_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
 
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
@@ -715,7 +715,7 @@ where
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
                 fetch_concurrent: self.simplex.fetch_concurrent,
-                activity_timeout: self.simplex.activity_timeout,
+                view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,
             },

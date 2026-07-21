@@ -1323,7 +1323,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
 
         // Drive the finalized chain forward to advance `last_processed_round`
         // past V=2's retention boundary but not past V=25's. With
-        // view_retention_timeout=10 and prunable_items_per_section=10, the
+        // view_retention=10 and prunable_items_per_section=10, the
         // prune floor snaps down to the section boundary and evicts V=1 and
         // V=2 while leaving V=25 intact.
         const CHAIN_LEN: u64 = 21;
@@ -1812,7 +1812,7 @@ impl TestHarness for StandardHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
             block_codec_config: (),
@@ -2045,7 +2045,7 @@ impl TestHarness for StandardHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
@@ -2601,7 +2601,7 @@ impl TestHarness for CodingHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
             block_codec_config: (),
@@ -2874,7 +2874,7 @@ impl TestHarness for CodingHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),

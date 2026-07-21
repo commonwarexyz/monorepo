@@ -13,7 +13,12 @@ use commonware_utils::{
 };
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
-use std::{future::Future, mem, sync::Arc};
+use std::{
+    future::{Future, poll_fn},
+    mem,
+    sync::Arc,
+    task::Poll,
+};
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -680,6 +685,22 @@ pub fn release_pending_syncs(pending: &PendingSyncs) {
     for sync in mem::take(&mut *pending.lock()) {
         let _ = sync.release.send(Ok(()));
     }
+}
+
+/// Drive `fut` to completion, releasing any parked syncs each time it stalls.
+pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
+    let mut fut = std::pin::pin!(fut);
+    poll_fn(|cx| match fut.as_mut().poll(cx) {
+        Poll::Ready(out) => Poll::Ready(out),
+        Poll::Pending => {
+            // A concurrent task may park a new sync after this release, so
+            // self-wake to check again on the next scheduler tick.
+            release_pending_syncs(pending);
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// Fail all pending syncs with an injected I/O error.

@@ -637,7 +637,7 @@ mod test {
                     start: Start::Genesis(genesis.clone()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
-                    view_retention_timeout: ViewDelta::new(10),
+                    view_retention: ViewDelta::new(10),
                     prunable_items_per_section: NZU64!(10),
                     page_cache,
                     replay_buffer: NZUsize!(2048),

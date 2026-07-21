@@ -595,7 +595,7 @@ mod tests {
                 start: Start::Genesis(mocks::genesis_block(public_key)),
                 partition_prefix,
                 mailbox_size: NZUsize!(16),
-                view_retention_timeout: ViewDelta::new(8),
+                view_retention: ViewDelta::new(8),
                 prunable_items_per_section: NZU64!(10),
                 page_cache,
                 replay_buffer: NZUsize!(1024),

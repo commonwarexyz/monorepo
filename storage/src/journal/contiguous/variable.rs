@@ -2396,6 +2396,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::rewind(self, size).await
     }
 
+    async fn start_commit(self) -> Result<(Self, Handle<()>), Error> {
+        Ok(Self::start_commit(self).await)
+    }
+
     async fn commit(self) -> Result<Self, Error> {
         Self::commit(self).await
     }

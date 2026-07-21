@@ -27,7 +27,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     /// Strategy for parallel operations.
     pub strategy: T,
 
-    pub activity_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
     pub skip_timeout: Duration,
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
@@ -179,7 +179,7 @@ mod tests {
     /// Batcher [Config] fields that vary across tests; everything else is
     /// fixed by [test_config].
     struct BatcherOptions {
-        activity_timeout: ViewDelta,
+        view_retention: ViewDelta,
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
@@ -189,7 +189,7 @@ mod tests {
     impl Default for BatcherOptions {
         fn default() -> Self {
             Self {
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
@@ -214,7 +214,7 @@ mod tests {
             reporter,
             relay,
             strategy: Sequential,
-            activity_timeout: options.activity_timeout,
+            view_retention: options.view_retention,
             skip_timeout: options.skip_timeout,
             epoch,
             mailbox_size: NZUsize!(128),
@@ -3798,7 +3798,7 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    activity_timeout: ViewDelta::new(2),
+                    view_retention: ViewDelta::new(2),
                     floor,
                     ..Default::default()
                 },
@@ -3876,7 +3876,7 @@ mod tests {
             }
 
             // The stale vote below the activity window must not have produced
-            // any activity (votes within `activity_timeout` of the floor are
+            // any activity (votes within `view_retention` of the floor are
             // still reported)
             assert!(
                 reporter.notarizes.lock().get(&stale_view).is_none(),
@@ -3938,7 +3938,7 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    activity_timeout: ViewDelta::new(2),
+                    view_retention: ViewDelta::new(2),
                     ..Default::default()
                 },
             );

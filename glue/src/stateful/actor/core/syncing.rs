@@ -447,7 +447,7 @@ mod tests {
                 start: marshal::Start::Genesis(TestBlock::new(0, 0)),
                 partition_prefix: "syncing-harness".to_string(),
                 mailbox_size: NZUsize!(8),
-                view_retention_timeout: ViewDelta::new(1),
+                view_retention: ViewDelta::new(1),
                 prunable_items_per_section: NZU64!(4),
                 page_cache,
                 replay_buffer: NZUsize!(64),

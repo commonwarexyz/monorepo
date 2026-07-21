@@ -32,9 +32,12 @@ use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::telemetry::metrics::{
-    Counter, Gauge, GaugeExt as _, MetricsExt as _,
-    histogram::{ScopedTimer, Timed},
+use commonware_runtime::{
+    Handle,
+    telemetry::metrics::{
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+        histogram::{ScopedTimer, Timed},
+    },
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
@@ -791,6 +794,21 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
+    /// bitmap metadata is not durably persisted, so recovery may be required on startup in the
+    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
+    /// the prior commit's sync before starting. Failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    #[tracing::instrument(name = "qmdb.current.db.start_commit", level = "info", skip_all)]
+    #[boxed]
+    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let (any, handle) = self.any.start_commit().await?;
+        self.any = any;
+        Ok((self, handle))
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
@@ -1453,6 +1471,44 @@ mod tests {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    /// State committed via an awaited start_commit handle is recovered on reopen, including the
+    /// grafted bitmap contribution to the root.
+    #[test_traced]
+    fn test_start_commit_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("first"),
+                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+            )
+            .await
+            .unwrap();
+            let key = Sha256::hash(&0u64.to_be_bytes());
+            let value = Sha256::hash(&1u64.to_be_bytes());
+            let merkleized = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let (db, handle) = db.start_commit().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = MmrDb::init(
+                ctx.child("second"),
+                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
     }
 
     /// A prune dropped between the pruning-metadata sync and the log prune must remain
