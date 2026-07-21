@@ -318,7 +318,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, reschedule, Clock as _, Error as RuntimeError,
-        Handle, Runner as _, Supervisor as _,
+        Handle, Runner as _, Spawner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -832,6 +832,45 @@ mod tests {
             waiter2.await.expect("block 2 must be acknowledged");
             assert_eq!(*finalized.lock(), vec![1, 2]);
 
+            handle.abort();
+        });
+    }
+
+    /// A ready durability handle must not win the select after the loop has
+    /// already removed another request from the mailbox. Dropping that losing
+    /// ready future would also drop its response sender.
+    #[test]
+    fn ready_mailbox_request_is_not_dropped_by_durability() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let (mut mailbox, gate, _finalized, handle, _resolver_handler) =
+                start_gated_stateful(&context, "ready-mailbox").await;
+
+            let _ = mailbox.subscribe_databases().await;
+
+            let (ack1, waiter1) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(1, 1)), ack1));
+            wait_for_pending(&gate, 1).await;
+
+            // Processing block 2 starts its sync, then blocks settling block
+            // 1. This lets us queue mailbox work before both syncs resolve.
+            let (ack2, waiter2) = commonware_utils::acknowledgement::Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(TestBlock::new(2, 2)), ack2));
+            wait_for_pending(&gate, 2).await;
+
+            let subscriber = context
+                .child("subscriber")
+                .spawn(move |_| async move { mailbox.subscribe_databases().await });
+            for _ in 0..16 {
+                reschedule().await;
+            }
+
+            let mut releases = gate.lock().drain(..).collect::<Vec<_>>();
+            releases.remove(0).send(Ok(())).unwrap();
+            releases.remove(0).send(Ok(())).unwrap();
+
+            subscriber.await.expect("subscriber task failed");
+            waiter1.await.expect("block 1 must be acknowledged");
+            waiter2.await.expect("block 2 must be acknowledged");
             handle.abort();
         });
     }

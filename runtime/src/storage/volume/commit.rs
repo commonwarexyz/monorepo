@@ -779,7 +779,8 @@ fn stage_meta<S: crate::Storage>(
         checksums: retained,
         shadow: None,
     };
-    if !cksum_bytes.is_empty() {
+    let wrote_checksum_ref = !cksum_bytes.is_empty();
+    if wrote_checksum_ref {
         let extent = {
             let mut state = ready.state.lock();
             state.allocate(block_align(cksum_bytes.len() as u64))
@@ -826,6 +827,15 @@ fn stage_meta<S: crate::Storage>(
     }
     for chunk in dirty_chunks {
         manifest.push((id, chunk));
+    }
+    // Recovery guard-verifies the last checksum ref of every blob named by
+    // the manifest. A metadata-only compaction (for example, a sparse grow
+    // after reaching the ref cap) writes a fresh ref without changing or
+    // shadowing any content chunk. Give that blob a manifest group anyway:
+    // the chunk may be a hole, but the group still makes recovery verify the
+    // newly referenced extent before adopting the candidate.
+    if wrote_checksum_ref && manifest.iter().all(|&(blob, _)| blob != id) {
+        manifest.push((id, array_start));
     }
     {
         let mut state = ready.state.lock();

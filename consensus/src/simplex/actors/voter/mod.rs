@@ -4394,6 +4394,24 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            let observer = participants[1].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
             let (cert_sender, _) = oracle
                 .control(me.clone())
                 .register(1, TEST_QUOTA)
@@ -4425,17 +4443,18 @@ mod tests {
             )
             .await;
 
-            // Wait for the voter to emit its own notarize (journaled). The captured
-            // proposal is reused post-restart to exercise the re-delivery path.
+            // The network vote is emitted only after the journal sync completes.
+            // Capture it there so aborting below cannot race the durability boundary.
             let proposal = loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Constructed(Vote::Notarize(notarize))
-                        if notarize.view() == target_view =>
-                    {
+                let (_, message) =
+                    commonware_p2p::Receiver::recv(&mut observer_vote_receiver)
+                        .await
+                        .unwrap();
+                let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                if let Vote::Notarize(notarize) = vote {
+                    if notarize.view() == target_view {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { .. } => {},
-                    batcher::Message::Constructed(_) => {}
                 }
             };
 
@@ -4944,6 +4963,24 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            let observer = participants[2].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
             let (cert_sender, _) = oracle
                 .control(me.clone())
                 .register(1, TEST_QUOTA)
@@ -4988,17 +5025,18 @@ mod tests {
             relay.broadcast(&leader_pk, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
-            // Wait for our local notarize (journaled) so replay has something to restore.
+            // The outbound vote proves the local notarize is durable before restart.
             loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Constructed(Vote::Notarize(notarize))
-                        if notarize.view() == target_view =>
-                    {
+                let (_, message) =
+                    commonware_p2p::Receiver::recv(&mut observer_vote_receiver)
+                        .await
+                        .unwrap();
+                let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                if let Vote::Notarize(notarize) = vote {
+                    if notarize.view() == target_view {
                         assert_eq!(notarize.proposal, proposal);
                         break;
                     }
-                    batcher::Message::Update { .. } => {},
-                    batcher::Message::Constructed(_) => {}
                 }
             }
 
@@ -5399,6 +5437,24 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            let observer = participants[1].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
             let (cert_sender, _) = oracle
                 .control(me.clone())
                 .register(1, TEST_QUOTA)
@@ -5430,18 +5486,17 @@ mod tests {
             )
             .await;
 
-            // Wait for the voter to emit and journal its own notarize for the
-            // leader-owned view. The captured proposal is reused post-restart
-            // to drive certification.
+            // Wait for the post-sync network vote and reuse its proposal after restart.
             let proposal = loop {
-                match batcher_receiver.recv().await.unwrap() {
-                    batcher::Message::Constructed(Vote::Notarize(notarize))
-                        if notarize.view() == target_view =>
-                    {
+                let (_, message) =
+                    commonware_p2p::Receiver::recv(&mut observer_vote_receiver)
+                        .await
+                        .unwrap();
+                let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                if let Vote::Notarize(notarize) = vote {
+                    if notarize.view() == target_view {
                         break notarize.proposal;
                     }
-                    batcher::Message::Update { .. } => {},
-                    batcher::Message::Constructed(_) => {}
                 }
             };
 
@@ -6863,6 +6918,17 @@ mod tests {
                             .is_ok()
                 })
                 .unwrap();
+
+            // Constructed reaches the batcher before the journal sync and notify
+            // phases complete. Wait until the broadcast event exists, then check
+            // its exact span ancestry below.
+            while traces
+                .get_by_level(Level::DEBUG)
+                .expect_event(|event| event.metadata.content == "broadcasting notarize")
+                .is_err()
+            {
+                reschedule().await;
+            }
 
             // The notarize broadcast happens within notify under the view span.
             traces

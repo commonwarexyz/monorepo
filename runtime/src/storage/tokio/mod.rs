@@ -5,6 +5,8 @@ use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
+#[cfg(target_os = "macos")]
+use tokio::task;
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -15,6 +17,20 @@ use tokio::{
 mod fallback;
 #[cfg(unix)]
 mod unix;
+
+/// Sync a Tokio file with the platform's stable-media guarantee.
+async fn sync_file(file: &fs::File) -> std::io::Result<()> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "macos")] {
+            let file = file.try_clone().await?.into_std().await;
+            task::spawn_blocking(move || unix::sync_file(&file))
+                .await
+                .map_err(std::io::Error::other)?
+        } else {
+            file.sync_all().await
+        }
+    }
+}
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
@@ -28,13 +44,25 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
             e.into(),
         )
     })?;
-    dir.sync_all().await.map_err(|e| {
+    sync_file(&dir).await.map_err(|e| {
         Error::BlobSyncFailed(
             path.to_string_lossy().to_string(),
             "directory".to_string(),
             e.into(),
         )
     })
+}
+
+/// Sync `directory` and its ancestors through `existing_ancestor`.
+#[cfg(unix)]
+async fn sync_dir_hierarchy(directory: &Path, existing_ancestor: &Path) -> Result<(), Error> {
+    for directory in directory.ancestors() {
+        sync_dir(directory).await?;
+        if directory == existing_ancestor {
+            break;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -93,9 +121,14 @@ impl crate::Storage for Storage {
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
 
-        // Check if partition exists before creating
+        // Remember the nearest existing ancestor. If creation adds directories,
+        // each new directory entry and the file entry must be synced through it.
         #[cfg(unix)]
-        let parent_existed = parent.exists();
+        let existing_ancestor = parent
+            .ancestors()
+            .find(|ancestor| ancestor.exists())
+            .ok_or_else(|| Error::PartitionCreationFailed(partition.into()))?
+            .to_path_buf();
 
         // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
@@ -112,30 +145,7 @@ impl crate::Storage for Storage {
             .await
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
-
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the file to ensure it is durable
-            file.sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
-            {
-                // Sync the parent directory to ensure the directory entry is durable.
-                sync_dir(parent).await?;
-
-                // Sync storage directory if parent directory did not exist
-                if !parent_existed {
-                    sync_dir(&self.cfg.storage_directory).await?;
-                }
-            }
-        }
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
@@ -154,9 +164,14 @@ impl crate::Storage for Storage {
             file.write_all(&header.encode())
                 .await
                 .map_err(|_| Error::WriteFailed)?;
-            file.sync_all()
+            sync_file(&file)
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+            // On Unix, sync every directory entry created for this file. This also
+            // repairs a prior process crash that left a visible partial file whose
+            // name was not yet durable.
+            #[cfg(unix)]
+            sync_dir_hierarchy(parent, &existing_ancestor).await?;
             (blob_version, 0, 0)
         } else {
             // Existing blob - read and validate header

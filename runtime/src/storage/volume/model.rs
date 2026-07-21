@@ -239,16 +239,18 @@
 //! shrink-to-floor shape) and the lockstep conformance. Resize of a
 //! batch-created slot is unreachable here (staged creations are not live
 //! until apply), matching the content-op carve-out in `Action::BatchApply`'s
-//! commit-free reasoning. The checksum-extent lifecycle is
-//! also uncovered: the model inlines expected chunk content into the
-//! superblock-bound table, so the implementation's separately stored
-//! commit-written checksum extents — the whole-extent guard CRCs,
-//! recovery's unconditional last-ref load, and the `MAX_CHECKSUM_REFS`
-//! compaction commit — sit outside all exhaustive checking. The scale
-//! soak in `tests` drives that lifecycle at size (ref compaction, overlay
-//! eviction, and committed-CRC paging) under materialized power loss
-//! against a history oracle, but it samples seeded histories rather than
-//! enumerating them. The same soak covers pruning at scale: its prune arm
+//! commit-free reasoning. Checksum extents are separate model disk blocks:
+//! crash fan tears their values independently, recovery loads requested
+//! windows while guarding whole refs (including an empty-window final ref),
+//! delta commits retain prefix refs, compaction rewrites at a scaled two-ref
+//! cap, and superseded extents join confirmation-gated recycling. A split
+//! page-load action also pins the ref-identity recheck across a committed ref
+//! swap. The implementation's physical packing (many CRCs per 4 KiB block),
+//! 16-ref production cap, 1024-checksum pages, and 16-page cache remain scale
+//! parameters rather than exhaustive model dimensions. Directed conformance
+//! tests exercise those production thresholds, while the scale soak samples
+//! larger seeded histories against a history oracle. The same soak covers
+//! pruning at scale: its prune arm
 //! and scripted large-floor crashes (committed, regressed, and parked
 //! mid-commit) drive the floor's interaction with checksum-ref dropping,
 //! compaction, and paging at size (see `commit::finalize` and the
@@ -274,7 +276,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 mod stateright;
 
 /// Total blocks (blocks 0/1 are superblock slots).
-const BLOCKS: usize = 12;
+const BLOCKS: usize = 16;
 /// First allocatable block.
 const RESERVED: usize = 2;
 /// Logical cells per block.
@@ -283,6 +285,10 @@ pub(super) const CELLS_PER_BLOCK: u8 = 2;
 pub(super) const BLOBS: u8 = 3;
 /// Maximum committed cells per blob (bounds the space).
 pub(super) const MAX_CELLS: u8 = 4;
+/// Scaled checksum-ref cap. Production uses 16; two reaches the same
+/// delta-to-full-compaction transition in a bounded directed workload.
+const MAX_CHECKSUM_REFS: usize = 2;
+const CHECKSUM_MAX_CELLS: u8 = 6;
 
 /// A logical cell value.
 ///
@@ -303,6 +309,11 @@ pub(super) enum Cell {
     },
 }
 
+/// Collision-free stand-in for CRC(bytes[0..span]). The span is part of the
+/// fingerprint because partial bytes and the same bytes padded to a full
+/// block have different production CRCs.
+type Fingerprint = (Cell, Cell, u8);
+
 /// Durable content of one disk block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Block {
@@ -310,6 +321,10 @@ enum Block {
     /// Power loss tore this block.
     Torn,
     Data(Cell, Cell),
+    /// One checksum-array value. The production format packs many values in
+    /// one extent; the model scales that geometry to one independently
+    /// tearable block per value so whole-ref guard verification is exercised.
+    Checksum(Fingerprint),
     /// Shadow copy of a blob's frozen tail cell.
     Shadow(Cell),
     /// Serialized blob table (symbolic).
@@ -331,6 +346,21 @@ enum Block {
     ZeroedSuper,
 }
 
+/// A committed checksum extent. `guard` is the collision-free model of the
+/// extent CRC and binds the exact value sequence stored in `blocks`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ChecksumRef {
+    first: u8,
+    blocks: Vec<usize>,
+    guard: Vec<Fingerprint>,
+}
+
+impl ChecksumRef {
+    fn end(&self) -> u8 {
+        self.first + self.blocks.len() as u8
+    }
+}
+
 /// One blob's entry in a durable table.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 struct Entry {
@@ -341,10 +371,16 @@ struct Entry {
     /// were dropped and are never served. A mid-block floor's straddling
     /// block stays referenced, its low cell dead.
     floor: u8,
-    /// Logical block -> (physical block, expected cells). Absent = hole.
-    /// Expected cells are the model's chunk CRC. Cells at or beyond `size`
-    /// are uncommitted and never compared.
-    runs: BTreeMap<u8, (usize, Cell, Cell)>,
+    /// Logical block -> (physical block, expected cells, backed span).
+    /// Absent = hole. Expected cells are the model's chunk CRC oracle. The
+    /// span is durable run metadata: sparse layouts can contain a partial
+    /// non-final run, so it cannot be inferred from the shadowed frontier.
+    runs: BTreeMap<u8, (usize, Cell, Cell, u8)>,
+    /// Out-of-band checksum extents covering every backed block below the
+    /// frontier, including partial non-final sparse runs. The cells retained
+    /// in `runs` are a ghost logical oracle; recovery and reads obtain their
+    /// expectations here.
+    checksums: Vec<ChecksumRef>,
     /// Shadow block for the committed tail cell (odd `size`, backed tail).
     shadow: Option<usize>,
 }
@@ -427,12 +463,15 @@ impl Disk {
     }
 }
 
-/// A run in RAM: physical block, expected cells, and how many of its cells
-/// are frozen (see module docs).
+/// A run in RAM: physical block, expected cells, backed span, and how many of
+/// its cells are frozen (see module docs). `span` differs from logical blob
+/// size after sparse growth: a block-sized logical range may have only its
+/// first cell physically backed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Run {
     phys: usize,
     cells: (Cell, Cell),
+    span: u8,
     frozen: u8,
 }
 
@@ -565,11 +604,23 @@ struct InFlight {
     table_block: usize,
     /// New shadow blocks to write in the WRITE phase: (block, tail cell).
     shadows: Vec<(usize, Cell)>,
+    /// Fresh checksum values written in the metadata phase.
+    checksums: Vec<(usize, Fingerprint)>,
     /// Blocks this commit stops referencing (freed on confirmation).
     frees: Vec<usize>,
     /// (slot, pubseq at snapshot) for every slot this commit resolves:
     /// captured live blobs and dropped (removed) blobs.
     resolved: Vec<(u8, u64)>,
+}
+
+/// A checksum page whose guarded read completed against `reference`, but
+/// whose result has not yet been installed in the blob's cache.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PageRead {
+    slot: u8,
+    lblock: u8,
+    reference: ChecksumRef,
+    value: Fingerprint,
 }
 
 /// The volume's RAM state (dies with the process).
@@ -587,6 +638,7 @@ pub(super) struct Volume {
     /// Table block of the last confirmed commit (freed on supersede).
     last_table: usize,
     in_flight: Option<InFlight>,
+    pending_page: Option<PageRead>,
     poisoned: bool,
     /// The staged (unapplied) batch, if any. At most one at a time.
     pub(super) batch: Option<Batch>,
@@ -699,6 +751,24 @@ pub(super) struct Rules {
     /// entry that still references it, and the next write into it
     /// clobbers the live cell (I3 via extent reuse).
     retain_straddler: bool,
+    /// Any capture that writes a fresh checksum extent must put the blob
+    /// through recovery's per-entry manifest loop, even with no content dirt.
+    manifest_checksum_write: bool,
+    /// Recovery verifies every block of a consulted checksum ref against its
+    /// whole-extent guard, not only the requested value window.
+    whole_checksum_guard: bool,
+    /// Recovery consults a manifested entry's final checksum ref even when no
+    /// manifested full block requests a value from it.
+    verify_last_checksum_ref: bool,
+    /// Append-shaped captures retain prior checksum refs. Disabling models a
+    /// delta capture that forgets the earlier checksum coverage.
+    retain_delta_checksum_refs: bool,
+    /// Superseded checksum extents remain unavailable until the replacing
+    /// commit confirms, so the durable fallback can still load them.
+    defer_checksum_frees: bool,
+    /// Before installing an asynchronously loaded checksum page, recheck that
+    /// the exact ref used by the read is still present in the committed entry.
+    recheck_paged_ref: bool,
 }
 
 pub(super) const SPEC: Rules = Rules {
@@ -718,6 +788,12 @@ pub(super) const SPEC: Rules = Rules {
     prune_capture_gated: true,
     floor_from_commit: true,
     retain_straddler: true,
+    manifest_checksum_write: true,
+    whole_checksum_guard: true,
+    verify_last_checksum_ref: true,
+    retain_delta_checksum_refs: true,
+    defer_checksum_frees: true,
+    recheck_paged_ref: true,
 };
 
 /// Capture mask covering every blob (group-commit behavior).
@@ -726,6 +802,15 @@ pub(super) const ALL: u8 = (1 << BLOBS) - 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     Append(u8),
+    /// Append one full model block. Used only by the checksum-ref workload to
+    /// reach delta/compaction shapes without widening every core BFS budget.
+    AppendBlock(u8),
+    /// Grow by one full hole block under the checksum workload's wider bound.
+    SparseGrowBlock(u8),
+    /// Write one cell a full block beyond the logical end, leaving an odd
+    /// backed frontier partial and non-final. This is the sparse shape whose
+    /// durable run span checksum refinement cannot infer from a shadow.
+    SparseWrite(u8),
     /// Overwrite cell 0 (exercises the freeze rule / COW).
     Overwrite(u8),
     /// Shrink by one cell (rewind).
@@ -749,6 +834,10 @@ pub(super) enum Action {
     WriteMeta,
     FsyncOk,
     FsyncFail,
+    /// Complete a guarded checksum read but delay installing its page.
+    PageStart(u8, u8),
+    /// Install or discard the pending checksum page after a possible ref swap.
+    PageFinish,
     Crash,
     /// Stage one append into the current batch (starting one if needed).
     BatchAppend(u8),
@@ -792,6 +881,19 @@ fn coverage(size: u8, lblock: u8) -> u8 {
         .min(CELLS_PER_BLOCK)
 }
 
+fn run_cells(run: &Run) -> (Cell, Cell) {
+    if run.span == 1 {
+        (run.cells.0, Cell::Zero)
+    } else {
+        run.cells
+    }
+}
+
+fn run_fingerprint(run: &Run) -> Fingerprint {
+    let (c0, c1) = run_cells(run);
+    (c0, c1, run.span)
+}
+
 impl Volume {
     fn fresh() -> Self {
         Self {
@@ -807,6 +909,7 @@ impl Volume {
             sacred: 0,
             last_table: usize::MAX,
             in_flight: None,
+            pending_page: None,
             poisoned: false,
             batch: None,
             groups: Vec::new(),
@@ -817,6 +920,19 @@ impl Volume {
     fn allocate(&mut self) -> usize {
         assert!(!self.free.is_empty(), "model out of blocks");
         self.free.remove(0)
+    }
+
+    /// Allocate one contiguous checksum extent of `count` model blocks.
+    fn allocate_span(&mut self, count: usize) -> Vec<usize> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let start = self
+            .free
+            .windows(count)
+            .position(|w| w.windows(2).all(|p| p[1] == p[0] + 1))
+            .expect("model out of contiguous blocks");
+        self.free.drain(start..start + count).collect()
     }
 
     fn release(&mut self, block: usize, rules: &Rules) {
@@ -891,7 +1007,10 @@ impl Volume {
                     b.runs
                         .get(&(i / CELLS_PER_BLOCK))
                         .map_or(Cell::Zero, |run| {
-                            if i.is_multiple_of(CELLS_PER_BLOCK) {
+                            let index = i % CELLS_PER_BLOCK;
+                            if index >= run.span {
+                                Cell::Zero
+                            } else if index == 0 {
                                 run.cells.0
                             } else {
                                 run.cells.1
@@ -924,6 +1043,7 @@ impl Volume {
                     Run {
                         phys,
                         cells,
+                        span: idx + 1,
                         frozen: 0,
                     },
                 );
@@ -934,11 +1054,12 @@ impl Volume {
                 } else {
                     (run.cells.0, val)
                 };
+                let span = run.span.max(idx + 1);
                 if idx >= run.frozen {
                     disk.write(run.phys, Block::Data(cells.0, cells.1));
                     self.blobs[slot as usize]
                         .runs
-                        .insert(lblock, Run { cells, ..run });
+                        .insert(lblock, Run { cells, span, ..run });
                 } else {
                     let phys = self.allocate();
                     disk.write(phys, Block::Data(cells.0, cells.1));
@@ -948,6 +1069,7 @@ impl Volume {
                         Run {
                             phys,
                             cells,
+                            span,
                             frozen: 0,
                         },
                     );
@@ -985,11 +1107,16 @@ impl Volume {
                     let writable = sr.private || (cell >= published && idx >= sr.run.frozen);
                     if writable {
                         let cells = merge(sr.run.cells);
+                        let span = sr.run.span.max(idx + 1);
                         disk.write(sr.run.phys, Block::Data(cells.0, cells.1));
                         staged.runs.insert(
                             lblock,
                             StagedRun {
-                                run: Run { cells, ..sr.run },
+                                run: Run {
+                                    cells,
+                                    span,
+                                    ..sr.run
+                                },
                                 private: sr.private,
                             },
                         );
@@ -1001,6 +1128,7 @@ impl Volume {
                         // shrink re-accounts nothing).
                         let phys = self.allocate();
                         let cells = merge(sr.run.cells);
+                        let span = sr.run.span.max(idx + 1);
                         disk.write(phys, Block::Data(cells.0, cells.1));
                         staged.replaced.push(sr.run.phys);
                         staged.removed.insert(lblock);
@@ -1011,6 +1139,7 @@ impl Volume {
                                 run: Run {
                                     phys,
                                     cells,
+                                    span,
                                     frozen: 0,
                                 },
                                 private: true,
@@ -1023,11 +1152,12 @@ impl Volume {
                         // In-place into the published run's block, beyond
                         // everything a snapshot can capture.
                         let cells = merge(run.cells);
+                        let span = run.span.max(idx + 1);
                         disk.write(run.phys, Block::Data(cells.0, cells.1));
                         staged.runs.insert(
                             lblock,
                             StagedRun {
-                                run: Run { cells, ..run },
+                                run: Run { cells, span, ..run },
                                 private: false,
                             },
                         );
@@ -1037,6 +1167,7 @@ impl Volume {
                         // leaves the merged view.
                         let phys = self.allocate();
                         let cells = merge(run.cells);
+                        let span = run.span.max(idx + 1);
                         disk.write(phys, Block::Data(cells.0, cells.1));
                         staged.replaced.push(run.phys);
                         staged.removed.insert(lblock);
@@ -1047,6 +1178,7 @@ impl Volume {
                                 run: Run {
                                     phys,
                                     cells,
+                                    span,
                                     frozen: 0,
                                 },
                                 private: true,
@@ -1069,6 +1201,7 @@ impl Volume {
                                 run: Run {
                                     phys,
                                     cells,
+                                    span: idx + 1,
                                     frozen: 0,
                                 },
                                 private: true,
@@ -1113,8 +1246,11 @@ fn entry_cells(entry: &Entry) -> Vec<Cell> {
             entry
                 .runs
                 .get(&(i / CELLS_PER_BLOCK))
-                .map_or(Cell::Zero, |&(_, c0, c1)| {
-                    if i.is_multiple_of(CELLS_PER_BLOCK) {
+                .map_or(Cell::Zero, |&(_, c0, c1, _)| {
+                    let index = i % CELLS_PER_BLOCK;
+                    if index >= entry_run_span(entry, i / CELLS_PER_BLOCK) {
+                        Cell::Zero
+                    } else if index == 0 {
                         c0
                     } else {
                         c1
@@ -1124,43 +1260,139 @@ fn entry_cells(entry: &Entry) -> Vec<Cell> {
         .collect()
 }
 
-/// Verify a candidate's delta manifest against the disk, using shadows as the
-/// authority for the frozen cell of partial tail blocks.
-fn verify_manifest(disk: &Disk, table: &Table) -> bool {
+/// Physically backed cells in an entry run.
+fn entry_run_span(entry: &Entry, lblock: u8) -> u8 {
+    entry.runs.get(&lblock).map_or(0, |&(_, _, _, span)| span)
+}
+
+/// Exclusive checksum frontier encoded by the entry. Every backed run below
+/// it must resolve through a checksum ref, including partial non-final runs.
+fn entry_checksum_end(entry: &Entry) -> u8 {
+    entry.runs.last_key_value().map_or(0, |(&last, run)| {
+        if run.3 == CELLS_PER_BLOCK {
+            last + 1
+        } else {
+            last
+        }
+    })
+}
+
+/// Read and optionally whole-guard-verify a checksum ref.
+fn checksum_values(disk: &Disk, r: &ChecksumRef, whole_guard: bool) -> Option<Vec<Fingerprint>> {
+    let values: Option<Vec<_>> = r
+        .blocks
+        .iter()
+        .map(|&block| match disk.read(block) {
+            Block::Checksum(value) => Some(*value),
+            _ => None,
+        })
+        .collect();
+    let values = values?;
+    (!whole_guard || values == r.guard).then_some(values)
+}
+
+/// Resolve one full block's expected fingerprint through the out-of-band
+/// checksum refs. A missing covering ref or failed guard is corruption.
+fn checksum_value(
+    disk: &Disk,
+    entry: &Entry,
+    lblock: u8,
+    whole_guard: bool,
+) -> Option<Fingerprint> {
+    let r = entry
+        .checksums
+        .iter()
+        .find(|r| r.first <= lblock && lblock < r.end())?;
+    let offset = (lblock - r.first) as usize;
+    if whole_guard {
+        checksum_values(disk, r, true)?.get(offset).copied()
+    } else {
+        match disk.read(*r.blocks.get(offset)?) {
+            Block::Checksum(value) => Some(*value),
+            _ => None,
+        }
+    }
+}
+
+/// Verify a candidate's delta manifest against the disk, including the whole
+/// guard of every consulted checksum extent and the final ref of each entry
+/// represented in the manifest.
+fn verify_manifest(disk: &Disk, table: &Table, rules: &Rules) -> bool {
+    let mut groups: BTreeMap<u8, Vec<u8>> = BTreeMap::new();
     for &(slot, lblock) in &table.manifest {
+        groups.entry(slot).or_default().push(lblock);
+    }
+    for (slot, blocks) in groups {
         let Some(entry) = table.blobs.get(&slot) else {
             continue;
         };
-        let Some(&(phys, c0, c1)) = entry.runs.get(&lblock) else {
-            continue;
-        };
-        let partial_tail = coverage(entry.size, lblock) == 1;
-        let shadow_ok = || {
-            entry
-                .shadow
-                .is_some_and(|s| matches!(disk.read(s), Block::Shadow(sc) if *sc == c0))
-        };
-        let ok = match disk.read(phys) {
-            Block::Data(d0, d1) => {
-                if partial_tail {
-                    // The committed cell is recoverable from the shadow even
-                    // if a post-snapshot append tore this block; without a
-                    // shadow the on-disk cell must match directly.
-                    if entry.shadow.is_some() {
-                        shadow_ok()
-                    } else {
-                        *d0 == c0
-                    }
-                } else {
-                    *d0 == c0 && *d1 == c1
-                }
+        let mut consulted = BTreeSet::new();
+        for &lblock in &blocks {
+            if lblock < entry_checksum_end(entry) {
+                let Some(i) = entry
+                    .checksums
+                    .iter()
+                    .position(|r| r.first <= lblock && lblock < r.end())
+                else {
+                    return false;
+                };
+                consulted.insert(i);
             }
-            // Block missing/torn: acceptable only if the committed content
-            // is fully shadow-recoverable.
-            _ => partial_tail && shadow_ok(),
-        };
-        if !ok {
+        }
+        if rules.verify_last_checksum_ref && !entry.checksums.is_empty() {
+            consulted.insert(entry.checksums.len() - 1);
+        }
+        if rules.whole_checksum_guard
+            && consulted
+                .into_iter()
+                .any(|i| checksum_values(disk, &entry.checksums[i], true).is_none())
+        {
             return false;
+        }
+
+        for lblock in blocks {
+            let Some(&(phys, c0, c1, span)) = entry.runs.get(&lblock) else {
+                continue;
+            };
+            let expected = if lblock < entry_checksum_end(entry) {
+                let Some(value) = checksum_value(disk, entry, lblock, false) else {
+                    return false;
+                };
+                value
+            } else {
+                (c0, c1, span)
+            };
+            if expected.2 != span {
+                return false;
+            }
+            let shadowed_tail = span < CELLS_PER_BLOCK
+                && entry.shadow.is_some()
+                && entry
+                    .runs
+                    .last_key_value()
+                    .is_some_and(|(&last, _)| last == lblock);
+            let shadow_ok = || {
+                entry
+                    .shadow
+                    .is_some_and(|s| matches!(disk.read(s), Block::Shadow(sc) if *sc == expected.0))
+            };
+            let ok = match disk.read(phys) {
+                Block::Data(d0, d1) => {
+                    if span < CELLS_PER_BLOCK {
+                        if shadowed_tail {
+                            shadow_ok()
+                        } else {
+                            *d0 == expected.0
+                        }
+                    } else {
+                        *d0 == expected.0 && *d1 == expected.1
+                    }
+                }
+                _ => shadowed_tail && shadow_ok(),
+            };
+            if !ok {
+                return false;
+            }
         }
     }
     true
@@ -1168,13 +1400,26 @@ fn verify_manifest(disk: &Disk, table: &Table) -> bool {
 
 /// Read one committed cell through a table entry (post-repair disk).
 fn read_cell(disk: &Disk, entry: &Entry, cell: u8) -> Result<Cell, String> {
-    let Some(&(phys, c0, c1)) = entry.runs.get(&(cell / CELLS_PER_BLOCK)) else {
+    let lblock = cell / CELLS_PER_BLOCK;
+    let Some(&(phys, c0, c1, _)) = entry.runs.get(&lblock) else {
         return Ok(Cell::Zero);
     };
-    let expected = if cell.is_multiple_of(CELLS_PER_BLOCK) {
-        c0
+    if cell % CELLS_PER_BLOCK >= entry_run_span(entry, lblock) {
+        return Ok(Cell::Zero);
+    }
+    let expected_fingerprint = if lblock < entry_checksum_end(entry) {
+        checksum_value(disk, entry, lblock, true)
+            .ok_or_else(|| format!("block {lblock}: checksum ref missing or corrupt"))?
     } else {
-        c1
+        (c0, c1, entry_run_span(entry, lblock))
+    };
+    if expected_fingerprint.2 != entry_run_span(entry, lblock) {
+        return Err(format!("block {lblock}: checksum span mismatch"));
+    }
+    let expected = if cell.is_multiple_of(CELLS_PER_BLOCK) {
+        expected_fingerprint.0
+    } else {
+        expected_fingerprint.1
     };
     match disk.read(phys) {
         Block::Data(d0, d1) => {
@@ -1238,7 +1483,7 @@ fn adopt(disk: &Disk, rules: &Rules) -> Result<Adopted, String> {
         let is_candidate = idx == 0 && slots.len() == 2;
         let adoptable = match disk.read(*table_block) {
             Block::Table(table) if !rules.bind_table || table == bound => {
-                verify_manifest(disk, table).then(|| table.clone())
+                verify_manifest(disk, table, rules).then(|| table.clone())
             }
             _ => None,
         };
@@ -1283,7 +1528,7 @@ fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules) -> Vo
                 }
             };
             let mut vers: BTreeMap<u8, u8> = BTreeMap::new();
-            for &(phys, c0, c1) in e.runs.values() {
+            for &(phys, c0, c1, _) in e.runs.values() {
                 used.push(phys);
                 for c in [c0, c1] {
                     if let Cell::Val { cell, ver, .. } = c {
@@ -1292,6 +1537,7 @@ fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules) -> Vo
                     }
                 }
             }
+            used.extend(e.checksums.iter().flat_map(|r| r.blocks.iter().copied()));
             if let Some(sh) = e.shadow {
                 used.push(sh);
             }
@@ -1303,13 +1549,14 @@ fn rebuild(adopted: &Adopted, crashed: &[Option<(u8, u8)>], rules: &Rules) -> Vo
                 runs: e
                     .runs
                     .iter()
-                    .map(|(&l, &(phys, c0, c1))| {
+                    .map(|(&l, &(phys, c0, c1, span))| {
                         (
                             l,
                             Run {
                                 phys,
                                 cells: (c0, c1),
-                                frozen: coverage(e.size, l),
+                                span,
+                                frozen: span,
                             },
                         )
                     })
@@ -1344,11 +1591,13 @@ fn queue_repairs(disk: &mut Disk, adopted: &Adopted, rules: &Rules) {
         return;
     }
     for entry in adopted.table.blobs.values() {
-        if entry.size % CELLS_PER_BLOCK != 1 {
+        let Some((&tail, _)) = entry.runs.last_key_value() else {
+            continue;
+        };
+        if entry_run_span(entry, tail) == CELLS_PER_BLOCK {
             continue;
         }
-        let tail = entry.size / CELLS_PER_BLOCK;
-        let (Some(&(phys, _, _)), Some(shadow)) = (entry.runs.get(&tail), entry.shadow) else {
+        let (Some(&(phys, _, _, _)), Some(shadow)) = (entry.runs.get(&tail), entry.shadow) else {
             continue;
         };
         // The splice is a RAW byte copy: the implementation cannot tell a
@@ -1426,6 +1675,22 @@ pub(super) fn initial_state(actions: u8, crashes: u8) -> State {
         actions_left: actions,
         crashes_left: crashes,
     }
+}
+
+/// Logical checksum-ref boundaries in the last confirmed entry. Physical
+/// offsets intentionally stay hidden because the conformance harness uses a
+/// different allocation geometry from this scaled model.
+pub(super) fn checksum_ref_ranges(state: &State, slot: u8) -> Vec<(u8, u8)> {
+    state.volume.blobs[slot as usize]
+        .committed
+        .as_ref()
+        .map_or_else(Vec::new, |entry| {
+            entry
+                .checksums
+                .iter()
+                .map(|reference| (reference.first, reference.end()))
+                .collect()
+        })
 }
 
 /// The crashed process's view that recovery's invariants bind to: the last
@@ -1649,6 +1914,7 @@ fn begin_snapshot(
     let table_block = s.volume.allocate();
     let mut table = Table::default();
     let mut shadows = Vec::new();
+    let mut checksum_writes = Vec::new();
     let mut frees = Vec::new();
     let mut resolved = Vec::new();
     if s.volume.last_table != usize::MAX {
@@ -1679,21 +1945,27 @@ fn begin_snapshot(
             // published (and that no manifest verifies).
             if !rules.stage_invisible {
                 if let Some(staged) = s.volume.batch.as_ref().and_then(|b| b.slots.get(&slot)) {
+                    let checksums = entry.checksums.clone();
                     entry = Entry {
                         gen: b.gen,
                         size: staged.size,
                         floor: b.floor,
                         runs: {
-                            let mut runs: BTreeMap<u8, (usize, Cell, Cell)> = b
+                            let mut runs: BTreeMap<u8, (usize, Cell, Cell, u8)> = b
                                 .runs
                                 .iter()
-                                .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
+                                .map(|(&l, r)| {
+                                    let (c0, c1) = run_cells(r);
+                                    (l, (r.phys, c0, c1, r.span))
+                                })
                                 .collect();
                             for (&l, sr) in &staged.runs {
-                                runs.insert(l, (sr.run.phys, sr.run.cells.0, sr.run.cells.1));
+                                let (c0, c1) = run_cells(&sr.run);
+                                runs.insert(l, (sr.run.phys, c0, c1, sr.run.span));
                             }
                             runs
                         },
+                        checksums,
                         shadow: b.shadow,
                     };
                 }
@@ -1716,10 +1988,90 @@ fn begin_snapshot(
         // only already-frozen extents.
         let size = s.volume.blobs[slot as usize].size;
         if rules.freeze_at_snapshot {
-            for (&l, run) in s.volume.blobs[slot as usize].runs.iter_mut() {
-                run.frozen = run.frozen.max(coverage(size, l));
+            for run in s.volume.blobs[slot as usize].runs.values_mut() {
+                run.frozen = run.frozen.max(run.span);
             }
         }
+        let (prev_refs, covered_end, floor_block, values) = {
+            let b = &s.volume.blobs[slot as usize];
+            let covered_end = b.runs.last_key_value().map_or(0, |(&l, run)| {
+                if run.span == CELLS_PER_BLOCK {
+                    l + 1
+                } else {
+                    l
+                }
+            });
+            let values = (0..covered_end)
+                .map(|l| {
+                    b.runs.get(&l).map_or(
+                        (Cell::Zero, Cell::Zero, CELLS_PER_BLOCK),
+                        run_fingerprint,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                b.committed
+                    .as_ref()
+                    .map_or_else(Vec::new, |e| e.checksums.clone()),
+                covered_end,
+                b.floor / CELLS_PER_BLOCK,
+                values,
+            )
+        };
+        let prev_end = prev_refs.last().map_or(0, ChecksumRef::end);
+        let delta = covered_end >= prev_end
+            && prev_refs.len() < MAX_CHECKSUM_REFS
+            && dirty_blocks.iter().min().is_none_or(|&l| l >= prev_end);
+        let mut superseded = Vec::new();
+        let (array_start, mut checksums) = if delta {
+            let retained = prev_refs
+                .iter()
+                .filter(|r| r.end() > floor_block)
+                .cloned()
+                .collect::<Vec<_>>();
+            for r in prev_refs.iter().filter(|r| r.end() <= floor_block) {
+                superseded.extend_from_slice(&r.blocks);
+            }
+            let start = if retained.is_empty() {
+                floor_block
+            } else {
+                prev_end
+            };
+            if rules.retain_delta_checksum_refs {
+                (start, retained)
+            } else {
+                // Mutation: append the delta at the old frontier but forget
+                // every ref providing the prefix.
+                superseded.extend(retained.iter().flat_map(|r| r.blocks.iter()).copied());
+                (start, Vec::new())
+            }
+        } else {
+            superseded.extend(prev_refs.iter().flat_map(|r| r.blocks.iter()).copied());
+            (floor_block, Vec::new())
+        };
+        let new_values = (array_start..covered_end)
+            .map(|l| values[l as usize])
+            .collect::<Vec<_>>();
+        let wrote_checksum_ref = !new_values.is_empty();
+        if wrote_checksum_ref {
+            let blocks = s.volume.allocate_span(new_values.len());
+            checksum_writes.extend(blocks.iter().copied().zip(new_values.iter().copied()));
+            checksums.push(ChecksumRef {
+                first: array_start,
+                blocks,
+                guard: new_values,
+            });
+        }
+        if rules.defer_checksum_frees {
+            frees.extend(superseded);
+        } else {
+            // Mutation: make the fallback's checksum extents immediately
+            // allocatable while its replacement is still only in flight.
+            s.volume.free.extend(superseded);
+            s.volume.free.sort_unstable();
+            s.volume.free.dedup();
+        }
+
         let b = &s.volume.blobs[slot as usize];
         let mut entry = Entry {
             gen: b.gen,
@@ -1728,18 +2080,30 @@ fn begin_snapshot(
             runs: b
                 .runs
                 .iter()
-                .map(|(&l, r)| (l, (r.phys, r.cells.0, r.cells.1)))
+                .map(|(&l, r)| {
+                    let (c0, c1) = run_cells(r);
+                    (l, (r.phys, c0, c1, r.span))
+                })
                 .collect(),
+            checksums,
             shadow: b.shadow,
         };
         // A dirty blob with an odd, physically-backed tail gets a
         // fresh shadow; the old one is superseded.
-        let needs_shadow = rules.shadow_tails
-            && was_dirty
-            && size % CELLS_PER_BLOCK == 1
-            && b.runs.contains_key(&(size / CELLS_PER_BLOCK));
+        let partial_frontier = b
+            .runs
+            .last_key_value()
+            .filter(|(_, run)| run.span < CELLS_PER_BLOCK)
+            .map(|(&l, run)| (l, run.cells.0));
+        if partial_frontier.is_none() {
+            if let Some(old) = s.volume.blobs[slot as usize].shadow.take() {
+                frees.push(old);
+            }
+            entry.shadow = None;
+        }
+        let needs_shadow = rules.shadow_tails && was_dirty && partial_frontier.is_some();
         if needs_shadow {
-            let tail_cell = b.runs[&(size / CELLS_PER_BLOCK)].cells.0;
+            let (tail, tail_cell) = partial_frontier.expect("partial frontier checked");
             let sh = s.volume.allocate();
             if let Some(old) = s.volume.blobs[slot as usize].shadow.replace(sh) {
                 frees.push(old);
@@ -1749,17 +2113,20 @@ fn begin_snapshot(
             // The fresh shadow is a metadata write this commit may tear:
             // manifest the tail block so verification checks the shadow
             // content before adoption, even when no dirt touched the tail.
-            if rules.manifest_fresh_shadow {
-                let tail = size / CELLS_PER_BLOCK;
-                if !dirty_blocks.contains(&tail) {
-                    table.manifest.push((slot, tail));
-                }
+            if rules.manifest_fresh_shadow && !dirty_blocks.contains(&tail) {
+                table.manifest.push((slot, tail));
             }
         }
         for l in dirty_blocks {
             if entry.runs.contains_key(&l) {
                 table.manifest.push((slot, l));
             }
+        }
+        if rules.manifest_checksum_write
+            && wrote_checksum_ref
+            && table.manifest.iter().all(|&(id, _)| id != slot)
+        {
+            table.manifest.push((slot, array_start));
         }
         table.blobs.insert(slot, entry);
     }
@@ -1773,6 +2140,7 @@ fn begin_snapshot(
         table,
         table_block,
         shadows,
+        checksums: checksum_writes,
         frees,
         resolved,
     });
@@ -1831,6 +2199,52 @@ pub(super) fn step(
             s.volume.blobs[slot as usize].size += 1;
             Ok(Some(vec![s]))
         }
+        Action::AppendBlock(slot) => {
+            let b = &s.volume.blobs[slot as usize];
+            if mutations_blocked
+                || batch_staged(&s, slot)
+                || !b.live
+                || !b.size.is_multiple_of(CELLS_PER_BLOCK)
+                || b.size + CELLS_PER_BLOCK > CHECKSUM_MAX_CELLS
+            {
+                return Ok(None);
+            }
+            for _ in 0..CELLS_PER_BLOCK {
+                let cell = s.volume.blobs[slot as usize].size;
+                let val = s.volume.next_val(slot, cell);
+                s.volume.write_cell(&mut s.disk, rules, slot, cell, val);
+                s.volume.blobs[slot as usize].size += 1;
+            }
+            Ok(Some(vec![s]))
+        }
+        Action::SparseGrowBlock(slot) => {
+            let b = &s.volume.blobs[slot as usize];
+            if mutations_blocked
+                || batch_staged(&s, slot)
+                || !b.live
+                || b.size + CELLS_PER_BLOCK > CHECKSUM_MAX_CELLS
+            {
+                return Ok(None);
+            }
+            s.volume.blobs[slot as usize].size += CELLS_PER_BLOCK;
+            s.volume.mark_dirty(slot, None);
+            Ok(Some(vec![s]))
+        }
+        Action::SparseWrite(slot) => {
+            let b = &s.volume.blobs[slot as usize];
+            let cell = b.size.saturating_add(CELLS_PER_BLOCK);
+            if mutations_blocked
+                || batch_staged(&s, slot)
+                || !b.live
+                || cell >= CHECKSUM_MAX_CELLS
+            {
+                return Ok(None);
+            }
+            let val = s.volume.next_val(slot, cell);
+            s.volume.write_cell(&mut s.disk, rules, slot, cell, val);
+            s.volume.blobs[slot as usize].size = cell + 1;
+            Ok(Some(vec![s]))
+        }
         Action::Overwrite(slot) => {
             // Cell 0 sits below any nonzero pruned floor: the write path
             // rejects it (Error::OffsetPruned), so it is never enumerated.
@@ -1866,6 +2280,9 @@ pub(super) fn step(
             for l in dropped {
                 let run = s.volume.blobs[slot as usize].runs.remove(&l).unwrap();
                 s.volume.release_content(slot, run.phys, rules);
+            }
+            for (&l, run) in &mut s.volume.blobs[slot as usize].runs {
+                run.span = run.span.min(coverage(new_size, l));
             }
             // The (possibly newly partial) tail must re-commit: its shadow
             // and manifest entry change even though its bytes do not. A
@@ -1938,12 +2355,22 @@ pub(super) fn step(
             s.volume.blobs[slot as usize].pubseq += 1;
             let runs = std::mem::take(&mut s.volume.blobs[slot as usize].runs);
             let shadow = s.volume.blobs[slot as usize].shadow.take();
+            let checksum_blocks = s.volume.blobs[slot as usize]
+                .committed
+                .as_ref()
+                .into_iter()
+                .flat_map(|e| &e.checksums)
+                .flat_map(|r| r.blocks.iter().copied())
+                .collect::<Vec<_>>();
             let pending = std::mem::take(&mut s.volume.blobs[slot as usize].pending_frees);
             for run in runs.into_values() {
                 s.volume.release(run.phys, rules);
             }
             if let Some(sh) = shadow {
                 s.volume.release(sh, rules);
+            }
+            for block in checksum_blocks {
+                s.volume.release(block, rules);
             }
             // Every commit drops the entry, so capture-gated frees resolve
             // at the next commit.
@@ -2073,6 +2500,9 @@ pub(super) fn step(
             for &(block, cell) in &inf.shadows {
                 s.disk.write(block, Block::Shadow(cell));
             }
+            for &(block, value) in &inf.checksums {
+                s.disk.write(block, Block::Checksum(value));
+            }
             s.disk
                 .write(inf.table_block, Block::Table(inf.table.clone()));
             let slot = 1 - s.volume.sacred;
@@ -2118,7 +2548,7 @@ pub(super) fn step(
                 for (&l, run) in b.runs.iter_mut() {
                     run.frozen = match &entry {
                         Some(e) => match e.runs.get(&l) {
-                            Some(&(phys, _, _)) if phys == run.phys => coverage(e.size, l),
+                            Some(&(phys, _, _, span)) if phys == run.phys => span,
                             _ => 0,
                         },
                         None => 0,
@@ -2610,6 +3040,9 @@ pub(super) fn step(
                     b.runs.insert(l, sr.run);
                 }
                 b.size = staged.size;
+                for (&l, run) in &mut b.runs {
+                    run.span = run.span.min(coverage(b.size, l));
+                }
                 b.pubseq += 1;
                 record.insert(slot, Some((b.pubseq, false)));
                 members.push(slot);
@@ -2651,6 +3084,65 @@ pub(super) fn step(
                 for block in staged.fresh.into_iter().chain(staged.discarded) {
                     s.volume.release(block, rules);
                 }
+            }
+            Ok(Some(vec![s]))
+        }
+        Action::PageStart(slot, lblock) => {
+            if s.volume.pending_page.is_some() {
+                return Ok(None);
+            }
+            let Some(entry) = s.volume.blobs[slot as usize].committed.as_ref() else {
+                return Ok(None);
+            };
+            let Some(reference) = entry
+                .checksums
+                .iter()
+                .find(|r| r.first <= lblock && lblock < r.end())
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let Some(values) = checksum_values(&s.disk, &reference, true) else {
+                return Ok(None);
+            };
+            let value = values[(lblock - reference.first) as usize];
+            s.volume.pending_page = Some(PageRead {
+                slot,
+                lblock,
+                reference,
+                value,
+            });
+            Ok(Some(vec![s]))
+        }
+        Action::PageFinish => {
+            let Some(page) = s.volume.pending_page.take() else {
+                return Ok(None);
+            };
+            let current = s.volume.blobs[page.slot as usize].committed.as_ref();
+            let still_current =
+                current.is_some_and(|entry| entry.checksums.iter().any(|r| r == &page.reference));
+            if still_current || rules.recheck_paged_ref {
+                return Ok(Some(vec![s]));
+            }
+
+            // Mutation: install a page loaded through a superseded ref. A
+            // subsequent chunk read trusts this cached value, so disagreement
+            // with the current committed fingerprint is an I3 violation.
+            let expected =
+                current.and_then(|entry| {
+                    entry
+                        .runs
+                        .get(&page.lblock)
+                        .map(|&(_, c0, c1, span)| (c0, c1, span))
+                });
+            if expected.is_some_and(|expected| expected != page.value) {
+                return Err(Violation {
+                    trace: trace.to_vec(),
+                    reason: format!(
+                        "I3: installed stale checksum page for slot {} block {}",
+                        page.slot, page.lblock
+                    ),
+                });
             }
             Ok(Some(vec![s]))
         }
@@ -2771,6 +3263,35 @@ mod tests {
         Action::WriteMeta,
         Action::FsyncOk,
         Action::FsyncFail,
+        Action::Crash,
+    ];
+
+    /// Checksum-ref workload: full-block appends build delta refs, sparse
+    /// growth forces metadata-only compaction at the scaled cap, rewinds force
+    /// full rewrites, and crashes fan every checksum value independently.
+    const CHECKSUM_REFS: &[Action] = &[
+        Action::AppendBlock(0),
+        Action::SparseGrowBlock(0),
+        Action::SparseWrite(0),
+        Action::ResizeDown(0),
+        Action::ResizeUp(0),
+        Action::Overwrite(0),
+        Action::Snapshot(0b001),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::Crash,
+    ];
+
+    /// Checksum paging workload: a guarded read can straddle a ref-replacing
+    /// commit and crash at either side of its delayed installation.
+    const PAGING: &[Action] = &[
+        Action::AppendBlock(0),
+        Action::Overwrite(0),
+        Action::Snapshot(0b001),
+        Action::WriteMeta,
+        Action::FsyncOk,
+        Action::PageStart(0, 0),
+        Action::PageFinish,
         Action::Crash,
     ];
 
@@ -3024,6 +3545,16 @@ mod tests {
     #[test]
     fn spec_holds_latch() {
         assert_holds(LATCH, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_checksum_refs() {
+        assert_holds(CHECKSUM_REFS, 8, 2, 1_000);
+    }
+
+    #[test]
+    fn spec_holds_checksum_paging() {
+        assert_holds(PAGING, 8, 1, 1_000);
     }
 
     #[test]
@@ -3587,6 +4118,168 @@ mod tests {
             states = next;
         }
         Ok(())
+    }
+
+    /// A metadata-only compaction at the scaled ref cap writes a fresh
+    /// checksum extent but no content/shadow manifest item. The explicit
+    /// checksum marker must make recovery reject every crash outcome where
+    /// the candidate table lands without the extent.
+    #[test]
+    fn mutation_checksum_manifest_marker_detected() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::SparseGrowBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            manifest_checksum_write: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed an unmanifested fresh checksum extent"
+        );
+    }
+
+    /// Recovery must guard the whole compacted checksum extent even when the
+    /// manifest asks for only one value window.
+    #[test]
+    fn mutation_whole_checksum_guard_detected() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Overwrite(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            whole_checksum_guard: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed a torn checksum value outside the requested window"
+        );
+    }
+
+    /// A partial-frontier rewrite can create a final checksum ref that no
+    /// manifested full block consults; recovery must still guard it.
+    #[test]
+    fn mutation_last_checksum_ref_detected() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::ResizeDown(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            verify_last_checksum_ref: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed a torn last ref with an empty value window"
+        );
+    }
+
+    /// Delta captures must retain the prior refs that cover their prefix.
+    #[test]
+    fn mutation_delta_checksum_retention_detected() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            retain_delta_checksum_refs: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed dropped prefix checksum refs"
+        );
+    }
+
+    /// Superseded checksum blocks remain part of the crash fallback until the
+    /// replacement confirms; making them allocatable at snapshot lets a later
+    /// write destroy the only checksums with which fallback can recover.
+    #[test]
+    fn mutation_deferred_checksum_frees_detected() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::Overwrite(0),
+            Action::Snapshot(0b001),
+            Action::AppendBlock(0),
+            Action::Crash,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            defer_checksum_frees: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed checksum extent reuse before confirmation"
+        );
+    }
+
+    /// A page load may complete against a valid old ref while a commit swaps
+    /// that ref. Installation must recheck the exact ref identity rather than
+    /// cache the stale fingerprint under the new committed entry.
+    #[test]
+    fn mutation_paged_ref_recheck_detected() {
+        let trace = &[
+            Action::AppendBlock(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::PageStart(0, 0),
+            Action::Overwrite(0),
+            Action::Snapshot(0b001),
+            Action::WriteMeta,
+            Action::FsyncOk,
+            Action::PageFinish,
+        ];
+        assert!(run_trace(trace, &SPEC).is_ok(), "spec must allow the trace");
+        let rules = Rules {
+            recheck_paged_ref: false,
+            ..SPEC
+        };
+        assert!(
+            run_trace(trace, &rules).is_err(),
+            "checker missed a page installed from a superseded ref"
+        );
     }
 
     /// Directed trace for `mutation_capture_gated_frees_detected`, shared

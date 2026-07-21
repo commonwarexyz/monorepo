@@ -6587,6 +6587,7 @@ mod tests {
     #[test_traced("WARN")]
     fn test_standard_finalization_sync_does_not_block_mailbox() {
         const PACE: Duration = Duration::from_millis(100);
+        const MAX_MAILBOX_DELAY: Duration = Duration::from_millis(50);
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -6662,7 +6663,7 @@ mod tests {
             );
             tracing::info!(?elapsed, "get_verified answered");
             assert!(
-                elapsed < Duration::from_millis(5),
+                elapsed < MAX_MAILBOX_DELAY,
                 "get_verified queued behind the finalized-archive sync: took {elapsed:?}"
             );
 

@@ -48,7 +48,13 @@ struct InflightFinalize<B> {
 /// Wait for the in-flight finalize's durability handle, pending forever when
 /// none is in flight. Cancel-safe: losing a select race neither consumes the
 /// entry nor loses the handle's progress.
-async fn wait_durable<B>(inflight: &mut Option<InflightFinalize<B>>) -> Result<(), RuntimeError> {
+async fn wait_durable<B>(
+    inflight: &mut Option<InflightFinalize<B>>,
+    enabled: bool,
+) -> Result<(), RuntimeError> {
+    if !enabled {
+        return pending().await;
+    }
     match inflight {
         Some(entry) => (&mut entry.durability).await,
         None => pending().await,
@@ -102,27 +108,37 @@ where
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
                 // If a message is ready, it is always processed immediately.
-                let next = match self.mailbox.try_recv() {
+                let (next, poll_durable) = match self.mailbox.try_recv() {
                     // A message is ready: handle it now, regardless of any queued prune.
-                    Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
+                    Ok(message) => (
+                        Either::Left(ready(Some(Step::Message(message)))),
+                        false,
+                    ),
                     Err(TryRecvError::Empty) => match pending_prune.take() {
                         // No message, but a prune is queued: run it.
-                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                        Some(prune) => (
+                            Either::Left(ready(Some(Step::Prune(prune)))),
+                            false,
+                        ),
                         // No message and nothing to prune: wait on the mailbox as normal.
-                        None => Either::Right(self.mailbox.recv().map(|m| m.map(Step::Message))),
+                        None => (
+                            Either::Right(self.mailbox.recv().map(|m| m.map(Step::Message))),
+                            true,
+                        ),
                     },
                     // Flow through the refutable arm's else so the exit
                     // shares the post-loop drain below.
-                    Err(TryRecvError::Disconnected) => Either::Left(ready(None)),
+                    Err(TryRecvError::Disconnected) => (Either::Left(ready(None)), false),
                 };
             },
             on_stopped => {
                 debug!("shutdown signal received, stopping processing");
             },
             // The in-flight finalize's sync completed: release the effects
-            // that were gated on durability. Awaiting the handle here is
-            // also what drives the sync when no other commit covers it.
-            result = wait_durable(&mut inflight) => {
+            // that were gated on durability and observe any sync failure.
+            // A ready message or prune was moved into `next` above. Do not
+            // race and drop that owned work if durability is also ready.
+            result = wait_durable(&mut inflight, poll_durable) => {
                 let entry = inflight.take().expect("durability arm requires an in-flight finalize");
                 self.settle(entry, result).await;
             },

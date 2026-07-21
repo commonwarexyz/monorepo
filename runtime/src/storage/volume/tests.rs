@@ -557,6 +557,11 @@ impl Tearing {
         disk
     }
 
+    /// Snapshot the bytes made durable by the most recent inner sync.
+    pub(super) fn durable_image(&self) -> Vec<u8> {
+        self.durable.lock().clone()
+    }
+
     /// Build a wrapper whose durable state is `image` (a post-crash disk).
     pub(super) async fn from_image(pool: BufferPool, image: Vec<u8>) -> Self {
         let tearing = Self::new(pool);
@@ -2180,7 +2185,7 @@ impl Gate {
 #[derive(Clone)]
 pub(super) struct Gated<S: crate::Storage> {
     inner: S,
-    read_gate: Gate,
+    pub(super) read_gate: Gate,
     write_gate: Gate,
     pub(super) sync_gate: Gate,
     /// Completed inner syncs (fsyncs that reached the backend).
@@ -2296,6 +2301,35 @@ impl<B: crate::Blob> crate::Blob for GatedBlob<B> {
     async fn start_sync(&self) -> crate::Handle<()> {
         crate::Handle::ready(self.sync().await)
     }
+}
+
+/// Recovery places the adopted commit behind a fresh durability barrier even
+/// when it has no slot or shadow repairs to write. A process crash may leave
+/// the verified bytes only in lower-layer caches, and a clean blob sync would
+/// otherwise return without touching the inner file.
+#[tokio::test]
+async fn test_volume_clean_recovery_syncs_adopted_commit() {
+    let pool = test_pool();
+    let gated = Gated::new(memory::Storage::new(pool.clone()));
+    let cfg = Config::default();
+    let volume = Volume::new(gated.clone(), pool.clone(), cfg.clone(), test_driver());
+    let (blob, _) = volume.open("p", b"b").await.unwrap();
+    blob.write_at(0, IoBuf::copy_from_slice(b"durable"))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    drop(blob);
+    drop(volume);
+
+    let before = gated.syncs();
+    let reopened = Volume::new(gated.clone(), pool, cfg, test_driver());
+    let (_, size) = reopened.open("p", b"b").await.unwrap();
+    assert_eq!(size, 7);
+    assert_eq!(
+        gated.syncs() - before,
+        1,
+        "clean recovery must sync the adopted commit"
+    );
 }
 
 /// A run created AFTER a commit's snapshot-seq bump but BEFORE its blob's
@@ -3155,6 +3189,92 @@ async fn test_volume_checksum_ref_compaction() {
     }
 }
 
+/// A capture that rewrites the checksum array must make recovery verify the
+/// fresh extent even when no content chunk changed. Reaching the ref cap and
+/// then growing only through sparse holes produces exactly that shape: the
+/// compaction writes a new checksum extent, but there is otherwise no delta
+/// manifest entry for the blob. If the table and superblock land while the
+/// checksum extent vanishes, recovery must reject the candidate and fall back.
+#[tokio::test]
+async fn test_volume_metadata_only_compaction_rejects_missing_checksum_extent() {
+    let pool = test_pool();
+    let tearing = Tearing::new(pool.clone());
+    let gated = Gated::new(tearing.clone());
+    let volume = Volume::new(
+        gated.clone(),
+        pool.clone(),
+        Config::default(),
+        test_driver(),
+    );
+    let (blob, _) = volume.open("p", b"log").await.unwrap();
+
+    let bound = super::commit::MAX_CHECKSUM_REFS;
+    for i in 0..bound as u64 {
+        blob.write_at(
+            i * BLOCK,
+            IoBuf::copy_from_slice(&vec![i as u8 + 1; BLOCK as usize]),
+        )
+        .await
+        .unwrap();
+        blob.sync().await.unwrap();
+    }
+    assert_eq!(committed_refs(&blob).len(), bound);
+
+    let committed_size = bound as u64 * BLOCK;
+    blob.resize(committed_size + BLOCK).await.unwrap();
+    gated.sync_gate.arm();
+    let sync = tokio::spawn({
+        let blob = blob.clone();
+        async move { blob.sync().await }
+    });
+    gated.sync_gate.wait_reached().await;
+
+    let writes = tearing.unsynced.lock().clone();
+    let table = writes
+        .iter()
+        .find_map(|(_, bytes)| super::layout::Table::decode(bytes))
+        .expect("parked commit wrote its table");
+    let entry = table.blobs.first().expect("one blob");
+    assert_eq!(entry.checksums.len(), 1, "the ref cap forced compaction");
+    assert_eq!(
+        table.manifest,
+        vec![(entry.id, 0)],
+        "metadata-only compaction needs a recovery-verification group"
+    );
+    let missing = entry.checksums[0].offset;
+
+    // Land every write from the parked commit except its fresh checksum
+    // extent. This is a legal block-granular power-loss outcome: the table
+    // and superblock become the candidate while the extent they name did not
+    // reach durable media.
+    let mut image = tearing.durable.lock().clone();
+    for (offset, bytes) in writes {
+        if offset == missing {
+            continue;
+        }
+        let at = offset as usize;
+        image.resize(image.len().max(at + bytes.len()), 0);
+        image[at..at + bytes.len()].copy_from_slice(&bytes);
+    }
+
+    gated.sync_gate.release();
+    sync.await.unwrap().unwrap();
+    drop(blob);
+    drop(volume);
+
+    let post = Tearing::from_image(pool.clone(), image).await;
+    let recovered = Volume::new(post, pool, Config::default(), test_driver());
+    let (blob, size) = recovered.open("p", b"log").await.unwrap();
+    assert_eq!(size, committed_size, "torn compaction must roll back");
+    for i in 0..bound as u64 {
+        let got = blob.read_at(i * BLOCK, BLOCK as usize).await.unwrap();
+        assert!(
+            got.coalesce().as_ref().iter().all(|&x| x == i as u8 + 1),
+            "chunk {i}"
+        );
+    }
+}
+
 /// Recovery's delta-manifest verification seeds the verified bits of the
 /// chunks it CRC-checked, so their first read after reopen skips the
 /// widened verification read (exact-length inner read instead).
@@ -3699,6 +3819,65 @@ async fn test_volume_hydrate_reads_only_frontier() {
         assert_eq!(state.crc, ChunkCrc::Unloaded, "verification needs no value");
         inner.crcs().audit();
     }
+}
+
+/// A checksum page read that started through an old ref must not install its
+/// result after a commit replaces that ref. The loader retries against the
+/// current entry; the foreground read then retries its data generation and
+/// returns the newly committed bytes.
+#[tokio::test]
+async fn test_volume_checksum_page_rechecks_ref_after_commit_swap() {
+    let pool = test_pool();
+    let inner = memory::Storage::new(pool.clone());
+    {
+        let volume = Volume::new(
+            inner.clone(),
+            pool.clone(),
+            Config::default(),
+            test_driver(),
+        );
+        let (blob, _) = volume.open("p", b"paged").await.unwrap();
+        blob.write_at(0, IoBuf::copy_from_slice(&vec![1u8; 2 * BLOCK as usize]))
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    let gated = Gated::new(inner);
+    let volume = Volume::new(gated.clone(), pool, Config::default(), test_driver());
+    let (blob, _) = volume.open("p", b"paged").await.unwrap();
+    let old_ref = blob.core.inner.lock().committed_entry().unwrap().checksums[0];
+    assert_eq!(
+        blob.core.inner.lock().crcs().get(0).unwrap().crc,
+        super::chunk::ChunkCrc::Unloaded
+    );
+
+    gated.read_gate.arm();
+    let reader = tokio::spawn({
+        let blob = blob.clone();
+        async move { blob.read_at(0, 10).await }
+    });
+    gated.read_gate.wait_reached().await;
+
+    blob.write_at(0, IoBuf::copy_from_slice(&vec![2u8; BLOCK as usize]))
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
+    assert!(
+        !blob
+            .core
+            .inner
+            .lock()
+            .committed_entry()
+            .unwrap()
+            .checksums
+            .contains(&old_ref),
+        "commit must replace the ref used by the parked page read"
+    );
+
+    gated.read_gate.release();
+    let got = reader.await.unwrap().unwrap().coalesce();
+    assert_eq!(got.as_ref(), &[2u8; 10]);
 }
 
 /// Committed chunks whose CRCs were never loaded survive the full

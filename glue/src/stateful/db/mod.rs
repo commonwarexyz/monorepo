@@ -209,8 +209,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// must not externally acknowledge the finalized state until the handle
     /// resolves: a crash before the started sync's commit lands discards the
     /// applied state, and a failed handle is fatal to the database. The
-    /// handle must be observed — the sync's failure is reported only through
-    /// it, and awaiting it is what drives the sync to completion.
+    /// handle must be observed because the sync's failure is reported only
+    /// through it.
     fn finalize(
         &mut self,
         batch: Self::Merkleized,

@@ -54,9 +54,10 @@
 //! `tests::test_volume_aborted_commit_task_poisons`.
 
 use super::{
+    layout::{Superblock, Table},
     model::{
-        initial_state, step, Action, Cell, Logical, State as ModelState, Violation, BLOBS,
-        CELLS_PER_BLOCK, SPEC,
+        checksum_ref_ranges, initial_state, step, Action, Cell, Logical, State as ModelState,
+        Violation, BLOBS, CELLS_PER_BLOCK, SPEC,
     },
     state::Ready,
     tests::{audit_volume, test_driver, test_pool, Gated, Tearing},
@@ -111,6 +112,50 @@ enum CellObs {
 /// A recovered volume's observable state: per slot, absent or (pruned
 /// floor in cells, the cell sequence at and above it).
 type Obs = Vec<Option<(u8, Vec<CellObs>)>>;
+
+/// Committed checksum-ref boundaries per blob. Physical offsets are omitted
+/// because the model intentionally uses scaled allocation geometry.
+type RefObs = Vec<Option<Vec<(u8, u8)>>>;
+
+struct Extracted {
+    logical: Obs,
+    refs: RefObs,
+}
+
+fn model_ref_obs(state: &ModelState) -> RefObs {
+    (0..BLOBS)
+        .map(|slot| {
+            state.volume.blobs[slot as usize]
+                .live
+                .then(|| checksum_ref_ranges(state, slot))
+        })
+        .collect()
+}
+
+fn same_ref_coverage(actual: &[(u8, u8)], expected: &[(u8, u8)]) -> bool {
+    let contiguous = |refs: &[(u8, u8)]| {
+        refs.iter().all(|&(first, end)| first < end)
+            && refs.windows(2).all(|pair| pair[0].1 == pair[1].0)
+    };
+    contiguous(actual)
+        && contiguous(expected)
+        && actual.first().map(|r| r.0) == expected.first().map(|r| r.0)
+        && actual.last().map(|r| r.1) == expected.last().map(|r| r.1)
+}
+
+fn refs_match(actual: &RefObs, expected: &RefObs) -> bool {
+    actual.iter().zip(expected).all(|(actual, expected)| {
+        // Above the model's scaled two-ref cap, the production-threshold
+        // tests own the exact internal shape. Lockstep still requires ordered,
+        // contiguous refs with exactly the model's aggregate coverage.
+        match (actual, expected) {
+            (Some(actual), Some(expected)) if actual.len() > 2 => {
+                same_ref_coverage(actual, expected)
+            }
+            _ => actual == expected,
+        }
+    })
+}
 
 /// Decode a blob's content into cells.
 fn decode_cells(bytes: &[u8]) -> Vec<CellObs> {
@@ -544,6 +589,8 @@ type Stack = Yielding<Gated<Tearing>>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
     Append(u8),
+    /// Write one cell a full model block beyond the logical end.
+    SparseWrite(u8),
     Overwrite(u8),
     ResizeDown(u8),
     ResizeUp(u8),
@@ -723,6 +770,7 @@ impl Rig {
     fn model_actions(&self, op: Op) -> Vec<Action> {
         match op {
             Op::Append(s) => vec![Action::Append(s)],
+            Op::SparseWrite(s) => vec![Action::SparseWrite(s)],
             Op::Overwrite(s) => vec![Action::Overwrite(s)],
             Op::ResizeDown(s) => vec![Action::ResizeDown(s)],
             Op::ResizeUp(s) => vec![Action::ResizeUp(s)],
@@ -811,6 +859,7 @@ impl Rig {
     fn value_target(&self, op: Op) -> Option<(u8, u8)> {
         match op {
             Op::Append(s) => Some((s, self.size_cells(s))),
+            Op::SparseWrite(s) => Some((s, self.size_cells(s) + CELLS_PER_BLOCK)),
             Op::Overwrite(s) => Some((s, 0)),
             Op::BatchAppend(s) => Some((s, self.staged_cells(s))),
             Op::BatchOverwrite(s) => Some((s, self.floor_cells(s))),
@@ -895,6 +944,66 @@ impl Rig {
 
         audit_volume(&self.volume, !self.in_flight && self.batch.is_none());
         self.check_live().await;
+        self.check_checksum_refs();
+    }
+
+    /// Compare committed checksum-ref boundaries without comparing physical
+    /// offsets, whose allocation geometry deliberately differs in the scaled
+    /// model. Production permits 16 delta refs while the model compacts at 2;
+    /// shapes beyond the scaled cap are checked by the production-threshold
+    /// tests and rejoin this lockstep comparison after the next full rewrite.
+    fn check_checksum_refs(&self) {
+        let image = self.tearing.durable_image();
+        let newest = (0..2u8)
+            .filter_map(|slot| {
+                let at = Superblock::slot_offset(slot) as usize;
+                image
+                    .get(at..at + Superblock::SIZE)
+                    .and_then(Superblock::decode)
+            })
+            .max_by_key(|sb| sb.seq)
+            .expect("durable volume has a superblock");
+        let start = newest.table_offset as usize;
+        let end = start + newest.table_len as usize;
+        let table = Table::decode(&image[start..end]).expect("durable volume has a table");
+
+        for slot in 0..BLOBS {
+            let actual = table
+                .blobs
+                .iter()
+                .find(|entry| entry.partition == 0 && entry.name == name(slot))
+                .map_or_else(Vec::new, |entry| {
+                    entry
+                        .checksums
+                        .iter()
+                        .map(|reference| {
+                            let first = u8::try_from(reference.first_chunk)
+                                .expect("conformance chunk fits model");
+                            let count = u8::try_from(reference.count)
+                                .expect("conformance count fits model");
+                            (first, first + count)
+                        })
+                        .collect::<Vec<_>>()
+                });
+            for tracked in &self.tracked {
+                let expected = checksum_ref_ranges(&tracked.state, slot);
+                if actual.len() > 2 {
+                    assert!(
+                        same_ref_coverage(&actual, &expected),
+                        "{}: checksum ref coverage diverged for slot {slot}: \
+                         actual {actual:?}, expected {expected:?}",
+                        self.ctx()
+                    );
+                } else {
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "{}: checksum refs diverged for slot {slot}",
+                        self.ctx()
+                    );
+                }
+            }
+        }
     }
 
     /// Drive the real API for `op`.
@@ -907,6 +1016,14 @@ impl Rig {
                     .write_at(offset, IoBuf::copy_from_slice(&data))
                     .await
                     .unwrap_or_else(|e| panic!("{}: append: {e}", self.ctx()));
+            }
+            Op::SparseWrite(s) => {
+                let offset = (self.size_cells(s) + CELLS_PER_BLOCK) as u64 * CELL;
+                let data = pattern(ctr.expect("sparse write carries a value"));
+                self.blobs[&s]
+                    .write_at(offset, IoBuf::copy_from_slice(&data))
+                    .await
+                    .unwrap_or_else(|e| panic!("{}: sparse write: {e}", self.ctx()));
             }
             Op::Overwrite(s) => {
                 let data = pattern(ctr.expect("overwrite writes a value"));
@@ -1142,12 +1259,13 @@ impl Rig {
         let mut actions = extra.to_vec();
         actions.push(Action::Crash);
         let allowed = states_after(&self.tracked, &actions, &self.trace);
-        let allowed_obs: Vec<Obs> = {
+        let allowed_obs: Vec<(Obs, RefObs)> = {
             let mut set = Vec::new();
             for (parent, state) in &allowed {
                 let obs = translated(&self.tracked[*parent], &state.volume.logical());
-                if !set.contains(&obs) {
-                    set.push(obs);
+                let refs = model_ref_obs(state);
+                if !set.contains(&(obs.clone(), refs.clone())) {
+                    set.push((obs, refs));
                 }
             }
             set
@@ -1166,15 +1284,19 @@ impl Rig {
             );
             let pool = self.pool.clone();
             let checked = std::panic::AssertUnwindSafe(async {
-                let obs = extract(&pool, case.image.clone())
+                let extracted = extract(&pool, case.image.clone())
                     .await
                     .unwrap_or_else(|e| {
                         panic!("recovery/read failed on a pure-crash history: {e}")
                     });
                 assert!(
-                    allowed_obs.contains(&obs),
+                    allowed_obs.iter().any(|(logical, refs)| {
+                        logical == &extracted.logical && refs_match(&extracted.refs, refs)
+                    }),
                     "recovered state is not allowed by the model\n  \
-                     recovered: {obs:?}\n  allowed ({}): {allowed_obs:?}",
+                     recovered: {:?}\n  refs: {:?}\n  allowed ({}): {allowed_obs:?}",
+                    extracted.logical,
+                    extracted.refs,
                     allowed_obs.len()
                 );
             })
@@ -1194,7 +1316,7 @@ impl Rig {
 
 /// Reopen a crashed image, extract its observable state through the public
 /// API, and run the strict bookkeeping audit on the recovered state.
-async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
+async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Extracted, String> {
     let tearing = Tearing::from_image(pool.clone(), image).await;
     let gated = Gated::new(tearing.clone());
     let yields = Arc::new(AtomicBool::new(false));
@@ -1209,16 +1331,35 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
         Err(e) => return Err(format!("scan: {e}")),
     };
     let mut obs: Obs = Vec::new();
+    let mut refs: RefObs = Vec::new();
     let mut blobs = Vec::new();
     for slot in 0..BLOBS {
         if !names.contains(&name(slot)) {
             obs.push(None);
+            refs.push(None);
             continue;
         }
         let (blob, size) = volume
             .open(PARTITION, &name(slot))
             .await
             .map_err(|e| format!("open slot {slot}: {e}"))?;
+        let committed_refs = blob
+            .core
+            .inner
+            .lock()
+            .committed_entry()
+            .expect("opened blob has a committed entry")
+            .checksums
+            .iter()
+            .map(|reference| {
+                let first = u8::try_from(reference.first_chunk)
+                    .map_err(|_| format!("slot {slot}: checksum ref exceeds model range"))?;
+                let count = u8::try_from(reference.count)
+                    .map_err(|_| format!("slot {slot}: checksum ref exceeds model range"))?;
+                Ok((first, first + count))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        refs.push(Some(committed_refs));
         if !size.is_multiple_of(CELL) {
             return Err(format!("slot {slot}: size {size} is not cell-aligned"));
         }
@@ -1261,7 +1402,7 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
     }
     // The freshly recovered state is quiesced: bookkeeping must be exact.
     audit_volume(&volume, true);
-    Ok(obs)
+    Ok(Extracted { logical: obs, refs })
 }
 
 /// Surface-parity tripwire: the exhaustive match forces this ledger to be
@@ -1288,7 +1429,7 @@ async fn extract(pool: &BufferPool, image: Vec<u8>) -> Result<Obs, String> {
 fn conformance_surface_parity() {
     fn drives(op: Op) -> &'static str {
         match op {
-            Op::Append(_) | Op::Overwrite(_) => "Blob::write_at",
+            Op::Append(_) | Op::SparseWrite(_) | Op::Overwrite(_) => "Blob::write_at",
             Op::ResizeDown(_) | Op::ResizeUp(_) => "Blob::resize",
             Op::Prune(_) => "Blob::prune",
             Op::Sync(_) => "Blob::sync / Blob::start_sync (pooled union)",
@@ -1578,6 +1719,126 @@ async fn conformance_core() {
     })
     .await;
     assert!(stats.cases > 2_000, "suspiciously few cases: {stats:?}");
+}
+
+/// Checksum refs are a structural part of the refinement, not only an
+/// implementation-side scale assertion: two append captures retain disjoint
+/// delta refs, an overwrite compacts them to one full ref, and pruning moves
+/// the recovery coverage window before another crash/reopen check.
+#[tokio::test]
+async fn conformance_checksum_refs() {
+    let mut rig = Rig::new().await;
+    let mut stats = Stats::default();
+
+    for op in [Op::Append(0), Op::Append(0), Op::Sync(0b001)] {
+        rig.execute(op).await;
+    }
+    rig.crash_probe(&[], 1024, 0xC5EC_0001, &mut stats).await;
+
+    for op in [Op::Append(0), Op::Append(0), Op::Sync(0b001)] {
+        rig.execute(op).await;
+    }
+    rig.crash_probe(&[], 1024, 0xC5EC_0002, &mut stats).await;
+
+    for op in [Op::Overwrite(0), Op::Sync(0b001)] {
+        rig.execute(op).await;
+    }
+    rig.crash_probe(&[], 1024, 0xC5EC_0003, &mut stats).await;
+
+    for op in [Op::Prune(0), Op::Prune(0), Op::Sync(0b001)] {
+        rig.execute(op).await;
+    }
+    rig.crash_probe(&[], 1024, 0xC5EC_0004, &mut stats).await;
+
+    assert_eq!(stats.crash_points, 4);
+    assert!(stats.cases >= 4, "missing checksum crash cases: {stats:?}");
+}
+
+/// A sparse write beyond an odd frontier leaves that frontier's run partial
+/// but non-final. Its durable span controls the checksum value, recovery
+/// verification, and the next full rewrite; keep all three in lockstep.
+#[tokio::test]
+async fn conformance_sparse_partial_non_final_checksum() {
+    let mut rig = Rig::new().await;
+    let mut stats = Stats::default();
+
+    for op in [
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Sync(0b001),
+        Op::ResizeDown(0),
+        Op::SparseWrite(0),
+        Op::Sync(0b001),
+    ] {
+        rig.execute(op).await;
+    }
+    rig.crash_probe(&[], 1024, 0x5A75_E001, &mut stats).await;
+
+    for op in [Op::Overwrite(0), Op::Sync(0b001)] {
+        rig.execute(op).await;
+    }
+    rig.crash_probe(&[], 1024, 0x5A75_E002, &mut stats).await;
+
+    assert_eq!(stats.crash_points, 2);
+    assert!(stats.cases >= 2, "missing sparse checksum cases: {stats:?}");
+}
+
+/// Lockstep the paging ref-identity race itself: recovery leaves a non-frontier
+/// checksum unloaded, its page read parks after selecting the old ref, and a
+/// full-rewrite commit swaps that ref before the read resumes. Both the real
+/// loader and the model must discard the old result and finish against the
+/// current ref.
+#[tokio::test]
+async fn conformance_checksum_page_ref_swap() {
+    let mut rig = Rig::new().await;
+    for op in [
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Append(0),
+        Op::Sync(0b001),
+    ] {
+        rig.execute(op).await;
+    }
+
+    let image = rig.tearing.durable_image();
+    let recovered = states_after(&rig.tracked, &[Action::Crash], &rig.trace);
+    let tracked = recovered
+        .into_iter()
+        .map(|(parent, mut state)| {
+            state.actions_left = 120;
+            state.crashes_left = 6;
+            Tracked {
+                state,
+                translate: rig.tracked[parent].translate.clone(),
+            }
+        })
+        .collect();
+    let next_ctr = rig.next_ctr;
+    let ops = rig.ops.clone();
+    let trace = rig.trace.clone();
+    rig = Rig::resume(rig.pool.clone(), image, tracked, next_ctr, ops, trace).await;
+
+    rig.gated.read_gate.arm();
+    let reader = tokio::spawn({
+        let blob = rig.blobs[&0].clone();
+        async move { blob.read_at(0, 10).await }
+    });
+    rig.gated.read_gate.wait_reached().await;
+    rig.step_model_only(&[Action::PageStart(0, 0)]);
+
+    rig.execute(Op::Overwrite(0)).await;
+    rig.execute(Op::Sync(0b001)).await;
+    let expected = pattern(rig.next_ctr);
+
+    rig.gated.read_gate.release();
+    let got = reader.await.unwrap().unwrap().coalesce();
+    assert_eq!(got.as_ref(), &expected[..10]);
+    rig.step_model_only(&[Action::PageFinish]);
+    rig.check_live().await;
+    rig.check_checksum_refs();
 }
 
 /// Recycling workload: overwrite/rewind/hole-growth/remove/recreate with
@@ -2171,7 +2432,7 @@ async fn random_walk(seed: u64) {
             let mut resumed = false;
             for case in cases {
                 stats.cases += 1;
-                let obs = extract(&rig.pool, case.image.clone())
+                let extracted = extract(&rig.pool, case.image.clone())
                     .await
                     .unwrap_or_else(|e| {
                         panic!(
@@ -2182,7 +2443,9 @@ async fn random_walk(seed: u64) {
                 let matching: Vec<Tracked> = allowed
                     .iter()
                     .filter(|(parent, state)| {
-                        translated(&rig.tracked[*parent], &state.volume.logical()) == obs
+                        translated(&rig.tracked[*parent], &state.volume.logical())
+                            == extracted.logical
+                            && refs_match(&extracted.refs, &model_ref_obs(state))
                     })
                     .map(|(parent, state)| {
                         // Budgets are exploration bounds, not semantic
@@ -2203,7 +2466,8 @@ async fn random_walk(seed: u64) {
                     !matching.is_empty(),
                     "seed {seed} step {step_idx}: recovered state not allowed \
                      ({}):\n  {obs:?}",
-                    case.desc
+                    case.desc,
+                    obs = extracted.logical
                 );
                 // Resume the walk on the first outcome (the rest were
                 // membership-checked and dropped).

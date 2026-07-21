@@ -414,9 +414,8 @@ where
     /// The caller may keep applying batches while the handle is pending, but must not
     /// externally acknowledge the synced state until the handle resolves: a crash before the
     /// started sync's commit lands discards the synced state exactly as if this call had
-    /// never been made. The handle must be observed — a sync failure (fatal to the db, like
-    /// every mutable storage failure) is reported only through it, and awaiting it is what
-    /// drives the commit when no other sync arrives.
+    /// never been made. The handle must be observed because a sync failure (fatal to the db,
+    /// like every mutable storage failure) is reported only through it.
     pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
         let mut batch = self.log.context().batch().await?;
         self.log.sync_into(&mut batch).await?;

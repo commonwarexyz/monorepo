@@ -16,6 +16,28 @@ use tokio::task;
 // per-write kernel setup overhead.
 const IOVEC_BATCH_SIZE: usize = 32;
 
+/// Flush a file through the storage device's volatile write cache.
+/// macOS `fsync` does not provide that guarantee, so use `F_FULLFSYNC`.
+pub(super) fn sync_file(file: &File) -> std::io::Result<()> {
+    cfg_if! {
+        if #[cfg(target_os = "macos")] {
+            loop {
+                // SAFETY: `file` owns a valid descriptor that remains live for the call.
+                // `F_FULLFSYNC` ignores its variadic argument and returns -1 on error.
+                if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+                    return Ok(());
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        } else {
+            file.sync_all()
+        }
+    }
+}
+
 /// Reads at or below this size attempt a non-blocking page-cache read on
 /// the caller thread before falling back to the blocking pool. Dispatching
 /// through `spawn_blocking` costs ~7us while a warm 4KiB `pread` costs
@@ -79,7 +101,7 @@ impl Blob {
             }
             state.epoch()
         };
-        file.sync_all()
+        sync_file(file)
             .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))?;
         // The floor written above is durable, unless a prune advanced it
         // mid-sync (a failure leaves the mark set for a retry).

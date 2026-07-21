@@ -185,8 +185,9 @@ pub(super) struct Table {
     pub partitions: Vec<String>,
     pub blobs: Vec<Entry>,
     /// Chunks whose content changed in THIS commit — plus each captured
-    /// blob's frontier chunk whenever the capture wrote a fresh shadow —
-    /// as (blob id, chunk index). Recovery verifies exactly these to
+    /// blob's frontier chunk whenever the capture wrote a fresh shadow, or
+    /// a sentinel chunk when it wrote a fresh checksum extent but changed no
+    /// content — as (blob id, chunk index). Recovery verifies exactly these to
     /// distinguish a fully-landed commit from a torn one; the manifested
     /// frontier makes it check the fresh shadow's content (recovery's
     /// splice is a raw byte copy and must never write an unverified

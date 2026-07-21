@@ -386,8 +386,7 @@ where
     /// ONE batch and begin its commit. Awaiting the returned [Handle] waits for the same
     /// durability guarantee as [Self::sync]. Until it resolves the synced state is readable
     /// but a crash may discard it (exactly like unsynced state). The handle must be
-    /// observed: the commit's failure is reported only through it, and awaiting it is what
-    /// drives the commit when no other sync arrives.
+    /// observed because the commit's failure is reported only through it.
     pub async fn start_sync(&mut self) -> Result<Handle<()>, Error<F>> {
         let mut batch = self
             .journal

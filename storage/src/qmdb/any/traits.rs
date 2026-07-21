@@ -109,8 +109,7 @@ pub trait DbAny<F: Family>:
 
     /// Start [`Self::sync`]: begin durably persisting the database. Awaiting the returned
     /// [`Handle`] waits for the same durability guarantee as [`Self::sync`]. The handle must
-    /// be observed: a sync failure is reported only through it, and awaiting it is what
-    /// drives the sync when no other sync arrives.
+    /// be observed because a sync failure is reported only through it.
     fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error<F>>> + Send;
 
     /// Destroy the database, removing all data from disk.
