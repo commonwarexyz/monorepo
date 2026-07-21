@@ -971,6 +971,9 @@ impl<B: Blob> Writer<B> {
     /// [`Self::new`] sizes a blob by scanning backward to its last valid page, which cannot
     /// detect an earlier page that was lost or corrupted. This scans forward instead, stopping
     /// at the first invalid or short page.
+    ///
+    /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
+    /// still buffered in this writer is unreadable from the blob and fails the scan.
     pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
@@ -981,7 +984,7 @@ impl<B: Blob> Writer<B> {
                 Ok((logical, _)) => {
                     let len = logical.len() as u64;
                     valid_len += len;
-                    // A partial page can only legitimately be the last one; stop here.
+                    // A partial page can only legitimately be the last one, so stop here.
                     if len < logical_page_size {
                         break;
                     }

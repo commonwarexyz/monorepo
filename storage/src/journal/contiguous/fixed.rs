@@ -34,7 +34,7 @@
 //!   and byte offset.
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail. When the
-//!   tail fills, it is sealed and an fsync of it begins; `Writable` tracks that in-flight sync
+//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync
 //!   along with any started sync of the new tail.
 //!
 //! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
@@ -68,12 +68,14 @@
 //! When an append fills the tail blob, the journal rolls over: it seals the full blob, starts an
 //! fsync of it, and opens the next blob as the new tail. Each rollover first waits for the
 //! previous rollover's fsync, so only the tail and its predecessor (the blob sealed by the last
-//! rollover) can ever hold non-durable data; every older blob is fully durable.
+//! rollover) can ever hold non-durable data. Every older blob is fully durable.
 //!
 //! A crash while one of those fsyncs is in flight can persist the blob's pages out of order: an
 //! earlier page may be lost while later pages, including a valid last page, survive. Sizing a
 //! blob by its last valid page cannot detect such a hole, so recovery re-reads the two newest
-//! blobs from the front and truncates each at the first missing or corrupt page.
+//! blobs from the front and truncates each at the first missing or corrupt page. A hole in a
+//! blob fully below the recovery watermark is external corruption, and recovery fails without
+//! truncating it.
 //!
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
 //! exceeds the recovered size, recovery returns a corruption error. Both the pruning boundary
@@ -431,24 +433,38 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Check the two newest blobs for interior holes. Only they can hold non-durable data, and
         // a crash during an in-flight fsync can lose an interior page while later pages survive.
-        // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Re-read
-        // each blob from the front and truncate at the first bad page (rounded down to whole
-        // items) so `recover_bounds` sees only intact data.
+        // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Above
+        // the watermark, truncate at the first bad page (rounded down to whole items) so
+        // `recover_bounds` sees only intact data. In a blob fully below the watermark the
+        // covering fsync completed, so a hole is external corruption: fail and preserve the
+        // evidence (`recover_bounds` would reject the truncated result anyway).
+        let floor_blob = super::position_to_blob(
+            checkpoint.watermark().unwrap_or(0),
+            cfg.items_per_blob.get(),
+        );
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
             let valid = writer.recoverable_prefix_len().await?;
             let valid = Self::items_to_bytes(valid / Self::CHUNK_SIZE_U64)?;
-            if valid < writer.size() {
-                warn!(
-                    blob,
-                    valid,
-                    size = writer.size(),
-                    "interior hole detected: truncating to last well-formed page"
-                );
-                writer.resize(valid).await?;
-                writer.sync().await?;
+            if valid == writer.size() {
+                continue;
             }
+            if blob < floor_blob {
+                return Err(Error::Corruption(format!(
+                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
+                     of size {}",
+                    writer.size()
+                )));
+            }
+            warn!(
+                blob,
+                valid,
+                size = writer.size(),
+                "truncating to last well-formed page"
+            );
+            writer.resize(valid).await?;
+            writer.sync().await?;
         }
 
         let RecoveredBounds {
@@ -1153,8 +1169,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash after this call doesn't require any recovery.
     ///
     /// At most one commit's sync is in flight at a time: this call waits for the sync the prior
-    /// commit started before starting another. Appends and reads proceed while the returned
-    /// handle is pending, and dropping the handle does not cancel the sync.
+    /// commit started before starting another. It does not wait for a pending rollover fsync:
+    /// the returned handle joins it, so an earlier commit's handle may still be pending when
+    /// this call returns. Reads always proceed while the returned handle is pending, and
+    /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
+    /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_commit(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_commit().await;
         (self, handle)
@@ -3537,7 +3556,8 @@ mod tests {
 
     /// A torn page beneath the recovery watermark is external corruption, not a crash artifact:
     /// the watermark only advances after the covering fsync completes. Recovery must fail rather
-    /// than silently adopt a shortened prefix.
+    /// than silently adopt a shortened prefix, and it must preserve the evidence so a retry
+    /// fails identically.
     #[test_traced]
     fn test_fixed_recovery_rejects_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();
@@ -3559,8 +3579,24 @@ mod tests {
                 PAGE_SIZE.get() as u64,
             )
             .await;
+            let (_, size_before) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
 
-            let result = Journal::<_, Digest>::init(context.child("second"), cfg).await;
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The rejection must not truncate the torn blob, and a retry must fail identically.
+            let (_, size_after) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(
+                size_after, size_before,
+                "rejection must preserve the evidence"
+            );
+            let result = Journal::<_, Digest>::init(context.child("third"), cfg).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -3707,7 +3743,7 @@ mod tests {
     }
 
     /// A crash right after pruning must not lose retained items that were appended but never
-    /// synced. Blob removal is durable, so prune flushes every dirty blob first: otherwise the
+    /// synced. Blob removal is durable, so prune makes all data durable first: otherwise the
     /// unsynced tail would vanish with the crash and recovery would truncate the journal to
     /// empty even though the removal survived.
     #[test_traced]
