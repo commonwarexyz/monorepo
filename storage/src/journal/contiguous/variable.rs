@@ -2263,10 +2263,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
     /// the previous `sync()`.
     ///
-    /// At most one tail fsync is in flight at a time: if a prior commit's fsync is still pending,
-    /// this call waits for it before starting a new one. It does not wait for a pending rollover
-    /// fsync: the returned handle joins it, so an earlier commit's handle may still be pending
-    /// when this call returns. Reads always proceed while the returned handle is pending, and
+    /// At most one commit's sync is in flight at a time: this call waits for the sync the prior
+    /// commit started before starting another. It does not wait for a pending rollover fsync:
+    /// the returned handle joins it, so an earlier commit's handle may still be pending when
+    /// this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
     /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_commit(mut self) -> (Self, Handle<()>) {
