@@ -436,6 +436,52 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
 
 #[test_group("slow")]
 #[test_traced("INFO")]
+fn reshare_e2e_state_sync_probe_floor_crosses_epoch() {
+    // The node anchors mid-epoch 1, then the harness holds bootstrap until the
+    // anchored committee finishes epoch 1, so probe's floor lands in epoch 2.
+    // The node must sync inside epoch 2 without epoch 2's boundary info,
+    // follow to the epoch 3 boundary, and participate normally afterward:
+    // dealt to as a player during epoch 3, it registers as a signer for
+    // epoch 4.
+    let anchor_epoch = Epoch::new(1);
+    let floor_epoch = anchor_epoch.next();
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let start_height = epocher
+        .midpoint(anchor_epoch)
+        .expect("test epoch should be supported");
+    let engine = ReshareEngine::with_committee(6, 4).with_epoch_cross_before_probe();
+    let delayed = engine.participants[5].clone();
+    let registrations = engine.registrations.clone();
+    let state_syncs = engine.state_syncs.clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+    reshare_plan_with_boundary(engine, 4, BoundaryEpochInfos::new(5))
+        .crash(Crash::DelayRound {
+            participants: vec![delayed.clone()],
+            round: height_round(start_height),
+        })
+        .property(StateSyncedAtHeight::new(
+            delayed.clone(),
+            epocher
+                .first(floor_epoch)
+                .expect("test epoch should be supported"),
+            final_height(floor_epoch.get()),
+            state_syncs.clone(),
+        ))
+        .property(StateSyncedSigner::new(
+            delayed.clone(),
+            Epoch::new(4),
+            registrations,
+            state_syncs,
+        ))
+        .timeout(Duration::from_secs(180))
+        .run()
+        .unwrap();
+
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
+}
+
+#[test_group("slow")]
+#[test_traced("INFO")]
 fn reshare_e2e_state_sync_epoch_zero_next_player() {
     let next_player_epoch = Epoch::zero();
     state_sync_next_player_plan(

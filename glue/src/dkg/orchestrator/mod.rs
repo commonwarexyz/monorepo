@@ -826,19 +826,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "state sync artifact and floor must be in the same epoch")]
-    fn state_sync_rejects_mismatched_floor_epoch() {
+    #[should_panic(expected = "state sync artifact epoch must not exceed floor epoch")]
+    fn state_sync_rejects_artifact_beyond_floor_epoch() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
-            let info = make_epoch_info(Epoch::zero(), fixture.participants.iter().cloned());
+            let info = make_epoch_info(Epoch::new(1), fixture.participants.iter().cloned());
             let genesis = make_genesis_block(
                 fixture.participants[0].clone(),
                 fixture.participants.iter().cloned(),
             );
             let floor = make_finalization(
                 Proposal::new(
-                    Round::new(Epoch::new(1), View::new(1)),
+                    Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
                     genesis.digest(),
                 ),

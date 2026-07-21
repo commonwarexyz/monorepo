@@ -54,8 +54,38 @@
 //! reshare configurations. The plan durably records fresh state-sync material
 //! before the actors start, so a node can restart immediately after state sync
 //! completes. Both actors share one recovery decision, and the plan removes
-//! stale material once marshal's recovered epoch advances beyond the synced
+//! stale material once marshal's recovered epoch advances beyond the floor's
 //! epoch. This API is independent of the optional [`crate::stateful`] actor.
+//!
+//! ## Crossing an epoch boundary during bootstrap
+//!
+//! [`anchor`] resolves `EpochInfo(E)` from the boundary block `last(E - 1)`.
+//! If the network finalizes into `E + 1` before the probe samples its floor,
+//! the floor lands in `E + 1`. The boundary block `last(E)` carrying
+//! `EpochInfo(E + 1)` is below the floor and is never fetched. Startup
+//! proceeds without it:
+//!
+//! ```text
+//! anchor: EpochInfo(E) via last(E - 1)
+//! probe:  floor finalization in E + 1
+//!          |
+//!          v
+//! no scheme for E + 1: orchestrator awaits the boundary, reshare follows
+//!          |
+//!          v
+//! anchor serving forwards verified finalizations, marshal delivers E + 1
+//!          |
+//!          v
+//! last(E + 1) finalizes, carrying EpochInfo(E + 2)
+//!          |
+//!          v
+//! scheme(E + 2) registers, the first Simplex engine starts
+//! ```
+//!
+//! The first engine is for `E + 2`. `EpochInfo(E + 1)` is unlearnable (its
+//! boundary block is below the floor), and a share for `E + 1` would have been
+//! dealt while the node was still bootstrapping. When the floor stays in `E`,
+//! startup is unchanged and the engine for `E` starts immediately.
 //!
 //! # Marshal Retention
 //!
@@ -118,6 +148,7 @@ pub mod anchor;
 pub mod bootstrap;
 pub mod fence;
 pub mod orchestrator;
+pub mod provider;
 pub mod reshare;
 pub mod state_sync;
 pub mod types;

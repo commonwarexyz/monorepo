@@ -3,6 +3,7 @@ use crate::{
         ParticipantsProvider, Registrar, ReshareBlock, SecretStore, anchor,
         fence::Fence,
         orchestrator,
+        provider::FallbackProvider,
         reshare::{self, Input as ReshareInput},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::mocks::{FilteredReceiver, MemorySecretStore},
@@ -430,6 +431,7 @@ pub(super) struct ReshareEngine {
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     pub(super) state_sync_starts: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     state_sync_floor: Option<Height>,
+    epoch_cross_before_probe: bool,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -558,6 +560,7 @@ impl ReshareEngine {
             state_syncs: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_starts: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_floor: None,
+            epoch_cross_before_probe: false,
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -576,6 +579,14 @@ impl ReshareEngine {
 
     pub(super) const fn with_state_sync_floor(mut self, height: Height) -> Self {
         self.state_sync_floor = Some(height);
+        self
+    }
+
+    /// Hold state-sync bootstrap between anchor and probe until every member
+    /// of the anchored committee has processed into the next epoch, forcing
+    /// probe's floor to land beyond the anchored epoch.
+    pub(super) const fn with_epoch_cross_before_probe(mut self) -> Self {
+        self.epoch_cross_before_probe = true;
         self
     }
 
@@ -661,6 +672,13 @@ impl EngineDefinition for ReshareEngine {
         let provider = DynamicProvider::new();
         let store = self.store(public_key);
         self.initial.register_epoch_zero(&provider, &store).await;
+        // Probe and marshal judge certificates through the all-epoch fallback
+        // so epochs beyond the registered horizon stay judgeable. Signing
+        // scheme lookup still resolves only registered epochs.
+        let fallback_provider = FallbackProvider::new(
+            provider.clone(),
+            Scheme::certificate_verifier(NAMESPACE, *self.initial.info.output.public().public()),
+        );
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
@@ -746,12 +764,41 @@ impl EngineDefinition for ReshareEngine {
         } else {
             None
         };
+        // Optionally hold bootstrap between anchor and probe until the whole
+        // anchored committee has processed into the next epoch, so probe's
+        // replies carry rounds beyond the anchored epoch.
+        if self.epoch_cross_before_probe && should_state_sync {
+            let artifact = anchor_artifact
+                .as_ref()
+                .expect("epoch cross hold requires state-sync bootstrap");
+            let committee = artifact.info.output.players().clone();
+            assert!(
+                committee.position(public_key).is_none(),
+                "delayed node must not be an anchored-committee member for the epoch-cross hold"
+            );
+            let target = FixedEpocher::new(EPOCH_LENGTH)
+                .first(artifact.epoch.next())
+                .expect("next epoch must be supported")
+                .get();
+            loop {
+                let crossed = {
+                    let processed = self.processed.lock();
+                    committee
+                        .iter()
+                        .all(|member| processed.get(member).is_some_and(|height| *height > target))
+                };
+                if crossed {
+                    break;
+                }
+                context.sleep(Duration::from_millis(50)).await;
+            }
+        }
         let minimum_probe_epoch = anchor_artifact
             .as_ref()
             .map_or_else(Epoch::zero, |artifact| artifact.epoch);
         let (probe_actor, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
-            provider: provider.clone(),
+            provider: fallback_provider.clone(),
             strategy: Sequential,
             capacity: NZUsize!(100),
             blocker: oracle.control(public_key.clone()),
@@ -783,7 +830,7 @@ impl EngineDefinition for ReshareEngine {
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                provider: provider.clone(),
+                provider: fallback_provider.clone(),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
                 start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
@@ -947,7 +994,7 @@ impl EngineDefinition for ReshareEngine {
             orchestrator::Config {
                 oracle: oracle.control(public_key.clone()),
                 manager: oracle.manager(),
-                provider: provider.clone(),
+                provider: fallback_provider.clone(),
                 marshal: marshal.clone(),
                 application: deferred.clone(),
                 strategy: Sequential,

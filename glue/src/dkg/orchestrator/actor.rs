@@ -9,7 +9,7 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Heightable, Relay,
+    CertifiableAutomaton, Epochable as _, Heightable, Relay,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
         self, Floor, ForwardingPolicy, Plan, elector::Config as Elector, scheme, types::Context,
@@ -34,7 +34,10 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
-use futures::FutureExt as _;
+use futures::{
+    FutureExt as _,
+    future::{self, Either},
+};
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -70,6 +73,25 @@ impl Drop for ActiveEpoch {
     }
 }
 
+enum EpochState {
+    /// No Simplex engine is running because the epoch's public info is not
+    /// available yet. The actor waits for the finalized boundary block of
+    /// `epoch` to introduce the first epoch it can enter.
+    AwaitBoundary {
+        epoch: Epoch,
+    },
+    Active(ActiveEpoch),
+}
+
+impl EpochState {
+    const fn epoch(&self) -> Epoch {
+        match self {
+            Self::AwaitBoundary { epoch } => *epoch,
+            Self::Active(active) => active.epoch,
+        }
+    }
+}
+
 enum EnterEpochError {
     GateClosed,
     MuxClosed,
@@ -86,6 +108,20 @@ where
     epoch: Epoch,
     floor: Floor<S, D>,
     info: EpochInfo<V, P>,
+}
+
+enum StartState<S, D, V, P>
+where
+    S: scheme::Scheme<D, PublicKey = P>,
+    D: Digest,
+    V: BlsVariant,
+    P: PublicKey,
+{
+    /// The startup epoch's public info is available and an engine can start.
+    Epoch(Box<ResolvedStart<S, D, V, P>>),
+    /// The state-sync floor is beyond the newest known epoch info, so no
+    /// engine can start until the boundary block of `epoch` finalizes.
+    AwaitBoundary { epoch: Epoch },
 }
 
 /// Simplex configuration applied to each epoch engine.
@@ -311,10 +347,12 @@ where
 
     /// Run the actor event loop.
     ///
-    /// The loop owns one active Simplex engine at a time. It listens for
-    /// finalized boundary blocks from marshal and for backup vote traffic from
-    /// future epochs, which is used only to ask marshal for the missing boundary
-    /// finalization.
+    /// The loop owns at most one active Simplex engine at a time. It listens
+    /// for finalized boundary blocks from marshal and for backup vote traffic
+    /// from future epochs, which is used only to ask marshal for the missing
+    /// boundary finalization. When the state-sync floor is beyond the newest
+    /// known epoch info, the loop starts with no engine and enters its first
+    /// epoch from the floor epoch's finalized boundary block.
     async fn run<S, R>(
         mut self,
         (vote_sender, vote_receiver): (S, R),
@@ -334,38 +372,50 @@ where
             debug!("context shutdown while resolving startup epoch");
             return;
         };
-        let mut active = match self
-            .enter_epoch(
-                start.epoch,
-                start.floor,
-                start.info.participants().tracked_peers(),
-                &mut channels,
-            )
-            .await
-        {
-            Ok(active) => active,
-            Err(EnterEpochError::GateClosed) => {
-                debug!(
-                    epoch = start.epoch.get(),
-                    "epoch gate closed before startup"
-                );
-                return;
+        let mut state = match start {
+            StartState::Epoch(start) => {
+                let start = *start;
+                match self
+                    .enter_epoch(
+                        start.epoch,
+                        start.floor,
+                        start.info.participants().tracked_peers(),
+                        &mut channels,
+                    )
+                    .await
+                {
+                    Ok(active) => EpochState::Active(active),
+                    Err(EnterEpochError::GateClosed) => {
+                        debug!(
+                            epoch = start.epoch.get(),
+                            "epoch gate closed before startup"
+                        );
+                        return;
+                    }
+                    Err(EnterEpochError::MuxClosed) => {
+                        debug!(
+                            epoch = start.epoch.get(),
+                            "consensus mux closed before startup epoch"
+                        );
+                        return;
+                    }
+                    Err(EnterEpochError::Stopped) => {
+                        debug!("context shutdown before startup epoch");
+                        return;
+                    }
+                }
             }
-            Err(EnterEpochError::MuxClosed) => {
-                debug!(
-                    epoch = start.epoch.get(),
-                    "consensus mux closed before startup epoch"
-                );
-                return;
-            }
-            Err(EnterEpochError::Stopped) => {
-                debug!("context shutdown before startup epoch");
-                return;
-            }
+            StartState::AwaitBoundary { epoch } => EpochState::AwaitBoundary { epoch },
         };
 
         select_loop! {
             self.context,
+            on_start => {
+                let engine = match &mut state {
+                    EpochState::Active(active) => Either::Left(&mut active.handle),
+                    EpochState::AwaitBoundary { .. } => Either::Right(future::pending()),
+                };
+            },
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
@@ -373,15 +423,15 @@ where
                 debug!("vote mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
-                self.handle_backup_vote(&epocher, active.epoch, their_epoch, from);
+                self.handle_backup_vote(&epocher, state.epoch(), their_epoch, from);
             },
-            result = &mut active.handle => match result {
+            result = engine => match result {
                 Ok(()) => {
-                    debug!(epoch = active.epoch.get(), "simplex engine stopped, shutting down orchestrator");
+                    debug!(epoch = state.epoch().get(), "simplex engine stopped, shutting down orchestrator");
                     break;
                 }
                 Err(error) => {
-                    panic!("simplex engine for epoch {} stopped unexpectedly: {error}", active.epoch);
+                    panic!("simplex engine for epoch {} stopped unexpectedly: {error}", state.epoch());
                 }
             },
             Some(message) = self.mailbox.recv() else {
@@ -395,7 +445,7 @@ where
                     let keep_running = self
                         .handle_finalized(
                             &epocher,
-                            &mut active,
+                            &mut state,
                             block,
                             acknowledgement,
                             &mut channels,
@@ -414,15 +464,16 @@ where
     /// Normal startup resolves from marshal's local boundary blocks. State-sync
     /// startup and recovery are exceptions: the node may know a recent public
     /// boundary from `dkg::anchor` without having the previous boundary block in
-    /// local marshal storage.
+    /// local marshal storage. When the state-sync floor is beyond the anchored
+    /// epoch, no epoch can start until the floor epoch's boundary block
+    /// finalizes with the next epoch's info.
     ///
     /// Returns `None` when marshal becomes unavailable because the context is
     /// shutting down.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
-    ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
-    {
+    ) -> Option<StartState<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>> {
         let recovered_epoch = state_sync::recovered_epoch(&self.marshal, epocher).await;
         if let Some(state_sync) = self
             .state_sync
@@ -432,15 +483,28 @@ where
             )
             .await
         {
-            return Some(ResolvedStart {
+            let floor_epoch = state_sync.floor.epoch();
+            if floor_epoch > state_sync.info.epoch {
+                // The network crossed an epoch boundary during bootstrap. The
+                // floor's epoch cannot be entered without its EpochInfo, which
+                // only the next finalized boundary block supplies.
+                info!(
+                    synced = %state_sync.info.epoch,
+                    floor = %floor_epoch,
+                    "state-sync floor beyond synced epoch, awaiting next boundary"
+                );
+                return Some(StartState::AwaitBoundary { epoch: floor_epoch });
+            }
+            return Some(StartState::Epoch(Box::new(ResolvedStart {
                 epoch: state_sync.info.epoch,
                 floor: Floor::Finalized(state_sync.floor),
                 info: state_sync.info,
-            });
+            })));
         }
 
         self.resolve_boundary(recovered_epoch.unwrap_or_else(Epoch::zero), epocher)
             .await
+            .map(|start| StartState::Epoch(Box::new(start)))
     }
 
     /// Resolve a locally recovered epoch from marshal's finalized boundary block.
@@ -577,12 +641,12 @@ where
     ///
     /// Non-boundary blocks are acknowledged immediately. A boundary block must
     /// carry the next epoch's public [`Payload::EpochInfo`]; once it does, the
-    /// actor stops the current Simplex engine and enters the next epoch using
-    /// that public peer set.
+    /// actor stops the current Simplex engine (if one is running) and enters
+    /// the next epoch using that public peer set.
     async fn handle_finalized<S, R>(
         &mut self,
         epocher: &FixedEpocher,
-        active: &mut ActiveEpoch,
+        state: &mut EpochState,
         block: Arc<MV::ApplicationBlock>,
         acknowledgement: ACK,
         channels: &mut Channels<P::Scheme, S, R>,
@@ -592,19 +656,20 @@ where
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         let height = block.height();
-        if epocher.last(active.epoch) != Some(height) {
+        let current = state.epoch();
+        if epocher.last(current) != Some(height) {
             acknowledgement.acknowledge();
             return true;
         }
 
-        let next_epoch = active.epoch.next();
+        let next_epoch = current.next();
         let Some(Payload::EpochInfo(info)) = block.payload() else {
-            panic!("boundary block of epoch {} missing EpochInfo", active.epoch);
+            panic!("boundary block of epoch {current} missing EpochInfo");
         };
         if info.epoch != next_epoch {
             panic!(
-                "boundary block of epoch {} carries epoch info for wrong epoch (got: {}, expected: {})",
-                active.epoch, info.epoch, next_epoch
+                "boundary block of epoch {current} carries epoch info for wrong epoch (got: {}, expected: {next_epoch})",
+                info.epoch
             );
         }
 
@@ -643,7 +708,7 @@ where
             }
         };
 
-        *active = next;
+        *state = EpochState::Active(next);
         acknowledgement.acknowledge();
         true
     }
