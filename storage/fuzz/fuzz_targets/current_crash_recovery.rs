@@ -34,6 +34,7 @@ type RawValue = [u8; 32];
 
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
+const MAX_OPERATIONS: usize = 50;
 
 type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
 
@@ -68,25 +69,49 @@ enum CurrentOperation {
 }
 
 /// Fuzz input containing fault injection parameters and operations.
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     seed: u64,
-    #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    #[arbitrary(with = bounded_items_per_blob)]
     merkle_items_per_blob: u64,
-    #[arbitrary(with = bounded_items_per_blob)]
     log_items_per_blob: u64,
-    #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
-    #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: f64,
-    #[arbitrary(with = bounded_nonzero_rate)]
     write_failure_rate: f64,
     operations: Vec<CurrentOperation>,
     raw_bytes: Vec<u8>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
+        let seed = u.arbitrary()?;
+        let page_size = bounded_page_size(u)?;
+        let page_cache_size = bounded_page_cache_size(u)?;
+        let merkle_items_per_blob = bounded_items_per_blob(u)?;
+        let log_items_per_blob = bounded_items_per_blob(u)?;
+        let write_buffer = bounded_write_buffer(u)?;
+        let sync_failure_rate = bounded_nonzero_rate(u)?;
+        let write_failure_rate = bounded_nonzero_rate(u)?;
+        let num_operations = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_operations)
+            .map(|_| CurrentOperation::arbitrary(u))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            seed,
+            page_size,
+            page_cache_size,
+            merkle_items_per_blob,
+            log_items_per_blob,
+            write_buffer,
+            sync_failure_rate,
+            write_failure_rate,
+            operations,
+            raw_bytes,
+        })
+    }
 }
 
 fn make_config(
@@ -189,10 +214,6 @@ async fn commit_pending<F: Graftable>(
 }
 
 fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
-    if input.operations.is_empty() {
-        return;
-    }
-
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let merkle_items_per_blob = input.merkle_items_per_blob;

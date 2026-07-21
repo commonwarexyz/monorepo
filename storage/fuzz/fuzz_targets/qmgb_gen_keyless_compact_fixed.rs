@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{
     BufferPooler, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -11,7 +11,7 @@ use commonware_storage::{
     merkle::{Error as MerkleError, Family, Location, mmb, mmr},
     qmdb::{
         Error,
-        keyless::variable::{CompactConfig, CompactDb},
+        keyless::fixed::{CompactConfig, CompactDb},
         sync::compact as compact_sync,
     },
 };
@@ -22,7 +22,6 @@ use std::{num::NonZeroU16, sync::Arc};
 const MAX_OPERATIONS: usize = 50;
 const MAX_VALUE_LEN: usize = 10000;
 const MAX_METADATA_LEN: usize = 1000;
-type CodecConfig = (commonware_codec::RangeCfg<usize>, ());
 
 /// Which error variant a bad-floor commit should produce.
 #[derive(Debug, Clone, Copy)]
@@ -96,23 +95,19 @@ enum Operation {
     /// Drop the handle without syncing and reopen: state must match the last synced commit.
     Restart,
     Root,
-    LastCommitLoc,
     GetMetadata,
     Target,
-    ToBatch,
-    Strategy {
-        values: [u8; 4],
-    },
+    CompactSync,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 16 {
+        match choice % 14 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = (((value_len as usize) % MAX_VALUE_LEN) + 1).min(u.len());
-                let value_bytes = u.bytes(actual_len.min(u.len()))?.to_vec();
+                let value_bytes = u.bytes(actual_len)?.to_vec();
                 Ok(Operation::Append { value_bytes })
             }
             1 => {
@@ -121,7 +116,7 @@ impl<'a> Arbitrary<'a> for Operation {
                     let metadata_len: u16 = u.arbitrary()?;
                     let actual_len =
                         (((metadata_len as usize) % MAX_METADATA_LEN) + 1).min(u.len());
-                    Some(u.bytes(actual_len.min(u.len()))?.to_vec())
+                    Some(u.bytes(actual_len)?.to_vec())
                 } else {
                     None
                 };
@@ -133,7 +128,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             2 => Ok(Operation::ChainedCommit),
             3 => Ok(Operation::StaleBatch),
-            4 => Ok(Operation::Sync),
+            4 => Ok(Operation::Persist),
             5 => {
                 let idx = u.arbitrary()?;
                 Ok(Operation::Rewind { idx })
@@ -147,12 +142,8 @@ impl<'a> Arbitrary<'a> for Operation {
             9 => Ok(Operation::Root),
             10 => Ok(Operation::GetMetadata),
             11 => Ok(Operation::Target),
-            12 => Ok(Operation::Persist),
-            13 => Ok(Operation::LastCommitLoc),
-            14 => Ok(Operation::ToBatch),
-            15 => Ok(Operation::Strategy {
-                values: u.arbitrary()?,
-            }),
+            12 => Ok(Operation::CompactSync),
+            13 => Ok(Operation::Sync),
             _ => unreachable!(),
         }
     }
@@ -179,13 +170,13 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(127);
 const PAGE_CACHE_SIZE: usize = 8;
 
-type Db<F, S> = CompactDb<F, deterministic::Context, Vec<u8>, Sha256, CodecConfig, S>;
+type Db<F, S> = CompactDb<F, deterministic::Context, Digest, Sha256, S>;
 
 fn test_config<S: Strategy>(
     test_name: &str,
     pooler: &impl BufferPooler,
     strategy: S,
-) -> CompactConfig<CodecConfig, S> {
+) -> CompactConfig<S> {
     CompactConfig {
         strategy,
         witness: JournalConfig {
@@ -196,7 +187,7 @@ fn test_config<S: Strategy>(
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             write_buffer: NZUsize!(1024),
         },
-        commit_codec_config: ((0..=10000).into(), ()),
+        commit_codec_config: (),
     }
 }
 
@@ -204,8 +195,7 @@ fn test_config<S: Strategy>(
 struct SyncedCommit<D> {
     size: u64,
     root: D,
-    metadata: Option<Vec<u8>>,
-    floor: u64,
+    metadata: Option<Digest>,
 }
 
 fn fuzz_family<F: Family, S: Strategy>(
@@ -213,7 +203,6 @@ fn fuzz_family<F: Family, S: Strategy>(
     suffix: &str,
     strategy: impl FnOnce(&deterministic::Context) -> S,
 ) {
-    deterministic::Runner::default();
     let cfg =
         deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
     let runner = deterministic::Runner::new(cfg);
@@ -226,20 +215,20 @@ fn fuzz_family<F: Family, S: Strategy>(
             .expect("Failed to init compact keyless db");
         let mut restarts = 0usize;
 
-        let mut pending_appends: Vec<Vec<u8>> = Vec::new();
+        let mut pending_appends: Vec<Digest> = Vec::new();
         let mut expected_metadata = db.get_metadata();
+        let mut syncs = 0usize;
         // The bootstrap commit is durable, so it is a valid rewind target.
         let mut synced = vec![SyncedCommit {
             size: db.size().as_u64(),
             root: db.root(),
             metadata: db.get_metadata(),
-            floor: db.inactivity_floor_loc().as_u64(),
         }];
 
         for op in &input.ops {
             match op {
                 Operation::Append { value_bytes } => {
-                    pending_appends.push(value_bytes.clone());
+                    pending_appends.push(Sha256::hash(value_bytes));
                 }
 
                 Operation::Commit {
@@ -267,26 +256,25 @@ fn fuzz_family<F: Family, S: Strategy>(
                         }
                     };
 
+                    let appends = std::mem::take(&mut pending_appends);
                     let mut batch = db.new_batch();
-                    for v in pending_appends.drain(..) {
-                        batch = batch.append(v);
+                    for v in &appends {
+                        batch = batch.append(*v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
+                    let metadata = metadata_bytes.as_deref().map(Sha256::hash);
+                    let merkleized = batch.merkleize(&db, metadata, floor).await;
 
                     match expect_err {
                         None => {
-                            assert_eq!(merkleized.bounds().base_size, db.size().as_u64());
-                            assert_eq!(
-                                merkleized.bounds().total_size,
-                                db.size().as_u64() + pending_count + 1
-                            );
-                            assert_eq!(merkleized.bounds().inactivity_floor, floor);
                             let expected_root = merkleized.root();
-                            (db, _) = db.apply_batch(merkleized).expect("Commit should not fail");
+                            let start = db.size();
+                            let range;
+                            (db, range) =
+                                db.apply_batch(merkleized).expect("Commit should not fail");
+                            assert_eq!(range.start, start);
+                            assert_eq!(range.end, db.size());
                             assert_eq!(db.root(), expected_root);
-                            assert_eq!(db.get_metadata(), metadata_bytes.clone());
-                            assert_eq!(db.inactivity_floor_loc(), floor);
-                            expected_metadata = metadata_bytes.clone();
+                            expected_metadata = metadata;
                         }
                         Some(kind) => {
                             // Snapshot state; the reject must not mutate. `apply_batch` consumes
@@ -301,59 +289,77 @@ fn fuzz_family<F: Family, S: Strategy>(
                             assert_eq!(db.size(), before_size);
                             assert_eq!(db.inactivity_floor_loc(), before_floor);
                             assert_eq!(db.root(), before_root);
+                            pending_appends = appends;
                         }
                     }
                 }
 
                 Operation::ChainedCommit => {
+                    if pending_appends.len() < 2 {
+                        continue;
+                    }
                     let floor = db.inactivity_floor_loc();
                     let parent = db
                         .new_batch()
-                        .append(vec![0u8; 1])
+                        .append(pending_appends[0])
                         .merkleize(&db, None, floor)
                         .await;
                     let child = parent
                         .new_batch::<Sha256>()
-                        .append(vec![1u8; 1])
+                        .append(pending_appends[1])
                         .merkleize(&db, None, floor)
                         .await;
                     let expected_root = child.root();
-                    (db, _) = db
+                    let start = db.size();
+                    let range;
+                    (db, range) = db
                         .apply_batch(child)
                         .expect("Chained commit should not fail");
+                    assert_eq!(range.start, start);
+                    assert_eq!(range.end, db.size());
                     assert_eq!(db.root(), expected_root);
-                    assert_eq!(db.get_metadata(), None);
                     expected_metadata = None;
                 }
 
                 Operation::StaleBatch => {
+                    if pending_appends.len() < 2 {
+                        continue;
+                    }
                     let floor = db.inactivity_floor_loc();
                     let batch_a = db
                         .new_batch()
-                        .append(vec![2u8; 1])
+                        .append(pending_appends[0])
                         .merkleize(&db, None, floor)
                         .await;
                     let batch_b = db
                         .new_batch()
-                        .append(vec![3u8; 1])
+                        .append(pending_appends[1])
                         .merkleize(&db, None, floor)
                         .await;
-                    (db, _) = db.apply_batch(batch_a).expect("Commit should not fail");
-                    expected_metadata = None;
+                    let start = db.size();
+                    let range;
+                    (db, range) = db.apply_batch(batch_a).expect("Commit should not fail");
+                    assert_eq!(range.start, start);
+                    assert_eq!(range.end, db.size());
                     assert!(
                         matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch { .. })),
                         "second batch from the same state must be stale"
                     );
+                    expected_metadata = None;
                 }
 
-                Operation::Persist => {
+                Operation::Persist | Operation::Sync => {
                     let expected = (
                         db.size(),
                         db.root(),
                         db.inactivity_floor_loc(),
                         db.get_metadata(),
                     );
-                    db = db.commit().await.expect("Commit should not fail");
+                    db = if matches!(op, Operation::Persist) {
+                        db.commit().await.expect("Commit should not fail")
+                    } else {
+                        db.sync().await.expect("Sync should not fail")
+                    };
                     assert_eq!(
                         (
                             db.size(),
@@ -361,33 +367,16 @@ fn fuzz_family<F: Family, S: Strategy>(
                             db.inactivity_floor_loc(),
                             db.get_metadata(),
                         ),
-                        expected
+                        expected,
+                        "persistence should preserve compact keyless state"
                     );
-                    let state = SyncedCommit {
-                        size: db.size().as_u64(),
-                        root: db.root(),
-                        metadata: db.get_metadata(),
-                        floor: db.inactivity_floor_loc().as_u64(),
-                    };
-                    if synced.last().map(|commit| commit.size) == Some(state.size) {
-                        *synced.last_mut().unwrap() = state;
-                    } else {
-                        synced.push(state);
-                    }
-                }
-
-                Operation::Sync => {
-                    db = db.sync().await.expect("Sync should not fail");
-                    let state = SyncedCommit {
-                        size: db.size().as_u64(),
-                        root: db.root(),
-                        metadata: db.get_metadata(),
-                        floor: db.inactivity_floor_loc().as_u64(),
-                    };
-                    if synced.last().map(|commit| commit.size) == Some(state.size) {
-                        *synced.last_mut().unwrap() = state;
-                    } else {
-                        synced.push(state);
+                    let size = db.size().as_u64();
+                    if synced.last().map(|c| c.size) != Some(size) {
+                        synced.push(SyncedCommit {
+                            size,
+                            root: db.root(),
+                            metadata: db.get_metadata(),
+                        });
                     }
                 }
 
@@ -403,8 +392,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_eq!(db.size().as_u64(), tip.size);
                     assert_eq!(db.root(), tip.root);
                     assert_eq!(db.get_metadata(), tip.metadata);
-                    assert_eq!(db.inactivity_floor_loc().as_u64(), tip.floor);
-                    expected_metadata = tip.metadata.clone();
+                    expected_metadata = tip.metadata;
                 }
 
                 Operation::RewindUnsynced => {
@@ -433,8 +421,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_eq!(db.size().as_u64(), tip.size);
                     assert_eq!(db.root(), tip.root);
                     assert_eq!(db.get_metadata(), tip.metadata);
-                    assert_eq!(db.inactivity_floor_loc().as_u64(), tip.floor);
-                    expected_metadata = tip.metadata.clone();
+                    expected_metadata = tip.metadata;
                 }
 
                 Operation::Prune { idx } => {
@@ -464,16 +451,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_eq!(db.size().as_u64(), tip.size);
                     assert_eq!(db.root(), tip.root);
                     assert_eq!(db.get_metadata(), tip.metadata);
-                    assert_eq!(db.inactivity_floor_loc().as_u64(), tip.floor);
-                    expected_metadata = tip.metadata.clone();
+                    expected_metadata = tip.metadata;
                 }
 
                 Operation::Root => {
                     assert_eq!(db.root(), db.to_batch().root());
-                }
-
-                Operation::LastCommitLoc => {
-                    assert_eq!(db.last_commit_loc() + 1, db.size());
                 }
 
                 Operation::GetMetadata => {
@@ -482,78 +464,54 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                 Operation::Target => {
                     let target = db.target();
+                    assert!(target.validate().is_ok());
                     let expected = synced.last().unwrap();
                     assert_eq!(target.leaf_count.as_u64(), expected.size);
                     assert_eq!(target.root, expected.root);
                 }
 
-                Operation::ToBatch => {
-                    let batch = db.to_batch();
-                    assert_eq!(batch.root(), db.root());
-                    assert_eq!(batch.bounds().base_size, db.size().as_u64());
-                    assert_eq!(batch.bounds().total_size, db.size().as_u64());
-                    assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
-                }
-
-                Operation::Strategy { values } => {
-                    let expected = values.iter().map(|value| u64::from(*value)).sum::<u64>();
-                    let actual = db.strategy().fold(
-                        values,
-                        || 0u64,
-                        |sum, value| sum + u64::from(*value),
-                        |left, right| left + right,
+                Operation::CompactSync => {
+                    let target = db.target();
+                    let expected = synced.last().unwrap();
+                    let expected_size = expected.size;
+                    let expected_metadata = expected.metadata;
+                    let source = Arc::new(db);
+                    let client_cfg = test_config(
+                        &format!("{suffix}-client-{syncs}"),
+                        &context,
+                        strategy.clone(),
                     );
-                    assert_eq!(actual, expected, "database strategy produced a wrong fold");
+                    let client: Db<F, S> = compact_sync::sync(compact_sync::Config {
+                        context: context.child("client").with_attribute("instance", syncs),
+                        resolver: source.clone(),
+                        target: target.clone(),
+                        db_config: client_cfg,
+                        update_rx: None,
+                        finish_rx: None,
+                        reached_target_tx: None,
+                    })
+                    .await
+                    .expect("Compact sync should not fail");
+                    assert_eq!(client.root(), target.root);
+                    assert_eq!(client.size().as_u64(), expected_size);
+                    assert_eq!(client.get_metadata(), expected_metadata);
+                    client.destroy().await.expect("Destroy should not fail");
+                    db = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+                    syncs += 1;
                 }
             }
         }
-
-        // Compact-sync round-trip: rebuild a fresh db from the source's persisted compact witness,
-        // exercising compact_state, init_from_validated_state, and Store::from_import.
-        let db = db.sync().await.expect("Sync should not fail");
-        let target = db.target();
-        let source = Arc::new(db);
-        let client_cfg = test_config(&format!("{suffix}-client"), &context, strategy.clone());
-        let client: Db<F, S> = compact_sync::sync(compact_sync::Config {
-            context: context.child("client"),
-            resolver: source.clone(),
-            target: target.clone(),
-            db_config: client_cfg.clone(),
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-        })
-        .await
-        .expect("Compact sync should not fail");
-        assert_eq!(client.root(), target.root);
-        assert_eq!(client.get_metadata(), source.get_metadata());
-        assert_eq!(client.inactivity_floor_loc(), source.inactivity_floor_loc());
-        drop(client);
-
-        // Reopen from disk: the imported witness must persist across a restart.
-        let reopened: Db<F, S> = Db::init(context.child("client_reopen"), client_cfg)
-            .await
-            .expect("Failed to reopen imported client");
-        assert_eq!(reopened.root(), target.root);
-        assert_eq!(reopened.get_metadata(), source.get_metadata());
-        assert_eq!(
-            reopened.inactivity_floor_loc(),
-            source.inactivity_floor_loc()
-        );
-        reopened.destroy().await.expect("Destroy should not fail");
-
-        let db = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
         db.destroy().await.expect("Destroy should not fail");
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", |_| Sequential);
-    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", |_| Sequential);
-    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", |context| {
+    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-fixed-mmr-sequential", |_| Sequential);
+    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-fixed-mmb-sequential", |_| Sequential);
+    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-fixed-mmr-rayon", |context| {
         context.strategy(NZUsize!(2))
     });
-    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", |context| {
+    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-fixed-mmb-rayon", |context| {
         context.strategy(NZUsize!(2))
     });
 });

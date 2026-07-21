@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy as _};
 use commonware_runtime::{BufferPooler, Runner, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -39,6 +39,14 @@ enum ImmutableOperation {
     Get {
         key_seed: u64,
     },
+    GetMany {
+        first_key_seed: u64,
+        second_key_seed: u64,
+    },
+    BatchReads {
+        first_key_seed: u64,
+        second_key_seed: u64,
+    },
     Commit {
         has_metadata: bool,
         metadata_size: usize,
@@ -58,8 +66,19 @@ enum ImmutableOperation {
     },
     GetMetadata,
     OpCount,
+    Size,
     OldestRetainedLoc,
+    SyncBoundary,
+    Sync,
+    Rewind {
+        idx: u8,
+    },
+    ValidateBatch,
+    ToBatch,
     Root,
+    Strategy {
+        values: [u8; 4],
+    },
 }
 
 #[derive(Debug)]
@@ -71,6 +90,8 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let seed = u.arbitrary()?;
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let mut operations = Vec::with_capacity(num_ops);
@@ -79,7 +100,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(u.arbitrary()?);
         }
 
-        let raw_bytes = u.bytes(u.len())?.to_vec();
         Ok(FuzzInput {
             seed,
             operations,
@@ -167,6 +187,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
             let mut last_commit_loc: Option<Location<F>> = None;
             let mut pending_sets: Vec<(Digest, Vec<u8>)> = Vec::new();
+            let mut expected_metadata = db.get_metadata().await.unwrap();
+            let mut commit_history = vec![(
+                db.size(),
+                db.root(),
+                db.inactivity_floor_loc(),
+                db.get_metadata().await.unwrap(),
+            )];
 
             for op in operations {
                 db = match op {
@@ -187,7 +214,63 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
                     ImmutableOperation::Get { key_seed } => {
                         let key = generate_key(&mut rng, key_seed);
-                        let _ = db.get(&key).await;
+                        let actual = db.get(&key).await;
+                        match actual {
+                            Ok(value) => assert_eq!(
+                                db.get_many(&[&key]).await.unwrap(),
+                                vec![value],
+                                "single and batched reads disagreed",
+                            ),
+                            Err(_) => assert!(db.get_many(&[&key]).await.is_err()),
+                        }
+                        db
+                    }
+
+                    ImmutableOperation::GetMany {
+                        first_key_seed,
+                        second_key_seed,
+                    } => {
+                        let first = generate_key(&mut rng, first_key_seed);
+                        let second = generate_key(&mut rng, second_key_seed);
+                        let expected = vec![
+                            db.get(&first).await.unwrap(),
+                            db.get(&second).await.unwrap(),
+                        ];
+                        assert_eq!(db.get_many(&[&first, &second]).await.unwrap(), expected);
+                        db
+                    }
+
+                    ImmutableOperation::BatchReads {
+                        first_key_seed,
+                        second_key_seed,
+                    } => {
+                        let first = generate_key(&mut rng, first_key_seed);
+                        let second = generate_key(&mut rng, second_key_seed);
+                        let mut batch = db.new_batch();
+                        for (key, value) in &pending_sets {
+                            batch = batch.set(*key, value.clone());
+                        }
+                        let expected = vec![
+                            batch.get(&first, &db).await.unwrap(),
+                            batch.get(&second, &db).await.unwrap(),
+                        ];
+                        assert_eq!(
+                            batch.get_many(&[&first, &second], &db).await.unwrap(),
+                            expected
+                        );
+                        let merkleized =
+                            batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                        assert_eq!(
+                            merkleized.get_many(&[&first, &second], &db).await.unwrap(),
+                            vec![
+                                merkleized.get(&first, &db).await.unwrap(),
+                                merkleized.get(&second, &db).await.unwrap(),
+                            ]
+                        );
+                        assert_eq!(
+                            merkleized.bounds().total_size,
+                            db.size().as_u64() + pending_sets.len() as u64 + 1
+                        );
                         db
                     }
 
@@ -222,10 +305,24 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         } else {
                             db.inactivity_floor_loc()
                         };
+                        let expected_metadata_after = metadata.clone();
                         let merkleized = batch.merkleize(&db, metadata, floor).await;
+                        let expected_root = merkleized.root();
+                        let expected_size = Location::new(merkleized.bounds().total_size);
                         let (db, _) = db.apply_batch(merkleized).await.unwrap();
                         let db = db.commit().await.unwrap();
+                        assert_eq!(db.size(), expected_size);
+                        assert_eq!(db.root(), expected_root);
+                        assert_eq!(db.inactivity_floor_loc(), floor);
+                        assert_eq!(db.get_metadata().await.unwrap(), expected_metadata_after);
+                        expected_metadata = expected_metadata_after;
                         last_commit_loc = Some(db.bounds().end - 1);
+                        commit_history.push((
+                            db.size(),
+                            db.root(),
+                            db.inactivity_floor_loc(),
+                            db.get_metadata().await.unwrap(),
+                        ));
                         db
                     }
 
@@ -247,10 +344,21 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             // but never below the current floor (monotonicity).
                             let floor = safe_loc.max(db.inactivity_floor_loc());
                             let merkleized = batch.merkleize(&db, None, floor).await;
+                            let expected_root = merkleized.root();
                             let (db, _) = db.apply_batch(merkleized).await.unwrap();
                             let db = db.commit().await.unwrap();
+                            expected_metadata = None;
                             last_commit_loc = Some(db.bounds().end - 1);
+                            commit_history.push((
+                                db.size(),
+                                db.root(),
+                                db.inactivity_floor_loc(),
+                                db.get_metadata().await.unwrap(),
+                            ));
+                            let size = db.size();
                             let db = db.prune(safe_loc).await.expect("prune should not fail");
+                            assert_eq!(db.size(), size);
+                            assert_eq!(db.root(), expected_root);
                             let oldest = db.bounds().start;
                             set_locations.retain(|(_, l)| *l >= oldest);
                             keys_set.retain(|(_, l)| *l >= oldest);
@@ -284,11 +392,31 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             let merkleized = batch.merkleize(&db, None, floor).await;
                             let (db, _) = db.apply_batch(merkleized).await.unwrap();
                             let db = db.commit().await.unwrap();
+                            expected_metadata = None;
                             last_commit_loc = Some(db.bounds().end - 1);
+                            commit_history.push((
+                                db.size(),
+                                db.root(),
+                                db.inactivity_floor_loc(),
+                                db.get_metadata().await.unwrap(),
+                            ));
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
-                                let _ =
-                                    verify_proof::<Sha256, _, _>(&proof, safe_start, &ops, &root);
+                                assert!(verify_proof::<Sha256, _, _>(
+                                    &proof, safe_start, &ops, &root
+                                ));
+                                let pinned = db.pinned_nodes_at(safe_start).await.unwrap();
+                                assert!(commonware_storage::qmdb::verify_proof_and_pinned_nodes::<
+                                    Sha256,
+                                    _,
+                                    _,
+                                >(
+                                    &proof, safe_start, &ops, &pinned, &root,
+                                ));
+                                for op in &ops {
+                                    assert_eq!(op.key().is_some(), !op.is_commit());
+                                    assert_eq!(op.has_floor().is_some(), op.is_commit());
+                                }
                             }
                             db
                         } else {
@@ -301,25 +429,30 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         start_loc,
                         max_ops,
                     } => {
-                        let op_count = db.bounds().end;
-                        if op_count > 0 && pending_sets.is_empty() {
-                            let safe_size = (size % op_count.as_u64()).max(1);
-                            let safe_size = Location::new(safe_size);
-                            let safe_start = start_loc % safe_size.as_u64();
-                            let safe_start = Location::new(safe_start);
+                        let bounds = db.bounds();
+                        let candidates = commit_history
+                            .iter()
+                            .filter(|(candidate_size, _, floor, _)| {
+                                *candidate_size > bounds.start && *floor >= bounds.start
+                            })
+                            .collect::<Vec<_>>();
+                        if !candidates.is_empty() && pending_sets.is_empty() {
+                            let expected = candidates[size as usize % candidates.len()];
+                            let safe_size = expected.0;
+                            let retained = (safe_size - bounds.start).as_u64();
+                            let safe_start = bounds.start + (start_loc % retained);
                             let safe_max_ops =
                                 NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-
-                            let floor = db.inactivity_floor_loc();
-                            let batch = db.new_batch().merkleize(&db, None, floor).await;
-                            let (db, _) = db.apply_batch(batch).await.unwrap();
-                            let db = db.commit().await.unwrap();
-                            last_commit_loc = Some(db.bounds().end - 1);
-                            if safe_start >= db.bounds().start {
-                                let _ = db
-                                    .historical_proof(safe_size, safe_start, safe_max_ops)
-                                    .await;
-                            }
+                            let (proof, ops) = db
+                                .historical_proof(safe_size, safe_start, safe_max_ops)
+                                .await
+                                .expect("retained commit should produce a historical proof");
+                            assert!(verify_proof::<Sha256, _, _>(
+                                &proof,
+                                safe_start,
+                                &ops,
+                                &expected.1,
+                            ));
                             db
                         } else {
                             db
@@ -327,17 +460,97 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     ImmutableOperation::GetMetadata => {
-                        let _ = db.get_metadata().await;
+                        assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
                         db
                     }
 
                     ImmutableOperation::OpCount => {
-                        let _ = db.bounds().end;
+                        assert_eq!(db.bounds().end, db.size());
+                        db
+                    }
+
+                    ImmutableOperation::Size => {
+                        assert_eq!(db.size(), db.bounds().end);
                         db
                     }
 
                     ImmutableOperation::OldestRetainedLoc => {
-                        let _ = db.bounds().start;
+                        assert!(db.bounds().start <= db.inactivity_floor_loc());
+                        assert!(db.bounds().start <= db.size());
+                        db
+                    }
+
+                    ImmutableOperation::SyncBoundary => {
+                        assert_eq!(db.sync_boundary(), db.inactivity_floor_loc());
+                        db
+                    }
+
+                    ImmutableOperation::Sync => {
+                        let expected = (
+                            db.size(),
+                            db.root(),
+                            db.inactivity_floor_loc(),
+                            db.get_metadata().await.unwrap(),
+                        );
+                        let db = db.sync().await.unwrap();
+                        assert_eq!(
+                            (
+                                db.size(),
+                                db.root(),
+                                db.inactivity_floor_loc(),
+                                db.get_metadata().await.unwrap(),
+                            ),
+                            expected
+                        );
+                        db
+                    }
+
+                    ImmutableOperation::Rewind { idx } => {
+                        let bounds = db.bounds();
+                        let candidates = commit_history
+                            .iter()
+                            .filter(|(size, _, floor, _)| {
+                                *size > bounds.start && *floor >= bounds.start
+                            })
+                            .collect::<Vec<_>>();
+                        if candidates.len() < 2 {
+                            db
+                        } else {
+                            let expected = candidates[idx as usize % (candidates.len() - 1)];
+                            let target = expected.0;
+                            let db = db.rewind(target).await.unwrap();
+                            assert_eq!(db.size(), expected.0);
+                            assert_eq!(db.root(), expected.1);
+                            assert_eq!(db.inactivity_floor_loc(), expected.2);
+                            assert_eq!(db.get_metadata().await.unwrap(), expected.3);
+                            expected_metadata = expected.3.clone();
+                            commit_history.retain(|(size, _, _, _)| *size <= target);
+                            keys_set.retain(|(_, loc)| *loc < target);
+                            set_locations.retain(|(_, loc)| *loc < target);
+                            last_commit_loc = Some(target - 1);
+                            db
+                        }
+                    }
+
+                    ImmutableOperation::ValidateBatch => {
+                        let before = (db.size(), db.root(), db.inactivity_floor_loc());
+                        let mut batch = db.new_batch();
+                        for (key, value) in &pending_sets {
+                            batch = batch.set(*key, value.clone());
+                        }
+                        let merkleized =
+                            batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                        assert!(db.validate_batch(&merkleized).is_ok());
+                        assert_eq!((db.size(), db.root(), db.inactivity_floor_loc()), before);
+                        db
+                    }
+
+                    ImmutableOperation::ToBatch => {
+                        let batch = db.to_batch();
+                        assert_eq!(batch.root(), db.root());
+                        assert_eq!(batch.bounds().base_size, db.size().as_u64());
+                        assert_eq!(batch.bounds().total_size, db.size().as_u64());
+                        assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
                         db
                     }
 
@@ -354,10 +567,30 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
                         let floor = db.inactivity_floor_loc();
                         let merkleized = batch.merkleize(&db, None, floor).await;
+                        let expected_root = merkleized.root();
                         let (db, _) = db.apply_batch(merkleized).await.unwrap();
                         let db = db.commit().await.unwrap();
+                        expected_metadata = None;
                         last_commit_loc = Some(db.bounds().end - 1);
-                        let _ = db.root();
+                        assert_eq!(db.root(), expected_root);
+                        commit_history.push((
+                            db.size(),
+                            db.root(),
+                            db.inactivity_floor_loc(),
+                            db.get_metadata().await.unwrap(),
+                        ));
+                        db
+                    }
+
+                    ImmutableOperation::Strategy { values } => {
+                        let expected = values.iter().map(|value| u64::from(*value)).sum::<u64>();
+                        let actual = db.strategy().fold(
+                            values,
+                            || 0u64,
+                            |sum, value| sum + u64::from(value),
+                            |left, right| left + right,
+                        );
+                        assert_eq!(actual, expected, "database strategy produced a wrong fold");
                         db
                     }
                 };

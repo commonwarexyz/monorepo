@@ -149,10 +149,21 @@ impl<'a> Arbitrary<'a> for CorruptionType {
     }
 }
 
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum SyncOperation {
+    Scalar,
+    Array,
+    ArrayRef,
+    Slice,
+    Vec,
+    BTreeSet,
+}
+
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     /// Number of entries per section (1-10)
     entries_per_section: [u8; 3],
+    sync_operations: [SyncOperation; 3],
     /// Corruptions to apply before recovery
     corruptions: Vec<CorruptionType>,
     /// Whether to sync before corruption
@@ -206,7 +217,25 @@ fn fuzz(input: FuzzInput) {
                 let _ = oversized.append(section, entry, &value).await;
                 entry_id += 1;
             }
-            let _ = oversized.sync(section).await;
+            match input.sync_operations[section_idx] {
+                SyncOperation::Scalar => assert!(oversized.sync(section).await.is_ok()),
+                SyncOperation::Array => assert!(oversized.sync([section]).await.is_ok()),
+                SyncOperation::ArrayRef => {
+                    let sections = [section];
+                    assert!(oversized.sync(&sections).await.is_ok());
+                }
+                SyncOperation::Slice => {
+                    let sections = [section];
+                    assert!(oversized.sync(&sections[..]).await.is_ok());
+                }
+                SyncOperation::Vec => assert!(oversized.sync(vec![section]).await.is_ok()),
+                SyncOperation::BTreeSet => assert!(
+                    oversized
+                        .sync(std::collections::BTreeSet::from([section]))
+                        .await
+                        .is_ok()
+                ),
+            }
         }
 
         if input.sync_before_corrupt {
