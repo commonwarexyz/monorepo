@@ -22,6 +22,7 @@ members = [
     "resolver",
     "runtime",
     "runtime/macros",
+    "runtime/qualification",
     "storage",
     "stream",
     "invariants",

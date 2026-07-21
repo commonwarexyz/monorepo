@@ -1,0 +1,22 @@
+[package]
+name = "commonware-runtime-crash-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+autobins = false
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-runtime.workspace = true
+libc.workspace = true
+sha2.workspace = true
+
+[[bin]]
+name = "volume-crash-fuzz"
+path = "src/main.rs"
+
+[features]
+iouring = [ "commonware-runtime/iouring-storage" ]
