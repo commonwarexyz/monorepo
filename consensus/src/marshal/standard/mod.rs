@@ -113,7 +113,6 @@ mod tests {
         vec::NonEmptyVec,
     };
     use std::{
-        future::Future,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -1813,29 +1812,26 @@ mod tests {
         type Context = Ctx;
         type Digest = D;
 
-        fn propose(
-            &mut self,
-            context: Self::Context,
-        ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send {
-            async move { Wrapper::propose(self, context).await }
+        async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+            Self::propose(self, context).await
         }
 
-        fn verify(
+        async fn verify(
             &mut self,
             context: Self::Context,
             digest: Self::Digest,
-        ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
-            async move { Wrapper::verify(self, context, digest).await }
+        ) -> oneshot::Receiver<bool> {
+            Self::verify(self, context, digest).await
         }
     }
 
     impl CertifiableAutomaton for Wrapper {
-        fn certify(
+        async fn certify(
             &mut self,
             round: Round,
             digest: Self::Digest,
-        ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
-            async move { Wrapper::certify(self, round, digest).await }
+        ) -> oneshot::Receiver<bool> {
+            Self::certify(self, round, digest).await
         }
     }
 

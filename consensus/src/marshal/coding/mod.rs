@@ -1434,6 +1434,35 @@ mod tests {
                 "Valid re-proposal at epoch boundary should be accepted"
             );
 
+            // The same boundary commitment may be re-proposed again after the
+            // first re-proposal certifies. Its parent view advances while its
+            // parent payload remains the boundary commitment. Re-proposal
+            // validation is intrinsic to the committed block and must return
+            // the same result under both headers.
+            let repeated_reproposal_round =
+                Round::new(Epoch::new(0), View::new(boundary_height.get() + 2));
+            let repeated_reproposal_context = CodingCtx {
+                round: repeated_reproposal_round,
+                leader: me.clone(),
+                parent: (reproposal_round.view(), boundary_commitment),
+            };
+            let repeated_verify = marshaled
+                .verify(repeated_reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                repeated_verify.unwrap(),
+                "Repeated re-proposal should remain valid as the parent view advances"
+            );
+            let repeated_certify = marshaled
+                .certify(repeated_reproposal_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                repeated_certify.unwrap(),
+                "Repeated re-proposal certification should remain valid"
+            );
+
             // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
             // Create a block at height 10 (not at epoch boundary)
             let non_boundary_height = Height::new(10);
