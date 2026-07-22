@@ -331,32 +331,26 @@ where
         };
         let view = round.view().get();
 
+        // Deduplicate against this view only: the same digest may legitimately
+        // be stored again at a later view (boundary re-proposal), and each view
+        // needs its own copy to survive per-view retention pruning.
+        let exists = match cache.verified_blocks.has_at(view, &digest).await {
+            Ok(exists) => exists,
+            Err(e) => panic!("failed to check verified blocks: {e}"),
+        };
         let handle;
-        if cache.verified_blocks.pruned(view) {
-            debug!(?round, name = "verified", "already pruned");
-            handle = Handle::ready(Ok(()));
+        if exists {
+            (cache.verified_blocks, handle) = Self::handle_start_result(
+                cache.verified_blocks.start_sync().await,
+                round,
+                "verified",
+            );
         } else {
-            // Deduplicate against this view only: the same digest may legitimately
-            // be stored again at a later view (boundary re-proposal), and each view
-            // needs its own copy to survive per-view retention pruning.
-            let exists = match cache.verified_blocks.has_at(view, &digest).await {
-                Ok(exists) => exists,
-                Err(e) => panic!("failed to check verified blocks: {e}"),
-            };
-            if exists {
-                (cache.verified_blocks, handle) = Self::handle_start_result(
-                    cache.verified_blocks.start_sync().await,
-                    round,
-                    "verified",
-                );
-            } else {
-                let result = cache
-                    .verified_blocks
-                    .put_multi_start_sync(view, digest, block)
-                    .await;
-                (cache.verified_blocks, handle) =
-                    Self::handle_start_result(result, round, "verified");
-            }
+            let result = cache
+                .verified_blocks
+                .put_multi_start_sync(view, digest, block)
+                .await;
+            (cache.verified_blocks, handle) = Self::handle_start_result(result, round, "verified");
         }
         self.caches.insert(epoch, cache);
         (self, handle)
@@ -376,23 +370,19 @@ where
             return self;
         };
 
-        if cache.certified_blocks.pruned(height.get()) {
-            debug!(%height, "certified block already pruned");
-        } else {
-            // A digest determines its height, so scoping the dedup to this height
-            // is exact and avoids fetching values.
-            let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
-                Ok(exists) => exists,
-                Err(e) => panic!("failed to check certified block: {e}"),
-            };
-            if !exists {
-                cache.certified_blocks = cache
-                    .certified_blocks
-                    .put_multi_sync(height.get(), digest, block)
-                    .await
-                    .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
-                debug!(%height, "cached certified block");
-            }
+        // A digest determines its height, so scoping the dedup to this height
+        // is exact and avoids fetching values.
+        let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
+            Ok(exists) => exists,
+            Err(e) => panic!("failed to check certified block: {e}"),
+        };
+        if !exists {
+            cache.certified_blocks = cache
+                .certified_blocks
+                .put_multi_sync(height.get(), digest, block)
+                .await
+                .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
+            debug!(%height, "cached certified block");
         }
         self.caches.insert(epoch, cache);
         self
@@ -413,18 +403,12 @@ where
         };
 
         let view = round.view().get();
+        let result = cache
+            .notarized_blocks
+            .put_start_sync(view, digest, block)
+            .await;
         let handle;
-        if cache.notarized_blocks.pruned(view) {
-            debug!(?round, name = "notarized", "already pruned");
-            handle = Handle::ready(Ok(()));
-        } else {
-            let result = cache
-                .notarized_blocks
-                .put_start_sync(view, digest, block)
-                .await;
-            (cache.notarized_blocks, handle) =
-                Self::handle_start_result(result, round, "notarized");
-        }
+        (cache.notarized_blocks, handle) = Self::handle_start_result(result, round, "notarized");
         self.caches.insert(epoch, cache);
         (self, handle)
     }
@@ -481,18 +465,12 @@ where
         };
 
         let view = round.view().get();
+        let result = cache
+            .notarizations
+            .put_start_sync(view, digest, notarization)
+            .await;
         let handle;
-        if cache.notarizations.pruned(view) {
-            debug!(?round, name = "notarization", "already pruned");
-            handle = Handle::ready(Ok(()));
-        } else {
-            let result = cache
-                .notarizations
-                .put_start_sync(view, digest, notarization)
-                .await;
-            (cache.notarizations, handle) =
-                Self::handle_start_result(result, round, "notarization");
-        }
+        (cache.notarizations, handle) = Self::handle_start_result(result, round, "notarization");
         self.caches.insert(epoch, cache);
         (self, handle)
     }
@@ -517,16 +495,12 @@ where
         };
 
         let view = round.view().get();
-        if cache.finalizations.pruned(view) {
-            debug!(?round, "finalization already pruned");
-        } else {
-            cache.finalizations = cache
-                .finalizations
-                .put_sync(view, digest, finalization)
-                .await
-                .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
-            debug!(?round, "cached finalization");
-        }
+        cache.finalizations = cache
+            .finalizations
+            .put_sync(view, digest, finalization)
+            .await
+            .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
+        debug!(?round, "cached finalization");
         self.caches.insert(epoch, cache);
         self
     }
@@ -547,6 +521,7 @@ where
             }
         }
     }
+
 
     /// Get a notarization from the prunable archive by round.
     pub(crate) async fn get_notarization(

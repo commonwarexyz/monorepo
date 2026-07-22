@@ -16,8 +16,9 @@
 //! # Pruning
 //!
 //! [Cache] supports pruning up to a minimum `index` using the `prune` method. After pruning,
-//! `get` on a pruned index returns `None`, `prune` below the floor is a no-op, and `put` fails
-//! with an error. The pruning granularity is determined by `items_per_blob` in the configuration.
+//! `get` on a pruned index returns `None`, `prune` below the floor is a no-op, and `put` below
+//! the floor is satisfied without storing. The pruning granularity is determined by
+//! `items_per_blob` in the configuration.
 //!
 //! # Single Operation Reads
 //!
@@ -92,8 +93,6 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("record corrupted")]
     RecordCorrupted,
-    #[error("already pruned to: {0}")]
-    AlreadyPrunedTo(u64),
     #[error("record too large")]
     RecordTooLarge,
 }
@@ -243,9 +242,17 @@ mod tests {
             cache = cache.prune(3).await.expect("Failed to prune");
             assert_eq!(cache.first(), Some(3));
 
-            // Try to put older index
-            let result = cache.put(1, 1).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
+            // A put below the prune floor is satisfied without storing
+            let cache = cache.put(1, 1).await.expect("Failed to put below floor");
+            assert_eq!(cache.get(1).await.expect("Failed to get data"), None);
+            assert!(!cache.has(1));
+
+            // put_sync below the prune floor skips the sync
+            let cache = cache
+                .put_sync(1, 1)
+                .await
+                .expect("Failed to put_sync below floor");
+            assert_eq!(cache.get(1).await.expect("Failed to get data"), None);
         });
     }
 

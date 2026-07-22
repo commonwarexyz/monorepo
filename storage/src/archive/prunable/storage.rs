@@ -356,16 +356,17 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         key: K,
         data: V,
         skip_if_index_exists: bool,
-    ) -> Result<Box<Self>, Error> {
-        // Check last pruned
+    ) -> Result<(Box<Self>, bool), Error> {
+        // A put below the prune floor is satisfied without storing
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+            debug!(index, oldest_allowed, "ignoring put below prune floor");
+            return Ok((self, false));
         }
 
         // Check for existing index when enforcing single-item semantics.
         if skip_if_index_exists && self.indices.contains_key(&index) {
-            return Ok(self);
+            return Ok((self, true));
         }
 
         // Write value and index entry atomically (glob first, then index)
@@ -396,7 +397,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(self)
+        Ok((self, true))
     }
 
     /// See [Archive::prune].
@@ -584,9 +585,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 /// Implementation of `Archive` storage.
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
-/// dropped future) destroys the handle. Puts below the prune floor fail with
-/// [Error::AlreadyPrunedTo] without mutating. Check [Archive::pruned] first to keep the
-/// handle.
+/// dropped future) destroys the handle. Puts below the prune floor are satisfied without
+/// storing (see [crate::archive::Archive]).
 pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>(
     Box<Inner<T, E, K, V>>,
 );
@@ -613,14 +613,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
 
-    /// Returns true when `index` is below the prune floor.
-    ///
-    /// The floor only tracks prunes from the current execution and resets at init, so an
-    /// index pruned in a previous execution reports false.
-    pub fn pruned(&self, index: u64) -> bool {
-        self.0.pruned(index)
-    }
-
     /// Prune `Archive` to the provided `min` (masked by the configured
     /// section mask).
     ///
@@ -639,8 +631,33 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     type Value = V;
 
     async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        self.0 = self.0.put_internal(index, key, data, true).await?;
+        (self.0, _) = self.0.put_internal(index, key, data, true).await?;
         Ok(self)
+    }
+
+    async fn put_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+        // A put satisfied below the prune floor stored nothing, so skip the sync.
+        let stored;
+        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
+        if !stored {
+            return Ok(self);
+        }
+        self.sync().await
+    }
+
+    async fn put_start_sync(
+        mut self,
+        index: u64,
+        key: K,
+        data: V,
+    ) -> Result<(Self, Handle<()>), Error> {
+        // A put satisfied below the prune floor stored nothing, so skip the sync.
+        let stored;
+        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
+        if !stored {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        self.start_sync().await
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
@@ -699,8 +716,33 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn put_multi(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        self.0 = self.0.put_internal(index, key, data, false).await?;
+        (self.0, _) = self.0.put_internal(index, key, data, false).await?;
         Ok(self)
+    }
+
+    async fn put_multi_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+        // A put satisfied below the prune floor stored nothing, so skip the sync.
+        let stored;
+        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
+        if !stored {
+            return Ok(self);
+        }
+        crate::archive::Archive::sync(self).await
+    }
+
+    async fn put_multi_start_sync(
+        mut self,
+        index: u64,
+        key: K,
+        data: V,
+    ) -> Result<(Self, Handle<()>), Error> {
+        // A put satisfied below the prune floor stored nothing, so skip the sync.
+        let stored;
+        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
+        if !stored {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        crate::archive::Archive::start_sync(self).await
     }
 
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {

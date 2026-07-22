@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::cache::{Cache, Config, Error};
+use commonware_storage::cache::{Cache, Config};
 use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
@@ -154,28 +154,18 @@ fn fuzz(input: FuzzInput) {
             match op {
                 Operation::Put { index, value } => {
                     if let Some(cache) = cache_opt.take() {
-                        if cache.pruned(index) {
-                            // A put below the prune floor must fail with AlreadyPrunedTo
-                            // and consume the cache. Reinitialize to recover.
-                            match cache.put(index, value).await {
-                                Err(Error::AlreadyPrunedTo(_)) => {}
-                                Ok(_) => panic!("put below prune floor must fail"),
-                                Err(e) => panic!("unexpected put error: {e}"),
-                            }
-                            let cache =
-                                Cache::<_, u32>::init(context.child("storage"), cfg.clone())
-                                    .await
-                                    .expect("Failed to reinitialize cache");
-                            pruned_min = None;
-                            cache_opt = Some(cache);
-                        } else {
-                            let cache =
-                                cache.put(index, value).await.expect("Put should not error");
+                        // A put below the prune floor is satisfied without storing, so the
+                        // model only records puts at or above the floor.
+                        let cache = cache.put(index, value).await.expect("Put should not error");
+                        let section =
+                            (index / input.config.items_per_blob) * input.config.items_per_blob;
+                        let not_pruned = pruned_min.is_none_or(|min| section >= min);
+                        if not_pruned {
                             // Cache put only inserts if index doesn't already exist
                             // Only update expected_data if this is a new index
                             expected_data.entry(index).or_insert(value);
-                            cache_opt = Some(cache);
                         }
+                        cache_opt = Some(cache);
                     }
                 }
 
@@ -203,7 +193,6 @@ fn fuzz(input: FuzzInput) {
                         let section =
                             (index / input.config.items_per_blob) * input.config.items_per_blob;
                         let not_pruned = pruned_min.is_none_or(|min| section >= min);
-                        assert_eq!(cache.pruned(index), !not_pruned);
                         let should_exist = not_pruned && expected_data.contains_key(&index);
 
                         assert_eq!(has, should_exist);
@@ -277,11 +266,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Reinit => {
-                    if cache_opt.is_none() {
+                    if let Some(cache) = cache_opt.take() {
+                        // Make pending writes durable so the model stays exact across
+                        // the restart, then replay from storage. The prune floor
+                        // resets at init.
+                        let cache = cache.sync().await.expect("Sync should not error");
+                        drop(cache);
                         let cache = Cache::<_, u32>::init(context.child("storage"), cfg.clone())
                             .await
                             .expect("Failed to reinitialize cache");
-
                         pruned_min = None;
                         cache_opt = Some(cache);
                     }

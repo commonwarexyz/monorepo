@@ -97,8 +97,8 @@
 //! # Pruning
 //!
 //! [Archive] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
-//! called on a `section`, all interaction with a `section` less than the pruned `section` will
-//! return an error.
+//! called on a `section`, entries below the pruned `section` are gone: `get` returns `None`,
+//! and a `put` below the floor is satisfied without storing.
 //!
 //! ## Lazy Index Cleanup
 //!
@@ -1086,9 +1086,32 @@ mod tests {
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
             assert!(has_metric_value(&buffer, "pruned_total", 1));
 
-            // Try to put older index (consumes the archive, so this is last)
-            let result = archive.put(1, test_key("key1-blah"), 1).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
+            // A put below the prune floor is satisfied without storing
+            let archive = archive
+                .put(1, test_key("key1-blah"), 1)
+                .await
+                .expect("Failed to put below floor");
+            assert_eq!(
+                archive
+                    .get(Identifier::Key(&test_key("key1-blah")))
+                    .await
+                    .expect("Failed to get data"),
+                None
+            );
+
+            // The sync combinators skip the sync for a satisfied below-floor put
+            // and return a ready handle
+            let (archive, handle) = archive
+                .put_start_sync(1, test_key("key1-blah"), 1)
+                .await
+                .expect("Failed to put_start_sync below floor");
+            handle.await.expect("handle must resolve");
+            let archive = archive
+                .put_sync(2, test_key("key2-blfh"), 2)
+                .await
+                .expect("Failed to put_sync below floor");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), None);
         });
     }
 
@@ -1511,9 +1534,27 @@ mod tests {
             assert!(has_metric_value(&buffer, "items_tracked", 1));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 1));
 
-            // put_multi below pruned index is rejected
-            let result = archive.put_multi(2, test_key("ddd"), 40).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
+            // put_multi below the prune floor is satisfied without storing
+            let archive = archive
+                .put_multi(2, test_key("ddd"), 40)
+                .await
+                .expect("Failed to put below floor");
+            assert_eq!(
+                archive
+                    .get(Identifier::Key(&test_key("ddd")))
+                    .await
+                    .expect("Failed to get data"),
+                None
+            );
+
+            // put_multi_start_sync below the prune floor skips the sync and
+            // returns a ready handle
+            let (archive, handle) = archive
+                .put_multi_start_sync(2, test_key("ddd"), 41)
+                .await
+                .expect("Failed to put_multi_start_sync below floor");
+            handle.await.expect("handle must resolve");
+            assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
         });
     }
 }

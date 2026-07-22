@@ -179,14 +179,6 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.indices.contains_key(&index)
     }
 
-    /// See [Cache::pruned].
-    const fn pruned(&self, index: u64) -> bool {
-        match self.oldest_allowed {
-            Some(oldest_allowed) => index < oldest_allowed,
-            None => false,
-        }
-    }
-
     /// See [Cache::prune].
     //
     // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
@@ -238,16 +230,17 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Cache::put].
-    async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
-        // Check last pruned
+    async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<(Box<Self>, bool), Error> {
+        // A put below the prune floor is satisfied without storing
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+            debug!(index, oldest_allowed, "ignoring put below prune floor");
+            return Ok((self, false));
         }
 
         // Check for existing index
         if self.indices.contains_key(&index) {
-            return Ok(self);
+            return Ok((self, true));
         }
 
         // Store item in journal
@@ -267,7 +260,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(self)
+        Ok((self, true))
     }
 
     /// See [Cache::sync].
@@ -323,14 +316,6 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         self.0.first()
     }
 
-    /// Returns true when `index` is below the prune floor.
-    ///
-    /// The floor only tracks prunes from the current execution and resets at init, so an
-    /// index pruned in a previous execution reports false.
-    pub fn pruned(&self, index: u64) -> bool {
-        self.0.pruned(index)
-    }
-
     /// Returns up to `max` missing items starting from `start`.
     ///
     /// This method iterates through gaps between existing ranges, collecting missing indices
@@ -355,11 +340,11 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
     /// Store an item in the [Cache].
     ///
-    /// If the index already exists, put does nothing and returns. Storing below the prune
-    /// floor fails with [Error::AlreadyPrunedTo] without mutating. Check [Cache::pruned]
-    /// first to keep the handle.
+    /// If the index already exists, put does nothing and returns. A put below the prune
+    /// floor is satisfied without storing: pruning declared that range obsolete, so nothing
+    /// is mutated and nothing below the floor is ever readable.
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
-        self.0 = self.0.put(index, value).await?;
+        (self.0, _) = self.0.put(index, value).await?;
         Ok(self)
     }
 
@@ -371,9 +356,15 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
     /// Stores an item in the [Cache] and syncs it, plus any other pending writes, to disk.
     ///
-    /// If the index already exists, the cache is just synced.
-    pub async fn put_sync(self, index: u64, value: V) -> Result<Self, Error> {
-        self.put(index, value).await?.sync().await
+    /// If the index already exists, the cache is just synced. A put satisfied below the
+    /// prune floor stored nothing, so it skips the sync.
+    pub async fn put_sync(mut self, index: u64, value: V) -> Result<Self, Error> {
+        let stored;
+        (self.0, stored) = self.0.put(index, value).await?;
+        if !stored {
+            return Ok(self);
+        }
+        self.sync().await
     }
 
     /// Remove all persistent data created by this [Cache].

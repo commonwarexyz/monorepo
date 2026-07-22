@@ -82,18 +82,16 @@ fn fuzz(data: FuzzInput) {
                     key_data,
                     value_data,
                 } => {
-                    // Skip if we've pruned this index
-                    if let Some(already_pruned) = oldest_allowed
-                        && *index < already_pruned {
-                            continue;
-                        }
                     let key = Key::new(*key_data);
                     let value = Value::new(*value_data);
 
-                    // Put the item into the archive
+                    // Put the item into the archive. A put below the prune floor is
+                    // satisfied without storing, so the model only records puts at or
+                    // above the floor.
                     archive = archive.put(*index, key, value).await.expect("put failed");
+                    let below_floor = oldest_allowed.is_some_and(|min| *index < min);
                     // Only add if not already written (Archive doesn't allow overwrites)
-                    if !written_indices.contains(index) {
+                    if !below_floor && !written_indices.contains(index) {
                         items.push((*index, *key_data, *value_data));
                         written_indices.insert(*index);
                     }
