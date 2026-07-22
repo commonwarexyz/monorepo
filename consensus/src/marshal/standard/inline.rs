@@ -495,11 +495,12 @@ where
                 let block = match decision {
                     Decision::Complete(valid) => {
                         // Re-proposal: a valid precheck already persisted the block
-                        // (durable), an invalid one is an epoch rejection. The rejection
-                        // only speaks for this header: without an embedded context an
-                        // honest notarization may still form for the same
-                        // `(round, digest)` under another header, so certification must
-                        // recover rather than adopt it.
+                        // (durable), an invalid one is an epoch rejection. The re-proposal
+                        // reading is an artifact of this header's declared parent: a
+                        // conflicting header naming the block's real parent lets honest
+                        // validators verify the same block as a normal proposal and
+                        // notarize `(round, digest)`, so certification must recover
+                        // rather than adopt the rejection.
                         tx.send_lossy(valid);
                         durable_tx.send_lossy(if valid {
                             GateOutcome::Ready(true)
