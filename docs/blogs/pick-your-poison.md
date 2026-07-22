@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/pick-your-poison.png"
 katex: true
 ---
 
-Encrypted mempools have emerged as the leading candidate for protecting the privacy of pending transactions. At a high level, users (threshold) encrypt transactions to the validator set and once the chain fixes an ordering, validators quickly decrypt transactions and execute them. If we instantiate this scheme using a standard threshold encryption scheme such as ElGamal, each of the $n$ committee members must broadcast a decryption share for each of the $B$ ciphertexts in the block, for a total of $O(nB)$ communication which can be orders of magnitude larger than the block itself.
+Encrypted mempools have emerged as the leading candidate for protecting the privacy of pending transactions. At a high level, users (threshold) encrypt transactions to the validator set, and once the chain fixes an ordering, validators quickly decrypt transactions and execute them. If we instantiate this scheme using a standard threshold encryption scheme such as ElGamal, each of the $n$ committee members must broadcast a decryption share for each of the $B$ ciphertexts in the block, for a total of $O(nB)$ communication, which can be orders of magnitude larger than the block itself.
 
 [Batched threshold encryption](https://eprint.iacr.org/2024/669) (BTE) was introduced to address this communication bottleneck. Instead of decrypting ciphertexts independently, the committee publishes a *succinct* key that can be used to decrypt the entire batch of ciphertexts. Since the original construction of [CGPP24](https://eprint.iacr.org/2024/669), a long line of work has pushed (silent) batched threshold encryption schemes closer to practicality. We summarize them below.
 
@@ -72,7 +72,7 @@ In practice, it may be more interesting to consider a smooth tradeoff on the Par
 
 We quantify censorship resistance as the minimum number of ciphertexts an attacker needs to include in a batch before a victim's transaction is forced to be excluded.
 Ideally, censorship resistance is the same as the maximum batch size $B$, i.e. censoring a transaction is as expensive as buying up the entire block.
-[BFOQ25](https://eprint.iacr.org/2024/1533), [ABDGMPRY25](https://eprint.iacr.org/2025/2115) only achieve a censorship resistance of $1$.
+[BFOQ25](https://eprint.iacr.org/2024/1533), [ABDGMPRY25](https://eprint.iacr.org/2025/2115) only achieve a censorship resistance of $1$ (without increasing ciphertext size).
 
 [BNRT26](https://eprint.iacr.org/2026/674), [Pol26a](https://eprint.iacr.org/2026/760), [ADGRS26](https://eprint.iacr.org/2026/754) achieve maximum censorship resistance $B$ but they all have an $O(B)$ secret key size. This makes changing the committee at large batch sizes $B \gg n$ quite expensive as it requires $O(B/n)$ DKGs to reshare the secrets to the new committee even with the trick of [Hyper-Invertible Matrices](https://cs.au.dk/fileadmin/www.cfem.au.dk/Downloads/MPC_workshop/Martin_Hirt_slides-stacked.pdf).
 
@@ -86,7 +86,7 @@ In an updated version of [Pol26a](https://eprint.iacr.org/2026/760), we introduc
 
 [FPTX25](https://eprint.iacr.org/2025/2032) avoids censorship issues and epoch restrictions at the cost of a much larger $O(qB)$ CRS and a forced DKG re-setup after decrypting $q$ batches. In practice, deployments would choose $q$ large enough to support the *expected* number of batch decryptions over the committee rotation period, which typically lasts from a few hours to a few days.
 
-But this might be overkill for the epoch restriction issue. Recall that in [CGPW25](https://eprint.iacr.org/2024/1516), [AFP25](https://eprint.iacr.org/2024/1575), users had to "guess" the block height at which their transaction would be included which is infeasible. But what if the user only had to guess a *window* of blocks in which their transaction could be included?
+But this might be overkill for the epoch restriction issue. Recall that in [CGPW25](https://eprint.iacr.org/2024/1516), [AFP25](https://eprint.iacr.org/2024/1575), users had to "guess" the block height at which their transaction would be included, which is infeasible. But what if the user only had to guess a *window* of blocks in which their transaction could be included?
 
 > What if we accept *some* epoch restrictions but are able to avoid a forced DKG re-setup?
 

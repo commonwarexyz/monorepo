@@ -102,14 +102,14 @@ Vamsi Policharla</a></div>
         </div>
         <p>Encrypted mempools have emerged as the leading candidate for
         protecting the privacy of pending transactions. At a high level,
-        users (threshold) encrypt transactions to the validator set and
+        users (threshold) encrypt transactions to the validator set, and
         once the chain fixes an ordering, validators quickly decrypt
         transactions and execute them. If we instantiate this scheme
         using a standard threshold encryption scheme such as ElGamal,
         each of the <span class="math inline">n</span> committee members
         must broadcast a decryption share for each of the <span
         class="math inline">B</span> ciphertexts in the block, for a
-        total of <span class="math inline">O(nB)</span> communication
+        total of <span class="math inline">O(nB)</span> communication,
         which can be orders of magnitude larger than the block
         itself.</p>
         <p><a href="https://eprint.iacr.org/2024/669">Batched threshold
@@ -254,7 +254,8 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2024/1533">BFOQ25</a>, <a
         href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a> only
         achieve a censorship resistance of <span
-        class="math inline">1</span>.</p>
+        class="math inline">1</span> (without increasing ciphertext
+        size).</p>
         <p><a href="https://eprint.iacr.org/2026/674">BNRT26</a>, <a
         href="https://eprint.iacr.org/2026/760">Pol26a</a>, <a
         href="https://eprint.iacr.org/2026/754">ADGRS26</a> achieve
@@ -297,7 +298,7 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
         href="https://eprint.iacr.org/2024/1575">AFP25</a>, users had to
         “guess” the block height at which their transaction would be
-        included which is infeasible. But what if the user only had to
+        included, which is infeasible. But what if the user only had to
         guess a <em>window</em> of blocks in which their transaction
         could be included?</p>
         <blockquote>

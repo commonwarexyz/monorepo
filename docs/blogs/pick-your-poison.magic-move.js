@@ -868,8 +868,11 @@ function initMagicMove(mount) {
   // Arrow keys jump between story steps, Keynote style. Forward from above
   // the track enters the deck and forward past the last stop exits into the
   // article; backward steps all the way out to the top of the page. Outside
-  // that range keys stay native so readers are never trapped.
+  // that range keys stay native so readers are never trapped. Bail under
+  // prefers-reduced-motion (the preference can turn on after init) — the
+  // track is hidden and the stops would be meaningless.
   function onKeyDown(event) {
+    if (reducedMotion.matches) return;
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
     const backward = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
@@ -954,12 +957,17 @@ function initFinalFigure(mount) {
 
 // Module scripts run after the document is parsed, so the mounts already exist.
 // Under prefers-reduced-motion the injected styles hide the animation and show
-// the prose sources instead, so skip the scroll machinery entirely: its key
-// handler would otherwise compute stops against a display:none track and
+// the prose sources instead, so defer the scroll machinery until the
+// preference lifts. Its key handler must not run while the track is
+// display:none — it would compute stops against a zero-height track and
 // swallow arrow-key scrolling at the top of the page.
-const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const mount = document.getElementById(MOUNT_ID);
-if (mount && !reducedMotion) initMagicMove(mount);
+if (mount && reducedMotion.matches) {
+  reducedMotion.addEventListener('change', () => initMagicMove(mount), { once: true });
+} else if (mount) {
+  initMagicMove(mount);
+}
 
 const finalMount = document.getElementById(FINAL_MOUNT_ID);
 if (finalMount) initFinalFigure(finalMount);
