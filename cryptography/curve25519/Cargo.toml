@@ -1,0 +1,18 @@
+[package]
+name = "commonware-cryptography-curve25519"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Curve25519 field/group arithmetic and the Ed25519 signature scheme."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography/curve25519"
+documentation = "https://docs.rs/commonware-cryptography-curve25519"
+
+[lints]
+workspace = true
+
+[features]
+default = [ "std" ]
+std = []
