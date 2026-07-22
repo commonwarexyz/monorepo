@@ -228,7 +228,7 @@ where
         db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
-    let metrics = db::Metrics::new(context);
+    let metrics = Box::new(db::Metrics::new(context));
     let mut current_db = db::Db {
         any,
         grafted_tree: Arc::new(grafted_tree),
