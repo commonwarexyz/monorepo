@@ -1532,10 +1532,8 @@ mod tests {
         }
 
         // The root should be the hash of empty data
-        let mut hasher = Sha256::default();
-        hasher.update(&0u32.to_be_bytes());
-        hasher.update(&Sha256::hash(&[b""]));
-        let (_, expected_root) = hasher.finalize();
+        let empty = Sha256::hash(&[b""]);
+        let expected_root = Sha256::hash(&[&0u32.to_be_bytes(), &empty]);
         assert_eq!(roots[0], expected_root);
     }
 

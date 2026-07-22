@@ -370,8 +370,7 @@ where
     };
     let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
-    let app_cfg = application::Config {
-        hasher: Sha256::default(),
+    let app_cfg = application::Config::<Sha256, _> {
         relay,
         me: validator.clone(),
         propose_latency: (10.0, 5.0),
@@ -422,7 +421,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
 
@@ -515,7 +514,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         )
         .await;
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
         let term_length = input.term_length;
@@ -615,8 +614,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             };
             let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
-            let app_cfg = application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),

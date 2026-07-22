@@ -1780,11 +1780,8 @@ mod tests {
         }
         let encoding = encoder.encode().unwrap();
 
-        let mut hasher = Sha256::default();
-        for shard in encoding.recovery_iter() {
-            hasher.update(shard);
-        }
-        let (_, digest) = hasher.finalize();
+        let recovery: Vec<&[u8]> = encoding.recovery_iter().collect();
+        let digest = Sha256::hash(&recovery);
         assert_eq!(
             format!("{digest}"),
             "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",

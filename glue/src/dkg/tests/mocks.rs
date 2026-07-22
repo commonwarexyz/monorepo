@@ -246,27 +246,26 @@ impl<D: Digest, C: Codec> MockBlock<D, C> {
         timestamp: u64,
         payload: Option<EncodedPayload>,
     ) -> Self {
-        let mut hasher = H::default();
-        hasher.update(&parent);
-        hasher.update(&height.get().to_be_bytes());
-        hasher.update(&context.encode());
-        hasher.update(&timestamp.to_be_bytes());
-        match &payload {
-            Some(payload) => {
-                hasher.update(&[1]);
-                hasher.update(&payload.max_participants.get().to_be_bytes());
-                hasher.update(
+        let height_be = height.get().to_be_bytes();
+        let context_enc = context.encode();
+        let timestamp_be = timestamp.to_be_bytes();
+        let digest = payload.as_ref().map_or_else(
+            || H::hash(&[&parent, &height_be, &context_enc, &timestamp_be, &[0]]),
+            |payload| {
+                H::hash(&[
+                    &parent,
+                    &height_be,
+                    &context_enc,
+                    &timestamp_be,
+                    &[1],
+                    &payload.max_participants.get().to_be_bytes(),
                     &u32::try_from(payload.bytes.len())
                         .expect("payload too large")
                         .to_be_bytes(),
-                );
-                hasher.update(&payload.bytes);
-            }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        let (_, digest) = hasher.finalize();
+                    &payload.bytes,
+                ])
+            },
+        );
         Self {
             context,
             parent,
