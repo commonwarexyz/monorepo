@@ -75,7 +75,7 @@ impl Storage {
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, u16, u64)>, Error> {
-        let mut raw = vec![0u8; len.min(Header::V1_DATA_OFFSET) as usize];
+        let mut raw = vec![0u8; Header::resolve_len(len)];
         file.read_exact(&mut raw)
             .await
             .map_err(|_| Error::ReadFailed)?;

@@ -11,7 +11,7 @@ fn resolve_header(
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
-    let raw = &content[..content.len().min(Header::V1_DATA_OFFSET_USIZE)];
+    let raw = &content[..Header::resolve_len(content.len() as u64)];
     super::resolve_header(raw, content.len() as u64, versions, partition, name)
 }
 

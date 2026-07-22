@@ -301,6 +301,16 @@ stability_scope!(BETA {
             raw_len < Self::PRELUDE_SIZE_U64
         }
 
+        /// Number of leading bytes [resolve_header] needs for a blob of raw on-disk length
+        /// `raw_len`: the full header region, capped by the file itself.
+        pub(crate) const fn resolve_len(raw_len: u64) -> usize {
+            if raw_len < Self::V1_DATA_OFFSET {
+                raw_len as usize
+            } else {
+                Self::V1_DATA_OFFSET_USIZE
+            }
+        }
+
         /// Returns true if a blob's raw contents are consistent with the creation of a
         /// [BlobHeaderLayout::V1] blob that was interrupted before its header became durable.
         ///
@@ -512,7 +522,7 @@ stability_scope!(BETA {
         name: &[u8],
     ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
         assert!(
-            raw.len() as u64 >= raw_len.min(Header::V1_DATA_OFFSET),
+            raw.len() >= Header::resolve_len(raw_len),
             "caller must provide enough bytes to resolve the header region"
         );
 

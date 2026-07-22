@@ -45,7 +45,7 @@ fn resolve_header(
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, Error> {
-    let mut raw = vec![0u8; raw_len.min(Header::V1_DATA_OFFSET) as usize];
+    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
