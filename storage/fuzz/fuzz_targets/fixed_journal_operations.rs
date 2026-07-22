@@ -167,7 +167,7 @@ fn fuzz(input: FuzzInput) {
         for op in input.ops.iter() {
             journal = match op {
                 JournalOperation::Append { value } => {
-                    let digest = Sha256::hash(&value.to_be_bytes());
+                    let digest = Sha256::hash(&[&value.to_be_bytes()]);
                     match journal.append(&digest).await {
                         Ok((journal, _pos)) => {
                             journal_size += 1;
@@ -298,7 +298,7 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         let items: Vec<_> = (0..*count)
                             .map(|_| {
-                                let d = Sha256::hash(&next_value.to_be_bytes());
+                                let d = Sha256::hash(&[&next_value.to_be_bytes()]);
                                 next_value += 1;
                                 d
                             })
@@ -337,14 +337,14 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         let items_a: Vec<_> = (0..*count_a)
                             .map(|_| {
-                                let d = Sha256::hash(&next_value.to_be_bytes());
+                                let d = Sha256::hash(&[&next_value.to_be_bytes()]);
                                 next_value += 1;
                                 d
                             })
                             .collect();
                         let items_b: Vec<_> = (0..*count_b)
                             .map(|_| {
-                                let d = Sha256::hash(&next_value.to_be_bytes());
+                                let d = Sha256::hash(&[&next_value.to_be_bytes()]);
                                 next_value += 1;
                                 d
                             })
@@ -369,7 +369,7 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::RewindTo { keep_value } => {
                     if journal_size > oldest_retained_pos {
-                        let target = Sha256::hash(&keep_value.to_be_bytes());
+                        let target = Sha256::hash(&[&keep_value.to_be_bytes()]);
                         let (journal, new_size) =
                             journal.rewind_to(|item| *item == target).await.unwrap();
                         let journal = journal.sync().await.unwrap();

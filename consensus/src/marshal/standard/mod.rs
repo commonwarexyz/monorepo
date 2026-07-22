@@ -159,7 +159,7 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            let parent = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let parent = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
             let subscription = mailbox.subscribe_parent(&child);
 
@@ -582,7 +582,7 @@ mod tests {
             let peer_validator = participants[1].clone();
 
             // Build chain: genesis -> block_one -> block_two
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_two = StandardHarness::make_finalization(
@@ -675,7 +675,7 @@ mod tests {
             let peer_validator = participants[1].clone();
 
             // Build chain: genesis -> block_one -> block_two -> block_three
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let block_three = make_raw_block(block_two.digest(), Height::new(3), 300);
@@ -789,7 +789,7 @@ mod tests {
 
             // Build chain: genesis -> block_one -> block_two
             // Only block_one gets a finalization; block_two is an orphan.
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_one = StandardHarness::make_finalization(
@@ -876,7 +876,7 @@ mod tests {
             let peer_validator = participants[1].clone();
 
             // Build a 5-block chain.
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let block_three = make_raw_block(block_two.digest(), Height::new(3), 300);
@@ -993,7 +993,7 @@ mod tests {
             let pending_tip = 18;
 
             let mut blocks = Vec::new();
-            let mut parent = Sha256::hash(b"");
+            let mut parent = Sha256::hash(&[b""]);
             for height in 1..=pending_tip {
                 let block = make_raw_block(parent, Height::new(height), height * 100);
                 parent = block.digest();
@@ -1105,7 +1105,7 @@ mod tests {
 
             let recovering_validator = participants[0].clone();
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_one = StandardHarness::make_finalization(
@@ -1182,7 +1182,7 @@ mod tests {
 
             let recovering_validator = participants[0].clone();
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
             let finalization_two = StandardHarness::make_finalization(
@@ -1256,7 +1256,7 @@ mod tests {
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
 
@@ -1312,7 +1312,7 @@ mod tests {
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
             let notarization = StandardHarness::make_notarization(
@@ -1424,7 +1424,7 @@ mod tests {
 
             // Build a chain whose tip is the floor anchor.
             const ANCHOR_HEIGHT: u64 = 5;
-            let mut parent = Sha256::hash(b"");
+            let mut parent = Sha256::hash(&[b""]);
             let mut anchor = None;
             for i in 1..=ANCHOR_HEIGHT {
                 let block = make_raw_block(parent, Height::new(i), i);
@@ -1523,7 +1523,7 @@ mod tests {
 
             // Build a chain whose tip is the floor anchor.
             const ANCHOR_HEIGHT: u64 = 5;
-            let mut parent = Sha256::hash(b"");
+            let mut parent = Sha256::hash(&[b""]);
             let mut anchor = None;
             for i in 1..=ANCHOR_HEIGHT {
                 let block = make_raw_block(parent, Height::new(i), i);
@@ -1627,7 +1627,7 @@ mod tests {
             };
 
             // Advance the victim's processed floor to height 3 on the canonical chain.
-            let mut parent = Sha256::hash(b"");
+            let mut parent = Sha256::hash(&[b""]);
             let mut canonical = Vec::new();
             for i in 1..=3u64 {
                 let block = make_raw_block(parent, Height::new(i), i);
@@ -1822,7 +1822,7 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
@@ -1879,7 +1879,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("missing-candidate-{kind:?}"),
@@ -1900,7 +1900,7 @@ mod tests {
                     leader: me,
                     parent: (View::zero(), genesis.digest()),
                 };
-                let missing = Sha256::hash(b"missing candidate");
+                let missing = Sha256::hash(&[b"missing candidate"]);
                 let mut verify = wrapper.verify(consensus_context, missing).await;
 
                 context.sleep(Duration::from_millis(50)).await;
@@ -1955,7 +1955,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("missing-certify-candidate-{kind:?}"),
@@ -2037,7 +2037,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("certify-bumps-fetch-{kind:?}"),
@@ -2132,7 +2132,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "deferred-certify-canceled-verify",
@@ -2213,7 +2213,7 @@ mod tests {
                 );
                 let me = participants[0].clone();
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("height-lie-{kind:?}"),
@@ -2352,7 +2352,7 @@ mod tests {
                 .await;
                 let mut honest_mailbox = honest_setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let parent_round = Round::new(Epoch::zero(), View::new(1));
                 let parent_context = Ctx {
                     round: parent_round,
@@ -2508,7 +2508,7 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper = Wrapper::new(
                     kind,
@@ -2619,7 +2619,7 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
@@ -2764,7 +2764,7 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
@@ -2907,7 +2907,7 @@ mod tests {
                 .await;
                 let marshal = setup.mailbox;
 
-                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> =
                     MockVerifyingApp::with_verify_result(false);
                 let mut wrapper = Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
@@ -3002,7 +3002,7 @@ mod tests {
             // converted into a `false` certification/verification verdict.
             context.storage_fault_config().write().sync_rate = Some(1.0);
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
                 Ctx {
@@ -3056,7 +3056,7 @@ mod tests {
 
             context.storage_fault_config().write().sync_rate = Some(1.0);
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
                 Ctx {
@@ -3109,7 +3109,7 @@ mod tests {
 
             context.storage_fault_config().write().sync_rate = Some(1.0);
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
                 Ctx {
@@ -3163,7 +3163,7 @@ mod tests {
             let marshal = setup.mailbox;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = B::new::<Sha256>(
                 Ctx {
@@ -3574,7 +3574,7 @@ mod tests {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start,
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
@@ -3716,7 +3716,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -3753,7 +3753,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -3785,7 +3785,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -3822,7 +3822,7 @@ mod tests {
             )
             .await;
 
-            let served = make_raw_block(Sha256::hash(b"served-parent"), Height::new(1), 100);
+            let served = make_raw_block(Sha256::hash(&[b"served-parent"]), Height::new(1), 100);
             let served_round = Round::new(Epoch::zero(), View::new(1));
             assert!(mailbox.verified(served_round, served.clone()).await);
             let (response, response_rx) = oneshot::channel();
@@ -3859,7 +3859,7 @@ mod tests {
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block =
-                make_raw_block(Sha256::hash(b"local-floor-parent"), Height::new(5), 500);
+                make_raw_block(Sha256::hash(&[b"local-floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -3922,7 +3922,8 @@ mod tests {
             let partition_prefix = "start-floor-height-one-without-metadata";
 
             let floor_round = Round::new(Epoch::zero(), View::new(1));
-            let floor_block = make_raw_block(Sha256::hash(b"genesis-parent"), Height::new(1), 100);
+            let floor_block =
+                make_raw_block(Sha256::hash(&[b"genesis-parent"]), Height::new(1), 100);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -3980,7 +3981,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -4088,7 +4089,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
-            let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
+            let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     block1_round,
@@ -4109,7 +4110,7 @@ mod tests {
             .await;
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -4156,7 +4157,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             let _subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(b"below-floor-after-stale-ack"),
+                Sha256::hash(&[b"below-floor-after-stale-ack"]),
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
                 },
@@ -4192,7 +4193,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
-            let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
+            let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     block1_round,
@@ -4214,7 +4215,7 @@ mod tests {
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block =
-                make_raw_block(Sha256::hash(b"local-floor-parent"), Height::new(5), 500);
+                make_raw_block(Sha256::hash(&[b"local-floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -4249,7 +4250,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             let _subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(b"below-local-floor-after-stale-ack"),
+                Sha256::hash(&[b"below-local-floor-after-stale-ack"]),
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
                 },
@@ -4271,7 +4272,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -4369,7 +4370,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -4468,7 +4469,7 @@ mod tests {
 
             let old_floor_round = Round::new(Epoch::zero(), View::new(5));
             let old_floor_block =
-                make_raw_block(Sha256::hash(b"old-floor-parent"), Height::new(5), 500);
+                make_raw_block(Sha256::hash(&[b"old-floor-parent"]), Height::new(5), 500);
             let old_floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     old_floor_round,
@@ -4497,7 +4498,7 @@ mod tests {
 
             let new_floor_round = Round::new(Epoch::zero(), View::new(7));
             let new_floor_block =
-                make_raw_block(Sha256::hash(b"new-floor-parent"), Height::new(7), 700);
+                make_raw_block(Sha256::hash(&[b"new-floor-parent"]), Height::new(7), 700);
             let new_floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     new_floor_round,
@@ -4635,7 +4636,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_proposal = Proposal::new(
                 floor_round,
                 View::new(4),
@@ -4714,7 +4715,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
-            let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
+            let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     block1_round,
@@ -4735,7 +4736,7 @@ mod tests {
             .await;
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"stale-floor"), Height::zero(), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"stale-floor"]), Height::zero(), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -4961,7 +4962,7 @@ mod tests {
             // Keep a round-bound resolver request live so the stale floor's
             // round-floor side effect is covered separately from ack handling.
             let stale_floor_round = Round::new(Epoch::zero(), View::new(5));
-            let missing = Sha256::hash(b"missing-before-stale-lower-floor");
+            let missing = Sha256::hash(&[b"missing-before-stale-lower-floor"]);
             let _subscription = mailbox.subscribe_by_commitment(
                 missing,
                 CommitmentFallback::FetchByRound {
@@ -5041,7 +5042,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
-            let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
+            let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
             let block1_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     block1_round,
@@ -5134,7 +5135,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block_round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b"processed-parent"), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b"processed-parent"]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     block_round,
@@ -5149,7 +5150,7 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::new(1));
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let missing = Sha256::hash(b"missing-before-stale-floor");
+            let missing = Sha256::hash(&[b"missing-before-stale-floor"]);
             let _subscription = mailbox.subscribe_by_commitment(
                 missing,
                 CommitmentFallback::FetchByRound { round: floor_round },
@@ -5195,7 +5196,7 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(floor_round, Sha256::hash(b"missing-after-stale-floor"));
+            mailbox.hint_notarized(floor_round, Sha256::hash(&[b"missing-after-stale-floor"]));
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
             assert!(
@@ -5240,7 +5241,8 @@ mod tests {
                     StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
                 ),
             };
-            let parent = B::new::<Sha256>(parent_context, Sha256::hash(b""), Height::new(1), 100);
+            let parent =
+                B::new::<Sha256>(parent_context, Sha256::hash(&[b""]), Height::new(1), 100);
 
             let floor_round = Round::new(Epoch::zero(), View::new(2));
             let bad_context = Ctx {
@@ -5300,7 +5302,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
@@ -5379,7 +5381,7 @@ mod tests {
 
             let requested_round = Round::new(Epoch::new(1), View::new(1));
             let delivered_round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(
                 delivered_round,
                 View::zero(),
@@ -5432,7 +5434,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
@@ -5478,7 +5480,7 @@ mod tests {
 
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), height, 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
@@ -5529,7 +5531,7 @@ mod tests {
             // reject it and blame the peer before any verification.
             let height = Height::new(1);
             let round = Round::new(Epoch::new(1), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), height, 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
@@ -5576,7 +5578,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let application = Application::<B>::manual_ack();
@@ -5613,9 +5615,9 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(round, Sha256::hash(b"missing-at-processed-round"));
+            mailbox.hint_notarized(round, Sha256::hash(&[b"missing-at-processed-round"]));
             let subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(b"missing-subscription-at-processed-round"),
+                Sha256::hash(&[b"missing-subscription-at-processed-round"]),
                 CommitmentFallback::FetchByRound { round },
             );
 
@@ -5654,7 +5656,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
@@ -5691,7 +5693,7 @@ mod tests {
                 Proposal::new(
                     round,
                     View::zero(),
-                    Sha256::hash(b"missing-finalized-at-processed-round"),
+                    Sha256::hash(&[b"missing-finalized-at-processed-round"]),
                 ),
                 &schemes,
                 QUORUM,
@@ -5723,9 +5725,9 @@ mod tests {
             let partition_prefix = "restart-keeps-existing-genesis";
 
             let original_genesis =
-                make_raw_block(Sha256::hash(b"original-genesis"), Height::zero(), 0);
+                make_raw_block(Sha256::hash(&[b"original-genesis"]), Height::zero(), 0);
             let replacement_genesis =
-                make_raw_block(Sha256::hash(b"replacement-genesis"), Height::zero(), 1);
+                make_raw_block(Sha256::hash(&[b"replacement-genesis"]), Height::zero(), 1);
             assert_ne!(original_genesis.digest(), replacement_genesis.digest());
 
             let (mailbox, buffer, resolver, actor_handle) = start_standard_actor(
@@ -5773,7 +5775,7 @@ mod tests {
             let partition_prefix = format!("processed-round-restart-{me}");
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
@@ -5826,9 +5828,9 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(round, Sha256::hash(b"missing-after-restart"));
+            mailbox.hint_notarized(round, Sha256::hash(&[b"missing-after-restart"]));
             let subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(b"missing-subscription-after-restart"),
+                Sha256::hash(&[b"missing-subscription-after-restart"]),
                 CommitmentFallback::FetchByRound { round },
             );
 
@@ -5867,7 +5869,7 @@ mod tests {
             let partition_prefix = "round-floor-missing-next-block";
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let notarization =
                 StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -5961,7 +5963,7 @@ mod tests {
             let partition_prefix = "round-floor-before-anchor-ack";
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let floor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -6018,7 +6020,7 @@ mod tests {
 
             let fetches_before = resolver.fetches().len();
             let mut subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(b"missing-before-anchor-ack"),
+                Sha256::hash(&[b"missing-before-anchor-ack"]),
                 CommitmentFallback::FetchByRound { round: floor_round },
             );
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
@@ -6059,7 +6061,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
@@ -6074,7 +6076,7 @@ mod tests {
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
-            let missing = Sha256::hash(b"missing-before-set-floor");
+            let missing = Sha256::hash(&[b"missing-before-set-floor"]);
             let _subscription = mailbox
                 .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
             wait_until(
@@ -6110,7 +6112,7 @@ mod tests {
             );
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(round, Sha256::hash(b"missing-after-set-floor"));
+            mailbox.hint_notarized(round, Sha256::hash(&[b"missing-after-set-floor"]));
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
             assert!(
@@ -6158,7 +6160,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
-                view_retention_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
                 block_codec_config: (),
@@ -6301,7 +6303,7 @@ mod tests {
             let me = participants[0].clone();
             let partition_prefix = format!("validator-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
@@ -6586,7 +6588,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
-                view_retention_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
                 block_codec_config: (),
@@ -6721,7 +6723,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
-                view_retention_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(4),
                 block_codec_config: (),
@@ -6933,7 +6935,7 @@ mod tests {
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
-                view_retention_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(4),
                 block_codec_config: (),
@@ -7130,7 +7132,7 @@ mod tests {
             // Submit finalizations; marshal dispatches up to MAX_PENDING_ACKS
             // blocks at a time and stalls until the application acks.
             let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-            let mut parent = Sha256::hash(b"");
+            let mut parent = Sha256::hash(&[b""]);
             let mut parent_commitment =
                 StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
             for i in 1..=NUM_BLOCKS {
@@ -7212,7 +7214,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let unknown = Sha256::hash(b"unknown-block");
+            let unknown = Sha256::hash(&[b"unknown-block"]);
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
@@ -7254,7 +7256,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
@@ -7316,7 +7318,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
@@ -7383,7 +7385,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
@@ -7456,8 +7458,8 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block_a = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-            let block_b = make_raw_block(Sha256::hash(b""), Height::new(1), 200);
+            let block_a = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let block_b = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 200);
             assert_ne!(block_a.digest(), block_b.digest());
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
@@ -7503,7 +7505,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
@@ -7563,7 +7565,7 @@ mod tests {
 
             // Raise the floor above the hint we are about to send.
             let floor_anchor = StandardHarness::make_test_block(
-                Sha256::hash(b"floor-parent"),
+                Sha256::hash(&[b"floor-parent"]),
                 StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
                 Height::new(10),
                 10,
@@ -7607,7 +7609,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
@@ -7698,7 +7700,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,

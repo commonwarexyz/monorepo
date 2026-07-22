@@ -160,7 +160,7 @@ pub mod test {
             // pushing the inactivity floor past at least one full bitmap chunk.
             let key = Sha256::fill(0x11);
             for i in 0..chunk_bits + 10 {
-                let value = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&[&i.to_be_bytes()]);
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
@@ -240,9 +240,9 @@ pub mod test {
             if i % 7 == 1 {
                 None
             } else if i.is_multiple_of(3) {
-                Some(Sha256::hash(&((i + 1) * 11).to_be_bytes()))
+                Some(Sha256::hash(&[&((i + 1) * 11).to_be_bytes()]))
             } else {
-                Some(Sha256::hash(&(i * 7).to_be_bytes()))
+                Some(Sha256::hash(&[&(i * 7).to_be_bytes()]))
             }
         }
 
@@ -254,8 +254,8 @@ pub mod test {
         // Commit 1: insert.
         let mut batch = db.new_batch();
         for i in 0u64..2000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -265,12 +265,12 @@ pub mod test {
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
         let mut batch = db.new_batch();
         for i in (0u64..2000).step_by(3) {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&((i + 1) * 11).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
         for i in (1u64..2000).step_by(7) {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -299,7 +299,7 @@ pub mod test {
                 "current root mismatch at P={P} concurrency={concurrency}"
             );
             for i in 0u64..2000 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 assert_eq!(
                     db.get(&k).await.unwrap(),
                     expected_value(i),

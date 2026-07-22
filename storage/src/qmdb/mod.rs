@@ -26,8 +26,9 @@
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
-//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
-//! and `destroy()`.
+//! Persistence and cleanup are managed directly on the database: `commit()` and `start_commit()`
+//! make applied state durable, `sync()` additionally eliminates recovery on startup, and
+//! `prune()`/`destroy()` reclaim storage.
 //!
 //! # Ownership
 //!

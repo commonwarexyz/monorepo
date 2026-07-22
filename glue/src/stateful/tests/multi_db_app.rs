@@ -5,8 +5,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p::{compact as compact_resolver, standard as qmdb_resolver},
@@ -20,6 +20,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
+        ancestry::Ancestry,
         core::{Actor as MarshalActor, CommitmentFallback},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -58,7 +59,7 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
 };
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -134,7 +135,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -210,7 +211,7 @@ impl App {
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
         // per-block operation count so its state sync spans the same crash windows.
-        let counter = Sha256::hash(b"counter");
+        let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch_a
             .get(&counter)
             .await
@@ -218,13 +219,13 @@ impl App {
             .map_or(0, |v| digest_to_u64(&v));
         batch_a = batch_a.write(counter, Some(u64_to_digest(current + 1)));
         batch_a = batch_a.write(
-            Sha256::hash(&height.get().to_be_bytes()),
+            Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
 
         // DB-B: write height marker
         let batch_b = batch_b.set(
-            Sha256::hash(&height.get().to_be_bytes()),
+            Sha256::hash(&[&height.get().to_be_bytes()]),
             u64_to_digest(height.get()),
         );
 
@@ -239,7 +240,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -248,9 +250,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
@@ -282,7 +284,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -561,7 +563,7 @@ impl EngineDefinition for MultiDbEngine {
             start: plan.marshal_start(genesis_block.clone()),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             prunable_items_per_section: NZU64!(10),
             page_cache: page_cache.clone(),
             replay_buffer: IO_BUFFER_SIZE,
@@ -634,7 +636,7 @@ impl EngineDefinition for MultiDbEngine {
             StatefulConfig {
                 application,
                 db_config,
-                input_provider: (),
+                provider: (),
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
@@ -719,7 +721,7 @@ impl EngineDefinition for MultiDbEngine {
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_millis(500),
-            activity_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),

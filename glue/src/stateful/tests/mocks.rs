@@ -1,11 +1,11 @@
 use crate::stateful::{
-    Application, Proposed,
+    Application, Input, Proposed,
     db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
-    marshal::standard::Standard,
+    marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
@@ -13,8 +13,7 @@ use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Buf, BufMut};
-use futures::Stream;
-use std::{convert::Infallible, sync::Arc};
+use std::convert::Infallible;
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -182,7 +181,8 @@ impl<
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         block.height().get()
@@ -195,9 +195,9 @@ impl<
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+        _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         None
     }
@@ -205,7 +205,7 @@ impl<
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+        _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         None
