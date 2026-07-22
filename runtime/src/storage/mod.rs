@@ -226,8 +226,8 @@ stability_scope!(BETA {
         /// header of a different layout.
         pub(crate) const fn magic(self) -> [u8; 4] {
             match self {
-                Self::V0 => *b"CWIC", // Commonware Is CWIC
-                Self::V1 => *b"CWI1",
+                Self::V0 => *b"CWIC",
+                Self::V1 => *b"CWIK",
             }
         }
 
@@ -235,7 +235,7 @@ stability_scope!(BETA {
         pub(crate) const fn from_magic(magic: &[u8; 4]) -> Option<Self> {
             match magic {
                 b"CWIC" => Some(Self::V0),
-                b"CWI1" => Some(Self::V1),
+                b"CWIK" => Some(Self::V1),
                 _ => None,
             }
         }
@@ -649,7 +649,7 @@ pub(crate) mod tests {
     fn test_header_v1_fixture_bytes() {
         let (region, _) = Header::create(&(3..=3));
         let expected = [
-            b'C', b'W', b'I', b'1', // V1 magic
+            b'C', b'W', b'I', b'K', // V1 magic
             0x00, 0x01, // runtime version 1
             0x00, 0x03, // blob version 3
         ];
