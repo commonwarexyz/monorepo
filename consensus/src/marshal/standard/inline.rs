@@ -1462,4 +1462,121 @@ mod tests {
             );
         });
     }
+
+    /// Inline analog of the deferred equivocation test. A proposal that names
+    /// the certified view-1 parent for a block built on the view-2 block
+    /// fails structural parent validation, which resolves the certification
+    /// gate to false. Certification of the honest notarization for the same
+    /// `(round, digest)` must not adopt that verdict: the no-gate fallback
+    /// already certifies any notarized block it can fetch.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mut inline = Inline::new(
+                context.child("inline"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let leader = participants[1].clone();
+
+            // The view-1 block: the parent this validator last certified.
+            let certified_round = Round::new(Epoch::zero(), View::new(1));
+            let certified_ctx = Ctx {
+                round: certified_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let certified = B::new::<Sha256>(certified_ctx, genesis.digest(), Height::new(1), 100);
+            let certified_digest = certified.digest();
+            assert!(marshal.verified(certified_round, certified).await);
+
+            // The view-2 block: notarized by the network but only nullified
+            // here, so this validator never certified it.
+            let notarized_round = Round::new(Epoch::zero(), View::new(2));
+            let notarized_ctx = Ctx {
+                round: notarized_round,
+                leader: leader.clone(),
+                parent: (View::new(1), certified_digest),
+            };
+            let notarized = B::new::<Sha256>(notarized_ctx, certified_digest, Height::new(2), 200);
+            let notarized_digest = notarized.digest();
+            assert!(marshal.verified(notarized_round, notarized).await);
+
+            // The view-3 block builds on the view-2 block. The leader's
+            // broadcast delivered it into the local buffer without a local
+            // verification.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let block_ctx = Ctx {
+                round,
+                leader: leader.clone(),
+                parent: (View::new(2), notarized_digest),
+            };
+            let block = B::new::<Sha256>(block_ctx, notarized_digest, Height::new(3), 300);
+            let digest = block.digest();
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), block)
+                    .accepted(),
+                "buffer broadcast for the candidate should be accepted"
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The equivocating proposal names the certified view-1 block as
+            // parent, which this validator's parent selection accepts
+            // (view 1 certified, view 2 nullified). Refusing to notarize it
+            // is correct.
+            let equivocating_ctx = Ctx {
+                round,
+                leader,
+                parent: (View::new(1), certified_digest),
+            };
+            let verify_rx = inline.verify(equivocating_ctx, digest).await;
+            assert!(
+                !verify_rx.await.expect("verify result missing"),
+                "the equivocating proposal must not be notarized"
+            );
+
+            // The honest notarization for the same `(round, digest)` arrives.
+            let certify_rx = inline.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized digest must not adopt the verdict computed under the equivocating context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
+        });
+    }
 }

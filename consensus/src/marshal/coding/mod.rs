@@ -2393,6 +2393,139 @@ mod tests {
         })
     }
 
+    /// Coding analog of the standard equivocation tests. The commitment binds
+    /// the proposal context, so a proposal that names a different parent for
+    /// the same commitment fails `validate_proposal` before any certification
+    /// gate is registered. Certification of the notarized commitment then
+    /// recovers through the block's embedded context.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The view-1 block: the parent this validator last certified.
+            let certified_round = Round::new(Epoch::zero(), View::new(1));
+            let certified_ctx = CodingCtx {
+                round: certified_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let certified = make_coding_block(certified_ctx, genesis.digest(), Height::new(1), 100);
+            let certified_digest = certified.digest();
+            let coded_certified = CodedBlock::new(certified, coding_config, &Sequential);
+            let certified_commitment = coded_certified.commitment();
+            shards.proposed(certified_round, coded_certified);
+
+            // The view-2 block: notarized by the network but only nullified
+            // here, so this validator never certified it.
+            let notarized_round = Round::new(Epoch::zero(), View::new(2));
+            let notarized_ctx = CodingCtx {
+                round: notarized_round,
+                leader: me.clone(),
+                parent: (View::new(1), certified_commitment),
+            };
+            let notarized = make_coding_block(notarized_ctx, certified_digest, Height::new(2), 200);
+            let notarized_digest = notarized.digest();
+            let coded_notarized = CodedBlock::new(notarized, coding_config, &Sequential);
+            let notarized_commitment = coded_notarized.commitment();
+            shards.proposed(notarized_round, coded_notarized);
+
+            // The view-3 block builds on the view-2 block.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let block_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(2), notarized_commitment),
+            };
+            let block = make_coding_block(block_ctx, notarized_digest, Height::new(3), 300);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.proposed(round, coded_block);
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The equivocating proposal names the certified view-1 block as
+            // parent, which this validator's parent selection accepts
+            // (view 1 certified, view 2 nullified). The commitment's context
+            // digest exposes the mismatch, so verify rejects it without
+            // registering a certification gate.
+            let equivocating_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(1), certified_commitment),
+            };
+            let verify_rx = marshaled.verify(equivocating_ctx, commitment).await;
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        !result.expect("verify result missing"),
+                        "the equivocating proposal must not be notarized"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should reject the equivocating proposal promptly");
+                },
+            }
+
+            // The honest notarization for the same `(round, commitment)`
+            // arrives. Certification recovers through the embedded context.
+            let certify_rx = marshaled.certify(round, commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized commitment must succeed via the embedded context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
+        })
+    }
+
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
         // Regression: when backfilling by Key::Block(commitment), a peer may return
