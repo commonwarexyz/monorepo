@@ -155,6 +155,16 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the live tail. Kept on failure so later operations keep failing.
     tail_sync: Option<SyncCompletion>,
+
+    /// Test-only: park [Self::seal_tail] at entry so tests can drop an append future at the
+    /// roll-over await, leaving the logical end ahead of the physical tail.
+    #[cfg(test)]
+    pub(super) halt_seal_tail: bool,
+
+    /// Test-only: park [Self::prune] after tracking advances but before any unlink, so tests
+    /// can drop a prune future that leaves every condemned file behind, untracked.
+    #[cfg(test)]
+    pub(super) halt_prune_unlinks: bool,
 }
 
 impl<E: Context> Writable<E> {
@@ -224,6 +234,10 @@ impl<E: Context> Writable<E> {
             sealed_snapshot: None,
             tail_predecessor_sync: None,
             tail_sync: None,
+            #[cfg(test)]
+            halt_seal_tail: false,
+            #[cfg(test)]
+            halt_prune_unlinks: false,
         })
     }
 
@@ -270,6 +284,11 @@ impl<E: Context> Writable<E> {
 
     /// Seal the tail, start syncing it, and open the next blob as the new tail.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
+        #[cfg(test)]
+        if self.halt_seal_tail {
+            std::future::pending::<()>().await;
+        }
+
         self.drain_tail_predecessor_sync().await?;
         // seal() waits only for syncs the writer started: a commit whose flush failed before its
         // sync began is retained solely in the tail sync slot, so it must be drained here too.
@@ -293,9 +312,10 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
-    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
-    /// valid.
+    /// Drop and remove every blob below `min_blob`.
+    ///
+    /// Safe with live readers: snapshot readers keep their own handles, which the runtime's
+    /// read-after-remove contract keeps valid.
     ///
     /// # Invariants
     ///
@@ -311,11 +331,18 @@ impl<E: Context> Writable<E> {
         self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
 
-        for blob in prev_oldest_blob_index..min_blob {
-            self.partition.remove(blob).await?;
-            self.metrics.tracked.dec();
-            self.metrics.pruned.inc();
+        #[cfg(test)]
+        if self.halt_prune_unlinks {
+            std::future::pending::<()>().await;
         }
+
+        // Remove blobs concurrently. (Some backends serialize removals internally, so concurrency
+        // is an upper bound, not a guarantee.)
+        let partition = &self.partition;
+        try_join_all((prev_oldest_blob_index..min_blob).map(|blob| partition.remove(blob))).await?;
+
+        self.metrics.tracked.dec_by(drop_count as i64);
+        self.metrics.pruned.inc_by(drop_count as u64);
         Ok(())
     }
 
@@ -391,9 +418,9 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
-        for blob in self.oldest_blob_index..=self.tail_blob_index() {
-            self.partition.remove(blob).await?;
-        }
+        // Remove the whole partition: a cancelled prune may leave untracked blob files
+        // whose contents would become visible again after resetting the boundary.
+        Partition::remove_all(&self.partition.context, &self.partition.name).await?;
         let _ = self.metrics.tracked.try_set(0);
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
