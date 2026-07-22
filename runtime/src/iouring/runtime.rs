@@ -20,7 +20,7 @@
 //! helper thread, registering a sleeper alarm, delivering a stop signal)
 //! remain supported through each loop's latched wake state.
 
-use super::{IoUringLoop, RingConfig, driver::Affine, new_ring, waker::Waker as RingWaker};
+use super::{Driver, RingConfig, driver::Affine, waker::Waker as RingWaker};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
@@ -352,9 +352,7 @@ impl Executor {
 /// to its thread, so the driver's thread-affinity invariants hold per worker.
 struct Worker {
     executor: Arc<Executor>,
-    io: Arc<super::driver::Driver>,
-    ioloop: IoUringLoop,
-    ring: io_uring::IoUring,
+    driver: Driver,
     storage: Storage,
     network: Network,
 }
@@ -379,20 +377,19 @@ impl Worker {
             .max_request_timeout
             .max(globals.cfg.network_cfg.read_write_timeout)
             .max(globals.cfg.network_cfg.connect_timeout);
-        let (io, ioloop) =
-            IoUringLoop::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"));
-        let ring = new_ring(&ioloop.cfg).unwrap_or_else(|err| {
-            panic!(
-                "unable to create io_uring instance ({err}): this runtime requires Linux 6.1+ \
-                 (IORING_SETUP_SINGLE_ISSUER and IORING_SETUP_DEFER_TASKRUN)"
-            )
-        });
+        let (driver, handle) = Driver::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "unable to create io_uring instance ({err}): this runtime requires Linux \
+                         6.1+ (IORING_SETUP_SINGLE_ISSUER and IORING_SETUP_DEFER_TASKRUN)"
+                )
+            });
 
         // Initialize storage and network against this worker's driver.
         let storage = MeteredStorage::new(
             IoUringStorage::new(
                 globals.cfg.storage_directory.clone(),
-                io.clone(),
+                handle.clone(),
                 globals.storage_buffer_pool.clone(),
             ),
             &mut runtime_registry,
@@ -400,22 +397,20 @@ impl Worker {
         let network = MeteredNetwork::new(
             IoUringNetwork::new(
                 globals.cfg.network_cfg.clone(),
-                io.clone(),
+                handle,
                 globals.network_buffer_pool.clone(),
             ),
             &mut runtime_registry,
         );
 
         let executor = Arc::new(Executor {
-            tasks: Arc::new(Tasks::new(ioloop.waker.clone())),
+            tasks: Arc::new(Tasks::new(driver.waker())),
             sleeping: Mutex::new(BinaryHeap::new()),
             globals,
         });
         Self {
             executor,
-            io,
-            ioloop,
-            ring,
+            driver,
             storage,
             network,
         }
@@ -448,9 +443,7 @@ impl Worker {
     {
         let Self {
             executor,
-            io,
-            mut ioloop,
-            mut ring,
+            mut driver,
             storage,
             network,
         } = self;
@@ -488,7 +481,7 @@ impl Worker {
 
                 // Service the ring: completions wake tasks and staged submissions
                 // reach the kernel before the executor considers parking.
-                ioloop.turn(&mut ring);
+                driver.turn();
 
                 // Wake sleepers whose deadlines have elapsed.
                 executor.wake_ready_sleepers(Instant::now());
@@ -500,7 +493,7 @@ impl Worker {
 
                 // Park until a completion arrives, a wake is published, or the
                 // next timer (ring timeout wheel or sleeper alarm) is due.
-                ioloop.park(&mut ring, executor.next_alarm());
+                driver.park(executor.next_alarm());
 
                 // Fire any sleepers that became due while parked.
                 executor.wake_ready_sleepers(Instant::now());
@@ -542,11 +535,10 @@ impl Worker {
         // A panic inside the drain itself (an unrecoverable ring error) must
         // not unwind past this point: the slab would be freed while the kernel
         // may still write into its buffers, so abort instead.
-        for waker in io.close() {
+        for waker in driver.close() {
             waker.wake();
         }
-        drop(io);
-        if catch_unwind(AssertUnwindSafe(|| ioloop.drain(&mut ring))).is_err() {
+        if catch_unwind(AssertUnwindSafe(|| driver.drain())).is_err() {
             eprintln!("io_uring drain panicked with operations in flight, aborting");
             std::process::abort();
         }

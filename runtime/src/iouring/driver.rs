@@ -1,7 +1,8 @@
 //! Thread-affine op submission for the io_uring runtime.
 //!
-//! The [Driver] holds the state shared between op futures and the event loop:
-//! the waiter slab, the staged/cancel queues, and the capacity wait list. The
+//! The [Handle] is the shared half of the driver: the waiter slab, the
+//! staged/cancel queues, and the capacity wait list reached by op futures
+//! and by the event loop that services them (see [super::Driver]). The
 //! runtime traits force [crate::Blob], [crate::Sink], and [crate::Stream] to
 //! be `Send + Sync` and op futures to be `Send`, so they reach this state
 //! through an [Affine] cell that pins every access to the loop thread instead
@@ -105,28 +106,30 @@ pub(crate) struct Shared {
     pub(super) closed: bool,
 }
 
-/// Thread-affine handle to the loop's op state.
+/// Thread-affine handle to the driver's op state, cloned by the network and
+/// storage front-ends and held by the event loop itself.
 ///
-/// Held by the network and storage front-ends (via `Arc`) and by the event
-/// loop itself. All access goes through the affinity-checked [Affine] cell.
-pub(crate) struct Driver {
-    shared: Affine<RefCell<Shared>>,
+/// All access goes through the affinity-checked [Affine] cell.
+#[derive(Clone)]
+pub(crate) struct Handle {
+    shared: Arc<Affine<RefCell<Shared>>>,
 }
 
-impl Driver {
-    /// Create a driver whose slab tracks at most `capacity` requests.
+impl Handle {
+    /// Create the op state for a driver whose slab tracks at most `capacity`
+    /// requests.
     ///
     /// The calling thread becomes the owning (runtime) thread.
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            shared: Affine::new(RefCell::new(Shared {
+            shared: Arc::new(Affine::new(RefCell::new(Shared {
                 waiters: Waiters::new(capacity),
                 staged: VecDeque::with_capacity(capacity),
                 pending_cancels: VecDeque::with_capacity(capacity),
                 released_deadlines: Vec::new(),
                 capacity: Vec::new(),
                 closed: false,
-            })),
+            }))),
         }
     }
 
@@ -143,8 +146,8 @@ impl Driver {
         self.shared.try_with(|cell| f(&mut cell.borrow_mut()))
     }
 
-    /// Close the driver: subsequent admissions fail with their kind-specific
-    /// error. Returns the capacity waiters so the caller can wake them
+    /// Close the op state: subsequent admissions fail with their
+    /// kind-specific error. Returns the capacity waiters so the caller can wake them
     /// outside the borrow.
     pub(crate) fn close(&self) -> Vec<Waker> {
         self.with(|shared| {
@@ -208,11 +211,7 @@ impl Driver {
     /// expires, or the accept fails. Callers should treat [Error::Timeout] as
     /// a cue to issue a fresh accept: the deadline exists so an abandoned
     /// accept cannot occupy a waiter slot forever.
-    pub(crate) async fn start_accept(
-        self: &Arc<Self>,
-        fd: Arc<OwnedFd>,
-        deadline: Instant,
-    ) -> AcceptTicket {
+    pub(crate) async fn start_accept(&self, fd: Arc<OwnedFd>, deadline: Instant) -> AcceptTicket {
         let request = Request::Accept(AcceptRequest {
             fd,
             addr: RawSocketAddr::zeroed(),
@@ -309,7 +308,7 @@ impl Driver {
     }
 
     /// Submit a logical fsync request and wait for its completion.
-    pub(crate) async fn sync(self: &Arc<Self>, file: Arc<File>) -> Result<(), Error> {
+    pub(crate) async fn sync(&self, file: Arc<File>) -> Result<(), Error> {
         self.start_sync(file).await.await
     }
 
@@ -318,7 +317,7 @@ impl Driver {
     ///
     /// Admission applies the same backpressure as every other request. The
     /// returned ticket resolves once the fsync completes.
-    pub(crate) async fn start_sync(self: &Arc<Self>, file: Arc<File>) -> SyncTicket {
+    pub(crate) async fn start_sync(&self, file: Arc<File>) -> SyncTicket {
         let request = Request::Sync(SyncRequest { file });
         SyncTicket(Ticket::admit(self, request).await)
     }
@@ -331,11 +330,11 @@ impl Driver {
 /// wait list. Otherwise the request is admitted: the slab owns it (along with
 /// the task waker) and its id is pushed onto the staged queue for the loop.
 fn poll_admission(
-    driver: &Driver,
+    handle: &Handle,
     request: &mut Option<Request>,
     cx: &mut Context<'_>,
 ) -> Poll<Result<WaiterId, Output>> {
-    let outcome = driver.with(|shared| {
+    let outcome = handle.with(|shared| {
         if shared.closed {
             return Admission::Closed;
         }
@@ -362,8 +361,8 @@ fn poll_admission(
 ///
 /// Taking a result frees a slot, so capacity waiters are released (outside
 /// the state borrow). A pending poll refreshes the stored task waker.
-fn poll_completion(driver: &Driver, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
-    let (output, wakers) = driver.with(|shared| {
+fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
+    let (output, wakers) = handle.with(|shared| {
         let output = shared.waiters.poll_take(id, cx.waker());
         let wakers = if output.is_some() {
             std::mem::take(&mut shared.capacity)
@@ -384,8 +383,8 @@ fn poll_completion(driver: &Driver, id: WaiterId, cx: &mut Context<'_>) -> Poll<
 /// simply leaks until shutdown (drain force-cancels it). This is reachable
 /// only by moving an already-polled op future to a raw thread, which nothing
 /// in the workspace does.
-fn orphan(driver: &Driver, id: WaiterId) {
-    let wakers = driver.try_with(|shared| {
+fn orphan(handle: &Handle, id: WaiterId) {
+    let wakers = handle.try_with(|shared| {
         match shared.waiters.mark_orphaned(id) {
             // A parked result was dropped, freeing a slot.
             DropOutcome::Freed => std::mem::take(&mut shared.capacity),
@@ -440,14 +439,14 @@ enum OpState {
 /// see the module docs for the wind-down rules.
 #[must_use]
 struct Op<'a> {
-    driver: &'a Driver,
+    handle: &'a Handle,
     state: OpState,
 }
 
 impl<'a> Op<'a> {
-    const fn new(driver: &'a Driver, request: Request) -> Self {
+    const fn new(handle: &'a Handle, request: Request) -> Self {
         Self {
-            driver,
+            handle,
             state: OpState::Queued(Some(request)),
         }
     }
@@ -460,7 +459,7 @@ impl Future for Op<'_> {
         let this = self.get_mut();
         match &mut this.state {
             OpState::Queued(request) => {
-                match poll_admission(this.driver, request, cx) {
+                match poll_admission(this.handle, request, cx) {
                     // Completion cannot be ready before the loop's next turn,
                     // so an admitted op always returns pending here.
                     Poll::Ready(Ok(id)) => {
@@ -476,7 +475,7 @@ impl Future for Op<'_> {
                 }
             }
             OpState::Waiting(id) => {
-                let output = std::task::ready!(poll_completion(this.driver, *id, cx));
+                let output = std::task::ready!(poll_completion(this.handle, *id, cx));
                 this.state = OpState::Done;
                 Poll::Ready(output)
             }
@@ -490,7 +489,7 @@ impl Drop for Op<'_> {
         // Queued: the request (and its buffers) drops with the future, nothing
         // reached the loop or the kernel. Done: nothing to release.
         if let OpState::Waiting(id) = self.state {
-            orphan(self.driver, id);
+            orphan(self.handle, id);
         }
     }
 }
@@ -515,23 +514,23 @@ enum TicketState {
 /// Owns a driver clone so it can outlive its front-end call. Dropping the
 /// ticket orphans the slot.
 struct Ticket {
-    driver: Arc<Driver>,
+    handle: Handle,
     state: TicketState,
 }
 
 impl Ticket {
     /// Admit `request`, parking on slab capacity, and return the reservation.
-    async fn admit(driver: &Arc<Driver>, request: Request) -> Self {
+    async fn admit(handle: &Handle, request: Request) -> Self {
         let mut request = Some(request);
         let state = std::future::poll_fn(|cx| {
-            poll_admission(driver, &mut request, cx).map(|admitted| match admitted {
+            poll_admission(handle, &mut request, cx).map(|admitted| match admitted {
                 Ok(id) => TicketState::Waiting(id),
                 Err(output) => TicketState::Failed(Some(output)),
             })
         })
         .await;
         Self {
-            driver: Arc::clone(driver),
+            handle: handle.clone(),
             state,
         }
     }
@@ -544,7 +543,7 @@ impl Future for Ticket {
         let this = self.get_mut();
         match &mut this.state {
             TicketState::Waiting(id) => {
-                let output = std::task::ready!(poll_completion(&this.driver, *id, cx));
+                let output = std::task::ready!(poll_completion(&this.handle, *id, cx));
                 this.state = TicketState::Done;
                 Poll::Ready(output)
             }
@@ -561,7 +560,7 @@ impl Future for Ticket {
 impl Drop for Ticket {
     fn drop(&mut self) {
         if let TicketState::Waiting(id) = self.state {
-            orphan(&self.driver, id);
+            orphan(&self.handle, id);
         }
     }
 }

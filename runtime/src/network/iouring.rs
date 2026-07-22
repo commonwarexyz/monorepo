@@ -205,7 +205,7 @@ pub struct Network {
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
     /// Used to submit operations to the io_uring event loop.
-    handle: Arc<iouring::Driver>,
+    handle: iouring::Handle,
     /// Timeout for establishing an outbound TCP connection.
     connect_timeout: Duration,
     /// Timeout budget applied to each send/recv call and each in-flight
@@ -224,7 +224,7 @@ impl Network {
     /// large enough, given the number of connections that will be maintained.
     /// Each in-flight send/recv to/from each connection consumes a ring slot, as
     /// does each in-flight accept and connect.
-    pub(crate) const fn new(cfg: Config, handle: Arc<iouring::Driver>, pool: BufferPool) -> Self {
+    pub(crate) const fn new(cfg: Config, handle: iouring::Handle, pool: BufferPool) -> Self {
         Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
@@ -311,7 +311,7 @@ pub struct Listener {
     /// Address the listener is bound to.
     local_addr: SocketAddr,
     /// Used to submit operations to the io_uring event loop.
-    handle: Arc<iouring::Driver>,
+    handle: iouring::Handle,
     /// Timeout budget applied to each in-flight accept and inherited by
     /// accepted connections.
     read_write_timeout: Duration,
@@ -394,7 +394,7 @@ pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    handle: Arc<iouring::Driver>,
+    handle: iouring::Handle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
     /// Tracks this sink's lifecycle.
@@ -413,7 +413,7 @@ enum SinkState {
 
 impl Sink {
     /// Construct a sink that submits logical send requests through one io_uring loop.
-    const fn new(fd: Arc<OwnedFd>, handle: Arc<iouring::Driver>, timeout: Duration) -> Self {
+    const fn new(fd: Arc<OwnedFd>, handle: iouring::Handle, timeout: Duration) -> Self {
         Self {
             fd,
             handle,
@@ -490,7 +490,7 @@ pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    handle: Arc<iouring::Driver>,
+    handle: iouring::Handle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
@@ -509,7 +509,7 @@ impl Stream {
     /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
-        handle: Arc<iouring::Driver>,
+        handle: iouring::Handle,
         timeout: Duration,
         buffer_capacity: usize,
         pool: BufferPool,
@@ -689,7 +689,7 @@ mod tests {
             .max(cfg.read_write_timeout)
             .max(cfg.connect_timeout);
         let harness = TestLoop::new(ring);
-        let network = Network::new(cfg, Arc::clone(&harness.driver), pool);
+        let network = Network::new(cfg, harness.handle.clone(), pool);
         (harness, network)
     }
 
@@ -912,7 +912,7 @@ mod tests {
         {
             let mut recv = Box::pin(client_stream.recv(1));
             assert!(poll_once(&harness, &mut recv).is_pending());
-            harness.ioloop.turn(&mut harness.ring);
+            harness.driver().turn();
 
             // The admitted request holds an additional clone.
             assert_eq!(Arc::strong_count(&fd), 4);
@@ -933,10 +933,8 @@ mod tests {
                 "cancelled recv still holds fd after {:?}",
                 start.elapsed()
             );
-            harness.ioloop.turn(&mut harness.ring);
-            harness
-                .ioloop
-                .park(&mut harness.ring, Some(Duration::from_millis(10)));
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
         }
     }
 
@@ -962,7 +960,7 @@ mod tests {
         {
             let mut recv = Box::pin(client_stream.recv(1));
             assert!(poll_once(&harness, &mut recv).is_pending());
-            harness.ioloop.turn(&mut harness.ring);
+            harness.driver().turn();
         }
 
         harness.block_on(async {
@@ -1036,7 +1034,7 @@ mod tests {
         let (left, mut right) = UnixStream::pair().unwrap();
         let stream = Stream::new(
             Arc::new(left.into()),
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             Duration::from_secs(1),
             0,
             pool,
@@ -1068,7 +1066,7 @@ mod tests {
         let (left, mut right) = UnixStream::pair().unwrap();
         let mut sink = Sink::new(
             Arc::new(left.into()),
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             Duration::from_secs(1),
         );
 
@@ -1088,7 +1086,7 @@ mod tests {
     fn test_zero_length_send_short_circuits_before_submit() {
         // Verify empty sends return locally without staging any request.
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
 
@@ -1097,7 +1095,7 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
         let mut sink = Sink::new(
             Arc::new(left.into()),
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             Duration::from_secs(1),
         );
 
@@ -1184,7 +1182,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
 
@@ -1192,7 +1190,7 @@ mod tests {
         let (send_left, _send_right) = UnixStream::pair().unwrap();
         let mut sink = Sink::new(
             Arc::new(send_left.into()),
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             Duration::from_secs(1),
         );
         assert!(matches!(
@@ -1204,7 +1202,7 @@ mod tests {
         let (recv_left, _recv_right) = UnixStream::pair().unwrap();
         let mut stream = Stream::new(
             Arc::new(recv_left.into()),
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             Duration::from_secs(1),
             0,
             pool,

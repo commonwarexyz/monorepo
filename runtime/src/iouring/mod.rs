@@ -189,7 +189,7 @@ use std::{
 
 mod driver;
 use driver::Shared;
-pub(crate) use driver::{AcceptTicket, Driver};
+pub(crate) use driver::{AcceptTicket, Handle};
 mod request;
 mod runtime;
 pub use runtime::{Config, Context, Runner};
@@ -302,7 +302,7 @@ pub(crate) struct IoUringLoop {
     cfg: RingConfig,
     metrics: Arc<Metrics>,
     /// Shared op state, also reachable from the front-ends' op futures.
-    driver: Arc<Driver>,
+    handle: Handle,
     timeout_wheel: TimeoutWheel,
     idle_spinner: Spinner,
     waker: Waker,
@@ -357,11 +357,11 @@ impl FillResult {
 }
 
 impl IoUringLoop {
-    /// Create a new io_uring loop and its submission driver.
+    /// Create a new io_uring loop and its shared submission handle.
     ///
     /// The loop allocates its own metrics and internal `eventfd` wake source.
-    /// The calling thread becomes the driver's owning (runtime) thread.
-    pub(crate) fn new(mut cfg: RingConfig, registry: &mut impl Register) -> (Arc<Driver>, Self) {
+    /// The calling thread becomes the handle's owning (runtime) thread.
+    pub(crate) fn new(mut cfg: RingConfig, registry: &mut impl Register) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
@@ -392,14 +392,14 @@ impl IoUringLoop {
             Instant::now(),
         );
         let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.pending(0));
-        let driver = Arc::new(Driver::new(size));
+        let handle = Handle::new(size);
 
         (
-            Arc::clone(&driver),
+            handle.clone(),
             Self {
                 cfg,
                 metrics,
-                driver,
+                handle,
                 timeout_wheel,
                 idle_spinner,
                 waker,
@@ -436,9 +436,9 @@ impl IoUringLoop {
     /// executor calls this between task-poll batches so completions wake tasks
     /// promptly while submissions reach the kernel before the executor parks.
     pub(crate) fn turn(&mut self, ring: &mut IoUring) {
-        let driver = Arc::clone(&self.driver);
+        let handle = self.handle.clone();
         loop {
-            let (fill_result, kernel_idle) = driver.with(|shared| {
+            let (fill_result, kernel_idle) = handle.with(|shared| {
                 // Process available completions.
                 for cqe in ring.completion() {
                     self.handle_cqe(shared, cqe);
@@ -509,7 +509,7 @@ impl IoUringLoop {
             (wheel, limit) => wheel.or(limit),
         };
 
-        let (fully_idle, waiters_full) = self.driver.with(|shared| {
+        let (fully_idle, waiters_full) = self.handle.with(|shared| {
             (
                 shared.waiters.pending() == 0
                     && shared.staged.is_empty()
@@ -839,14 +839,14 @@ impl IoUringLoop {
     /// buffers, so operations that cannot be cancelled (e.g. an executing disk
     /// write) are awaited regardless of the budget.
     fn drain(&mut self, ring: &mut IoUring) {
-        let driver = Arc::clone(&self.driver);
+        let handle = self.handle.clone();
         let mut remaining = self.cfg.shutdown_timeout;
 
         // Keep driving completions until all progressing waiters finish.
         loop {
             // Always drain CQEs first, even after a timed wait: completions can
             // race with timeout expiry and still be pending in the queue.
-            let pending = driver.with(|shared| {
+            let pending = handle.with(|shared| {
                 for cqe in ring.completion() {
                     self.handle_cqe(shared, cqe);
                 }
@@ -865,14 +865,14 @@ impl IoUringLoop {
             // request would free buffers the kernel may still write into.
             if remaining.is_some_and(|t| t.is_zero()) {
                 remaining = None;
-                driver.with(|shared| self.cancel_all(shared));
+                handle.with(|shared| self.cancel_all(shared));
             }
 
             // Keep userspace deadline processing alive during shutdown so
             // in-flight timed operations preserve their ETIMEDOUT semantics,
             // and continue staging requeued requests so partially-complete or
             // retrying requests can keep making progress.
-            let pending = driver.with(|shared| {
+            let pending = handle.with(|shared| {
                 self.advance_timeouts(shared);
                 {
                     let mut submission_queue = ring.submission();
@@ -907,8 +907,8 @@ impl IoUringLoop {
             }
         }
 
-        let driver = Arc::clone(&self.driver);
-        driver.with(|shared| {
+        let handle = self.handle.clone();
+        handle.with(|shared| {
             self.metrics
                 .pending_operations
                 .set(shared.waiters.len() as _);
@@ -1001,6 +1001,62 @@ pub(crate) fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
+/// Owned half of the io_uring driver: the ring plus the loop state that
+/// services it.
+///
+/// Op futures reach the driver's shared op state through [Handle]s, while the
+/// worker that owns the [Driver] is the only place SQEs are built and CQEs
+/// are reaped. The ring and loop state live in separate fields so the
+/// delegating methods below can borrow them disjointly.
+pub(crate) struct Driver {
+    ring: IoUring,
+    inner: IoUringLoop,
+}
+
+impl Driver {
+    /// Create the driver and its shared submission handle.
+    ///
+    /// The calling thread becomes the ring's owner and only submitter.
+    pub(crate) fn new(
+        cfg: RingConfig,
+        registry: &mut impl Register,
+    ) -> Result<(Self, Handle), std::io::Error> {
+        let (handle, inner) = IoUringLoop::new(cfg, registry);
+        let ring = new_ring(&inner.cfg)?;
+        Ok((Self { ring, inner }, handle))
+    }
+
+    /// Clone the driver's cross-thread wake source.
+    pub(crate) fn waker(&self) -> Waker {
+        self.inner.waker.clone()
+    }
+
+    /// Service the ring: build and submit staged SQEs, then reap CQEs and
+    /// wake the tasks whose results parked.
+    pub(crate) fn turn(&mut self) {
+        self.inner.turn(&mut self.ring);
+    }
+
+    /// Park until a completion arrives, a wake is published, or the next
+    /// timer (ring timeout wheel or `limit`) is due.
+    pub(crate) fn park(&mut self, limit: Option<Duration>) {
+        self.inner.park(&mut self.ring, limit);
+    }
+
+    /// Close the shared op state so late admissions fail with their
+    /// kind-specific error. Returns the capacity waiters so the caller can
+    /// wake them outside the borrow.
+    pub(crate) fn close(&self) -> Vec<TaskWaker> {
+        self.inner.handle.close()
+    }
+
+    /// Drain in-flight ring work so kernel-owned buffers and descriptors are
+    /// released, consuming the driver: the ring is destroyed afterwards.
+    pub(crate) fn drain(mut self) {
+        self.inner.drain(&mut self.ring);
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     //! Shared single-threaded harness for tests that drive the loop
@@ -1028,9 +1084,9 @@ pub(crate) mod testing {
     /// Single-threaded loop harness driving `turn`/`park` interleaved with
     /// polling a future, mirroring the runtime executor's structure.
     pub(crate) struct TestLoop {
-        pub(crate) driver: Arc<Driver>,
-        pub(crate) ioloop: IoUringLoop,
-        pub(crate) ring: IoUring,
+        pub(crate) handle: Handle,
+        /// The owned driver, taken by [TestLoop::shutdown] (drain consumes it).
+        driver: Option<Driver>,
     }
 
     impl TestLoop {
@@ -1040,45 +1096,65 @@ pub(crate) mod testing {
             // harness must exercise the same completion-delivery mode.
             cfg.single_issuer = true;
             let mut registry = Registry::default();
-            let (driver, ioloop) = IoUringLoop::new(cfg, &mut registry);
-            let ring = new_ring(&ioloop.cfg).expect("unable to create io_uring instance");
+            let (driver, handle) =
+                Driver::new(cfg, &mut registry).expect("unable to create io_uring instance");
             Self {
-                driver,
-                ioloop,
-                ring,
+                handle,
+                driver: Some(driver),
+            }
+        }
+
+        /// Access the owned driver.
+        ///
+        /// Panics after [TestLoop::shutdown].
+        pub(crate) fn driver(&mut self) -> &mut Driver {
+            self.driver.as_mut().expect("driver already drained")
+        }
+
+        /// Build a waker that latches the loop's out-of-band wake, or a noop
+        /// waker once the driver is drained (parked results resolve without
+        /// one).
+        fn waker(&self) -> TaskWaker {
+            match &self.driver {
+                Some(driver) => arc_waker(Arc::new(Unpark(driver.waker()))),
+                None => futures::task::noop_waker(),
             }
         }
 
         /// Drive `fut` to completion, servicing the ring between polls.
         pub(crate) fn block_on<F: Future>(&mut self, fut: F) -> F::Output {
-            let waker = arc_waker(Arc::new(Unpark(self.ioloop.waker.clone())));
+            let waker = self.waker();
             let mut cx = Context::from_waker(&waker);
             let mut fut = pin!(fut);
             loop {
                 if let Poll::Ready(output) = fut.as_mut().poll(&mut cx) {
                     return output;
                 }
-                self.ioloop.turn(&mut self.ring);
-                self.ioloop.park(&mut self.ring, None);
+                let driver = self.driver.as_mut().expect("future pending after shutdown");
+                driver.turn();
+                driver.park(None);
             }
         }
 
         /// Close the driver and drain in-flight work, as runtime teardown does.
         pub(crate) fn shutdown(&mut self) {
-            for waker in self.driver.close() {
+            let Some(driver) = self.driver.take() else {
+                return;
+            };
+            for waker in driver.close() {
                 waker.wake();
             }
-            self.ioloop.drain(&mut self.ring);
+            driver.drain();
         }
 
         /// Number of tracked waiters (including parked results).
         pub(crate) fn tracked(&self) -> usize {
-            self.driver.with(|shared| shared.waiters.len())
+            self.handle.with(|shared| shared.waiters.len())
         }
 
         /// Number of waiters still progressing.
         pub(crate) fn pending(&self) -> usize {
-            self.driver.with(|shared| shared.waiters.pending())
+            self.handle.with(|shared| shared.waiters.pending())
         }
     }
 
@@ -1090,7 +1166,7 @@ pub(crate) mod testing {
 
     /// Poll `fut` exactly once with a loop-latching waker.
     pub(crate) fn poll_once<F: Future + Unpin>(harness: &TestLoop, fut: &mut F) -> Poll<F::Output> {
-        let waker = arc_waker(Arc::new(Unpark(harness.ioloop.waker.clone())));
+        let waker = harness.waker();
         let mut cx = Context::from_waker(&waker);
         Pin::new(fut).poll(&mut cx)
     }
@@ -1155,14 +1231,15 @@ mod tests {
 
         // Closing the ring fd out from under the loop makes the next enter
         // fail with EBADF.
+        let driver = harness.driver();
         // SAFETY: the fd is intentionally invalidated; the harness issues no
         // further ring operations after the failed wait.
         unsafe {
-            libc::close(std::os::fd::AsRawFd::as_raw_fd(&harness.ring));
+            libc::close(std::os::fd::AsRawFd::as_raw_fd(&driver.ring));
         }
-        let err = harness
-            .ioloop
-            .submit_and_wait(&mut harness.ring, 1, Some(Duration::from_millis(1)))
+        let err = driver
+            .inner
+            .submit_and_wait(&mut driver.ring, 1, Some(Duration::from_millis(1)))
             .expect_err("enter on a closed ring must fail");
         assert_eq!(err.raw_os_error(), Some(libc::EBADF));
 
@@ -1178,7 +1255,7 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[42]).unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let (mut buf, read) = harness
             .block_on(driver.recv(
                 Arc::new(left.into()),
@@ -1205,7 +1282,7 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let start = Instant::now();
         let result = harness.block_on(driver.recv(
             Arc::new(left.into()),
@@ -1240,7 +1317,7 @@ mod tests {
         // after slot reuse.
         let (left1, right1) = UnixStream::pair().unwrap();
         (&right1).write_all(&[42]).unwrap();
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let (_buf1, read1) = harness
             .block_on(driver.recv(
                 Arc::new(left1.into()),
@@ -1279,7 +1356,7 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[1, 2, 3]).unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(5),
@@ -1294,7 +1371,7 @@ mod tests {
             if poll_once(&harness, &mut recv).is_ready() {
                 panic!("exact recv completed before all bytes arrived");
             }
-            harness.ioloop.turn(&mut harness.ring);
+            harness.driver().turn();
         }
         (&right).write_all(&[4, 5]).unwrap();
 
@@ -1314,7 +1391,7 @@ mod tests {
         let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let start = Instant::now();
         let result = harness.block_on(driver.recv(
             Arc::new(left.into()),
@@ -1337,7 +1414,7 @@ mod tests {
     fn test_recv_panics_on_invalid_buffer_bounds() {
         let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let _ = harness.block_on(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(4),
@@ -1359,7 +1436,7 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
         let fd = Arc::new(OwnedFd::from(left));
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(fd.try_clone().unwrap()),
             IoBufMut::with_capacity(8),
@@ -1371,7 +1448,7 @@ mod tests {
 
         // Admit and submit the recv.
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(harness.pending(), 1);
 
         // Dropping the future orphans the slot and requests cancellation. The
@@ -1384,10 +1461,8 @@ mod tests {
                 "orphaned recv still tracked after {:?}",
                 start.elapsed()
             );
-            harness.ioloop.turn(&mut harness.ring);
-            harness
-                .ioloop
-                .park(&mut harness.ring, Some(Duration::from_millis(10)));
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
         }
     }
 
@@ -1398,7 +1473,7 @@ mod tests {
         let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1414,7 +1489,7 @@ mod tests {
         drop(recv);
 
         // The staged entry is retired locally on the next turn.
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(harness.tracked(), 0);
     }
 
@@ -1437,7 +1512,7 @@ mod tests {
             .unwrap();
 
         let mut harness = TestLoop::new(RingConfig::default());
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let payload = vec![7u8; 1 << 20];
         let mut write = Box::pin(driver.write_at_sync(
             Arc::new(file),
@@ -1467,7 +1542,7 @@ mod tests {
         let (left_a, right_a) = UnixStream::pair().unwrap();
         let (left_b, right_b) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let recv_a = driver.recv(
             Arc::new(left_a.into()),
             IoBufMut::with_capacity(1),
@@ -1505,12 +1580,12 @@ mod tests {
         // Verify ops staged after close resolve with their kind-specific
         // failures without touching the ring.
         let mut harness = TestLoop::new(RingConfig::default());
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
 
         let (left, _right) = UnixStream::pair().unwrap();
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let result = harness.block_on(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1551,7 +1626,7 @@ mod tests {
             shutdown_timeout: None,
             ..Default::default()
         });
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let payload = vec![9u8; 1 << 20];
         let mut write = Box::pin(driver.write_at_sync(
             Arc::new(file),
@@ -1582,7 +1657,7 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1592,7 +1667,7 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
         ));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(harness.pending(), 1);
 
         let start = Instant::now();
@@ -1623,7 +1698,7 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1633,7 +1708,7 @@ mod tests {
             Instant::now() + Duration::from_millis(100),
         ));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
 
         let start = Instant::now();
         harness.shutdown();
@@ -1662,7 +1737,7 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1674,7 +1749,7 @@ mod tests {
 
         // Admit and submit the recv (first staging schedules the deadline).
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(harness.pending(), 1);
 
         // Drop the future: orphan plus eager async-cancel.
@@ -1686,18 +1761,16 @@ mod tests {
                 "orphaned recv still tracked after {:?}",
                 start.elapsed()
             );
-            harness.ioloop.turn(&mut harness.ring);
-            harness
-                .ioloop
-                .park(&mut harness.ring, Some(Duration::from_millis(10)));
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
         }
 
         // No waiters remain, so once the original deadline elapses the wheel
         // must not report an active deadline.
         std::thread::sleep(Duration::from_millis(100));
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(
-            harness.ioloop.timeout_wheel.next_deadline(),
+            harness.driver().inner.timeout_wheel.next_deadline(),
             None,
             "dropped op leaked its timeout-wheel deadline"
         );
@@ -1716,7 +1789,7 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
 
         // Keep a recv in flight so park blocks in the eventfd-backed path.
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(1),
@@ -1726,17 +1799,17 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
         ));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(harness.pending(), 1);
 
         // Wake from a foreign thread after the loop has had time to block.
-        let waker = harness.ioloop.waker.clone();
+        let waker = harness.driver().waker();
         let start = Instant::now();
         let wake_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             waker.wake();
         });
-        harness.ioloop.park(&mut harness.ring, None);
+        harness.driver().park(None);
         let elapsed = start.elapsed();
         wake_thread.join().unwrap();
         assert!(
@@ -1762,7 +1835,7 @@ mod tests {
         let (left_a, _right_a) = UnixStream::pair().unwrap();
         let (left_b, _right_b) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv_a = Box::pin(driver.recv(
             Arc::new(left_a.into()),
             IoBufMut::with_capacity(1),
@@ -1785,22 +1858,17 @@ mod tests {
         // First pass: the wake-poll rearm plus one op fill the two-slot SQ
         // while the second op stays staged, so SQ pressure must dominate the
         // (also true) waiter-capacity pressure.
-        let driver_state = Arc::clone(&harness.driver);
-        let fill = driver_state.with(|shared| {
-            harness
-                .ioloop
-                .fill_submission_queue(shared, &mut harness.ring)
-        });
+        let driver_state = harness.handle.clone();
+        let driver = harness.driver();
+        let fill = driver_state
+            .with(|shared| driver.inner.fill_submission_queue(shared, &mut driver.ring));
         assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
 
         // After flushing, the second op stages and nothing remains queued, so
         // the full slab now reports waiter pressure.
-        harness.ioloop.submit(&mut harness.ring).unwrap();
-        let fill = driver_state.with(|shared| {
-            harness
-                .ioloop
-                .fill_submission_queue(shared, &mut harness.ring)
-        });
+        driver.inner.submit(&mut driver.ring).unwrap();
+        let fill = driver_state
+            .with(|shared| driver.inner.fill_submission_queue(shared, &mut driver.ring));
         assert_eq!(fill, FillResult::AtWaiterCapacity);
 
         drop(recv_a);
@@ -1819,7 +1887,7 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1856,7 +1924,7 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[1]).unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(2),
@@ -1866,7 +1934,7 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
         ));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
 
         // Supply the rest before shutdown so drain can finish the requeue.
         (&right).write_all(&[2]).unwrap();
@@ -1897,7 +1965,7 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv = Box::pin(driver.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
@@ -1907,7 +1975,7 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
         ));
         assert!(poll_once(&harness, &mut recv).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(harness.tracked(), 1);
 
         // Drop the admitted future on a foreign thread: the affinity check
@@ -1915,7 +1983,7 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(move || drop(recv)).join().unwrap();
         });
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert_eq!(
             harness.tracked(),
             1,
@@ -1945,7 +2013,7 @@ mod tests {
         let (left_a, _right_a) = UnixStream::pair().unwrap();
         let (left_b, _right_b) = UnixStream::pair().unwrap();
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut recv_a = Box::pin(driver.recv(
             Arc::new(left_a.into()),
             IoBufMut::with_capacity(1),
@@ -1965,11 +2033,11 @@ mod tests {
 
         // Fill the single slot, then park the second admission.
         assert!(poll_once(&harness, &mut recv_a).is_pending());
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
         assert!(poll_once(&harness, &mut recv_b).is_pending());
 
         // Close the driver: the parked admission must fail on its next poll.
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
         match poll_once(&harness, &mut recv_b) {
@@ -1991,7 +2059,7 @@ mod tests {
             ..Default::default()
         });
 
-        let driver = Arc::clone(&harness.driver);
+        let driver = harness.handle.clone();
         let mut sockets = Vec::new();
         let mut recvs = Vec::new();
         for _ in 0..8 {
@@ -2009,7 +2077,7 @@ mod tests {
         for recv in &mut recvs {
             assert!(poll_once(&harness, recv).is_pending());
         }
-        harness.ioloop.turn(&mut harness.ring);
+        harness.driver().turn();
 
         // Let every deadline expire, then drive all ops to their timeout
         // results: the cancel burst plus the wake-poll rearm exceeds the

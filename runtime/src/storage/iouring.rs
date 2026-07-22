@@ -60,7 +60,7 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
-    io_handle: Arc<iouring::Driver>,
+    io_handle: iouring::Handle,
     pool: BufferPool,
 }
 
@@ -68,7 +68,7 @@ impl Storage {
     /// Returns a new `Storage` instance that submits I/O through the driver.
     pub(crate) fn new(
         storage_directory: PathBuf,
-        io_handle: Arc<iouring::Driver>,
+        io_handle: iouring::Handle,
         pool: BufferPool,
     ) -> Self {
         Self {
@@ -236,7 +236,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_handle: Arc<iouring::Driver>,
+    io_handle: iouring::Handle,
     /// Buffer pool for read allocations
     pool: BufferPool,
 }
@@ -259,7 +259,7 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_handle: Arc<iouring::Driver>,
+        io_handle: iouring::Handle,
         pool: BufferPool,
     ) -> Self {
         Self {
@@ -432,7 +432,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let harness = TestLoop::new(iouring::RingConfig::default());
-        let storage = Storage::new(storage_directory.clone(), Arc::clone(&harness.driver), pool);
+        let storage = Storage::new(storage_directory.clone(), harness.handle.clone(), pool);
         (harness, storage, storage_directory)
     }
 
@@ -835,7 +835,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        let storage = Storage::new(storage_root.clone(), Arc::clone(&harness.driver), pool);
+        let storage = Storage::new(storage_root.clone(), harness.handle.clone(), pool);
 
         let err = harness
             .block_on(storage.open("partition", b"blob"))
@@ -862,7 +862,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        let storage = Storage::new(storage_directory.clone(), Arc::clone(&harness.driver), pool);
+        let storage = Storage::new(storage_directory.clone(), harness.handle.clone(), pool);
 
         let err = harness
             .block_on(storage.open("partition", b"blob"))
@@ -919,7 +919,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
 
@@ -927,7 +927,7 @@ mod tests {
             "partition".into(),
             b"blob",
             file,
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             pool,
         );
 
@@ -977,7 +977,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
 
@@ -985,7 +985,7 @@ mod tests {
             "partition".into(),
             b"blob",
             file,
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             pool,
         );
         let err = harness
@@ -1007,7 +1007,7 @@ mod tests {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let mut harness = TestLoop::new(iouring::RingConfig::default());
-        for waker in harness.driver.close() {
+        for waker in harness.driver().close() {
             waker.wake();
         }
 
@@ -1015,7 +1015,7 @@ mod tests {
             "partition".into(),
             b"blob",
             file,
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             pool,
         );
         let err = harness
@@ -1048,7 +1048,7 @@ mod tests {
             "partition".into(),
             b"blob",
             file,
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             pool,
         );
         let err = harness
@@ -1080,7 +1080,7 @@ mod tests {
             "partition".into(),
             b"blob",
             file,
-            Arc::clone(&harness.driver),
+            harness.handle.clone(),
             pool,
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
