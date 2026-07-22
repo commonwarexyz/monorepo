@@ -178,8 +178,6 @@ impl crate::Storage for Storage {
                 });
                 match creation.await {
                     Ok(result) => result?,
-                    // Nothing aborts the creation task, so a join error is a panic (or a
-                    // runtime shutdown, which cancels the task).
                     Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                     Err(_) => return Err(Error::Closed),
                 }
