@@ -46,9 +46,9 @@ pub enum Error {
 /// A write-once key-value store addressed by both an index and a key.
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization. Pruning
-/// implementations reject puts below the prune floor with [Error::AlreadyPrunedTo] without
-/// mutating; check [prunable::Archive::pruned] first to keep the handle.
+/// dropped future) destroys the handle. Pruning implementations reject puts below the prune
+/// floor with [Error::AlreadyPrunedTo] without mutating; check [prunable::Archive::pruned]
+/// first to keep the handle.
 pub trait Archive: Send + Sized {
     /// The type of the key.
     type Key: Array;

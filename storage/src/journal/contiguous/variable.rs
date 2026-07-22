@@ -2105,7 +2105,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// recovered journal remains a contiguous prefix.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization.
+/// future) destroys the handle.
 pub struct Journal<E: Context, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: Context, V: CodecShared> std::fmt::Debug for Journal<E, V> {

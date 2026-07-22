@@ -454,7 +454,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 /// Implementation of [Ordinal].
 ///
 /// Mutating functions consume the store and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization.
+/// future) destroys the handle.
 pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>>(Box<Inner<E, V>>);
 
 impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> std::fmt::Debug for Ordinal<E, V> {

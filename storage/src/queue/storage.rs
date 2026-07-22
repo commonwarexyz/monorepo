@@ -73,7 +73,7 @@ pub struct Config<C> {
 /// Applications must handle duplicates (idempotent processing).
 ///
 /// Storage-mutating functions consume the queue and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization.
+/// dropped future) destroys the handle.
 pub struct Queue<E: Context, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,

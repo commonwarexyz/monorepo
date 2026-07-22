@@ -255,9 +255,9 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// shouldn't pollute a page cache).
 ///
 /// Mutating functions consume the glob and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
-/// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Glob::pruned] first to keep the handle.
+/// future) destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection] without mutating; check [Glob::pruned] first to keep the
+/// handle.
 pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: BufferPooler + Storage + Metrics, V: CodecShared> std::fmt::Debug for Glob<E, V> {

@@ -108,9 +108,9 @@ pub struct Config<C> {
 /// Provides coordinated operations and crash recovery.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
-/// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Oversized::pruned] first to keep the handle.
+/// future) destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection] without mutating; check [Oversized::pruned] first to keep the
+/// handle.
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,

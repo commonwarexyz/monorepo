@@ -158,7 +158,6 @@ where
     P: PublicKey,
 {
     secret_store: SS,
-    /// Taken while a consuming journal mutation is in flight; always restored before return.
     events: Option<Journal<E, Event<V, P>>>,
     current: Option<EpochInfo<V, P>>,
     epochs: BTreeMap<Epoch, EpochCache<V, P>>,

@@ -498,7 +498,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 /// Implementation of [Metadata] storage.
 ///
 /// Storage-mutating functions consume the store and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization.
+/// dropped future) destroys the handle.
 pub struct Metadata<E: Context, K: Span, V: Codec>(Box<Inner<E, K, V>>);
 
 impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {

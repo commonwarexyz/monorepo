@@ -287,7 +287,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// Implementation of `Cache` storage.
 ///
 /// Mutating functions consume the cache and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization.
+/// future) destroys the handle.
 pub struct Cache<E: Storage + Metrics, V: CodecShared>(Box<Inner<E, V>>);
 
 impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Cache<E, V> {

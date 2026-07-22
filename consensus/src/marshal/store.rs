@@ -12,7 +12,7 @@ use std::{error::Error, future::Future};
 /// Durable store for [Finalizations](Finalization) keyed by height and block digest.
 ///
 /// Mutating functions consume the store and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization.
+/// dropped future) destroys the handle.
 pub trait Certificates: Send + Sync + Sized + 'static {
     /// The type of [Digest] used for block digests.
     type BlockDigest: Digest;
@@ -133,7 +133,7 @@ pub trait Certificates: Send + Sync + Sized + 'static {
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
 ///
 /// Mutating functions consume the store and return it only on success: an error (or a
-/// dropped future) destroys the handle, and recovery is re-initialization.
+/// dropped future) destroys the handle.
 pub trait Blocks: Send + Sync + Sized + 'static {
     /// The type of [Block] that is stored.
     type Block: Block;

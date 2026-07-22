@@ -400,9 +400,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// init by checking each blob's size.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization. Mutations on pruned
-/// sections fail with [Error::AlreadyPrunedToSection] without mutating; check
-/// [Journal::pruned] first to keep the handle.
+/// future) destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection] without mutating; check [Journal::pruned] first to keep the
+/// handle.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed>(Box<Inner<E, A>>);
 
 impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {

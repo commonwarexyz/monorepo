@@ -1133,7 +1133,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// underlying blob will be truncated to the last valid item). Repair is performed during init.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization.
+/// future) destroys the handle.
 pub struct Journal<E: Context, A>(Box<Inner<E, A>>);
 
 impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {

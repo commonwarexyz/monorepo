@@ -1132,7 +1132,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 /// Implementation of [Freezer].
 ///
 /// Mutating functions consume the freezer and return it only on success: an error (or a dropped
-/// future) destroys the handle, and recovery is re-initialization.
+/// future) destroys the handle.
 pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Freezer<E, K, V> {

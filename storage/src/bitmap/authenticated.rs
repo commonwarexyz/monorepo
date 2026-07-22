@@ -385,7 +385,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     /// retained elements.
     ///
     /// Consumes the bitmap and returns it only on success: an error (or a dropped future)
-    /// destroys the handle, and recovery is re-initialization.
+    /// destroys the handle.
     pub async fn write_pruned(mut self) -> Result<Self, Error> {
         self.metadata.clear();
 
