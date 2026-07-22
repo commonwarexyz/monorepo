@@ -1,7 +1,5 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-#[commonware_macros::stability(BETA)]
-use crate::BlobHeaderLayout;
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
@@ -193,6 +191,56 @@ stability_scope!(BETA {
         }
     }
 
+    /// Version of a [crate::Blob]'s on-disk header layout.
+    ///
+    /// This versions the runtime's on-disk container (where data begins), not the blob's
+    /// contents: the application-owned blob version passed to
+    /// [crate::Storage::open_versioned] is a separate field and is unaffected by the layout.
+    ///
+    /// New blobs are always created with the latest layout. Reopening an existing blob honors
+    /// the layout recorded in its header.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum BlobHeaderLayout {
+        /// An 8-byte header, with data beginning immediately after it.
+        V0,
+        /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
+        V1,
+    }
+
+    impl BlobHeaderLayout {
+        /// The runtime version recorded in a header of this layout.
+        pub(crate) const fn runtime_version(self) -> u16 {
+            match self {
+                Self::V0 => 0,
+                Self::V1 => 1,
+            }
+        }
+
+        /// The magic bytes recorded in a header of this layout: a fixed 3-byte brand (`CWI`,
+        /// "is this file ours?") followed by a 1-byte layout tag ("which container layout?").
+        ///
+        /// The layout tag lives in the magic rather than the runtime version field because V0
+        /// stamped that field as zero, and zeros are exactly what a torn header write leaves
+        /// behind. Tags are nonzero and distinct, so no layout's magic can be turned into
+        /// another's by zeroing bytes, and a torn write can never be misread as a complete
+        /// header of a different layout.
+        pub(crate) const fn magic(self) -> [u8; 4] {
+            match self {
+                Self::V0 => *b"CWIC", // Commonware Is CWIC
+                Self::V1 => *b"CWI1",
+            }
+        }
+
+        /// The layout recorded by a header with the given magic bytes, if supported.
+        pub(crate) const fn from_magic(magic: &[u8; 4]) -> Option<Self> {
+            match magic {
+                b"CWIC" => Some(Self::V0),
+                b"CWI1" => Some(Self::V1),
+                _ => None,
+            }
+        }
+    }
+
     /// Fixed-size header prelude at the start of each [crate::Blob].
     ///
     /// On-disk layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
@@ -342,11 +390,6 @@ stability_scope!(BETA {
             raw_len: u64,
             versions: &RangeInclusive<u16>,
         ) -> Result<(u64, u16, u64), HeaderError> {
-            debug_assert!(
-                raw.len() >= raw_len.min(Self::V1_DATA_OFFSET) as usize,
-                "caller must provide enough bytes to validate the header region"
-            );
-
             let header: Self = Self::decode(&raw[..Self::PRELUDE_SIZE])
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
@@ -531,8 +574,8 @@ impl arbitrary::Arbitrary<'_> for Header {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Header, HeaderError};
-    use crate::{Blob, BlobHeaderLayout, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
+    use super::{BlobHeaderLayout, Header, HeaderError};
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
     use futures::FutureExt;
 

@@ -428,8 +428,10 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob as _, BlobHeaderLayout, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, utils::thread,
+        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
+        storage::{BlobHeaderLayout, tests::run_storage_tests},
+        telemetry::metrics::Registry,
+        utils::thread,
     };
     use std::{
         env,

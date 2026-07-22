@@ -131,10 +131,8 @@ impl crate::Storage for Storage {
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
         let existing = Self::resolve_header(&mut file, len, &versions, partition, name).await?;
-        let (file, logical_size, blob_version, data_offset) = match existing {
-            Some((logical_size, blob_version, data_offset)) => {
-                (file, logical_size, blob_version, data_offset)
-            }
+        let (file, (logical_size, blob_version, data_offset)) = match existing {
+            Some(resolved) => (file, resolved),
             None => {
                 // Run creation to completion on a task that owns the filesystem lock:
                 // dropping the open future must not abandon the sequence half-done (a
@@ -176,16 +174,15 @@ impl crate::Storage for Storage {
                         .await
                         .map_err(|e| Error::BlobSyncFailed(err_partition, err_name, e.into()))?;
 
-                    Ok::<_, Error>((file, blob_version, data_offset))
+                    Ok::<_, Error>((file, (0, blob_version, data_offset)))
                 });
-                let (file, blob_version, data_offset) = match creation.await {
+                match creation.await {
                     Ok(result) => result?,
                     // Nothing aborts the creation task, so a join error is a panic (or a
                     // runtime shutdown, which cancels the task).
                     Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                     Err(_) => return Err(Error::Closed),
-                };
-                (file, 0, blob_version, data_offset)
+                }
             }
         };
 
@@ -282,7 +279,8 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BlobHeaderLayout, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
+        Blob, BufferPoolConfig, Storage as _,
+        storage::{BlobHeaderLayout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
