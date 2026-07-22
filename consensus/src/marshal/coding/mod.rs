@@ -1363,6 +1363,12 @@ mod tests {
             let mut parent = genesis.digest();
             let mut last_view = View::zero();
             let mut last_commitment = genesis_commitment();
+
+            // Capture a genuinely-chained non-boundary block (height 10) so Test 2
+            // can re-propose one that validates cleanly under its own embedded
+            // context. Without this, a certify rejection there could come from an
+            // ancestry error rather than the re-proposal boundary gate under test.
+            let mut non_boundary = None;
             for i in 1..BLOCKS_PER_EPOCH.get() - 1 {
                 let round = Round::new(Epoch::new(0), View::new(i));
                 let ctx = CodingCtx {
@@ -1373,10 +1379,15 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
                 last_commitment = coded_block.commitment();
+                if i == 10 {
+                    non_boundary = Some((View::new(i), last_commitment));
+                }
                 shards.proposed(round, coded_block);
                 parent = block.digest();
                 last_view = View::new(i);
             }
+            let (non_boundary_view, non_boundary_commitment) =
+                non_boundary.expect("chain includes a non-boundary block");
 
             // Create the epoch boundary block (height 19, last block in epoch 0)
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -1464,37 +1475,16 @@ mod tests {
                 "Repeated re-proposal certification should remain valid"
             );
 
-            // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
-            // Create a block at height 10 (not at epoch boundary)
-            let non_boundary_height = Height::new(10);
-            let non_boundary_round = Round::new(Epoch::new(0), View::new(10));
-            // For simplicity, we'll create a fresh non-boundary block and test re-proposal
-            let non_boundary_context = CodingCtx {
-                round: non_boundary_round,
-                leader: me.clone(),
-                parent: (View::new(9), last_commitment), // Use a prior commitment
-            };
-            let non_boundary_block = make_coding_block(
-                non_boundary_context.clone(),
-                parent,
-                non_boundary_height,
-                1000,
-            );
-            let coded_non_boundary =
-                CodedBlock::new(non_boundary_block.clone(), coding_config, &Sequential);
-            let non_boundary_commitment = coded_non_boundary.commitment();
-
-            // Make the non-boundary block available
-            shards.proposed(non_boundary_round, coded_non_boundary);
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Attempt to re-propose the non-boundary block
+            // Test 2: Invalid re-proposal (not at epoch boundary) should be
+            // rejected. Re-propose the genuinely-chained height-10 block at view
+            // 15. Because that block validates cleanly under its embedded context,
+            // a certify rejection can only come from the re-proposal boundary gate,
+            // not from an ancestry error.
             let invalid_reproposal_round = Round::new(Epoch::new(0), View::new(15));
             let invalid_reproposal_context = CodingCtx {
                 round: invalid_reproposal_round,
                 leader: me.clone(),
-                parent: (View::new(10), non_boundary_commitment),
+                parent: (non_boundary_view, non_boundary_commitment),
             };
 
             // Call verify to kick off deferred verification.
