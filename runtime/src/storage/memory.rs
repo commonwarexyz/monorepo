@@ -270,7 +270,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{header::Layout, tests::run_storage_tests},
+        storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
 
@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(size, 0, "new blob should have logical size 0");
 
         // Verify raw storage has one header page
-        let data_offset = Header::V1_DATA_OFFSET as usize;
+        let data_offset = Layout::V1.data_offset() as usize;
         {
             let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();

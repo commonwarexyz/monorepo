@@ -429,7 +429,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
-        storage::{header::Layout, tests::run_storage_tests},
+        storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
         utils::thread,
     };
@@ -522,13 +522,13 @@ mod tests {
         assert_eq!(raw.len() as u64 % PHYSICAL_PAGE_SIZE, 0);
         assert_eq!(
             raw.len() as u64,
-            Header::V1_DATA_OFFSET + pages as u64 * PHYSICAL_PAGE_SIZE
+            Layout::V1.data_offset() + pages as u64 * PHYSICAL_PAGE_SIZE
         );
 
         // Every physical page sits exactly within one aligned 4096-byte disk page, with a valid
         // CRC record in its final 12 bytes.
         for page in 0..pages {
-            let start = Header::V1_DATA_OFFSET as usize + page * PHYSICAL_PAGE_SIZE as usize;
+            let start = Layout::V1.data_offset() as usize + page * PHYSICAL_PAGE_SIZE as usize;
             let physical = &raw[start..start + PHYSICAL_PAGE_SIZE as usize];
             assert!(
                 crate::buffer::paged::validate_page_for_tests(physical),
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(size, 0, "new blob should have logical size 0");
 
         // Verify raw file holds one header page
-        let data_offset = Header::V1_DATA_OFFSET;
+        let data_offset = Layout::V1.data_offset();
         let file_path = storage_directory.join("partition").join(hex(b"test"));
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
@@ -634,7 +634,7 @@ mod tests {
         let metadata = std::fs::metadata(&corrupted_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::V1_DATA_OFFSET,
+            Layout::V1.data_offset(),
             "corrupted blob should be reset to header-only"
         );
 
@@ -696,7 +696,7 @@ mod tests {
             let raw = std::fs::read(&path).unwrap();
             assert_eq!(
                 raw.len(),
-                Header::V1_DATA_OFFSET as usize,
+                Layout::V1.data_offset() as usize,
                 "recovered blob should be header-only"
             );
             assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V1.magic());
@@ -1020,7 +1020,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::PRELUDE_SIZE_U64,
+            Layout::V0.data_offset(),
         );
 
         // Read and write should fail through their wrapper-specific error enums
@@ -1079,7 +1079,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::PRELUDE_SIZE_U64,
+            Layout::V0.data_offset(),
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1118,7 +1118,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::PRELUDE_SIZE_U64,
+            Layout::V0.data_offset(),
         );
         let err = blob
             .start_sync()
@@ -1161,7 +1161,7 @@ mod tests {
             file,
             submitter,
             pool,
-            Header::PRELUDE_SIZE_U64,
+            Layout::V0.data_offset(),
         );
         let err = blob
             .resize(0)
@@ -1199,7 +1199,7 @@ mod tests {
             file,
             submitter.clone(),
             pool,
-            Header::PRELUDE_SIZE_U64,
+            Layout::V0.data_offset(),
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob
@@ -1281,6 +1281,42 @@ mod tests {
         assert!(
             matches!(result, Err(Error::BlobCorrupt(_, _, reason)) if reason.contains("header padding"))
         );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_v0_legacy_read() {
+        let (storage, storage_directory) = create_test_storage();
+
+        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // followed immediately by the payload.
+        let payload = b"hello world";
+        let partition_dir = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_dir).unwrap();
+        let file_path = partition_dir.join(hex(b"v0"));
+        std::fs::write(
+            &file_path,
+            crate::storage::header::tests::v0_blob_bytes(0, payload),
+        )
+        .unwrap();
+
+        // The blob opens with its data intact and remains readable and writable in place.
+        let (blob, size) = storage.open("partition", b"v0").await.unwrap();
+        assert_eq!(size, payload.len() as u64);
+        assert_eq!(
+            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
+            payload
+        );
+        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        // On disk the payload still sits immediately after the 8-byte V0 header.
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + payload.len() + 1);
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V0.magic());
+        assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

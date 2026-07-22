@@ -58,6 +58,21 @@ pub struct Storage {
     pool: BufferPool,
 }
 
+/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
+async fn resolve_header(
+    file: &mut fs::File,
+    raw_len: u64,
+    versions: &RangeInclusive<u16>,
+    partition: &str,
+    name: &[u8],
+) -> Result<Option<(u64, u16, u64)>, Error> {
+    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
+    file.read_exact(&mut raw)
+        .await
+        .map_err(|_| Error::ReadFailed)?;
+    super::header::resolve(&raw, raw_len, versions, partition, name)
+}
+
 impl Storage {
     pub fn new(cfg: Config, pool: BufferPool) -> Self {
         Self {
@@ -65,21 +80,6 @@ impl Storage {
             cfg,
             pool,
         }
-    }
-
-    /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-    async fn resolve_header(
-        file: &mut fs::File,
-        len: u64,
-        versions: &RangeInclusive<u16>,
-        partition: &str,
-        name: &[u8],
-    ) -> Result<Option<(u64, u16, u64)>, Error> {
-        let mut raw = vec![0u8; Header::resolve_len(len)];
-        file.read_exact(&mut raw)
-            .await
-            .map_err(|_| Error::ReadFailed)?;
-        super::header::resolve(&raw, len, versions, partition, name)
     }
 }
 
@@ -123,14 +123,14 @@ impl crate::Storage for Storage {
             .await
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        let raw_len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
-        let existing = Self::resolve_header(&mut file, len, &versions, partition, name).await?;
+        let existing = resolve_header(&mut file, raw_len, &versions, partition, name).await?;
         let (file, guard, (logical_size, blob_version, data_offset)) = match existing {
             Some(resolved) => (file, guard, resolved),
             None => {
@@ -265,7 +265,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{header::Layout, tests::run_storage_tests},
+        storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(size, 0, "new blob should have logical size 0");
 
         // Verify raw file holds one header page
-        let data_offset = Header::V1_DATA_OFFSET;
+        let data_offset = Layout::V1.data_offset();
         let file_path = storage_directory.join("partition").join(hex(b"test"));
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert_eq!(
@@ -408,7 +408,7 @@ mod tests {
         let metadata = std::fs::metadata(&corrupted_path).unwrap();
         assert_eq!(
             metadata.len(),
-            Header::V1_DATA_OFFSET,
+            Layout::V1.data_offset(),
             "corrupted blob should be reset to header-only"
         );
 
@@ -456,13 +456,13 @@ mod tests {
         assert_eq!(raw.len() as u64 % PHYSICAL_PAGE_SIZE, 0);
         assert_eq!(
             raw.len() as u64,
-            Header::V1_DATA_OFFSET + pages as u64 * PHYSICAL_PAGE_SIZE
+            Layout::V1.data_offset() + pages as u64 * PHYSICAL_PAGE_SIZE
         );
 
         // Every physical page sits exactly within one aligned 4096-byte disk page, with a valid
         // CRC record in its final 12 bytes.
         for page in 0..pages {
-            let start = Header::V1_DATA_OFFSET as usize + page * PHYSICAL_PAGE_SIZE as usize;
+            let start = Layout::V1.data_offset() as usize + page * PHYSICAL_PAGE_SIZE as usize;
             let physical = &raw[start..start + PHYSICAL_PAGE_SIZE as usize];
             assert!(
                 crate::buffer::paged::validate_page_for_tests(physical),
@@ -735,7 +735,7 @@ mod tests {
             let raw = std::fs::read(&path).unwrap();
             assert_eq!(
                 raw.len(),
-                Header::V1_DATA_OFFSET as usize,
+                Layout::V1.data_offset() as usize,
                 "recovered blob should be header-only"
             );
             assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V1.magic());
