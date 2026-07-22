@@ -307,11 +307,24 @@ mod tests {
     }
 
     #[test]
-    fn addressed_epoch_info_rejects_oversized_directory() {
-        // The directory is bounded by three participant roles: with
-        // max_participants = 1, a four-entry directory must not decode.
+    fn addressed_epoch_info_accepts_outcome_independent_directory() {
         let mut info = addressed_info(1);
         info.directory = addresses(&keys(4));
+        let decoded =
+            EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
+                info.encode(),
+                &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
+            )
+            .expect("decode directory covering both possible dealer sets");
+        assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn addressed_epoch_info_rejects_oversized_directory() {
+        // The outcome-independent directory is bounded by four participant
+        // sets, so a fifth entry exceeds max_participants = 1.
+        let mut info = addressed_info(1);
+        info.directory = addresses(&keys(5));
         assert!(
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),

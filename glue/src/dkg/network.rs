@@ -108,8 +108,9 @@ impl<P: PublicKey> EncodeSize for Addresses<P> {
 
 impl<P: PublicKey> Directory<P> for Addresses<P> {
     fn read(buf: &mut impl Buf, max_participants: u32) -> Result<Self, CodecError> {
-        // A directory covers up to three participant roles per epoch.
-        let max = (max_participants as usize).saturating_mul(3);
+        // Artifact construction requests an outcome-independent superset of
+        // the three participant roles, including both possible dealer sets.
+        let max = (max_participants as usize).saturating_mul(4);
         Ok(Self(Map::read_cfg(buf, &(RangeCfg::new(0..=max), (), ()))?))
     }
 
