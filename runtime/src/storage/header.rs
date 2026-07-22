@@ -36,7 +36,7 @@ stability_scope!(BETA {
     impl HeaderError {
         /// Returns true if this parse failure could be the signature of a creation interrupted
         /// before the header became durable, making the blob a candidate for
-        /// [Header::interrupted_v1_creation] classification.
+        /// [Layout::interrupted_creation] classification.
         ///
         /// [HeaderError::VersionMismatch] is excluded: for V1 it fires only once the CRC has
         /// validated and the full header region is present, so the header was completely
@@ -138,6 +138,115 @@ stability_scope!(BETA {
                 _ => None,
             }
         }
+
+        /// The offset where blob data begins under this layout. Not stored on disk (the
+        /// layout's magic implies it).
+        pub(crate) const fn data_offset(self) -> u64 {
+            match self {
+                Self::V0 => Header::PRELUDE_SIZE_U64,
+                Self::V1 => Header::V1_DATA_OFFSET,
+            }
+        }
+
+        /// Validates the header region past the prelude for this layout, which must be
+        /// fully present: a [Layout::V0] region is the prelude alone, while a [Layout::V1]
+        /// region extends to a CRC over the prelude and zero reserved padding out to the
+        /// data offset.
+        fn validate_region(self, raw: &[u8], raw_len: u64) -> Result<(), HeaderError> {
+            match self {
+                Self::V0 => Ok(()),
+                Self::V1 => {
+                    if raw.len() < Header::PARSE_LEN {
+                        return Err(HeaderError::TruncatedHeader {
+                            required_len: Header::PARSE_LEN as u64,
+                            raw_len,
+                        });
+                    }
+                    let crc = u32::from_be_bytes(
+                        raw[Header::PRELUDE_SIZE..Header::PARSE_LEN].try_into().unwrap(),
+                    );
+                    if Crc32::checksum(&raw[..Header::PRELUDE_SIZE]) != crc {
+                        return Err(HeaderError::InvalidHeaderChecksum);
+                    }
+                    if raw_len < Header::V1_DATA_OFFSET {
+                        return Err(HeaderError::TruncatedHeader {
+                            required_len: Header::V1_DATA_OFFSET,
+                            raw_len,
+                        });
+                    }
+                    if raw[Header::PARSE_LEN..Header::V1_DATA_OFFSET_USIZE]
+                        .iter()
+                        .any(|&byte| byte != 0)
+                    {
+                        return Err(HeaderError::InvalidHeaderPadding);
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        /// Returns true if a blob's raw contents are consistent with the creation of a
+        /// blob with this layout that was interrupted before its header became durable.
+        ///
+        /// This runtime never creates [Layout::V0] blobs, so no contents qualify for V0 (a
+        /// pre-V1 writer's torn creation is a sub-prelude file, healed as new before any
+        /// parsing).
+        ///
+        /// [Layout::V1] creation writes the region with set_len(0) -> write -> sync, and
+        /// this classifier models the states it recovers as a prefix of the canonical
+        /// region, possibly followed by zeros (a persisted length without persisted bytes
+        /// reads as zeros). A file is accepted iff it fits within the region and equals a
+        /// canonical prefix followed by zeros: the magic and runtime version are fixed;
+        /// the blob version bytes continue the prefix with whatever value the writer
+        /// chose; the CRC bytes must be a prefix of the CRC over the preceding prelude,
+        /// which can only have begun persisting once the full prelude did; and everything
+        /// past the prefix must be zero.
+        ///
+        /// The prefix shape is a model, not a filesystem guarantee: device writeback before
+        /// the sync completes may persist bytes out of order. A file that is not a canonical
+        /// prefix (a lost byte followed by persisted ones, or a CRC that does not match its
+        /// own prelude) stays loudly corrupt rather than healing, trading recovery
+        /// coverage for avoiding broader acceptance that might erase nonzero data.
+        pub(crate) fn interrupted_creation(self, raw: &[u8]) -> bool {
+            match self {
+                Self::V0 => false,
+                Self::V1 => {
+                    // The file cannot extend past the region creation writes, and
+                    // everything past the parseable header must be zero padding.
+                    if raw.len() > Header::V1_DATA_OFFSET_USIZE {
+                        return false;
+                    }
+                    let head = &raw[..raw.len().min(Header::PARSE_LEN)];
+                    if raw[head.len()..].iter().any(|&byte| byte != 0) {
+                        return false;
+                    }
+
+                    // The written prefix ends after the last nonzero byte (trailing zeros
+                    // are indistinguishable from unwritten bytes).
+                    let written = head.iter().rposition(|&byte| byte != 0).map_or(0, |i| i + 1);
+
+                    let mut canonical = [0u8; Header::PARSE_LEN];
+                    canonical[..4].copy_from_slice(&self.magic());
+                    canonical[4..6].copy_from_slice(&self.runtime_version().to_be_bytes());
+                    if written <= Header::PRELUDE_SIZE {
+                        // Torn at or before the CRC: the fixed bytes of the prefix must
+                        // match; the blob version bytes (6-7) are the writer's choice.
+                        head[..written.min(6)] == canonical[..written.min(6)]
+                    } else {
+                        // CRC bytes persisted, so the full prelude did too: it must be
+                        // canonical (with the writer's version), and the CRC bytes must be
+                        // a prefix of the CRC over it.
+                        if head[..6] != canonical[..6] {
+                            return false;
+                        }
+                        canonical[6..8].copy_from_slice(&head[6..8]);
+                        let crc = Crc32::checksum(&canonical[..Header::PRELUDE_SIZE]);
+                        canonical[8..12].copy_from_slice(&crc.to_be_bytes());
+                        head[8..written] == canonical[8..written]
+                    }
+                }
+            }
+        }
     }
 
     /// Fixed-size header prelude at the start of each [crate::Blob].
@@ -210,60 +319,6 @@ stability_scope!(BETA {
             }
         }
 
-        /// Returns true if a blob's raw contents are consistent with the creation of a
-        /// [Layout::V1] blob that was interrupted before its header became durable.
-        ///
-        /// Creation writes the region with set_len(0) -> write -> sync, and this classifier
-        /// models the states it recovers as a prefix of the canonical region, possibly
-        /// followed by zeros (a persisted length without persisted bytes reads as zeros). A
-        /// file is accepted iff it fits within the region and equals a canonical prefix
-        /// followed by zeros: the magic and runtime version are fixed; the blob version
-        /// bytes continue the prefix with whatever value the writer chose; the CRC bytes
-        /// must be a prefix of the CRC over the preceding prelude, which can only have begun
-        /// persisting once the full prelude did; and everything past the prefix must be
-        /// zero.
-        ///
-        /// The prefix shape is a model, not a filesystem guarantee: device writeback before
-        /// the sync completes may persist bytes out of order. A file that is not a canonical
-        /// prefix (a lost byte followed by persisted ones, or a CRC that does not match its
-        /// own prelude) stays loudly corrupt rather than healing, trading recovery
-        /// coverage for avoiding broader acceptance that might erase nonzero data.
-        pub(crate) fn interrupted_v1_creation(raw: &[u8]) -> bool {
-            // The file cannot extend past the region creation writes, and everything past
-            // the parseable header must be zero padding.
-            if raw.len() > Self::V1_DATA_OFFSET_USIZE {
-                return false;
-            }
-            let head = &raw[..raw.len().min(Self::PARSE_LEN)];
-            if raw[head.len()..].iter().any(|&byte| byte != 0) {
-                return false;
-            }
-
-            // The written prefix ends after the last nonzero byte (trailing zeros are
-            // indistinguishable from unwritten bytes).
-            let written = head.iter().rposition(|&byte| byte != 0).map_or(0, |i| i + 1);
-
-            let mut canonical = [0u8; Self::PARSE_LEN];
-            canonical[..4].copy_from_slice(&Layout::V1.magic());
-            canonical[4..6]
-                .copy_from_slice(&Layout::V1.runtime_version().to_be_bytes());
-            if written <= Self::PRELUDE_SIZE {
-                // Torn at or before the CRC: the fixed bytes of the prefix must match; the
-                // blob version bytes (6-7) are the writer's choice.
-                head[..written.min(6)] == canonical[..written.min(6)]
-            } else {
-                // CRC bytes persisted, so the full prelude did too: it must be canonical
-                // (with the writer's version), and the CRC bytes must be a prefix of the
-                // CRC over it.
-                if head[..6] != canonical[..6] {
-                    return false;
-                }
-                canonical[6..8].copy_from_slice(&head[6..8]);
-                let crc = Crc32::checksum(&canonical[..Self::PRELUDE_SIZE]);
-                canonical[8..12].copy_from_slice(&crc.to_be_bytes());
-                head[8..written] == canonical[8..written]
-            }
-        }
 
         /// Creates the header region for a new blob using the latest version from the range and
         /// the latest header layout. Returns (encoded header region, blob version); the data
@@ -302,55 +357,21 @@ stability_scope!(BETA {
             let header: Self = Self::decode(&raw[..Self::PRELUDE_SIZE])
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
-            let data_offset = match layout {
-                Layout::V0 => {
-                    if !versions.contains(&header.blob_version) {
-                        return Err(HeaderError::VersionMismatch {
-                            expected: versions.clone(),
-                            found: header.blob_version,
-                        });
-                    }
-                    Self::PRELUDE_SIZE_U64
-                }
-                Layout::V1 => {
-                    // The blob version is checked last, once the CRC and region are intact, so
-                    // every earlier error still describes a header that may merely be
-                    // incompletely written.
-                    if raw.len() < Self::PARSE_LEN {
-                        return Err(HeaderError::TruncatedHeader {
-                            required_len: Self::PARSE_LEN as u64,
-                            raw_len,
-                        });
-                    }
-                    let crc = u32::from_be_bytes(
-                        raw[Self::PRELUDE_SIZE..Self::PARSE_LEN].try_into().unwrap(),
-                    );
-                    if Crc32::checksum(&raw[..Self::PRELUDE_SIZE]) != crc {
-                        return Err(HeaderError::InvalidHeaderChecksum);
-                    }
-                    if raw_len < Self::V1_DATA_OFFSET {
-                        return Err(HeaderError::TruncatedHeader {
-                            required_len: Self::V1_DATA_OFFSET,
-                            raw_len,
-                        });
-                    }
-                    if raw[Self::PARSE_LEN..Self::V1_DATA_OFFSET_USIZE]
-                        .iter()
-                        .any(|&byte| byte != 0)
-                    {
-                        return Err(HeaderError::InvalidHeaderPadding);
-                    }
-                    if !versions.contains(&header.blob_version) {
-                        return Err(HeaderError::VersionMismatch {
-                            expected: versions.clone(),
-                            found: header.blob_version,
-                        });
-                    }
-                    Self::V1_DATA_OFFSET
-                }
-            };
+            layout.validate_region(raw, raw_len)?;
+
+            // The blob version is checked only once the region is intact, so every earlier
+            // error still describes a header that may merely be incompletely written.
+            if !versions.contains(&header.blob_version) {
+                return Err(HeaderError::VersionMismatch {
+                    expected: versions.clone(),
+                    found: header.blob_version,
+                });
+            }
+
+            let data_offset = layout.data_offset();
             Ok((raw_len - data_offset, header.blob_version, data_offset))
         }
+
 
         /// Validates the magic bytes and runtime version, returning the layout the magic
         /// identifies.
@@ -440,7 +461,7 @@ stability_scope!(BETA {
         // creation prefix. Files longer than the creation region hold data and never heal.
         if raw_len <= Header::V1_DATA_OFFSET
             && err.may_be_torn_creation()
-            && Header::interrupted_v1_creation(raw)
+            && Layout::V1.interrupted_creation(raw)
         {
             warn!(
                 partition,
@@ -784,10 +805,20 @@ pub(crate) mod tests {
         ];
         for (label, raw) in cases {
             assert!(
-                Header::interrupted_v1_creation(raw),
+                Layout::V1.interrupted_creation(raw),
                 "{label} should classify as an interrupted creation"
             );
         }
+    }
+
+    /// This runtime never creates V0 blobs, so no contents qualify as an interrupted V0
+    /// creation, including ones that heal under V1.
+    #[test]
+    fn test_layout_v0_interrupted_creation_rejects_all() {
+        let (region, _) = Header::create(&(0..=0));
+        assert!(Layout::V1.interrupted_creation(&region[..10]));
+        assert!(!Layout::V0.interrupted_creation(&region[..10]));
+        assert!(!Layout::V0.interrupted_creation(&[]));
     }
 
     #[test]
@@ -863,7 +894,7 @@ pub(crate) mod tests {
         ];
         for (label, raw) in cases {
             assert!(
-                !Header::interrupted_v1_creation(raw),
+                !Layout::V1.interrupted_creation(raw),
                 "{label} must stay a loud corruption error"
             );
         }

@@ -414,7 +414,7 @@ mod tests {
         let storage = Storage::new(test_pool());
 
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
-        // region (the full state enumeration lives in the Header::interrupted_v1_creation
+        // region (the full state enumeration lives in the Layout::interrupted_creation
         // unit tables)
         let (region, _) = Header::create(&(0..=0));
         let states = [region[..10].to_vec()];

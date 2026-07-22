@@ -493,7 +493,7 @@ mod tests {
         let region = std::fs::read(&path).unwrap();
 
         // Simulate torn creations (the full state enumeration lives in the
-        // Header::interrupted_v1_creation unit tables): a file truncated mid-CRC and the same
+        // Layout::interrupted_creation unit tables): a file truncated mid-CRC and the same
         // prefix at a persisted full length.
         let mut torn_content = vec![0u8; region.len()];
         torn_content[..10].copy_from_slice(&region[..10]);

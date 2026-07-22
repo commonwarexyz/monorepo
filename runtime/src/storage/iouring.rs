@@ -1239,7 +1239,7 @@ mod tests {
         let region = std::fs::read(&path).unwrap();
 
         // Simulate a torn creation: a prefix of the canonical header region (the full
-        // state enumeration lives in the Header::interrupted_v1_creation unit tables).
+        // state enumeration lives in the Layout::interrupted_creation unit tables).
         let states = [region[..10].to_vec()];
         for state in states {
             std::fs::write(&path, &state).unwrap();
