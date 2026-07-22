@@ -67,9 +67,7 @@ impl Storage {
         }
     }
 
-    /// Parses an existing blob's header, returning `None` if the blob is new or its contents
-    /// are those of a creation that was interrupted before its header became durable (the
-    /// caller recreates the blob), and an error if the header is corrupt or unacceptable.
+    /// Reads a blob's leading bytes and resolves its header (see [super::resolve_header]).
     async fn resolve_header(
         file: &mut fs::File,
         len: u64,
@@ -77,24 +75,11 @@ impl Storage {
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, u16, u64)>, Error> {
-        if Header::missing(len) {
-            return Ok(None);
-        }
-        let mut raw = vec![0u8; len.min(Header::V1_DATA_OFFSET) as usize];
+        let mut raw = vec![0u8; Header::resolve_len(len)];
         file.read_exact(&mut raw)
             .await
             .map_err(|_| Error::ReadFailed)?;
-        let err = match Header::parse(&raw, len, versions) {
-            Ok(resolved) => return Ok(Some(resolved)),
-            Err(err) => err,
-        };
-
-        // The header failed to parse: files longer than the creation region hold data and are
-        // never torn creations. Shorter files are already fully represented in `raw`.
-        if !err.may_be_torn_creation() || len > Header::V1_DATA_OFFSET {
-            return Err(err.into_error(partition, name));
-        }
-        super::resolve_unparseable(err, &raw, partition, name)
+        super::resolve_header(&raw, len, versions, partition, name)
     }
 }
 
@@ -112,8 +97,9 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, u16), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        // Acquire the filesystem lock. The guard is owned so the creation path can move it
+        // into a task that outlives a dropped open future.
+        let guard = self.lock.clone().lock_owned().await;
 
         // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
@@ -121,10 +107,6 @@ impl crate::Storage for Storage {
             Some(parent) => parent,
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
-
-        // Check if partition exists before creating
-        #[cfg(unix)]
-        let parent_existed = parent.exists();
 
         // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
@@ -149,61 +131,67 @@ impl crate::Storage for Storage {
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
         let existing = Self::resolve_header(&mut file, len, &versions, partition, name).await?;
-        let (logical_size, blob_version, data_offset) = match existing {
-            Some(resolved) => resolved,
+        let (file, guard, (logical_size, blob_version, data_offset)) = match existing {
+            Some(resolved) => (file, guard, resolved),
             None => {
-                // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&versions);
-                let data_offset = region.len() as u64;
-                file.set_len(0)
-                    .await
-                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-                file.rewind().await.map_err(|_| Error::WriteFailed)?;
-                file.write_all(&region)
-                    .await
-                    .map_err(|_| Error::WriteFailed)?;
-                file.sync_all()
-                    .await
-                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-                // Sync the directories to ensure the directory entry is durable. This must
-                // also run when recreating a torn blob: the creation it is recovering from
-                // may have crashed before its own directory syncs completed. (Windows has
-                // no notion of syncing a directory entry; see
-                // https://github.com/commonwarexyz/monorepo/issues/2026.)
-                #[cfg(unix)]
-                {
-                    sync_dir(parent).await?;
-                    if !parent_existed {
-                        sync_dir(&self.cfg.storage_directory).await?;
+                // Run creation to completion on a task that owns the filesystem lock:
+                // dropping the open future must not abandon the sequence half-done (a
+                // straggling truncate could clobber a successor's blob) or leave a later
+                // open trusting a header whose syncs never ran. The task hands the lock
+                // back so the open holds it until the blob is returned, like the reopen
+                // path.
+                let parent = parent.to_path_buf();
+                let storage_directory = self.cfg.storage_directory.clone();
+                let err_partition = partition.to_string();
+                let err_name = hex(name);
+                let creation = tokio::task::spawn(async move {
+                    // Sync the directories before writing the header so a parseable
+                    // header always implies durable directory entries (an open that
+                    // parses a header never re-runs these). The storage directory is
+                    // synced unconditionally: the partition directory existing in the
+                    // namespace does not imply its entry is durable. (Windows has no
+                    // notion of syncing a directory entry; see
+                    // https://github.com/commonwarexyz/monorepo/issues/2026.)
+                    #[cfg(unix)]
+                    {
+                        sync_dir(&parent).await?;
+                        sync_dir(&storage_directory).await?;
                     }
-                }
+                    #[cfg(not(unix))]
+                    let _ = (parent, storage_directory);
 
-                (0, blob_version, data_offset)
+                    // Truncate to zero before writing, per the [Header::create] contract.
+                    let (region, blob_version) = Header::create(&versions);
+                    let data_offset = region.len() as u64;
+                    file.set_len(0).await.map_err(|e| {
+                        Error::BlobResizeFailed(err_partition.clone(), err_name.clone(), e.into())
+                    })?;
+                    file.rewind().await.map_err(|_| Error::WriteFailed)?;
+                    file.write_all(&region)
+                        .await
+                        .map_err(|_| Error::WriteFailed)?;
+                    file.sync_all()
+                        .await
+                        .map_err(|e| Error::BlobSyncFailed(err_partition, err_name, e.into()))?;
+
+                    Ok::<_, Error>((file, guard, (0, blob_version, data_offset)))
+                });
+                match creation.await {
+                    Ok(result) => result?,
+                    Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                    Err(_) => return Err(Error::Closed),
+                }
             }
         };
 
+        // Convert to a blocking std::fs::File
         #[cfg(unix)]
-        {
-            // Convert to a blocking std::fs::File
-            let file = file.into_std().await;
+        let file = file.into_std().await;
 
-            // Construct the blob
-            Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
-                logical_size,
-                blob_version,
-            ))
-        }
-        #[cfg(not(unix))]
-        {
-            // Construct the blob
-            Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
-                logical_size,
-                blob_version,
-            ))
-        }
+        // Construct the blob while still holding the filesystem lock.
+        let blob = Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset);
+        drop(guard);
+        Ok((blob, logical_size, blob_version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -276,7 +264,8 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BlobHeaderLayout, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
+        Blob, BufferPoolConfig, Storage as _,
+        storage::{BlobHeaderLayout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
@@ -539,6 +528,82 @@ mod tests {
         assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Dropping an open future at any await point must leave the blob openable: creation
+    /// runs to completion on a task that owns the filesystem lock, so a retry serializes
+    /// behind it and never observes (or clobbers) a half-created blob.
+    #[tokio::test]
+    async fn test_open_dropped_mid_creation() {
+        use futures::FutureExt;
+        use std::{
+            future::Future,
+            pin::Pin,
+            task::{Context, Poll},
+        };
+
+        /// Polls the wrapped future normally, but drops it after a fixed number of polls.
+        struct DropAfter<F: Future + Unpin> {
+            inner: Option<F>,
+            remaining: usize,
+        }
+
+        impl<F: Future + Unpin> Future for DropAfter<F> {
+            type Output = Option<F::Output>;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.remaining == 0 {
+                    self.inner = None;
+                    return Poll::Ready(None);
+                }
+                self.remaining -= 1;
+                match self.inner.as_mut().unwrap().poll_unpin(cx) {
+                    Poll::Ready(output) => Poll::Ready(Some(output)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+
+        let storage_directory =
+            env::temp_dir().join(format!("test_dropped_open_{}", random_suffix()));
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+
+        for depth in 0..64 {
+            let name = format!("blob{depth}");
+            let name = name.as_bytes();
+            let dropped = DropAfter {
+                inner: Some(Box::pin(storage.open("partition", name))),
+                remaining: depth,
+            }
+            .await;
+            let completed = dropped.is_some();
+            drop(dropped);
+
+            // Retry, write data, and confirm it survives reopen.
+            let (blob, size) = storage.open("partition", name).await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+            let (blob, size) = storage.open("partition", name).await.unwrap();
+            assert_eq!(size, 4);
+            let read = blob.read_at(0, 4).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            drop(blob);
+
+            // Once the first open completes within the poll budget, deeper drops add nothing.
+            if completed {
+                let _ = std::fs::remove_dir_all(&storage_directory);
+                return;
+            }
+        }
+        panic!("open never completed within the poll budget");
     }
 
     #[tokio::test]

@@ -178,7 +178,8 @@ impl CacheRef {
                 page_size = page_size.get(),
                 physical_page_size,
                 "page size produces physical pages that do not align with storage pages; pick a \
-                 page size via paged::page_size to avoid amplifying cold random reads"
+                 page size via paged::page_size to avoid amplifying cold random reads (changing \
+                 an existing store's page size is a destructive format migration)"
             );
         }
 

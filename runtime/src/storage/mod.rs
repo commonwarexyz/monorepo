@@ -1,7 +1,5 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-#[commonware_macros::stability(BETA)]
-use crate::BlobHeaderLayout;
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
@@ -193,9 +191,59 @@ stability_scope!(BETA {
         }
     }
 
+    /// Version of a [crate::Blob]'s on-disk header layout.
+    ///
+    /// This versions the runtime's on-disk container (where data begins), not the blob's
+    /// contents: the application-owned blob version passed to
+    /// [crate::Storage::open_versioned] is a separate field and is unaffected by the layout.
+    ///
+    /// New blobs are always created with the latest layout. Reopening an existing blob honors
+    /// the layout recorded in its header.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum BlobHeaderLayout {
+        /// An 8-byte header, with data beginning immediately after it.
+        V0,
+        /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
+        V1,
+    }
+
+    impl BlobHeaderLayout {
+        /// The runtime version recorded in a header of this layout.
+        pub(crate) const fn runtime_version(self) -> u16 {
+            match self {
+                Self::V0 => 0,
+                Self::V1 => 1,
+            }
+        }
+
+        /// The magic bytes recorded in a header of this layout: a fixed 3-byte brand (`CWI`,
+        /// "is this file ours?") followed by a 1-byte layout tag ("which container layout?").
+        ///
+        /// The layout tag lives in the magic rather than the runtime version field because V0
+        /// stamped that field as zero, and zeros are exactly what a torn header write leaves
+        /// behind. Tags are nonzero and distinct, so no layout's magic can be turned into
+        /// another's by zeroing bytes, and a torn write can never be misread as a complete
+        /// header of a different layout.
+        pub(crate) const fn magic(self) -> [u8; 4] {
+            match self {
+                Self::V0 => *b"CWIC",
+                Self::V1 => *b"CWIK",
+            }
+        }
+
+        /// The layout recorded by a header with the given magic bytes, if supported.
+        pub(crate) const fn from_magic(magic: &[u8; 4]) -> Option<Self> {
+            match magic {
+                b"CWIC" => Some(Self::V0),
+                b"CWIK" => Some(Self::V1),
+                _ => None,
+            }
+        }
+    }
+
     /// Fixed-size header prelude at the start of each [crate::Blob].
     ///
-    /// On-disk layout (big-endian). The prelude is 8 bytes; a V1 header extends it:
+    /// On-disk layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
     ///
     /// | bytes    | field                        | owner       | question it answers                              |
     /// |----------|------------------------------|-------------|--------------------------------------------------|
@@ -235,7 +283,7 @@ stability_scope!(BETA {
         pub(crate) const PARSE_LEN: usize = Self::PRELUDE_SIZE + Self::EXTENSION_SIZE;
 
         /// The data offset of every [BlobHeaderLayout::V1] blob: the header region occupies
-        /// exactly one 4096-byte page. Not stored on disk; the layout's magic implies it.
+        /// exactly one 4096-byte page. Not stored on disk (the layout's magic implies it).
         ///
         /// Frozen for the lifetime of the V1 layout: torn-creation recovery relies on every
         /// V1 creation producing this exact region, so a different offset requires a new
@@ -251,6 +299,16 @@ stability_scope!(BETA {
         /// Returns true if a blob is missing a valid header (new or corrupted).
         pub(crate) const fn missing(raw_len: u64) -> bool {
             raw_len < Self::PRELUDE_SIZE_U64
+        }
+
+        /// Number of leading bytes [resolve_header] needs for a blob of raw on-disk length
+        /// `raw_len`: the full header region, capped by the file itself.
+        pub(crate) const fn resolve_len(raw_len: u64) -> usize {
+            if raw_len < Self::V1_DATA_OFFSET {
+                raw_len as usize
+            } else {
+                Self::V1_DATA_OFFSET_USIZE
+            }
         }
 
         /// Returns true if a blob's raw contents are consistent with the creation of a
@@ -342,11 +400,6 @@ stability_scope!(BETA {
             raw_len: u64,
             versions: &RangeInclusive<u16>,
         ) -> Result<(u64, u16, u64), HeaderError> {
-            debug_assert!(
-                raw.len() >= raw_len.min(Self::V1_DATA_OFFSET) as usize,
-                "caller must provide enough bytes to validate the header region"
-            );
-
             let header: Self = Self::decode(&raw[..Self::PRELUDE_SIZE])
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
@@ -403,7 +456,7 @@ stability_scope!(BETA {
         /// Validates the magic bytes and runtime version, returning the layout the magic
         /// identifies.
         ///
-        /// The magic alone selects the layout; the runtime version must agree with it. Requiring
+        /// The magic alone selects the layout, and the runtime version must agree with it. Requiring
         /// agreement (rather than deriving the layout from the runtime version) means a header
         /// with any layout-identifying bytes zeroed by a torn write fails validation instead
         /// of parsing as a different layout.
@@ -452,25 +505,53 @@ stability_scope!(BETA {
         }
     }
 
-    /// Resolves a header that failed to parse: `Ok(None)` if the blob's raw contents are those
-    /// of a creation that was interrupted before its header became durable (the caller
-    /// recreates the blob), and the original parse error otherwise.
-    pub(crate) fn resolve_unparseable(
-        err: HeaderError,
+    /// Resolves a blob's header from its leading bytes.
+    ///
+    /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
+    /// `None` when the caller should (re)create the blob: the file is too short to hold a
+    /// header, or its contents are those of a [BlobHeaderLayout::V1] creation interrupted
+    /// before its header became durable. Anything else fails as corrupt or unacceptable.
+    ///
+    /// `raw` must hold the blob's first `min(raw_len, V1_DATA_OFFSET)` bytes, where
+    /// `raw_len` is the blob's raw on-disk length.
+    pub(crate) fn resolve_header(
         raw: &[u8],
+        raw_len: u64,
+        versions: &RangeInclusive<u16>,
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
-        if err.may_be_torn_creation() && Header::interrupted_creation(raw) {
+        assert!(
+            raw.len() >= Header::resolve_len(raw_len),
+            "caller must provide enough bytes to resolve the header region"
+        );
+
+        // Too short to hold any header: treat as new.
+        if Header::missing(raw_len) {
+            return Ok(None);
+        }
+
+        let err = match Header::parse(raw, raw_len, versions) {
+            Ok(resolved) => return Ok(Some(resolved)),
+            Err(err) => err,
+        };
+
+        // Heal a V1 creation interrupted before its header became durable: the failure
+        // must be one a torn write can produce, and the contents must match the canonical
+        // creation prefix. Files longer than the creation region hold data and never heal.
+        if raw_len <= Header::V1_DATA_OFFSET
+            && err.may_be_torn_creation()
+            && Header::interrupted_creation(raw)
+        {
             warn!(
                 partition,
                 name = %hex(name),
                 "recreating blob left torn by an interrupted creation"
             );
-            Ok(None)
-        } else {
-            Err(err.into_error(partition, name))
+            return Ok(None);
         }
+
+        Err(err.into_error(partition, name))
     }
 
     /// Validate that a partition name contains only allowed characters.
@@ -503,8 +584,8 @@ impl arbitrary::Arbitrary<'_> for Header {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Header, HeaderError};
-    use crate::{Blob, BlobHeaderLayout, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
+    use super::{BlobHeaderLayout, Header, HeaderError};
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
     use futures::FutureExt;
 
@@ -568,7 +649,7 @@ pub(crate) mod tests {
     fn test_header_v1_fixture_bytes() {
         let (region, _) = Header::create(&(3..=3));
         let expected = [
-            b'C', b'W', b'I', b'1', // V1 magic
+            b'C', b'W', b'I', b'K', // V1 magic
             0x00, 0x01, // runtime version 1
             0x00, 0x03, // blob version 3
         ];
@@ -691,7 +772,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// Classification only triggers for parse failures a torn write can produce; a version
+    /// Classification only triggers for parse failures a torn write can produce. A version
     /// mismatch requires a validated CRC over a complete header region and stays loud.
     #[test]
     fn test_header_error_torn_creation_candidates() {

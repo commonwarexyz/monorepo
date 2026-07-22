@@ -37,9 +37,7 @@ use std::{
     sync::Arc,
 };
 
-/// Parses an existing blob's header, returning `None` if the blob is new or its contents are
-/// those of a creation that was interrupted before its header became durable (the caller
-/// recreates the blob), and an error if the header is corrupt or unacceptable.
+/// Reads a blob's leading bytes and resolves its header (see [super::resolve_header]).
 fn resolve_header(
     file: &mut File,
     raw_len: u64,
@@ -47,24 +45,11 @@ fn resolve_header(
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, Error> {
-    if Header::missing(raw_len) {
-        return Ok(None);
-    }
-    let mut raw = vec![0u8; raw_len.min(Header::V1_DATA_OFFSET) as usize];
+    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    let err = match Header::parse(&raw, raw_len, versions) {
-        Ok(resolved) => return Ok(Some(resolved)),
-        Err(err) => err,
-    };
-
-    // The header failed to parse: files longer than the creation region hold data and are
-    // never torn creations. Shorter files are already fully represented in `raw`.
-    if !err.may_be_torn_creation() || raw_len > Header::V1_DATA_OFFSET {
-        return Err(err.into_error(partition, name));
-    }
-    super::resolve_unparseable(err, &raw, partition, name)
+    super::resolve_header(&raw, raw_len, versions, partition, name)
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -154,9 +139,6 @@ impl crate::Storage for Storage {
             .parent()
             .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
-        // Check if partition exists before creating
-        let parent_existed = parent.exists();
-
         // Create the partition directory if it does not exist
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
@@ -177,6 +159,14 @@ impl crate::Storage for Storage {
         let (logical_len, blob_version, data_offset) = match existing {
             Some(resolved) => resolved,
             None => {
+                // Sync the directories before writing the header so a parseable header
+                // always implies durable directory entries (an open that parses a header
+                // never re-runs these). The storage directory is synced unconditionally:
+                // the partition directory existing in the namespace does not imply its
+                // entry is durable.
+                sync_dir(parent)?;
+                sync_dir(&self.storage_directory)?;
+
                 // Truncate to zero before writing, per the [Header::create] contract.
                 let (region, blob_version) = Header::create(&versions);
                 let data_offset = region.len() as u64;
@@ -187,14 +177,6 @@ impl crate::Storage for Storage {
                 file.write_all(&region).map_err(|_| Error::WriteFailed)?;
                 file.sync_all()
                     .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-                // Sync the directories to ensure the directory entry is durable. This must also
-                // run when recreating a torn blob: the creation it is recovering from may have
-                // crashed before its own directory syncs completed.
-                sync_dir(parent)?;
-                if !parent_existed {
-                    sync_dir(&self.storage_directory)?;
-                }
 
                 (0, blob_version, data_offset)
             }
@@ -446,8 +428,10 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob as _, BlobHeaderLayout, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
-        storage::tests::run_storage_tests, telemetry::metrics::Registry, utils::thread,
+        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
+        storage::{BlobHeaderLayout, tests::run_storage_tests},
+        telemetry::metrics::Registry,
+        utils::thread,
     };
     use std::{
         env,
