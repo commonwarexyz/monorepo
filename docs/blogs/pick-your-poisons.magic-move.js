@@ -1,4 +1,4 @@
-const MOUNT_ID = 'pick-your-poison-magic-move';
+const MOUNT_ID = 'pick-your-poisons-magic-move';
 
 const LEFT_COLUMN_X = 19;
 const MIDDLE_COLUMN_X = 52;
@@ -80,7 +80,7 @@ const STEP_PHASE = {
 };
 
 // Nodes highlighted at each step, paired 1:1 with the paragraphs in
-// #pick-your-poison-story-source. Arrows draw when their target node first
+// #pick-your-poisons-story-source. Arrows draw when their target node first
 // reveals. A node may repeat (e.g. 'beat') so a later paragraph re-highlights it.
 const STORY_STEPS = [
   ['bte'],
@@ -115,7 +115,7 @@ const KEY_STOPS = [
 
 // Static copy of the completed Slide 1 DAG, extended with the two new
 // constructions (highlighted).
-const FINAL_MOUNT_ID = 'pick-your-poison-new-constructions';
+const FINAL_MOUNT_ID = 'pick-your-poisons-new-constructions';
 const FINAL_BOXES = [
   ...BOXES,
   { id: 'isbte', title: 'Indexed Simple BTE', papers: 'Pol26a', slide1: { x: 20.75, y: 81 }, slide2: null },
@@ -129,7 +129,7 @@ const FINAL_ARROWS = [
 ];
 const FINAL_HIGHLIGHTS = ['isbte', 'pol26b'];
 
-const STYLE_ID = 'pick-your-poison-magic-move-style';
+const STYLE_ID = 'pick-your-poisons-magic-move-style';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DESIGN_WIDTH = 1024;
 const DESIGN_HEIGHT = 576;
@@ -412,8 +412,8 @@ function renderMath(container) {
 // The source divs are hidden by the injected styles and shown again under
 // prefers-reduced-motion, so the prose stays readable without the animation.
 function readMarkdownSource() {
-  const storySource = document.getElementById('pick-your-poison-story-source');
-  const dreamSource = document.getElementById('pick-your-poison-dream-source');
+  const storySource = document.getElementById('pick-your-poisons-story-source');
+  const dreamSource = document.getElementById('pick-your-poisons-dream-source');
 
   return {
     storyBodies: storySource
@@ -677,12 +677,12 @@ function initMagicMove(mount) {
   const headline = document.createElement('h2');
   headline.className = 'cw-magic-headline';
   const headlineText1 = createSpan('BTE Schemes');
-  const headlineText2 = createSpan('Pick Your Poison');
+  const headlineText2 = createSpan('Pick Your Poisons');
   headline.append(headlineText1, headlineText2);
 
   if (markdownSource.storyBodies.length !== STORY_STEPS.length) {
     console.warn(
-      `pick-your-poison: ${STORY_STEPS.length} story steps but ` +
+      `pick-your-poisons: ${STORY_STEPS.length} story steps but ` +
       `${markdownSource.storyBodies.length} paragraphs in the story source`,
     );
   }

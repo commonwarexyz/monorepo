@@ -1,13 +1,13 @@
 ---
-title: "Pick Your Poison"
-description: "Every construction of batched threshold encryption comes with caveats of epoch restrictions, censorship issues, or a complicated setup. Pick your poison. Or two?"
+title: "Pick Your Poisons"
+description: "All efficient constructions of batched threshold encryption force a choice: epoch restrictions, censorship issues, or a complicated setup. With our new work, you can trade one poison at full strength for digestible doses of two."
 date: "July 22nd, 2026"
 published-time: "2026-07-22T00:00:00Z"
 modified-time: "2026-07-22T00:00:00Z"
 author: "Guru Vamsi Policharla"
 author_twitter: "https://x.com/guruvamsip"
-url: "https://commonware.xyz/blogs/pick-your-poison"
-image: "https://commonware.xyz/imgs/pick-your-poison.png"
+url: "https://commonware.xyz/blogs/pick-your-poisons"
+image: "https://commonware.xyz/imgs/pick-your-poisons.png"
 katex: true
 ---
 
@@ -18,15 +18,15 @@ We summarize them below and, as we will see, every construction makes an all-or-
 We then present two new constructions that interpolate the Pareto frontier, allowing system designers to pick a tradeoff point that best fits their operating constraints.
 
 ```{=html}
-<div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
+<div id="pick-your-poisons-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
   <noscript>
     This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
   </noscript>
 </div>
-<script type="module" src="pick-your-poison.magic-move.js"></script>
+<script type="module" src="pick-your-poisons.magic-move.js"></script>
 ```
 
-::: {#pick-your-poison-story-source .cw-magic-story-source}
+::: {#pick-your-poisons-story-source .cw-magic-story-source}
 The initial work of [CGPP24](https://eprint.iacr.org/2024/669) required a setup involving secure multiplications in MPC, and the size of secret keys held by each party grows with the batch size. They additionally required an interactive setup involving a constant number of secure multiplications for every batch that was decrypted.
 
 Follow-up work [CGPW25](https://eprint.iacr.org/2024/1516) and [AFP25](https://eprint.iacr.org/2024/1575) simplified the construction to a one-time DKG setup at the start of the protocol, but ciphertexts needed to be encrypted to a particular batch number, which we refer to as an "epoch restriction". Failing to be included in the chosen batch would result in the ciphertext never being decrypted. Decryption requires $O(B \log^2{B})$ group operations.
@@ -45,8 +45,8 @@ They also propose a variant where censorship resistance can be improved by incre
 In a different line of work, [BCFGOPQW25](https://eprint.iacr.org/2025/1419) (suffers from censorship issues) and [GWWW25](https://eprint.iacr.org/2025/2103) (suffers from epoch restrictions) avoid interactive setup entirely and show that it is possible to have a batched threshold encryption scheme with Silent Setup (just a PKI).
 :::
 
-::: {#pick-your-poison-dream-source .cw-magic-dream-source}
-Unfortunately, every single construction comes with caveats of epoch restrictions, censorship issues, or a complicated setup.
+::: {#pick-your-poisons-dream-source .cw-magic-dream-source}
+Unfortunately, every single construction forces a choice: epoch restrictions, censorship issues, or a complicated setup.
 
 [The dream goal]{#dream-goal} is:
 
@@ -97,8 +97,8 @@ But this might be overkill for the epoch restriction issue. Recall that in [CGPW
 Naively, one can encrypt to multiple blocks, but this increases the ciphertext size linearly with the number of blocks. In [Pol26b](https://eprint.iacr.org/2026/1452), we construct Labeled Multi-Key Batched IBE, a batched threshold encryption scheme where we can decrypt $q$ different batches per label (epoch). Each user still encrypts to an epoch but each epoch now contains $q$ blocks, making it much more reliable to guess the current epoch number. Although we still require a larger $O(qB)$ CRS, $q$ can be chosen to be much smaller than in [FPTX25](https://eprint.iacr.org/2025/2032) as we only need the window to be long enough to ensure transactions are included. We also avoid the forced DKG re-setup as the same CRS and public key can be used across different epochs.
 
 ```{=html}
-<div id="pick-your-poison-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
+<div id="pick-your-poisons-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
 ```
 
 As of this writing, no efficient construction achieves [the dream goal](#dream-goal), but
-Indexed Simple BTE and Labeled Multi-Key Batched IBE make these tradeoffs tunable, allowing deployments to choose a balance that best fits their needs.
+Indexed Simple BTE and Labeled Multi-Key Batched IBE let deployments trade one poison at full strength for digestible doses of two.
