@@ -192,6 +192,7 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MinPk;
     type Signer = ed25519::PrivateKey;
+    type Directory = ();
 
     fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
         self.payload.clone()
@@ -406,10 +407,13 @@ struct ScheduleProvider {
 
 impl ParticipantsProvider for ScheduleProvider {
     type PublicKey = ed25519::PublicKey;
+    type Directory = ();
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         self.schedule.players(epoch)
     }
+
+    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {}
 }
 
 #[derive(Clone)]
@@ -522,6 +526,7 @@ impl ReshareEngine {
             output,
             players,
             next_players: schedule.players(Epoch::new(1)),
+            directory: (),
         };
         Self {
             signers,
@@ -708,6 +713,7 @@ impl EngineDefinition for ReshareEngine {
             bootstrap: dkg_probe::Bootstrap {
                 epoch: Epoch::zero(),
                 participants: self.initial.info.participants(),
+                directory: (),
             },
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,

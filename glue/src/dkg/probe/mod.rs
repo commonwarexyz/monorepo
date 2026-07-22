@@ -17,10 +17,13 @@
 //! tracks identical contents if it later enters that epoch, so the registrations never
 //! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
 //! dealers: the epoch's active committee of share holders and certificate signers.
-//! Addressable deployments must seed the bootstrap epoch's address snapshot alongside this
-//! weak-subjectivity checkpoint. The actor resolves that snapshot only when its first subscriber
-//! appears. If resolution fails, the actor shuts down before sending a request and drops all
-//! pending subscribers.
+//! Addressable deployments seed the snapshot's transport
+//! [`Directory`] alongside this weak-subjectivity checkpoint
+//! through [`Bootstrap::directory`]. The actor activates the snapshot only when its first
+//! subscriber appears. If activation fails, the actor shuts down before sending a request and
+//! drops all pending subscribers. The discovered [`Artifact`] carries the target epoch's own
+//! directory in its [`EpochInfo`], so the joining node needs no out-of-band address source for
+//! the epoch it syncs into.
 //!
 //! # Trust Model
 //!
@@ -138,6 +141,7 @@
 
 use crate::dkg::{
     ReshareBlock,
+    network::Directory,
     types::{EpochInfo, Participants},
 };
 use commonware_consensus::{
@@ -159,7 +163,7 @@ mod wire;
 
 /// The weakly subjective checkpoint a joining node bootstraps from.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bootstrap<P: PublicKey> {
+pub struct Bootstrap<P: PublicKey, D: Directory<P> = ()> {
     /// Epoch whose participant snapshot is [`Bootstrap::participants`].
     ///
     /// Latest-finalization replies below this epoch are ignored, so the
@@ -180,6 +184,13 @@ pub struct Bootstrap<P: PublicKey> {
     /// same ID. The orchestrator tracks the identical contents if it later
     /// enters the bootstrap epoch, so the duplicate registration is benign.
     pub participants: Participants<P>,
+    /// Transport directory for [`Bootstrap::participants`], seeded alongside
+    /// the checkpoint.
+    ///
+    /// Discovery runs before any application state exists, so the directory
+    /// is part of the weak-subjectivity configuration rather than resolved
+    /// from a registry.
+    pub directory: D,
 }
 
 /// Concrete probe artifact for a marshal variant.
@@ -187,22 +198,27 @@ pub(crate) type ActorArtifact<S, V> = Artifact<
     S,
     <V as MarshalVariant>::Commitment,
     <<V as MarshalVariant>::ApplicationBlock as ReshareBlock>::Variant,
+    <<V as MarshalVariant>::ApplicationBlock as ReshareBlock>::Directory,
 >;
 
 /// Public epoch material discovered during bootstrap.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Artifact<S, D, V>
+pub struct Artifact<S, D, V, Dir = ()>
 where
     S: Scheme<D>,
     D: Digest,
     V: BlsVariant,
+    Dir: Directory<S::PublicKey>,
 {
     /// Finalization of the boundary block that carried the epoch info.
     ///
     /// Epoch zero is anchored by genesis and has no boundary finalization.
     pub finalization: Option<Finalization<S, D>>,
     /// Public epoch information from the finalized boundary block.
-    pub info: EpochInfo<V, S::PublicKey>,
+    ///
+    /// Carries the epoch's transport directory, so a joining node can activate
+    /// the discovered epoch's peers without any application state.
+    pub info: EpochInfo<V, S::PublicKey, Dir>,
     /// Highest finalization from the `f + 1` peer sample.
     ///
     /// This is the state-sync floor: it is at least as recent as the freshest
@@ -369,6 +385,7 @@ mod tests {
                 bootstrap: Bootstrap {
                     epoch: bootstrap_epoch,
                     participants: genesis.participants(),
+                    directory: (),
                 },
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
@@ -393,6 +410,7 @@ mod tests {
                 bootstrap: Bootstrap {
                     epoch: bootstrap_epoch,
                     participants: genesis.participants(),
+                    directory: (),
                 },
                 verifier: fixture.schemes[1].clone(),
                 genesis,
@@ -694,6 +712,7 @@ mod tests {
                 output,
                 players: participants.clone(),
                 next_players: participants,
+                directory: (),
             }),
         );
         (block, sharing)
@@ -733,6 +752,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: (),
         }
     }
 
@@ -1471,6 +1491,7 @@ mod tests {
                 bootstrap: Bootstrap {
                     epoch: Epoch::zero(),
                     participants: genesis.participants(),
+                    directory: (),
                 },
                 verifier: fixture.schemes[0].clone(),
                 genesis,

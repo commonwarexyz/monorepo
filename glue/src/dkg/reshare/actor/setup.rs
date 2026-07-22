@@ -94,9 +94,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -107,9 +107,9 @@ where
 {
     pub(super) async fn setup(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         current_epoch: Option<Epoch>,
-        state_sync_info: Option<EpochInfo<V, C::PublicKey>>,
+        state_sync_info: Option<EpochInfo<V, C::PublicKey, B::Directory>>,
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
@@ -178,8 +178,8 @@ where
 
     pub(super) async fn recovered_share(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
-        info: &EpochInfo<V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        info: &EpochInfo<V, C::PublicKey, B::Directory>,
     ) -> Option<Share> {
         let share = store.share(info.epoch).await;
         if share.is_some() || info.outcome != EpochOutcome::Failure {
@@ -192,7 +192,10 @@ where
         store.share(previous).await
     }
 
-    async fn boundary_epoch_info(&mut self, epoch: Epoch) -> Option<EpochInfo<V, C::PublicKey>> {
+    async fn boundary_epoch_info(
+        &mut self,
+        epoch: Epoch,
+    ) -> Option<EpochInfo<V, C::PublicKey, B::Directory>> {
         let height = epoch
             .previous()
             .and_then(|e| self.epocher.last(e))
@@ -210,7 +213,7 @@ where
 
     pub(super) async fn register_epoch(
         &mut self,
-        info: &EpochInfo<V, C::PublicKey>,
+        info: &EpochInfo<V, C::PublicKey, B::Directory>,
         share: Option<Share>,
     ) {
         let scheme_info = share.map_or_else(
@@ -230,7 +233,7 @@ where
 
     pub(super) fn prepare_epoch(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         preparation: EpochPreparation<V, C::PublicKey>,
     ) -> PreparedEpoch<V, C> {
         let EpochPreparation {

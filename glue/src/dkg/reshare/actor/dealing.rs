@@ -36,9 +36,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -55,7 +55,7 @@ where
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
         mut player: Option<&mut Player<V, C>>,
         (mut sender, mut receiver): (SE, RE),
@@ -160,7 +160,7 @@ where
     async fn handle_message<SE>(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         dealer: Option<&mut Dealer<V, C>>,
         player: Option<&mut Player<V, C>>,
         sender: &mut SE,
@@ -238,7 +238,7 @@ where
 
     async fn send_dealings<SE>(
         public_key: &C::PublicKey,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: &mut Dealer<V, C>,
         mut player: Option<&mut Player<V, C>>,
@@ -339,10 +339,13 @@ mod tests {
 
     impl ParticipantsProvider for StaticParticipants {
         type PublicKey = mocks::TestPublicKey;
+        type Directory = ();
 
         async fn participants(&mut self, _epoch: Epoch) -> Set<Self::PublicKey> {
             self.0.clone()
         }
+
+        async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {}
     }
 
     #[derive(Debug)]

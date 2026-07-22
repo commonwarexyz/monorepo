@@ -31,9 +31,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -44,7 +44,7 @@ where
 {
     pub(super) async fn run_dkg<SE, RE>(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         dealing_mux: &mut MuxHandle<SE, RE>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
@@ -112,7 +112,7 @@ where
 
     async fn setup_dkg(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) -> Result<Option<PreparedEpoch<V, C>>, M::Error> {
         self.metrics.set_phase(Phase::Setup);
 
@@ -144,11 +144,12 @@ where
             .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
             .expect("DKG epoch must have enough dealer-log slots");
 
-        // Resolve and activate the complete epoch-zero snapshot before the
-        // channel is registered or any dealings can be sent.
+        // Activate the complete epoch-zero snapshot with its configured
+        // directory before the channel is registered or any dealings can be
+        // sent.
+        let directory = self.dkg_directory().expect("DKG setup requires DKG mode");
         self.manager
-            .track(Epoch::zero(), snapshot.tracked_peers())
-            .await?;
+            .track(Epoch::zero(), snapshot.tracked_peers(), &directory)?;
 
         let seed = store
             .seed_or_random(Epoch::zero(), self.context.as_present_mut())
@@ -223,7 +224,14 @@ where
         }
     }
 
-    fn dkg_completion(&mut self) -> Option<super::DkgCompletion<V, C::PublicKey>> {
+    pub(super) fn dkg_directory(&self) -> Option<B::Directory> {
+        match &self.mode {
+            Mode::Dkg { directory, .. } => Some(directory.clone()),
+            Mode::Reshare => None,
+        }
+    }
+
+    fn dkg_completion(&mut self) -> Option<super::DkgCompletion<V, C::PublicKey, B::Directory>> {
         match &mut self.mode {
             Mode::Dkg { completion, .. } => completion.take(),
             Mode::Reshare => unreachable!("DKG completion requires DKG mode"),
@@ -232,8 +240,8 @@ where
 
     fn complete_dkg(
         &mut self,
-        completion: Option<super::DkgCompletion<V, C::PublicKey>>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        completion: Option<super::DkgCompletion<V, C::PublicKey, B::Directory>>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
         let info = store.current().filter(|info| info.epoch == Epoch::zero());
         if let Some(completion) = completion {

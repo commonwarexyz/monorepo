@@ -1,6 +1,27 @@
 //! Transport-neutral peer management for DKG.
+//!
+//! DKG peer identities are key-only in every ceremony artifact and wire
+//! message. Transports that need more than a public key to dial a peer (like
+//! [`commonware_p2p::authenticated::lookup`]) require an epoch-scoped
+//! [`Directory`] carried in-band by [`EpochInfo`]: the final block of each
+//! epoch embeds the next epoch's directory, so the same certificate-backed
+//! artifact that names the committee also says how to reach it.
+//!
+//! Activation never consults application state. A node entering an epoch
+//! through state sync holds only a certified [`EpochInfo`] (from
+//! [`probe`](crate::dkg::probe) or the persisted
+//! [`state_sync::Plan`](crate::dkg::state_sync::Plan)) and no synced state to
+//! resolve addresses from, so [`Manager::track`] consumes only the peer set
+//! and the directory embedded in that artifact. State-backed hooks
+//! ([`ParticipantsProvider`](crate::dkg::ParticipantsProvider)) are consulted
+//! only while building or verifying an epoch's final block, when the node is
+//! fully synced.
+//!
+//! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
+use bytes::Buf;
 use commonware_actor::Feedback;
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
@@ -8,18 +29,119 @@ use commonware_p2p::{
     Manager as P2pManager, Provider, TrackedPeers,
 };
 use commonware_utils::ordered::{Map, Set};
-use std::{convert::Infallible, fmt, future::Future};
+use std::{convert::Infallible, fmt, fmt::Debug};
 use thiserror::Error;
+
+/// Epoch-scoped reachability data for DKG participants, carried in-band by
+/// [`EpochInfo`](crate::dkg::types::EpochInfo).
+///
+/// A directory is consensus data: the proposer of an epoch's final block embeds
+/// the next epoch's directory in the epoch artifact and every verifier rebuilds
+/// and compares it, so all honest nodes agree on one directory per epoch. It is
+/// also the only reachability source available during recovery: restart and
+/// state-sync entry activate peers from the artifact alone, before any
+/// application state exists.
+///
+/// A directory MUST cover every peer of its epoch (dealers, players, and next
+/// players). Extra entries are allowed and ignored.
+pub trait Directory<P: PublicKey>:
+    Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Write + EncodeSize
+{
+    /// Decodes a directory, bounding pre-allocation by `max_participants` per
+    /// participant role.
+    fn read(buf: &mut impl Buf, max_participants: u32) -> Result<Self, CodecError>;
+
+    /// Returns a peer from `peers` without reachability data, if any.
+    fn missing(&self, peers: &Set<P>) -> Option<P>;
+}
+
+/// Key-only directory for transports that dial by public key alone.
+impl<P: PublicKey> Directory<P> for () {
+    fn read(_: &mut impl Buf, _: u32) -> Result<Self, CodecError> {
+        Ok(())
+    }
+
+    fn missing(&self, _: &Set<P>) -> Option<P> {
+        None
+    }
+}
+
+/// Address directory for transports that dial by [`Address`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Addresses<P: PublicKey>(Map<P, Address>);
+
+impl<P: PublicKey> Addresses<P> {
+    /// Returns the address recorded for `peer`, if any.
+    pub fn get(&self, peer: &P) -> Option<&Address> {
+        self.0.get_value(peer)
+    }
+
+    /// Returns the inner address map.
+    pub fn into_inner(self) -> Map<P, Address> {
+        self.0
+    }
+}
+
+impl<P: PublicKey> From<Map<P, Address>> for Addresses<P> {
+    fn from(addresses: Map<P, Address>) -> Self {
+        Self(addresses)
+    }
+}
+
+impl<P: PublicKey> FromIterator<(P, Address)> for Addresses<P> {
+    fn from_iter<I: IntoIterator<Item = (P, Address)>>(iter: I) -> Self {
+        Self(Map::from_iter_dedup(iter))
+    }
+}
+
+impl<P: PublicKey> Write for Addresses<P> {
+    fn write(&self, writer: &mut impl bytes::BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<P: PublicKey> EncodeSize for Addresses<P> {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl<P: PublicKey> Directory<P> for Addresses<P> {
+    fn read(buf: &mut impl Buf, max_participants: u32) -> Result<Self, CodecError> {
+        // A directory covers up to three participant roles per epoch.
+        let max = (max_participants as usize).saturating_mul(3);
+        Ok(Self(Map::read_cfg(buf, &(RangeCfg::new(0..=max), (), ()))?))
+    }
+
+    fn missing(&self, peers: &Set<P>) -> Option<P> {
+        peers
+            .iter()
+            .find(|peer| self.0.get_value(peer).is_none())
+            .cloned()
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey> arbitrary::Arbitrary<'_> for Addresses<P>
+where
+    P: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary()?))
+    }
+}
 
 /// Interface for activating the peers used by a DKG epoch.
 pub trait Manager: Provider {
+    /// In-band reachability data consumed when activating an epoch.
+    type Directory: Directory<Self::PublicKey>;
+
     /// Error returned when a peer set cannot be activated.
     ///
-    /// DKG actors stop when this error is returned. Implementations MUST retry
-    /// transient failures before returning an error.
+    /// DKG actors stop when this error is returned.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Activates `peers` for `epoch`.
+    /// Activates `peers` for `epoch` using the epoch's `directory`.
     ///
     /// The returned [`Feedback`] is exposed for callers that need it. DKG
     /// actors preserve the key-only manager's fire-and-forget contract and do
@@ -28,88 +150,52 @@ pub trait Manager: Provider {
         &mut self,
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
-    ) -> impl Future<Output = Result<Feedback, Self::Error>> + Send;
+        directory: &Self::Directory,
+    ) -> Result<Feedback, Self::Error>;
 }
 
 impl<M: P2pManager> Manager for M {
+    type Directory = ();
     type Error = Infallible;
 
-    async fn track(
+    fn track(
         &mut self,
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
+        _directory: &Self::Directory,
     ) -> Result<Feedback, Self::Error> {
         Ok(P2pManager::track(self, epoch.get(), peers))
     }
 }
 
-/// Supplies stable, epoch-scoped addresses for DKG participants.
-///
-/// [`addresses`](Self::addresses) returns the address snapshot used while `epoch`
-/// is active. The requested keys are the epoch's dealers, players, and next
-/// players. Every requested key MUST be present. The provider may return
-/// unrelated entries, which are ignored.
-///
-/// For a given epoch and requested key, every honest node MUST return the same
-/// [`Address`]. Repeated calls MUST remain stable across restarts and duplicate
-/// probe or orchestrator registrations.
-///
-/// The snapshot for epoch `E` MUST be locked before honest nodes propose or
-/// verify the final block of `E - 1`, because that boundary announces the peer
-/// roles activated in `E`. A participant first announced as a next player in
-/// [`EpochInfo`] for `E` MUST already have an address in snapshot `E`, allowing it to
-/// connect during `E`, one epoch before it becomes a player.
-///
-/// An address update submitted during epoch `E` takes effect only in snapshot
-/// `E + 1`. Implementations MUST NOT expose the update through a later call for
-/// epoch `E`. Mid-epoch [`commonware_p2p::AddressableManager::overwrite`] is
-/// outside the DKG contract and MUST NOT mutate addresses for the active DKG
-/// peer set. The next [`Manager::track`] applies the changed snapshot at the
-/// epoch boundary, allowing lookup to replace stale connections.
-///
-/// [`EpochInfo`]: crate::dkg::types::EpochInfo
-pub trait AddressProvider: Clone + Send + 'static {
-    /// Public key type used to identify peers.
-    type PublicKey: PublicKey;
-
-    /// Error returned when an address snapshot cannot be loaded.
-    ///
-    /// DKG actors stop and do not retry address resolution when this error is
-    /// returned. Implementations MUST retry transient failures internally.
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    /// Returns the address snapshot for the requested peers in `epoch`.
-    fn addresses(
-        &mut self,
-        epoch: Epoch,
-        peers: Set<Self::PublicKey>,
-    ) -> impl Future<Output = Result<Map<Self::PublicKey, Address>, Self::Error>> + Send;
-}
-
 /// Adapts an addressable peer manager to DKG's key-only peer sets.
+///
+/// Activation resolves each tracked peer through the epoch's in-band
+/// [`Addresses`] directory, preserving primary and secondary roles. Because the
+/// directory arrives with the epoch artifact, restart and state-sync entry use
+/// the same epoch-scoped addresses as an uninterrupted node, with no
+/// out-of-band registry access.
 #[derive(Clone)]
-pub struct AddressableManager<M, A> {
+pub struct AddressableManager<M> {
     manager: M,
-    addresses: A,
 }
 
-impl<M, A> AddressableManager<M, A> {
+impl<M> AddressableManager<M> {
     /// Creates an addressable DKG peer manager.
-    pub const fn new(manager: M, addresses: A) -> Self {
-        Self { manager, addresses }
+    pub const fn new(manager: M) -> Self {
+        Self { manager }
     }
 }
 
-impl<M, A> fmt::Debug for AddressableManager<M, A> {
+impl<M> fmt::Debug for AddressableManager<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AddressableManager").finish_non_exhaustive()
     }
 }
 
-impl<M, A> Provider for AddressableManager<M, A>
+impl<M> Provider for AddressableManager<M>
 where
     M: P2pAddressableManager,
-    A: AddressProvider<PublicKey = M::PublicKey>,
 {
     type PublicKey = M::PublicKey;
 
@@ -122,56 +208,44 @@ where
     }
 }
 
-/// Error returned while activating an addressable DKG peer set.
-#[derive(Debug, Error)]
-pub enum AddressablePeerSetError<P: PublicKey, E: std::error::Error + 'static> {
-    /// The address provider failed to load the epoch snapshot.
-    #[error("address provider failed: {0}")]
-    Provider(#[source] E),
-    /// The epoch snapshot omitted a requested peer.
-    #[error("address provider omitted peer {0:?}")]
-    MissingAddress(P),
-}
+/// The epoch directory omitted a tracked peer.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("epoch directory omitted peer {0:?}")]
+pub struct MissingAddress<P: PublicKey>(pub P);
 
-impl<M, A> Manager for AddressableManager<M, A>
+impl<M> Manager for AddressableManager<M>
 where
     M: P2pAddressableManager,
-    A: AddressProvider<PublicKey = M::PublicKey>,
 {
-    type Error = AddressablePeerSetError<M::PublicKey, A::Error>;
+    type Directory = Addresses<M::PublicKey>;
+    type Error = MissingAddress<M::PublicKey>;
 
-    async fn track(
+    fn track(
         &mut self,
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
+        directory: &Self::Directory,
     ) -> Result<Feedback, Self::Error> {
-        let requested = peers.clone().union();
-        let addresses = self
-            .addresses
-            .addresses(epoch, requested)
-            .await
-            .map_err(AddressablePeerSetError::Provider)?;
-
-        let primary = resolve(&peers.primary, &addresses)?;
-        let secondary = resolve(&peers.secondary, &addresses)?;
+        let primary = resolve(&peers.primary, directory)?;
+        let secondary = resolve(&peers.secondary, directory)?;
         let peers = AddressableTrackedPeers::new(primary, secondary);
 
         Ok(self.manager.track(epoch.get(), peers))
     }
 }
 
-fn resolve<P: PublicKey, E: std::error::Error + 'static>(
+fn resolve<P: PublicKey>(
     peers: &Set<P>,
-    addresses: &Map<P, Address>,
-) -> Result<Map<P, Address>, AddressablePeerSetError<P, E>> {
+    directory: &Addresses<P>,
+) -> Result<Map<P, Address>, MissingAddress<P>> {
     let resolved = peers
         .iter()
         .map(|peer| {
-            addresses
-                .get_value(peer)
+            directory
+                .get(peer)
                 .cloned()
                 .map(|address| (peer.clone(), address))
-                .ok_or_else(|| AddressablePeerSetError::MissingAddress(peer.clone()))
+                .ok_or_else(|| MissingAddress(peer.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Map::from_iter_dedup(resolved))
@@ -189,9 +263,7 @@ mod tests {
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
     use commonware_utils::{NZU32, channel::mpsc, sync::Mutex};
-    use futures::executor::block_on;
     use std::{
-        convert::Infallible,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
     };
@@ -199,7 +271,6 @@ mod tests {
     type PublicKey = ed25519::PublicKey;
     type Tracked = Arc<Mutex<Vec<(u64, TrackedPeers<PublicKey>)>>>;
     type AddressableTracked = Arc<Mutex<Vec<(u64, AddressableTrackedPeers<PublicKey>)>>>;
-    type Calls = Arc<Mutex<Vec<(Epoch, Set<PublicKey>)>>>;
 
     #[derive(Clone, Debug)]
     struct TestManager {
@@ -270,30 +341,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, Error, PartialEq, Eq)]
-    #[error("provider failed")]
-    struct ProviderFailed;
-
-    #[derive(Clone)]
-    struct TestAddressProvider {
-        result: Result<Map<PublicKey, Address>, ProviderFailed>,
-        calls: Calls,
-    }
-
-    impl AddressProvider for TestAddressProvider {
-        type PublicKey = PublicKey;
-        type Error = ProviderFailed;
-
-        async fn addresses(
-            &mut self,
-            epoch: Epoch,
-            peers: Set<Self::PublicKey>,
-        ) -> Result<Map<Self::PublicKey, Address>, Self::Error> {
-            self.calls.lock().push((epoch, peers));
-            self.result.clone()
-        }
-    }
-
     fn key(seed: u8) -> PublicKey {
         ed25519::PrivateKey::from_seed(seed.into()).public_key()
     }
@@ -317,7 +364,7 @@ mod tests {
         for feedback in [Feedback::Ok, Feedback::Backoff, Feedback::Closed] {
             let mut manager = TestManager::new(feedback);
             assert_eq!(
-                block_on(Manager::track(&mut manager, Epoch::new(7), peers.clone())),
+                Manager::track(&mut manager, Epoch::new(7), peers.clone(), &()),
                 Ok(feedback)
             );
             assert_eq!(manager.tracked.lock()[0], (7, peers.clone()));
@@ -325,31 +372,37 @@ mod tests {
     }
 
     #[test]
+    fn key_only_directory_never_misses() {
+        let (peers, _) = peers();
+        assert_eq!(Directory::missing(&(), &peers.union()), None);
+    }
+
+    #[test]
+    fn addresses_reports_missing_peer() {
+        let (peers, keys) = peers();
+        let directory =
+            Addresses::from_iter([(keys[0].clone(), address(1)), (keys[1].clone(), address(2))]);
+        assert_eq!(directory.missing(&peers.primary), None);
+        assert_eq!(directory.missing(&peers.union()), Some(keys[2].clone()));
+    }
+
+    #[test]
     fn addressable_mapping_preserves_roles_and_ignores_extras() {
         let (peers, keys) = peers();
-        let addresses = Map::from_iter_dedup([
+        let directory = Addresses::from_iter([
             (keys[0].clone(), address(1)),
             (keys[1].clone(), address(2)),
             (keys[2].clone(), address(3)),
             (keys[3].clone(), address(4)),
         ]);
-        let calls: Calls = Arc::default();
-        let provider = TestAddressProvider {
-            result: Ok(addresses),
-            calls: calls.clone(),
-        };
         let inner = TestManager::new(Feedback::Ok);
         let tracked = inner.addressable.clone();
-        let mut manager = AddressableManager::new(AddressableTestManager(inner), provider);
+        let mut manager = AddressableManager::new(AddressableTestManager(inner));
 
         let feedback =
-            block_on(Manager::track(&mut manager, Epoch::new(9), peers.clone())).unwrap();
+            Manager::track(&mut manager, Epoch::new(9), peers.clone(), &directory).unwrap();
         assert_eq!(feedback, Feedback::Ok);
 
-        assert_eq!(
-            calls.lock().as_slice(),
-            &[(Epoch::new(9), peers.clone().union())]
-        );
         let tracked = tracked.lock();
         assert_eq!(tracked[0].0, 9);
         assert_eq!(tracked[0].1.primary.keys(), &peers.primary);
@@ -367,106 +420,58 @@ mod tests {
     }
 
     #[test]
-    fn addressable_errors_prevent_registration() {
+    fn missing_address_prevents_registration() {
         let (peers, keys) = peers();
 
         let inner = TestManager::new(Feedback::Ok);
         let tracked = inner.addressable.clone();
-        let mut manager = AddressableManager::new(
-            AddressableTestManager(inner),
-            TestAddressProvider {
-                result: Err(ProviderFailed),
-                calls: Arc::default(),
-            },
+        let mut manager = AddressableManager::new(AddressableTestManager(inner));
+        let directory = Addresses::from_iter([(keys[0].clone(), address(1))]);
+        assert_eq!(
+            Manager::track(&mut manager, Epoch::new(1), peers.clone(), &directory),
+            Err(MissingAddress(keys[1].clone()))
         );
-        assert!(matches!(
-            block_on(Manager::track(&mut manager, Epoch::new(1), peers.clone())),
-            Err(AddressablePeerSetError::Provider(ProviderFailed))
-        ));
         assert!(tracked.lock().is_empty());
 
-        let inner = TestManager::new(Feedback::Ok);
-        let tracked = inner.addressable.clone();
-        let mut manager = AddressableManager::new(
-            AddressableTestManager(inner),
-            TestAddressProvider {
-                result: Ok(Map::from_iter_dedup([(keys[0].clone(), address(1))])),
-                calls: Arc::default(),
-            },
-        );
-        assert!(matches!(
-            block_on(Manager::track(&mut manager, Epoch::new(1), peers.clone())),
-            Err(AddressablePeerSetError::MissingAddress(_))
-        ));
-        assert!(tracked.lock().is_empty());
-
-        let addresses = Map::from_iter_dedup(
-            peers
-                .clone()
-                .union()
-                .into_iter()
-                .enumerate()
-                .map(|(index, peer)| (peer, address(index as u16 + 1))),
-        );
-        let mut manager = AddressableManager::new(
-            AddressableTestManager(TestManager::new(Feedback::Closed)),
-            TestAddressProvider {
-                result: Ok(addresses),
-                calls: Arc::default(),
-            },
-        );
-        let feedback = block_on(Manager::track(&mut manager, Epoch::new(1), peers)).unwrap();
+        let directory = peers
+            .clone()
+            .union()
+            .into_iter()
+            .enumerate()
+            .map(|(index, peer)| (peer, address(index as u16 + 1)))
+            .collect::<Addresses<_>>();
+        let mut manager =
+            AddressableManager::new(AddressableTestManager(TestManager::new(Feedback::Closed)));
+        let feedback = Manager::track(&mut manager, Epoch::new(1), peers, &directory).unwrap();
         assert_eq!(feedback, Feedback::Closed);
     }
 
     #[test]
-    fn repeated_and_consecutive_epochs_use_their_snapshots() {
-        #[derive(Clone)]
-        struct EpochProvider {
-            calls: Calls,
-        }
-
-        impl AddressProvider for EpochProvider {
-            type PublicKey = PublicKey;
-            type Error = Infallible;
-
-            async fn addresses(
-                &mut self,
-                epoch: Epoch,
-                peers: Set<Self::PublicKey>,
-            ) -> Result<Map<Self::PublicKey, Address>, Self::Error> {
-                self.calls.lock().push((epoch, peers.clone()));
-                let port = if epoch == Epoch::new(4) { 4 } else { 5 };
-                Ok(Map::from_iter_dedup(
-                    peers.into_iter().map(|peer| (peer, address(port))),
-                ))
-            }
-        }
-
+    fn consecutive_epochs_use_their_directories() {
         let (peers, _) = peers();
+        let directory_for = |port: u16| {
+            peers
+                .clone()
+                .union()
+                .into_iter()
+                .map(|peer| (peer, address(port)))
+                .collect::<Addresses<_>>()
+        };
+
         let inner = TestManager::new(Feedback::Ok);
         let tracked = inner.addressable.clone();
-        let calls: Calls = Arc::default();
-        let mut manager = AddressableManager::new(
-            AddressableTestManager(inner),
-            EpochProvider {
-                calls: calls.clone(),
-            },
-        );
+        let mut manager = AddressableManager::new(AddressableTestManager(inner));
 
-        for epoch in [Epoch::new(4), Epoch::new(4), Epoch::new(5)] {
-            block_on(Manager::track(&mut manager, epoch, peers.clone())).unwrap();
+        for (epoch, port) in [(4, 4), (4, 4), (5, 5)] {
+            Manager::track(
+                &mut manager,
+                Epoch::new(epoch),
+                peers.clone(),
+                &directory_for(port),
+            )
+            .unwrap();
         }
 
-        let requested = peers.union();
-        assert_eq!(
-            calls.lock().as_slice(),
-            &[
-                (Epoch::new(4), requested.clone()),
-                (Epoch::new(4), requested.clone()),
-                (Epoch::new(5), requested),
-            ]
-        );
         let tracked = tracked.lock();
         assert_eq!(tracked[0].1.primary.values(), tracked[1].1.primary.values());
         assert_ne!(tracked[1].1.primary.values(), tracked[2].1.primary.values());
@@ -482,7 +487,7 @@ mod tests {
             let participant_key = participant.public_key();
             let dealer_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6100);
             let participant_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6101);
-            let addresses = Map::from_iter_dedup([
+            let directory = Addresses::from_iter([
                 (dealer_key.clone(), Address::Symmetric(dealer_socket)),
                 (
                     participant_key.clone(),
@@ -520,20 +525,16 @@ mod tests {
             let (mut participant_sender, mut participant_receiver) =
                 participant_network.register(0, Quota::per_second(NZU32!(100)), 16);
 
-            let provider = |addresses| TestAddressProvider {
-                result: Ok(addresses),
-                calls: Arc::default(),
-            };
-            let mut dealer_manager =
-                AddressableManager::new(dealer_oracle, provider(addresses.clone()));
-            let mut participant_manager =
-                AddressableManager::new(participant_oracle, provider(addresses));
-            Manager::track(&mut dealer_manager, Epoch::new(3), peers.clone())
-                .await
-                .unwrap();
-            Manager::track(&mut participant_manager, Epoch::new(3), peers)
-                .await
-                .unwrap();
+            let mut dealer_manager = AddressableManager::new(dealer_oracle);
+            let mut participant_manager = AddressableManager::new(participant_oracle);
+            Manager::track(
+                &mut dealer_manager,
+                Epoch::new(3),
+                peers.clone(),
+                &directory,
+            )
+            .unwrap();
+            Manager::track(&mut participant_manager, Epoch::new(3), peers, &directory).unwrap();
 
             dealer_network.start();
             participant_network.start();
@@ -576,5 +577,16 @@ mod tests {
             assert_eq!(sender, dealer_key);
             assert_eq!(response.as_ref(), b"response");
         });
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::ed25519;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Addresses<ed25519::PublicKey>>,
     }
 }

@@ -1,6 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
-    network::Manager,
+    network::{Directory, Manager},
     reshare::{
         Actor, EpochInfoResponse, Message,
         actor::Mode,
@@ -44,19 +44,28 @@ use std::{
 use tracing::{Instrument as _, debug, info, info_span, warn};
 
 #[derive(Clone)]
-struct Artifact<V: BlsVariant, C: Signer> {
-    info: EpochInfo<V, C::PublicKey>,
+struct Artifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
+    info: EpochInfo<V, C::PublicKey, D>,
     share: Option<Share>,
 }
 
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
-struct CachedArtifact<V: BlsVariant, C: Signer> {
+struct CachedArtifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     // The cache is valid only for this exact effective view of finalized and
     // pending logs. It lives for one inclusion phase and never owns durable
     // protocol state.
     logs: PendingLogs<V, C::PublicKey>,
-    artifact: Option<Artifact<V, C>>,
+    artifact: Option<Artifact<V, C, D>>,
+}
+
+// Provider-supplied values for the next epoch's artifact. The provider
+// contract requires both to remain stable for the epoch, so one lookup is
+// reused across competing final block proposals and verification attempts.
+#[derive(Clone)]
+struct Lookahead<P: PublicKey, D: Directory<P>> {
+    next_players: Set<P>,
+    directory: D,
 }
 
 struct PendingLogScan<'a, V: BlsVariant, P> {
@@ -98,6 +107,12 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
     .expect("participants provider returned set exceeding epoch dealer-log capacity");
 }
 
+fn validate_directory<P: PublicKey, D: Directory<P>>(directory: &D, requested: &Set<P>) {
+    if let Some(peer) = directory.missing(requested) {
+        panic!("participants provider returned directory missing peer {peer:?}");
+    }
+}
+
 /// The final block is special because proposal and verification may run ahead
 /// of this actor's finalized-block reporter stream. In that case, the block
 /// ancestry given to the application can contain pending dealer logs that are
@@ -112,7 +127,7 @@ async fn pending_logs<B, V, C>(
     scan: PendingLogScan<'_, V, C::PublicKey>,
     mut ancestry: crate::dkg::reshare::mailbox::ErasedAncestry<B>,
     mut shutdown: signal::Signal,
-    response: &mut oneshot::Sender<EpochInfoResponse<V, C>>,
+    response: &mut oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 ) -> Option<PendingLogs<V, C::PublicKey>>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -169,9 +184,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -196,7 +211,7 @@ where
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
     ) -> ControlFlow<()> {
         self.metrics.set_phase(Phase::Inclusion);
@@ -207,7 +222,7 @@ where
 
         let mut served_at: Option<Height> = None;
         let mut finalized_tip = self.marshal.get_processed_height().await;
-        let mut next_players = None;
+        let mut lookahead = None;
         let mut artifact_cache = None;
         select_loop! {
             self.context,
@@ -302,7 +317,7 @@ where
                                 info,
                                 store,
                                 Some(&pending_logs),
-                                &mut next_players,
+                                &mut lookahead,
                                 &mut artifact_cache,
                             )
                             .await;
@@ -366,7 +381,7 @@ where
                                     info,
                                     store,
                                     None,
-                                    &mut next_players,
+                                    &mut lookahead,
                                     &mut artifact_cache,
                                 )
                                 .await;
@@ -417,10 +432,10 @@ where
     pub(super) async fn observe_dealer_log(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: Option<&mut Dealer<V, C>>,
-        payload: Option<Payload<V, C>>,
+        payload: Option<Payload<V, C, B::Directory>>,
     ) {
         let Some(Payload::DealerLog(log)) = payload else {
             return;
@@ -463,7 +478,8 @@ where
     ///
     /// The resulting [`EpochInfo`] is a lookahead for `epoch + 1`: its output is
     /// the outcome of this epoch's reshare, its players are this epoch's
-    /// next players, and its next players are fetched for the following epoch.
+    /// next players, and its next players and transport directory are fetched
+    /// for the following epoch.
     ///
     /// Artifact construction never mutates metrics or durable state. A
     /// speculative result is cached only for the exact effective dealer-log map
@@ -472,11 +488,11 @@ where
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         pending_logs: Option<&PendingLogs<V, C::PublicKey>>,
-        next_players: &mut Option<Set<C::PublicKey>>,
-        artifact_cache: &mut Option<CachedArtifact<V, C>>,
-    ) -> Option<Artifact<V, C>> {
+        lookahead: &mut Option<Lookahead<C::PublicKey, B::Directory>>,
+        artifact_cache: &mut Option<CachedArtifact<V, C, B::Directory>>,
+    ) -> Option<Artifact<V, C, B::Directory>> {
         let current = store.current();
 
         // DKG mode is the only path that reaches inclusion without a current
@@ -543,28 +559,59 @@ where
             }
         };
 
-        let future_players = if current.is_some() {
-            match next_players {
-                Some(players) => players.clone(),
+        let future = if let Some(current) = &current {
+            match lookahead {
+                Some(future) => future.clone(),
                 None => {
-                    // The provider contract requires this set to remain stable
-                    // for the epoch, so reuse one lookup across competing final
-                    // block proposals and verification attempts.
-                    let players = self
+                    // The provider contract requires these values to remain
+                    // stable for the epoch, so reuse one lookup across
+                    // competing final block proposals and verification
+                    // attempts.
+                    let next_players = self
                         .participants_provider
                         .participants(epoch.next().next())
                         .await;
                     validate_future_participants::<V, _>(
-                        &players,
+                        &next_players,
                         self.max_participants,
                         self.blocks_per_epoch,
                     );
-                    *next_players = Some(players.clone());
-                    players
+                    // The next epoch's dealers depend on the ceremony outcome
+                    // (this epoch's players on success, its dealers on
+                    // failure), so request reachability for the superset to
+                    // keep the lookup outcome-independent.
+                    let requested = Set::from_iter_dedup(
+                        current
+                            .output
+                            .players()
+                            .iter()
+                            .chain(current.players.iter())
+                            .chain(current.next_players.iter())
+                            .chain(next_players.iter())
+                            .cloned(),
+                    );
+                    let directory = self
+                        .participants_provider
+                        .directory(epoch.next(), requested.clone())
+                        .await;
+                    validate_directory(&directory, &requested);
+                    let future = Lookahead {
+                        next_players,
+                        directory,
+                    };
+                    *lookahead = Some(future.clone());
+                    future
                 }
             }
         } else {
-            Default::default()
+            // DKG mode: the one-shot artifact names no next committee and
+            // reuses the ceremony's configured directory.
+            Lookahead {
+                next_players: Set::default(),
+                directory: self
+                    .dkg_directory()
+                    .expect("current epoch or DKG mode must provide directory"),
+            }
         };
 
         let artifact = match outcome {
@@ -577,7 +624,8 @@ where
                             epoch: next_epoch,
                             output,
                             players: current.next_players,
-                            next_players: future_players,
+                            next_players: future.next_players,
+                            directory: future.directory,
                         },
                         share,
                     })
@@ -593,7 +641,8 @@ where
                             epoch,
                             output,
                             players,
-                            next_players: future_players,
+                            next_players: future.next_players,
+                            directory: future.directory,
                         },
                         share: Some(share),
                     })
@@ -618,7 +667,8 @@ where
                         epoch: epoch.next(),
                         output: current.output,
                         players: current.next_players,
-                        next_players: future_players,
+                        next_players: future.next_players,
+                        directory: future.directory,
                     },
                     share,
                 })
@@ -641,9 +691,9 @@ where
     async fn handle_finalized_epoch_info(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
-        artifact: Option<&Artifact<V, C>>,
-        payload: Option<Payload<V, C>>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        artifact: Option<&Artifact<V, C, B::Directory>>,
+        payload: Option<Payload<V, C, B::Directory>>,
     ) {
         let dkg = matches!(self.mode, Mode::Dkg { .. });
         if dkg && payload.is_none() {
@@ -783,6 +833,33 @@ mod tests {
         // Four participants need a three-log dealer quorum, but a four-block
         // epoch only has one inclusion slot.
         validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(4));
+    }
+
+    #[test]
+    fn directory_accepts_full_coverage() {
+        use crate::dkg::network::Addresses;
+        use commonware_p2p::Address;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let directory = players()
+            .into_iter()
+            .enumerate()
+            .map(|(index, peer)| {
+                let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), index as u16 + 1);
+                (peer, Address::Symmetric(socket))
+            })
+            .collect::<Addresses<_>>();
+        validate_directory(&directory, &players());
+        validate_directory(&(), &players());
+    }
+
+    #[test]
+    #[should_panic(expected = "participants provider returned directory missing peer")]
+    fn directory_rejects_missing_peer() {
+        use crate::dkg::network::Addresses;
+
+        let directory = Addresses::from_iter([]);
+        validate_directory(&directory, &players());
     }
 
     #[test]

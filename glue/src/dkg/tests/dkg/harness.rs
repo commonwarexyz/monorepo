@@ -193,7 +193,7 @@ impl EngineDefinition for DkgEngine {
             store: store.clone(),
             inner: Arc::default(),
         };
-        let engine = bootstrap::Engine::<_, MinPk, _, _, _, _>::new(
+        let engine = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
             context.child("dkg"),
             bootstrap::Config {
                 signer: self.signer(public_key),
@@ -206,6 +206,7 @@ impl EngineDefinition for DkgEngine {
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: format!("dkg-{index}"),
                 participants: self.participants_set(),
+                directory: (),
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );
@@ -380,7 +381,7 @@ pub(super) fn run_closed_network_receiver() {
             .expect("replacement channel registration failed");
 
         let store = engine.store(&public_key);
-        let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _>::new(
+        let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
             context.child("dkg"),
             bootstrap::Config {
                 signer: engine.signer(&public_key),
@@ -393,6 +394,7 @@ pub(super) fn run_closed_network_receiver() {
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-closed-receiver".into(),
                 participants: engine.participants_set(),
+                directory: (),
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );

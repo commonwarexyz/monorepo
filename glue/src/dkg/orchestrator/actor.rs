@@ -3,7 +3,7 @@
 use crate::dkg::{
     ReshareBlock,
     fence::Gate,
-    network::Manager,
+    network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
     state_sync::{self, Plan as StateSyncPlan},
     types::{EpochInfo, Payload},
@@ -24,7 +24,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::{select, select_loop};
 use commonware_p2p::{
-    Blocker, Channel, Message as P2pMessage, Receiver, Sender, TrackedPeers,
+    Blocker, Channel, Message as P2pMessage, Receiver, Sender,
     utils::mux::{Builder, MuxHandle, Muxer},
 };
 use commonware_parallel::Strategy;
@@ -75,16 +75,17 @@ enum EnterEpochError<E> {
     Stopped,
 }
 
-struct ResolvedStart<S, D, V, P>
+struct ResolvedStart<S, D, V, P, Dir>
 where
     S: scheme::Scheme<D, PublicKey = P>,
     D: Digest,
     V: BlsVariant,
     P: PublicKey,
+    Dir: Directory<P>,
 {
     epoch: Epoch,
     floor: Floor<S, D>,
-    info: EpochInfo<V, P>,
+    info: EpochInfo<V, P, Dir>,
 }
 
 /// Simplex configuration applied to each epoch engine.
@@ -144,6 +145,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock,
+    <MV::ApplicationBlock as ReshareBlock>::Signer:
+        Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
 {
     /// Network blocker shared with each epoch consensus engine.
@@ -172,7 +176,12 @@ where
     pub gate: Gate,
 
     /// Shared DKG state-sync startup recovery plan.
-    pub state_sync: StateSyncPlan<P::Scheme, MV::Commitment, DV>,
+    pub state_sync: StateSyncPlan<
+        P::Scheme,
+        MV::Commitment,
+        DV,
+        <MV::ApplicationBlock as ReshareBlock>::Directory,
+    >,
 
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
@@ -192,7 +201,10 @@ pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
 where
     E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-    M: Manager<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    M: Manager<
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
+            Directory = <MV::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
@@ -221,7 +233,12 @@ where
     strategy: T,
     simplex: SimplexConfig<L>,
     gate: Gate,
-    state_sync: StateSyncPlan<P::Scheme, MV::Commitment, DV>,
+    state_sync: StateSyncPlan<
+        P::Scheme,
+        MV::Commitment,
+        DV,
+        <MV::ApplicationBlock as ReshareBlock>::Directory,
+    >,
     blocks_per_epoch: NonZeroU64,
     muxer_size: usize,
     partition_prefix: String,
@@ -234,7 +251,10 @@ impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, 
 where
     E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-    M: Manager<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    M: Manager<
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
+            Directory = <MV::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
@@ -337,12 +357,7 @@ where
             return;
         };
         let mut active = match self
-            .enter_epoch(
-                start.epoch,
-                start.floor,
-                start.info.participants().tracked_peers(),
-                &mut channels,
-            )
+            .enter_epoch(start.epoch, start.floor, &start.info, &mut channels)
             .await
         {
             Ok(active) => active,
@@ -433,8 +448,15 @@ where
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
-    ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
-    {
+    ) -> Option<
+        ResolvedStart<
+            P::Scheme,
+            MV::Commitment,
+            DV,
+            <P::Scheme as Verifier>::PublicKey,
+            <MV::ApplicationBlock as ReshareBlock>::Directory,
+        >,
+    > {
         let recovered_epoch = state_sync::recovered_epoch(&self.marshal, epocher).await;
         if let Some(state_sync) = self
             .state_sync
@@ -477,8 +499,15 @@ where
         &mut self,
         epoch: Epoch,
         epocher: &FixedEpocher,
-    ) -> Option<ResolvedStart<P::Scheme, MV::Commitment, DV, <P::Scheme as Verifier>::PublicKey>>
-    {
+    ) -> Option<
+        ResolvedStart<
+            P::Scheme,
+            MV::Commitment,
+            DV,
+            <P::Scheme as Verifier>::PublicKey,
+            <MV::ApplicationBlock as ReshareBlock>::Directory,
+        >,
+    > {
         let height = epoch
             .previous()
             .and_then(|epoch| epocher.last(epoch))
@@ -634,14 +663,7 @@ where
         };
         let floor = Floor::Genesis(MV::commitment(&boundary));
 
-        let next = self
-            .enter_epoch(
-                next_epoch,
-                floor,
-                info.participants().tracked_peers(),
-                channels,
-            )
-            .await;
+        let next = self.enter_epoch(next_epoch, floor, &info, channels).await;
         let next = match next {
             Ok(next) => next,
             Err(EnterEpochError::GateClosed) => {
@@ -677,7 +699,11 @@ where
         &mut self,
         epoch: Epoch,
         floor: Floor<P::Scheme, MV::Commitment>,
-        peers: impl Into<TrackedPeers<<P::Scheme as Verifier>::PublicKey>> + Send,
+        info: &EpochInfo<
+            DV,
+            <P::Scheme as Verifier>::PublicKey,
+            <MV::ApplicationBlock as ReshareBlock>::Directory,
+        >,
         channels: &mut Channels<P::Scheme, S, R>,
     ) -> Result<ActiveEpoch, EnterEpochError<M::Error>>
     where
@@ -700,8 +726,7 @@ where
         drop(shutdown);
 
         self.manager
-            .track(epoch, peers.into())
-            .await
+            .track(epoch, info.participants().tracked_peers(), &info.directory)
             .map_err(EnterEpochError::PeerSet)?;
         let scheme = self
             .provider

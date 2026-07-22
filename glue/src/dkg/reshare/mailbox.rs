@@ -2,7 +2,7 @@
 //!
 //! [`Actor`]: super::Actor
 
-use crate::dkg::{ReshareBlock, types::Payload};
+use crate::dkg::{ReshareBlock, network::Directory, types::Payload};
 use commonware_actor::{
     Feedback,
     mailbox::{Policy, Sender as ActorSender},
@@ -20,16 +20,17 @@ pub(crate) type ErasedAncestry<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Response to a final-block epoch artifact request.
 #[derive(Clone, PartialEq, Eq)]
-pub enum EpochInfoResponse<V, C>
+pub enum EpochInfoResponse<V, C, D = ()>
 where
     V: Variant,
     C: Signer,
+    D: Directory<C::PublicKey>,
 {
     /// The actor derived a stable response.
     ///
     /// `None` is a legitimate response only for a failed one-shot DKG final
     /// block, which intentionally carries no epoch artifact.
-    Available(Option<Payload<V, C>>),
+    Available(Option<Payload<V, C, D>>),
     /// The actor cannot answer this request yet.
     ///
     /// This is not evidence that a proposed artifact is invalid. Verification
@@ -52,26 +53,26 @@ where
 #[must_use = "dropping a log reservation releases it for another proposal"]
 pub struct LogReservation<B, V, C, A = Exact>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     height: Height,
-    payload: Option<Payload<V, C>>,
+    payload: Option<Payload<V, C, B::Directory>>,
     release: Option<ActorSender<Message<B, V, C, A>>>,
 }
 
 impl<B, V, C, A> LogReservation<B, V, C, A>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     pub(crate) const fn new(
         height: Height,
-        payload: Payload<V, C>,
+        payload: Payload<V, C, B::Directory>,
         release: ActorSender<Message<B, V, C, A>>,
     ) -> Self {
         Self {
@@ -84,7 +85,7 @@ where
     /// Takes the reserved dealer log payload.
     ///
     /// Returns `None` if the payload was already taken.
-    pub const fn take_payload(&mut self) -> Option<Payload<V, C>> {
+    pub const fn take_payload(&mut self) -> Option<Payload<V, C, B::Directory>> {
         self.payload.take()
     }
 
@@ -97,7 +98,7 @@ where
 
 impl<B, V, C, A> Drop for LogReservation<B, V, C, A>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -118,7 +119,7 @@ where
 #[allow(clippy::large_enum_variant)]
 pub enum Message<B, V, C, A = Exact>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -144,7 +145,7 @@ where
     EpochInfo {
         span: Span,
         ancestry: ErasedAncestry<B>,
-        response: oneshot::Sender<EpochInfoResponse<V, C>>,
+        response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     },
 
     /// A new block has been finalized.
@@ -157,7 +158,7 @@ where
 
 impl<B, V, C, A> Message<B, V, C, A>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -174,7 +175,7 @@ where
 
 impl<B, V, C, A> Policy for Message<B, V, C, A>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -195,7 +196,7 @@ where
 #[derive(Clone)]
 pub struct Mailbox<B, V, C, A = Exact>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -205,7 +206,7 @@ where
 
 impl<B, V, C, A> Mailbox<B, V, C, A>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -248,7 +249,7 @@ where
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Stream<Item = Arc<B>> + Send + 'static,
-    ) -> EpochInfoResponse<V, C> {
+    ) -> EpochInfoResponse<V, C, B::Directory> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.epoch_info");
         if !self
@@ -276,7 +277,7 @@ where
 
 impl<B, V, C, A> Reporter for Mailbox<B, V, C, A>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,

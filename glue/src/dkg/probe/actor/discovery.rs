@@ -69,7 +69,10 @@ where
 pub(super) struct Discovery<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -81,8 +84,13 @@ where
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) manager: M,
     pub(super) bootstrap_participants: Participants<S::PublicKey>,
+    pub(super) bootstrap_directory: <V::ApplicationBlock as ReshareBlock>::Directory,
     pub(super) verifier: S,
-    pub(super) genesis: EpochInfo<<V::ApplicationBlock as ReshareBlock>::Variant, S::PublicKey>,
+    pub(super) genesis: EpochInfo<
+        <V::ApplicationBlock as ReshareBlock>::Variant,
+        S::PublicKey,
+        <V::ApplicationBlock as ReshareBlock>::Directory,
+    >,
     pub(super) strategy: T,
     pub(super) blocker: B,
     pub(super) epocher: FixedEpocher,
@@ -97,7 +105,10 @@ where
 impl<E, M, S, V, T, B> Discovery<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -142,7 +153,7 @@ where
                 return;
             } => match message {
                 Message::Subscribe { response } => {
-                    match self.subscribe(response, &mut boundary_sender).await {
+                    match self.subscribe(response, &mut boundary_sender) {
                         Ok(true) => {
                             deadline = self.context.current() + self.retry_timeout.get();
                         }
@@ -194,7 +205,7 @@ where
 
     /// Handle a new subscriber, returning whether a solicitation was sent (so
     /// the caller can reset the retry deadline).
-    async fn subscribe(
+    fn subscribe(
         &mut self,
         response: oneshot::Sender<ActorArtifact<S, V>>,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
@@ -213,12 +224,11 @@ where
             // deferred until discovery actually solicits: a node that never
             // bootstraps must not claim an ID above the epochs its
             // orchestrator still enters.
-            self.manager
-                .track(
-                    self.sample.minimum_epoch(),
-                    self.bootstrap_participants.tracked_peers(),
-                )
-                .await?;
+            self.manager.track(
+                self.sample.minimum_epoch(),
+                self.bootstrap_participants.tracked_peers(),
+                &self.bootstrap_directory,
+            )?;
             self.request_latest(boundary_sender);
         }
         Ok(solicit)
