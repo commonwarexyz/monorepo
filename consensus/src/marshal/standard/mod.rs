@@ -43,7 +43,7 @@ pub use variant::Standard;
 mod tests {
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Reporter,
+        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -68,7 +68,7 @@ mod tests {
         simplex::{
             self, Plan,
             config::ForwardingPolicy,
-            elector::RoundRobin,
+            elector::{Config as _, Elector as _, RoundRobin},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
                 Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
@@ -107,7 +107,7 @@ mod tests {
         Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
-        ordered::Set,
+        ordered::{Quorum as _, Set},
         sequence::U64,
         sync::Mutex,
         vec::NonEmptyVec,
@@ -1742,18 +1742,10 @@ mod tests {
     type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher>;
     type DeferredWrapper = Deferred<Runtime, S, App, B, FixedEpocher>;
 
+    #[derive(Clone)]
     enum Wrapper {
         Inline(InlineWrapper),
         Deferred(DeferredWrapper),
-    }
-
-    impl Clone for Wrapper {
-        fn clone(&self) -> Self {
-            match self {
-                Self::Inline(inline) => Self::Inline(inline.clone()),
-                Self::Deferred(deferred) => Self::Deferred(deferred.clone()),
-            }
-        }
     }
 
     impl Wrapper {
@@ -1826,16 +1818,12 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
-        async fn certify(
-            &mut self,
-            round: Round,
-            digest: Self::Digest,
-        ) -> oneshot::Receiver<bool> {
+        async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
     }
 
-    impl crate::Relay for Wrapper {
+    impl Relay for Wrapper {
         type Digest = D;
         type PublicKey = PublicKey;
         type Plan = Plan<PublicKey>;
@@ -1989,10 +1977,20 @@ mod tests {
                 NAMESPACE,
                 NUM_VALIDATORS,
             );
-            // At epoch 0, round-robin elects participant 3 for view 3.
+            // At epoch 0, round-robin elects participant 3 for view 3. Pin the
+            // mapping: with a different leader the scripted proposal never
+            // reaches verify, and certification would pass through the no-gate
+            // recovery path with or without a poisoned gate.
             let byzantine = participants[3].clone();
             let victim = participants[1].clone();
             let observer = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default().build(schemes[1].participants());
+            assert_eq!(
+                schemes[1]
+                    .participants()
+                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), None)),
+                Some(&byzantine),
+            );
 
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
@@ -2069,8 +2067,8 @@ mod tests {
             );
 
             // Channels 1 and 2 are owned by marshal. Keep the three Simplex
-            // channels separate and register the Byzantine peer as the
-            // scripted sender and observer.
+            // channels separate, register the Byzantine peer as the scripted
+            // sender, and tap the observer's vote receiver.
             let victim_control = oracle.control(victim.clone());
             let vote_network = victim_control.register(3, TEST_QUOTA).await.unwrap();
             let certificate_network = victim_control.register(4, TEST_QUOTA).await.unwrap();

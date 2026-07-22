@@ -490,9 +490,10 @@ where
                 };
                 let block = match decision {
                     Decision::Complete(valid) => {
-                        // Re-proposal: precheck already persisted the block (durable) when
-                        // valid; epoch-reject when invalid. An invalid precheck is not a
-                        // certification verdict for a potentially conflicting header.
+                        // Re-proposal: a valid precheck already persisted the block
+                        // (durable), an invalid one is an epoch rejection. An invalid
+                        // precheck is not a certification verdict for a potentially
+                        // conflicting header.
                         tx.send_lossy(valid);
                         durable_tx.send_lossy(if valid {
                             GateOutcome::Ready(true)
@@ -570,7 +571,8 @@ where
 }
 
 /// Inline certification consumes a registered certification gate when present, and
-/// falls back to a round-bound fetch/persist path after restart.
+/// falls back to a round-bound fetch/persist path when the gate is missing (after
+/// an unclean restart) or cannot speak for the notarized proposal.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -983,6 +985,92 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("certify should not depend on marshal after verify cached a re-proposal");
+                },
+            }
+        });
+    }
+
+    /// A header can only read as a re-proposal under its declared parent, so an
+    /// invalid-precheck rejection (non-boundary block) is scoped to that header,
+    /// not to the notarized `(round, digest)`. Certification must route through
+    /// recovery instead of adopting the rejection as its verdict.
+    #[test_traced("WARN")]
+    fn test_certify_recovers_from_invalid_reproposal_precheck() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mut inline = Inline::new(
+                context.child("inline"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // A non-boundary block notarized at view 2 and available locally.
+            let block_round = Round::new(Epoch::zero(), View::new(2));
+            let block = B::new::<Sha256>(
+                Ctx {
+                    round: block_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(2),
+                200,
+            );
+            let digest = block.digest();
+            assert!(marshal.verified(block_round, block).await);
+
+            // The view-3 header names the block as its own parent, so the
+            // precheck reads it as a re-proposal and rejects it (not at the
+            // epoch boundary).
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let reproposal_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(2), digest),
+            };
+            let verify_rx = inline.verify(reproposal_context, digest).await;
+            assert!(
+                !verify_rx.await.expect("verify result missing"),
+                "a non-boundary re-proposal must be rejected"
+            );
+
+            // The header-scoped rejection must not become the certification
+            // verdict for the notarized digest.
+            let certify_rx = inline.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify must recover instead of adopting the precheck rejection"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
                 },
             }
         });

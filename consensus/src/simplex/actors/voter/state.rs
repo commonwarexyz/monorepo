@@ -3227,11 +3227,8 @@ mod tests {
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
             state.set_certify_handle(nullified_view, handle);
-            let nullification = build_nullification(
-                &verifier,
-                &schemes,
-                Rnd::new(Epoch::new(1), nullified_view),
-            );
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), nullified_view));
             assert!(state.add_nullification(nullification));
 
             // The view-3 leader signs a header that reuses the honest block's
@@ -3249,16 +3246,24 @@ mod tests {
             assert!(Notarize::sign(&schemes[0], bad_proposal.clone()).is_some());
 
             assert!(state.set_proposal(view, bad_proposal.clone()));
-            let (verify_context, verify_proposal) =
-                state.try_verify().expect("bad header should reach verification");
+            let (verify_context, verify_proposal) = state
+                .try_verify()
+                .expect("bad header should reach verification");
             assert_eq!(verify_proposal, bad_proposal);
-            assert_eq!(
-                verify_context.parent,
-                (certified_view, certified_payload)
-            );
+            assert_eq!(verify_context.parent, (certified_view, certified_payload));
+
+            // The rejected header times out the view, so this validator
+            // nullifies view 3 before the honest notarization arrives.
+            state.trigger_timeout(view, TimeoutReason::InvalidProposal);
+            let (retry, _) = state
+                .construct_nullify(view, TimeoutReason::InvalidProposal)
+                .expect("nullify");
+            assert!(!retry);
 
             // The Byzantine leader and the other two honest validators form a
-            // notarization for the header naming view 2, without H2's vote.
+            // notarization for the header naming view 2, without this
+            // validator's vote. A local nullify must not suppress the
+            // certification dispatch.
             let good_votes: Vec<_> = [0usize, 2, 3]
                 .into_iter()
                 .map(|index| {

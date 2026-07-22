@@ -772,6 +772,14 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
+                        //
+                        // A rejection is safe to publish as a gate verdict because the
+                        // precheck depends only on the block's height and the gate key's
+                        // epoch, never on the declared parent. A conflicting header for
+                        // the same `(round, digest)` cannot produce an honest
+                        // notarization: reading the digest as a re-proposal requires it
+                        // to be the recorded payload of an earlier view, so its embedded
+                        // context fails the mismatch check under any normal header.
                         task_tx.send_lossy(GateOutcome::Ready(valid));
                         tx.send_lossy(valid);
                         return;

@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reproposal_context_exception_does_not_validate_later_normal_context() {
+    fn test_validate_proposal_reproposal_exception_not_valid_in_later_context() {
         let fixture = baseline_fixture();
         let later_context = Round::new(Epoch::new(0), View::new(8));
 

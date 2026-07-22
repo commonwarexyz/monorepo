@@ -40,7 +40,7 @@ struct Inner<D: Digest, B> {
 /// Each entry is keyed by `(Round, D)` where `D` is a commitment or digest
 /// identifying the block. The gate task's [`oneshot::Receiver`] is consumed by
 /// certification. [`GateOutcome::Ready`] carries a verdict that applies to the
-/// notarized proposal; [`GateOutcome::Recover`] means the completed work does
+/// notarized proposal. [`GateOutcome::Recover`] means the completed work does
 /// not apply, so certification must use its recovery path. A dropped sender
 /// also triggers recovery because the task did not complete.
 /// Storage sync failures are fatal to the local marshal state and must panic
@@ -75,12 +75,7 @@ impl<D: Digest, B> Gates<D, B> {
     }
 
     /// Registers a certification gate task for the block identified by `(round, digest)`.
-    pub(crate) fn insert(
-        &self,
-        round: Round,
-        digest: D,
-        task: oneshot::Receiver<GateOutcome>,
-    ) {
+    pub(crate) fn insert(&self, round: Round, digest: D, task: oneshot::Receiver<GateOutcome>) {
         self.inner
             .lock()
             .certifications
@@ -88,11 +83,7 @@ impl<D: Digest, B> Gates<D, B> {
     }
 
     /// Removes and returns the certification gate task for `(round, digest)`, if present.
-    pub(crate) fn take(
-        &self,
-        round: Round,
-        digest: D,
-    ) -> Option<oneshot::Receiver<GateOutcome>> {
+    pub(crate) fn take(&self, round: Round, digest: D) -> Option<oneshot::Receiver<GateOutcome>> {
         self.inner.lock().certifications.remove(&(round, digest))
     }
 
@@ -375,6 +366,75 @@ mod tests {
     }
 
     #[test]
+    fn test_drive_adopts_ready_verdict_without_fallback() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            for verdict in [true, false] {
+                let digest = Sha256::hash(&[b"block"]);
+                let (task_tx, task_rx) = oneshot::channel();
+                let (tx, rx) = oneshot::channel();
+                task_tx.send_lossy(GateOutcome::Ready(verdict));
+                drive(tx, task_rx, round(1), digest, || async {
+                    unreachable!("a ready gate must not fall back")
+                })
+                .await;
+                assert_eq!(rx.await.expect("verdict published"), verdict);
+            }
+        });
+    }
+
+    #[test]
+    fn test_drive_recover_publishes_fallback_verdict() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let digest = Sha256::hash(&[b"block"]);
+            let (task_tx, task_rx) = oneshot::channel();
+            let (tx, rx) = oneshot::channel();
+            task_tx.send_lossy(GateOutcome::Recover);
+            drive(tx, task_rx, round(1), digest, || async {
+                let (fallback_tx, fallback_rx) = oneshot::channel();
+                fallback_tx.send_lossy(true);
+                fallback_rx
+            })
+            .await;
+            assert!(rx.await.expect("fallback verdict published"));
+        });
+    }
+
+    #[test]
+    fn test_drive_dropped_sender_publishes_fallback_verdict() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let digest = Sha256::hash(&[b"block"]);
+            let (task_tx, task_rx) = oneshot::channel();
+            let (tx, rx) = oneshot::channel();
+            drop(task_tx);
+            drive(tx, task_rx, round(1), digest, || async {
+                let (fallback_tx, fallback_rx) = oneshot::channel();
+                fallback_tx.send_lossy(false);
+                fallback_rx
+            })
+            .await;
+            assert!(!rx.await.expect("fallback verdict published"));
+        });
+    }
+
+    #[test]
+    fn test_drive_abandons_when_consensus_receiver_dropped() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let digest = Sha256::hash(&[b"block"]);
+            let (_task_tx, task_rx) = oneshot::channel();
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            drive(tx, task_rx, round(1), digest, || async {
+                unreachable!("abandoned certification must not fall back")
+            })
+            .await;
+        });
+    }
+
+    #[test]
     fn test_stage_handshake() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
@@ -401,10 +461,7 @@ mod tests {
 
             // Delivering a durable handle resolves the gate.
             ack.send_lossy(Handle::ready(Ok(())));
-            assert_eq!(
-                gate.await.expect("gate resolved"),
-                GateOutcome::Ready(true)
-            );
+            assert_eq!(gate.await.expect("gate resolved"), GateOutcome::Ready(true));
         });
     }
 
