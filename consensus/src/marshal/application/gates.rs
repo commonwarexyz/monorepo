@@ -246,6 +246,7 @@ mod tests {
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{Runner, Spawner, deterministic};
+    use std::future::ready;
 
     type D = Sha256Digest;
     type TestGates = Gates<D, u64>;
@@ -257,6 +258,10 @@ mod tests {
     fn pending_task() -> oneshot::Receiver<GateOutcome> {
         let (_tx, rx) = oneshot::channel();
         rx
+    }
+
+    fn no_fallback() -> std::future::Ready<oneshot::Receiver<bool>> {
+        unreachable!("certification must not fall back")
     }
 
     #[test]
@@ -374,10 +379,7 @@ mod tests {
                 let (task_tx, task_rx) = oneshot::channel();
                 let (tx, rx) = oneshot::channel();
                 task_tx.send_lossy(GateOutcome::Ready(verdict));
-                drive(tx, task_rx, round(1), digest, || async {
-                    unreachable!("a ready gate must not fall back")
-                })
-                .await;
+                drive(tx, task_rx, round(1), digest, no_fallback).await;
                 assert_eq!(rx.await.expect("verdict published"), verdict);
             }
         });
@@ -391,12 +393,9 @@ mod tests {
             let (task_tx, task_rx) = oneshot::channel();
             let (tx, rx) = oneshot::channel();
             task_tx.send_lossy(GateOutcome::Recover);
-            drive(tx, task_rx, round(1), digest, || async {
-                let (fallback_tx, fallback_rx) = oneshot::channel();
-                fallback_tx.send_lossy(true);
-                fallback_rx
-            })
-            .await;
+            let (fallback_tx, fallback_rx) = oneshot::channel();
+            fallback_tx.send_lossy(true);
+            drive(tx, task_rx, round(1), digest, || ready(fallback_rx)).await;
             assert!(rx.await.expect("fallback verdict published"));
         });
     }
@@ -409,12 +408,9 @@ mod tests {
             let (task_tx, task_rx) = oneshot::channel();
             let (tx, rx) = oneshot::channel();
             drop(task_tx);
-            drive(tx, task_rx, round(1), digest, || async {
-                let (fallback_tx, fallback_rx) = oneshot::channel();
-                fallback_tx.send_lossy(false);
-                fallback_rx
-            })
-            .await;
+            let (fallback_tx, fallback_rx) = oneshot::channel();
+            fallback_tx.send_lossy(false);
+            drive(tx, task_rx, round(1), digest, || ready(fallback_rx)).await;
             assert!(!rx.await.expect("fallback verdict published"));
         });
     }
@@ -427,10 +423,7 @@ mod tests {
             let (_task_tx, task_rx) = oneshot::channel();
             let (tx, rx) = oneshot::channel();
             drop(rx);
-            drive(tx, task_rx, round(1), digest, || async {
-                unreachable!("abandoned certification must not fall back")
-            })
-            .await;
+            drive(tx, task_rx, round(1), digest, no_fallback).await;
         });
     }
 
