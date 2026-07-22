@@ -1597,7 +1597,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // handle so the caller drives it.
         let watermark = self
             .offsets
-            .start_advance_watermark(self.durable_size.proven())
+            .start_advance_watermark(self.durable_size.size())
             .await;
 
         let joint: SyncCompletion = async move { try_join(data, offsets).await.map(|_| ()) }

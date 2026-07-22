@@ -397,16 +397,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         items_per_blob: NonZeroU64,
         metrics: Metrics<E>,
     ) -> Self {
-        // Every init path persists the watermark before construction, so it is a proven size
-        // to start from.
-        let durable_size = DurableSize::new(checkpoint.watermark().unwrap_or(bounds.start));
         Self {
             blobs,
+            durable_size: DurableSize::new(checkpoint.watermark().unwrap_or(bounds.start)),
             checkpoint,
             bounds,
             items_per_blob,
             metrics: Arc::new(metrics),
-            durable_size,
             _phantom: PhantomData,
         }
     }
@@ -835,8 +832,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Begin durably persisting the data blobs.
     pub(super) async fn start_data_sync(&mut self) -> Handle<()> {
         let handle = self.blobs.start_sync().await;
-        // The blob layer waited out the previous tail sync, which may have resolved the
-        // pending observation.
         self.durable_size.observe();
         let completion: SyncCompletion = handle.boxed().shared();
         self.durable_size
@@ -852,7 +847,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// or joined into a caller-driven handle) for the advance to complete.
     pub(super) async fn start_advance_watermark(&mut self, to: u64) -> Handle<()> {
         self.durable_size.observe();
-        let to = to.min(self.durable_size.proven());
+        let to = to.min(self.durable_size.size());
         match self.checkpoint.start_advance(to).await {
             Ok(handle) => Handle::from_future(async move {
                 if let Err(err) = handle.await {

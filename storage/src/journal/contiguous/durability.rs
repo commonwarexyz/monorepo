@@ -3,32 +3,27 @@
 use super::blobs::SyncCompletion;
 use futures::FutureExt as _;
 
-/// The highest size whose covering sync has been observed to complete successfully.
-///
-/// The tracked value advances only on observed success, so it is always safe to persist as a
-/// recovery watermark without ordering against in-flight syncs (see "Watermark advancement" in
-/// [super::fixed]).
+/// The highest size known to be durable.
 pub(super) struct DurableSize {
-    /// The highest proven size.
-    proven: u64,
+    /// The highest size known to be durable.
+    size: u64,
 
-    /// The size covered by the last started sync and its shared completion, until its outcome
-    /// is observed.
+    /// The size covered by the last started sync, and its completion.
     pending: Option<(u64, SyncCompletion)>,
 }
 
 impl DurableSize {
-    /// Create a tracker with `proven` size.
-    pub(super) const fn new(proven: u64) -> Self {
+    /// Create a tracker starting at `size`.
+    pub(super) const fn new(size: u64) -> Self {
         Self {
-            proven,
+            size,
             pending: None,
         }
     }
 
     /// The highest proven size.
-    pub(super) const fn proven(&self) -> u64 {
-        self.proven
+    pub(super) const fn size(&self) -> u64 {
+        self.size
     }
 
     /// Observe the outcome of the last started sync without blocking: on success, advance the
@@ -42,7 +37,7 @@ impl DurableSize {
             return;
         };
         if result.is_ok() {
-            self.proven = self.proven.max(*size);
+            self.size = self.size.max(*size);
         }
         self.pending = None;
     }
@@ -50,7 +45,7 @@ impl DurableSize {
     /// Record that all items below `size` were proven durable, discarding any pending
     /// observation it supersedes.
     pub(super) fn prove(&mut self, size: u64) {
-        self.proven = self.proven.max(size);
+        self.size = self.size.max(size);
         if matches!(self.pending, Some((pending, _)) if pending <= size) {
             self.pending = None;
         }
@@ -64,7 +59,7 @@ impl DurableSize {
     /// Lower the proven size to at most `size` after a shrink, discarding any pending
     /// observation.
     pub(super) fn truncate(&mut self, size: u64) {
-        self.proven = self.proven.min(size);
+        self.size = self.size.min(size);
         self.pending = None;
     }
 }

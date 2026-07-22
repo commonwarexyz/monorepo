@@ -375,11 +375,9 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Begin durably persisting the journal and the Merkle structure.
+    /// Begin durably persisting the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Also makes a best-effort attempt to bound the recovery needed on startup; use
-    /// [Self::sync] to guarantee none is needed.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let (journal_handle, merkle_handle);
         ((self.journal, journal_handle), (self.merkle, merkle_handle)) = try_join!(
