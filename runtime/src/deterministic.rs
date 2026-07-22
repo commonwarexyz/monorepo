@@ -72,6 +72,8 @@ use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
+#[cfg(target_arch = "wasm32")]
+use commonware_utils::Cached;
 use commonware_utils::{
     SystemTimeExt,
     sync::{Mutex, RwLock},
@@ -87,6 +89,8 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
+#[cfg(target_arch = "wasm32")]
+use rayon::ThreadPoolBuildError;
 use rayon::ThreadPoolBuilder;
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -235,6 +239,9 @@ pub struct Config {
     ///
     /// Defaults to the system stack size when the current platform exposes it,
     /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// On `wasm32`, the runtime executes on the caller thread and this setting
+    /// has no effect.
     ///
     /// See [thread::system_thread_stack_size].
     thread_stack_size: usize,
@@ -567,29 +574,48 @@ impl Runner {
 
     /// Like [crate::Runner::start], but also returns a [Checkpoint] that can be used
     /// to recover the state of the runtime in a subsequent run.
+    ///
+    /// On `wasm32`, where spawning threads is unsupported, the runtime executes on
+    /// the caller thread.
     pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut + Send,
         Fut: Future,
         Fut::Output: Send,
     {
-        let thread_stack_size = match &self.state {
-            State::Config(config) => config.thread_stack_size,
-            State::Checkpoint(checkpoint) => checkpoint.thread_stack_size,
-        };
-        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
-        let thread_pool = Arc::new(
-            ThreadPoolBuilder::new()
-                .num_threads(1)
-                .thread_name(|_| "deterministic-rt-root".to_string())
-                .stack_size(thread_stack_size)
-                .build()
-                .expect("failed to spawn thread"),
-        );
-        let executor_pool = Arc::clone(&thread_pool);
-        thread_pool.install(move || {
-            tracing::dispatcher::with_default(&dispatcher, || self.run(f, executor_pool))
-        })
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "wasm32")] {
+                self.run(
+                    f,
+                    shared_thread_pool()
+                        .expect("failed to create deterministic Rayon thread pool"),
+                )
+            } else {
+                let thread_stack_size = match &self.state {
+                    State::Config(config) => config.thread_stack_size,
+                    State::Checkpoint(checkpoint) => checkpoint.thread_stack_size,
+                };
+                let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+                // `use_current_thread` leaks its Rayon registry. Let Rayon manage the native
+                // executor thread to avoid leaking one registry per runtime invocation.
+                let thread_pool = Arc::new(
+                    ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .thread_name(|_| "deterministic-rt-root".to_string())
+                        .stack_size(thread_stack_size)
+                        .build()
+                        .expect("failed to spawn thread"),
+                );
+                thread_pool.install({
+                    let thread_pool = thread_pool.clone();
+                    move || {
+                        tracing::dispatcher::with_default(&dispatcher, || {
+                            self.run(f, thread_pool)
+                        })
+                    }
+                })
+            }
+        }
     }
 
     /// Run the runtime on the current thread and return a checkpoint.
@@ -1251,6 +1277,35 @@ impl crate::Spawner for Context {
 
         executor.shutdown.lock().stopped()
     }
+}
+
+// Rayon permits one permanent registry registration per OS thread. Cache the pool that
+// registered the executor thread so later requests and runners reuse it.
+//
+// On `wasm32`, the caller thread is the executor thread, so the cache is scoped to it.
+#[cfg(target_arch = "wasm32")]
+commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
+
+/// Returns the single-threaded pool the executor thread registered with, created on first use.
+///
+/// All pool work executes inline on the executor thread, so a larger pool would only
+/// add permanently unstarted workers.
+///
+/// On `wasm32`, this avoids attempting to spawn an unsupported worker thread.
+#[cfg(target_arch = "wasm32")]
+fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
+    let pool = Cached::take(
+        &THREAD_POOL,
+        || {
+            ThreadPoolBuilder::new()
+                .num_threads(1)
+                .use_current_thread()
+                .build()
+                .map(Arc::new)
+        },
+        |_| Ok(()),
+    )?;
+    Ok(Arc::clone(&pool))
 }
 
 /// The executor thread is the sole member of its Rayon pool, so all work executes inline.
