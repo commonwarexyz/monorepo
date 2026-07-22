@@ -131,6 +131,9 @@ mod tests {
     use commonware_invariants::minifuzz;
 
     fn test_fuzz<H: Hasher>() {
+        // The generators below always emit at least one part, so pin the
+        // zero-parts one-shot to the empty-message digest separately.
+        Plan::<H>::new(vec![], vec![]).run();
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(512)

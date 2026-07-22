@@ -77,7 +77,7 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut map = Self::with_capacity(len);
+        let mut map = Self::with_capacity(len.min(buf.remaining()));
 
         // Read items in ascending order
         read_ordered_map(
@@ -374,6 +374,21 @@ mod tests {
         vec![20u8, 21u8].write(&mut expected4);
 
         assert_eq!(map4.encode(), expected4.freeze());
+    }
+
+    #[test]
+    fn test_hashmap_malicious_allocation() {
+        // A length prefix advertising the maximum wire-encodable length (u32::MAX) with a
+        // single-entry payload must fail with [Error::EndOfBuffer] without attempting the
+        // advertised allocation.
+        let mut malicious_buf = BytesMut::new();
+        (u32::MAX as usize).write(&mut malicious_buf);
+        1u32.write(&mut malicious_buf);
+        100u64.write(&mut malicious_buf);
+
+        let result =
+            HashMap::<u32, u64>::decode_cfg(malicious_buf.freeze(), &((..).into(), ((), ())));
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
     #[cfg(feature = "arbitrary")]

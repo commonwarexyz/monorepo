@@ -77,6 +77,7 @@ fn digest_from_state(state: [u32; 8]) -> [u8; DIGEST_LENGTH] {
 /// the padding region, which is the bulk of the one-shot speedup.
 #[inline]
 fn finalize_fixed_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], len: usize) -> [u8; DIGEST_LENGTH] {
+    assert!(len <= MAX_FIXED);
     let bit_len = ((len as u64) * 8).to_be_bytes();
     scratch[len] = 0x80;
     let mut state = IV;
@@ -95,7 +96,7 @@ fn finalize_fixed_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], len: usize) -> [u8
 }
 
 /// Specialize the hot merkle shapes: constant offsets let the compiler inline
-/// the copies and drop the runtime-length bookkeeping. The rare/general case is
+/// the copies and drop the runtime-length bookkeeping. The general case is
 /// outlined into [`hash_general`] so this stays small enough to inline.
 #[inline(always)]
 fn hash_specialized(parts: &[&[u8]]) -> Digest {
@@ -130,8 +131,8 @@ fn hash_specialized(parts: &[&[u8]]) -> Digest {
 }
 
 /// General-purpose assembly + streaming fallback for shapes that miss the
-/// specialized arms. Outlined and marked cold so it never bloats callers.
-#[cold]
+/// specialized arms (e.g. single-part messages and variable-length leaves).
+/// Outlined so it never bloats callers.
 #[inline(never)]
 fn hash_general(parts: &[&[u8]]) -> Digest {
     let mut scratch = [0u8; 2 * BLOCK_LENGTH];
@@ -339,6 +340,29 @@ mod tests {
             let (_, streamed) = hasher.finalize();
 
             assert_eq!(oneshot, streamed, "mismatch for total={total}");
+        }
+    }
+
+    /// Pin every specialized fast-path arm against the streaming implementation.
+    #[test]
+    fn test_sha256_hash_specialized_arms() {
+        let data: Vec<u8> = (0u8..72).collect();
+        let shapes: [&[&[u8]]; 4] = [
+            &[&data[..8], &data[8..40], &data[40..72]],
+            &[&data[..32], &data[32..64]],
+            &[&data[..8], &data[8..40]],
+            &[&data[..4], &data[4..36]],
+        ];
+        for parts in shapes {
+            let oneshot = Sha256::hash(parts);
+
+            let mut hasher = Sha256::default();
+            for part in parts {
+                hasher.update(part);
+            }
+            let (_, streamed) = hasher.finalize();
+
+            assert_eq!(oneshot, streamed, "mismatch for shape {parts:?}");
         }
     }
 

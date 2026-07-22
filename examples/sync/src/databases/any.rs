@@ -63,24 +63,10 @@ where
     type Operation = Operation;
 
     fn create_test_operations(count: usize, seed: u64, _starting_loc: u64) -> Vec<Self::Operation> {
-        let mut hasher = Hasher::default();
         let mut operations = Vec::new();
         for i in 0..count {
-            let key = {
-                hasher.update(&i.to_be_bytes());
-                hasher.update(&seed.to_be_bytes());
-                let (next_hasher, digest) = hasher.finalize();
-                hasher = next_hasher;
-                digest
-            };
-
-            let value = {
-                hasher.update(&key);
-                hasher.update(b"value");
-                let (next_hasher, digest) = hasher.finalize();
-                hasher = next_hasher;
-                digest
-            };
+            let key = Hasher::hash(&[&i.to_be_bytes(), &seed.to_be_bytes()]);
+            let value = Hasher::hash(&[&key, b"value"]);
 
             operations.push(Operation::Update(Update(key, value)));
 

@@ -42,7 +42,7 @@ pub struct Config<
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
-    pub activity_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
     pub page_cache: CacheRef,
@@ -231,11 +231,10 @@ mod tests {
             elector: elector.clone(),
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let relay = Arc::new(mocks::relay::Relay::new());
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
 
-        let application_cfg = mocks::application::Config {
-            hasher: Sha256::default(),
+        let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (1.0, 0.0),
@@ -261,7 +260,7 @@ mod tests {
             leader_timeout: options.leader_timeout,
             certification_timeout: options.certification_timeout,
             timeout_retry: options.timeout_retry,
-            activity_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -397,10 +396,9 @@ mod tests {
             elector: elector.clone(),
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let relay = Arc::new(mocks::relay::Relay::new());
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(schemes[0].participants());
-        let application_cfg = mocks::application::Config {
-            hasher: Sha256::default(),
+        let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (1.0, 0.0),
@@ -426,7 +424,7 @@ mod tests {
             leader_timeout: Duration::from_secs(5),
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
-            activity_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache,
@@ -830,9 +828,8 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
@@ -857,7 +854,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1021,7 +1018,7 @@ mod tests {
     /// 1. Advance last_finalized to a view 50.
     /// 2. Ensure self.views contains a view V_A (45) which is interesting,
     ///    and becomes the 'oldest' view when prune_views runs, setting the journal floor.
-    ///    Crucially, ensure there's a "gap" so that V_A is not LF - activity_timeout.
+    ///    Crucially, ensure there's a "gap" so that V_A is not LF - view_retention.
     /// 3. Let prune_views run, setting the journal floor to V_A.
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
@@ -1034,7 +1031,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Get participants
@@ -1061,9 +1058,8 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(signing.participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let app_config = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let app_config = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -1088,7 +1084,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
-                activity_timeout,
+                view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1146,7 +1142,7 @@ mod tests {
             // We want journal pruned at 45.
             let lf_target = View::new(50);
             let journal_floor_target = lf_target
-                .saturating_sub(activity_timeout)
+                .saturating_sub(view_retention)
                 .saturating_add(ViewDelta::new(5));
 
             // Send Finalization via voter mailbox to advance last_finalized
@@ -1701,9 +1697,8 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -1729,7 +1724,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1880,9 +1875,8 @@ mod tests {
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: leader.clone(),
                 propose_latency: (50.0, 10.0),
@@ -1916,7 +1910,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2083,9 +2077,8 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -2112,7 +2105,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2205,7 +2198,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2318,10 +2311,9 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -2350,7 +2342,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
@@ -2527,9 +2519,8 @@ mod tests {
             }
 
             let view_1 = View::new(1);
-            let mut hasher = Sha256::default();
-            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
-            let (_, genesis) = hasher.finalize();
+            let genesis =
+                Sha256::hash(&[&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode()]);
             let proposal_1 = Proposal::new(
                 Round::new(Epoch::new(333), view_1),
                 View::zero(),
@@ -2925,7 +2916,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
             // Get participants
@@ -2950,10 +2941,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -2983,7 +2973,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout,
+                view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3163,10 +3153,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3193,7 +3182,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3361,10 +3350,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3392,7 +3380,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3526,10 +3514,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3557,7 +3544,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3870,10 +3857,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3900,7 +3886,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(250),
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4148,12 +4134,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let me = participants[0].clone();
 
             // Create application with certify tracking
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4182,7 +4167,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4274,8 +4259,7 @@ mod tests {
 
             // Create new application with same tracker
             let tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4306,7 +4290,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4404,7 +4388,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Install propose + verify observers from the start so we can assert the
             // leader's propose call fires but no verify call is issued for our proposal.
@@ -4412,8 +4396,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4445,7 +4428,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4573,12 +4556,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can
             // cleanly propose and journal its own notarize vote for view 2.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4605,7 +4587,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4671,8 +4653,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4706,7 +4687,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4828,7 +4809,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-crash: drop every propose response. The leader calls
             // `automaton.propose`, the mock swallows the request, and nothing
@@ -4838,8 +4819,7 @@ mod tests {
             // the voter even became leader.
             let pre_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let pre_propose_tracker = pre_propose_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4876,7 +4856,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4953,8 +4933,7 @@ mod tests {
             // exactly one call for the target view.
             let post_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let post_propose_tracker = post_propose_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4988,7 +4967,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5123,12 +5102,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can verify
             // the leader's proposal and journal its own notarize vote for view 3.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5155,7 +5133,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5234,8 +5212,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5269,7 +5246,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5397,14 +5374,13 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Install a certify observer to confirm the leader certifies its own
             // proposal for the leader-owned view.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5436,7 +5412,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5578,12 +5554,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can
             // cleanly propose and journal its own notarize vote for view 2.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5610,7 +5585,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5675,8 +5650,7 @@ mod tests {
             handle.abort();
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5710,7 +5684,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5839,7 +5813,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Stall the propose response so the slot is never populated with
             // a locally-built proposal. The slot stays empty (proposal=None,
@@ -5852,8 +5826,7 @@ mod tests {
             // leader-owned proposal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5886,7 +5859,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6037,10 +6010,9 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -6066,7 +6038,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6224,10 +6196,9 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -6253,7 +6224,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -7182,14 +7153,13 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             let partition = "cancelled_certification_recertifies_after_restart".to_string();
             let epoch = Epoch::new(333);
 
             // First run: certification receiver gets cancelled.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -7215,7 +7185,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -7301,8 +7271,7 @@ mod tests {
             // Second run: certification should succeed from replayed state.
             // Use a longer certify latency so there is a real window where an
             // incorrect immediate nullify could fire after restart.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -7328,7 +7297,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8404,9 +8373,8 @@ mod tests {
             }
 
             // Build a valid first-view proposal (parent is genesis at view 0).
-            let mut hasher = Sha256::default();
-            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
-            let (_, genesis) = hasher.finalize();
+            let genesis =
+                Sha256::hash(&[&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode()]);
             let proposal = Proposal::new(
                 first_round,
                 View::zero(),
@@ -8550,7 +8518,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg.clone());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
             let target_view = View::new(3);
 
@@ -8562,8 +8530,7 @@ mod tests {
             let pending_syncs_for_certifier = pending_syncs.clone();
 
             // Arm the sync gate immediately before the target certification succeeds.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8595,7 +8562,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(
@@ -8805,8 +8772,7 @@ mod tests {
             // Second run: replay should process Artifact::Certification from journal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8842,7 +8808,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8960,12 +8926,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
 
             // First run: certify fails (returns false).
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8991,7 +8956,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9077,8 +9042,7 @@ mod tests {
             handle.abort();
 
             // Second run: replay should process Artifact::Certification(false) from journal.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9104,7 +9068,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9216,12 +9180,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
 
             // First run: trigger timeout and nullification.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9247,7 +9210,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9337,8 +9300,7 @@ mod tests {
 
             // Second run: replay should process Artifact::Nullify and
             // Artifact::Nullification from journal.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9364,7 +9326,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9474,10 +9436,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9503,7 +9464,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

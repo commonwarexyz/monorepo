@@ -8,30 +8,16 @@ use core::marker::PhantomData;
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
 /// The type parameter `F` determines which Merkle family (MMR, MMB, etc.) this hasher targets, and
-/// consequently which `Position` and `Location` types appear in method signatures. Default
-/// implementations are provided for all methods.
-///
-/// # Relationship to [`CHasher`]
-///
-/// Every Merkle hasher delegates its actual hashing to an underlying cryptographic
-/// [`CHasher`] (see the [`Hasher`](Self::Hasher) associated type). The default [`hash`](Self::hash)
-/// implementation forwards directly to [`CHasher::hash`], so all Merkle hashers automatically
-/// benefit from the underlying hasher's optimized one-shot path. Implementors only need to declare
-/// their underlying [`CHasher`] and a bagging policy.
+/// consequently which `Position` and `Location` types appear in method signatures.
 pub trait Hasher<F: Family>: Clone + Send + Sync {
-    /// The underlying cryptographic hasher that this Merkle hasher delegates to.
-    type Hasher: CHasher<Digest = Self::Digest>;
-
-    /// Digest produced by this hasher; always matches the underlying [`CHasher`]'s digest.
+    /// Digest produced by this hasher.
     type Digest: Digest;
 
     /// Hash a sequence of byte slices into a single digest.
     ///
     /// The parts are concatenated before hashing (i.e. there is no domain separation between
-    /// parts). By default this forwards to the underlying [`CHasher::hash`].
-    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
-        <Self::Hasher as CHasher>::hash(parts)
-    }
+    /// parts).
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest;
 
     /// The bagging policy applied when this hasher folds peaks into a root. Only affects root peak
     /// aggregation; `hash`, `leaf_digest`, and `node_digest` are unaffected.
@@ -216,8 +202,11 @@ impl<H: CHasher> Standard<H> {
 }
 
 impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
-    type Hasher = H;
     type Digest = H::Digest;
+
+    fn hash(&self, parts: &[&[u8]]) -> H::Digest {
+        Self::hash(self, parts)
+    }
 
     fn root_bagging(&self) -> Bagging {
         Self::root_bagging(self)
@@ -238,11 +227,12 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     }
 }
 
-// Forward every method, not just the required ones: a `&T` bound must resolve to `T`'s
-// overrides (e.g. a grafting hasher's `node_digest`), never to the trait defaults.
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
-    type Hasher = T::Hasher;
     type Digest = T::Digest;
+
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
+        (**self).hash(parts)
+    }
 
     fn root_bagging(&self) -> Bagging {
         (**self).root_bagging()

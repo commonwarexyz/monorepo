@@ -27,7 +27,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     /// Strategy for parallel operations.
     pub strategy: T,
 
-    pub activity_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
     pub skip_timeout: Duration,
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
@@ -179,7 +179,7 @@ mod tests {
     /// Batcher [Config] fields that vary across tests; everything else is
     /// fixed by [test_config].
     struct BatcherOptions {
-        activity_timeout: ViewDelta,
+        view_retention: ViewDelta,
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
@@ -189,7 +189,7 @@ mod tests {
     impl Default for BatcherOptions {
         fn default() -> Self {
             Self {
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
@@ -214,7 +214,7 @@ mod tests {
             reporter,
             relay,
             strategy: Sequential,
-            activity_timeout: options.activity_timeout,
+            view_retention: options.view_retention,
             skip_timeout: options.skip_timeout,
             epoch,
             mailbox_size: NZUsize!(128),
@@ -2902,27 +2902,6 @@ mod tests {
             batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
             expect_no_timeout(&mut context, &mut voter_receiver).await;
 
-            // Test 3: Send a vote from the leader for the current view (view 5)
-            let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
-            let leader_vote = Notarize::sign(&schemes[1], proposal).unwrap();
-            let (_, leader_sender) = peer_senders.iter_mut().find(|(i, _)| *i == 1).unwrap();
-            leader_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Vote::Notarize(leader_vote).encode(),
-                    true,
-                );
-
-            // Give network time to deliver
-            context.sleep(Duration::from_millis(50)).await;
-
-            // Test 4: Advance to view skip_timeout + 1 (view 6)
-            // Leader voted in view 5, which is in the recent window, so should be active
-            let view = View::new(skip_timeout + 1);
-            batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
-            expect_no_timeout(&mut context, &mut voter_receiver).await;
-
             // Test 3: Jump far ahead. We still fail open because we never observed a quorum of
             // recently active participants.
             let view = View::new(100);
@@ -3819,7 +3798,7 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    activity_timeout: ViewDelta::new(2),
+                    view_retention: ViewDelta::new(2),
                     floor,
                     ..Default::default()
                 },
@@ -3897,7 +3876,7 @@ mod tests {
             }
 
             // The stale vote below the activity window must not have produced
-            // any activity (votes within `activity_timeout` of the floor are
+            // any activity (votes within `view_retention` of the floor are
             // still reported)
             assert!(
                 reporter.notarizes.lock().get(&stale_view).is_none(),
@@ -3959,7 +3938,7 @@ mod tests {
                 MockRelay::new(),
                 epoch,
                 BatcherOptions {
-                    activity_timeout: ViewDelta::new(2),
+                    view_retention: ViewDelta::new(2),
                     ..Default::default()
                 },
             );

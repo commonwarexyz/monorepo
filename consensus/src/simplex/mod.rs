@@ -126,7 +126,7 @@
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
 //!   entered in the current term.
-//! * Votes are tracked down to `activity_timeout` views below the highest finalized view: late
+//! * Votes are tracked down to `view_retention` views below the highest finalized view: late
 //!   votes in that window are still reported (and equivocation there is still detected), even
 //!   though they are no longer verified or used for certificate construction. Votes below the
 //!   window are ignored on arrival, so downstream systems consuming per-vote activity (rewards,
@@ -427,7 +427,7 @@ cfg_if::cfg_if! {
             /// View currently being driven.
             pub current: View,
             /// Views retained below `finalized` (for reporting and backfill).
-            pub activity_timeout: ViewDelta,
+            pub view_retention: ViewDelta,
             /// Number of views in each leader term.
             pub term_length: TermLength,
         }
@@ -435,11 +435,11 @@ cfg_if::cfg_if! {
         impl Viewport {
             /// Returns the lowest view retained (genesis is never tracked).
             pub const fn floor(&self) -> View {
-                self.finalized.saturating_sub(self.activity_timeout)
+                self.finalized.saturating_sub(self.view_retention)
             }
 
             /// Returns whether `view` is retained: at or above the activity
-            /// floor and not genesis. Views up to `activity_timeout` below
+            /// floor and not genesis. Views up to `view_retention` below
             /// `finalized` are kept so late votes are still reported (even
             /// when no longer needed for progress).
             pub const fn retains(&self, view: View) -> bool {
@@ -820,7 +820,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -847,7 +847,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -865,8 +865,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -898,7 +897,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -928,7 +927,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check reporters for correct activity
-            let latest_complete = required_containers.saturating_sub(activity_timeout);
+            let latest_complete = required_containers.saturating_sub(view_retention);
             for reporter in reporters.iter() {
                 // Ensure no faults
                 reporter.assert_no_faults();
@@ -1073,7 +1072,7 @@ mod tests {
         let n = 5;
         let active_count = quorum(n) as usize;
         let initial_tip_target = View::new(15);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(5);
         let timeout_retry = Duration::from_secs(1);
         let namespace = b"consensus".to_vec();
@@ -1104,7 +1103,7 @@ mod tests {
                 .build(schemes[0].participants())
                 .terms()
                 .length();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
 
@@ -1124,8 +1123,7 @@ mod tests {
                 );
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1157,7 +1155,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1247,8 +1245,7 @@ mod tests {
                 mocks::reporter::Reporter::new(joiner_context.child("reporter"), reporter_config);
             reporters.push(joiner_reporter.clone());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: joiner.clone(),
                 propose_latency: (10.0, 5.0),
@@ -1278,7 +1275,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout,
+                view_retention,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -1343,7 +1340,7 @@ mod tests {
     {
         let n = 5;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -1368,7 +1365,7 @@ mod tests {
             let elector = RoundRobin::default();
             let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
             let built_elector = elector.clone().build(&participants_set);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             let dishonest = Participant::new(0);
@@ -1385,8 +1382,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1422,7 +1418,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1485,7 +1481,7 @@ mod tests {
         // Create context
         let n_active = 5;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -1526,7 +1522,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
 
             for (idx, validator) in participants.iter().enumerate() {
@@ -1551,8 +1547,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1584,7 +1579,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1638,7 +1633,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
 
@@ -1687,7 +1682,7 @@ mod tests {
 
                 // Create engines
                 let elector = L::default();
-                let relay = Arc::new(mocks::relay::Relay::new());
+                let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
@@ -1705,8 +1700,7 @@ mod tests {
                     let reporter_rng = StdRng::from_seed(reporter_seed);
                     let reporter = mocks::reporter::Reporter::new(reporter_rng, reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -1740,7 +1734,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(1),
                         timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -1828,7 +1822,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
@@ -1860,7 +1854,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -1883,8 +1877,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1916,7 +1909,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2007,8 +2000,7 @@ mod tests {
             let mut reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             reporters.push(reporter.clone());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
@@ -2038,7 +2030,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout,
+                view_retention,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2087,7 +2079,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
@@ -2119,7 +2111,7 @@ mod tests {
             .await;
 
             // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2142,8 +2134,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2175,7 +2166,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2322,7 +2313,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -2348,7 +2339,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2367,8 +2358,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = if idx_scheme == 0 {
-                    mocks::application::Config {
-                        hasher: Sha256::default(),
+                    mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
@@ -2377,8 +2367,7 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     }
                 } else {
-                    mocks::application::Config {
-                        hasher: Sha256::default(),
+                    mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -2411,7 +2400,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2496,7 +2485,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
@@ -2522,7 +2511,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -2540,8 +2529,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2573,7 +2561,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2659,7 +2647,7 @@ mod tests {
                     // certified for the purposes of testing.
                     let mut found = 0;
                     let notarizations = reporter.notarizations.lock();
-                    for view in View::range(latest, latest.saturating_add(activity_timeout)) {
+                    for view in View::range(latest, latest.saturating_add(view_retention)) {
                         if notarizations.contains_key(&view) {
                             found += 1;
                         }
@@ -2669,7 +2657,7 @@ mod tests {
                     // bounds that to a handful of views, not the viewport.
                     let tolerated_missing = 3;
                     assert!(
-                        found >= activity_timeout.get().saturating_sub(tolerated_missing),
+                        found >= view_retention.get().saturating_sub(tolerated_missing),
                         "found: {found}"
                     );
                 }
@@ -2692,7 +2680,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(10);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(3600));
@@ -2711,7 +2699,7 @@ mod tests {
             // Participant 0 never starts an engine and no links exist yet, so no
             // view can produce a certificate before the crash below.
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2734,8 +2722,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2767,7 +2754,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2852,8 +2839,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2885,7 +2871,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2928,7 +2914,7 @@ mod tests {
         // Create context
         let n = 10;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
@@ -2954,7 +2940,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -2972,8 +2958,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3005,7 +2990,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3107,7 +3092,7 @@ mod tests {
         // Create context
         let n = 5;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3142,7 +3127,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -3160,8 +3145,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3193,7 +3177,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3298,7 +3282,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3327,7 +3311,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -3356,8 +3340,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -3389,7 +3372,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -3464,7 +3447,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3508,7 +3491,7 @@ mod tests {
 
             // Create engines
             let elector = wrapped::Config(L::default());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -3525,8 +3508,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3558,7 +3540,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3629,7 +3611,7 @@ mod tests {
     {
         let n = 4;
         let required_containers = View::new(10);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3675,7 +3657,7 @@ mod tests {
             .await;
 
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 let context = context
@@ -3690,8 +3672,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3723,7 +3704,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3879,9 +3860,8 @@ mod tests {
             let mut monitor_reporter = reporter.clone();
             let (mut latest, mut monitor) = monitor_reporter.subscribe().await;
 
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (0.0, 0.0),
@@ -3910,7 +3890,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -3938,7 +3918,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -3967,7 +3947,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -3999,8 +3979,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4032,7 +4011,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4088,7 +4067,7 @@ mod tests {
         // Create context
         let n = 7;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4118,7 +4097,7 @@ mod tests {
             // Create engines
             let elector = L::default();
             let mut engines = Vec::new();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4139,11 +4118,10 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::equivocator::Config {
+                    let cfg = mocks::equivocator::Config::<_, _, Sha256> {
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
                         relay: relay.clone(),
-                        hasher: Sha256::default(),
                         elector: elector.clone(),
                     };
 
@@ -4153,8 +4131,7 @@ mod tests {
                     );
                     engines.push(engine.start(pending, recovered));
                 } else {
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4186,7 +4163,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4249,8 +4226,7 @@ mod tests {
             let (pending, recovered, resolver) =
                 register_validator(&mut oracle, validator.clone()).await;
             reporters.push(reporter.clone());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),
@@ -4280,7 +4256,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout,
+                view_retention,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4340,7 +4316,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4369,7 +4345,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4400,8 +4376,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4433,7 +4408,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4489,7 +4464,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(50);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4518,7 +4493,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4546,8 +4521,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4579,7 +4553,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4651,7 +4625,7 @@ mod tests {
         // Create context
         let n = 4;
         let required_containers = View::new(100);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
@@ -4680,7 +4654,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4702,15 +4676,14 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
+                        view_delta: ViewDelta::new(view_retention.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.child("byzantine_engine"), cfg);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4742,7 +4715,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4793,7 +4766,7 @@ mod tests {
         // Create context
         let n = 10;
         let required_containers = View::new(1_000);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
@@ -4820,7 +4793,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4838,8 +4811,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (100.0, 50.0),
@@ -4871,7 +4843,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -4962,9 +4934,8 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -4994,7 +4965,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(100),
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
-                activity_timeout: ViewDelta::new(4),
+                view_retention: ViewDelta::new(4),
                 skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 16),
@@ -5083,7 +5054,7 @@ mod tests {
     {
         let n = 3;
         let required_containers = View::new(10);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
@@ -5112,7 +5083,7 @@ mod tests {
 
             // Create engines with `AttributableReporter` wrapper
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 let context = context
@@ -5137,8 +5108,7 @@ mod tests {
                 );
                 reporters.push(mock_reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5170,7 +5140,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5297,7 +5267,7 @@ mod tests {
         let n = 10;
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -5434,7 +5404,7 @@ mod tests {
             // recovered channel (ensuring processing before any leader attempts to issue a
             // conflicting vote).
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 let (pending, recovered, resolver) = registrations
@@ -5472,8 +5442,7 @@ mod tests {
                     );
                     honest_reporters.push(reporter.clone());
 
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (250.0, 50.0), // ensure we process certificates first
@@ -5507,7 +5476,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(11),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -5631,7 +5600,7 @@ mod tests {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
-        let activity_timeout = ViewDelta::new(100);
+        let view_retention = ViewDelta::new(100);
         let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -5656,7 +5625,7 @@ mod tests {
 
             // Create engines and reporters
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             let monitor_reporter = Arc::new(Mutex::new(None));
@@ -5680,8 +5649,7 @@ mod tests {
                 }
 
                 // Configure application
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5713,7 +5681,7 @@ mod tests {
                     certification_timeout: Duration::from_millis(200),
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_millis(100),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5782,7 +5750,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
@@ -5808,7 +5776,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -5826,8 +5794,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.insert(idx, reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5859,7 +5826,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5927,8 +5894,7 @@ mod tests {
                 // Start engine
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5961,7 +5927,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout,
+                    view_retention,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5987,7 +5953,7 @@ mod tests {
             }
 
             // Check reporters for correct activity
-            let latest_complete = target.saturating_sub(activity_timeout);
+            let latest_complete = target.saturating_sub(view_retention);
             for reporter in reporters.values() {
                 // Ensure no faults
                 reporter.assert_no_faults();
@@ -6201,7 +6167,7 @@ mod tests {
                 "unexpected twins count for n={n} (expected f={faults})",
             );
 
-            let activity_timeout = ViewDelta::new(10);
+            let view_retention = ViewDelta::new(10);
             let skip_timeout = Duration::from_secs(11);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
@@ -6240,7 +6206,7 @@ mod tests {
                     &scenario,
                     n as usize,
                 );
-                let relay = Arc::new(mocks::relay::Relay::new());
+                let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
                 let twin_index_set: HashSet<usize> = twin_indices.iter().copied().collect();
@@ -6348,8 +6314,7 @@ mod tests {
                         );
                         reporters.push(reporter.clone());
 
-                        let application_cfg = mocks::application::Config {
-                            hasher: Sha256::default(),
+                        let application_cfg = mocks::application::Config::<Sha256, _> {
                             relay: relay.clone(),
                             me: validator.clone(),
                             propose_latency: (10.0, 5.0),
@@ -6382,7 +6347,7 @@ mod tests {
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
-                            activity_timeout,
+                            view_retention,
                             skip_timeout,
                             fetch_concurrent: NZUsize!(4),
                             replay_buffer: NZUsize!(1024 * 1024),
@@ -6418,8 +6383,7 @@ mod tests {
                         mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     reporters.push(reporter.clone());
 
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -6452,7 +6416,7 @@ mod tests {
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        activity_timeout,
+                        view_retention,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -6716,14 +6680,14 @@ mod tests {
         let viewport = Viewport {
             finalized: View::new(20),
             current: View::new(25),
-            activity_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             term_length: TermLength::new(commonware_utils::NZU32!(10)),
         };
 
         // Genesis is never tracked
         assert!(!viewport.retains(View::zero()));
 
-        // Retention floor is activity_timeout below finalized
+        // Retention floor is view_retention below finalized
         assert_eq!(viewport.floor(), View::new(10));
         assert!(!viewport.retains(View::new(9)));
         assert!(viewport.retains(View::new(10)));

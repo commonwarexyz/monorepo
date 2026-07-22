@@ -37,7 +37,6 @@
 //! let root = tree.root();
 //!
 //! // Generate a proof for leaf at index 1
-//! let mut hasher = Sha256::default();
 //! let proof = tree.proof(1).unwrap();
 //! assert!(proof.verify_element_inclusion::<Sha256>(&digests[1], 1, &root).is_ok());
 //! ```
@@ -75,7 +74,6 @@ pub enum Error {
 
 /// Constructor for a Binary Merkle Tree (BMT).
 pub struct Builder<H: Hasher> {
-    hasher: H,
     leaves: Vec<H::Digest>,
 }
 
@@ -83,7 +81,6 @@ impl<H: Hasher> Builder<H> {
     /// Creates a new Binary Merkle Tree builder.
     pub fn new(leaves: usize) -> Self {
         Self {
-            hasher: H::default(),
             leaves: Vec::with_capacity(leaves),
         }
     }
@@ -103,7 +100,7 @@ impl<H: Hasher> Builder<H> {
     /// It is valid to build a tree with no leaves, in which case
     /// just an "empty" node is included (no leaves will be provable).
     pub fn build(self) -> Tree<H::Digest> {
-        Tree::new(self.hasher, self.leaves)
+        Tree::new::<H>(self.leaves)
     }
 }
 
@@ -126,7 +123,7 @@ pub struct Tree<D: Digest> {
 
 impl<D: Digest> Tree<D> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new<H: Hasher<Digest = D>>(_hasher: H, mut leaves: Vec<D>) -> Self {
+    fn new<H: Hasher<Digest = D>>(mut leaves: Vec<D>) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -468,7 +465,7 @@ fn siblings_required_for_range_proof(
 
 impl<D: Digest> Proof<D> {
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
-    /// with `root` using the provided `hasher`.
+    /// with `root`.
     ///
     /// The proof consists of sibling hashes stored from the leaf up to the root. At each
     /// level, if the current node is a left child (even index), the sibling is combined
@@ -1579,10 +1576,8 @@ mod tests {
         }
 
         // The root should be the hash of empty data
-        let mut hasher = Sha256::default();
-        hasher.update(&0u32.to_be_bytes());
-        hasher.update(&Sha256::hash(&[b""]));
-        let (_, expected_root) = hasher.finalize();
+        let empty = Sha256::hash(&[b""]);
+        let expected_root = Sha256::hash(&[&0u32.to_be_bytes(), &empty]);
         assert_eq!(roots[0], expected_root);
     }
 

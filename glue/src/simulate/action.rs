@@ -1,9 +1,10 @@
 //! Simulation action types for testing.
 
+use commonware_consensus::types::Round;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::Link;
 use commonware_runtime::deterministic;
-use std::time::Duration;
+use std::{ops::RangeInclusive, time::Duration};
 
 /// Crash strategy for a simulation run.
 #[derive(Clone)]
@@ -19,12 +20,23 @@ pub enum Crash<P: PublicKey> {
         count: usize,
     },
 
-    /// Delay some validators from starting until after N finalizations.
-    Delay {
-        /// Number of validators to delay.
-        count: usize,
-        /// Number of finalizations before starting delayed validators.
-        after: u64,
+    /// Delay specific validators until the given round is observed.
+    DelayRound {
+        /// Validators to delay.
+        participants: Vec<P>,
+        /// Round to wait for before starting delayed validators.
+        round: Round,
+    },
+
+    /// Crash a validator when its application enters a processed-height window,
+    /// then restart it after the configured downtime.
+    ProcessedHeight {
+        /// Validator to crash.
+        participant: P,
+        /// Processed-height window in which the crash must occur.
+        heights: RangeInclusive<u64>,
+        /// How long the validator remains offline.
+        downtime: Duration,
     },
 
     /// Time-indexed action schedule for precise control.
