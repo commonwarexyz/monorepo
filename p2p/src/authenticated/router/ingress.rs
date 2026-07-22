@@ -1,8 +1,8 @@
 use crate::{
     Channel, Recipients,
     authenticated::{
-        data::EncodedData,
-        discovery::{channels::Channels, types},
+        channels::Channels,
+        data::{DATA_PREFIX, EncodedData},
         relay::Relay,
     },
     utils::limited::Connected,
@@ -124,8 +124,8 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Unreliable<Feedback> {
-        // Build Data and encode Payload::Data once for all recipients
-        let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
+        // Encode the data frame once for all recipients
+        let encoded = EncodedData::new(&self.pool, DATA_PREFIX, channel, message);
 
         self.sender.0.enqueue(Message::Content {
             recipients,

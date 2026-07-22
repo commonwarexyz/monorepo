@@ -1,20 +1,6 @@
-use crate::{
-    Channel,
-    authenticated::data::{Data, EncodedData},
-};
+use crate::authenticated::data::{DATA_PREFIX, Data};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, BufferPool, IoBufs};
-
-/// The maximum overhead (in bytes) when encoding a [Data].
-///
-/// The byte overhead is calculated as the sum of the following:
-/// - 1: Message enum discriminant
-/// - 10: Channel varint
-/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
-
-/// Prefix that identifies the message as a Data message.
-pub const DATA_PREFIX: u8 = 0;
+use commonware_runtime::{Buf, BufMut};
 
 /// Prefix that identifies the message as a Ping message.
 pub const PING_PREFIX: u8 = 1;
@@ -25,13 +11,6 @@ pub const PING_PREFIX: u8 = 1;
 pub enum Message {
     Data(Data),
     Ping,
-}
-
-impl Message {
-    /// Encode `Message::Data` bytes for transmission using pooled header allocation.
-    pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
-        EncodedData::new(pool, DATA_PREFIX, channel, message)
-    }
 }
 
 impl From<Data> for Message {
@@ -82,6 +61,7 @@ impl Read for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::data::MAX_PAYLOAD_DATA_OVERHEAD;
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_runtime::IoBuf;
 

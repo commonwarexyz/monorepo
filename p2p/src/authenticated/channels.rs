@@ -1,4 +1,4 @@
-use super::{Error, actors::Messenger};
+use super::router::Messenger;
 use crate::{
     Channel, Message as NetworkMessage, Recipients,
     utils::limited::{CheckedSender, LimitedSender},
@@ -15,6 +15,14 @@ use std::{
     num::NonZeroUsize,
     time::SystemTime,
 };
+use thiserror::Error;
+
+/// Errors that can occur when interacting with the network.
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("network closed")]
+    NetworkClosed,
+}
 
 pub(crate) struct Inbound<P: PublicKey>(pub(crate) NetworkMessage<P>);
 

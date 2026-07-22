@@ -38,6 +38,21 @@ impl Read for Data {
     }
 }
 
+/// Prefix byte identifying a data frame on the wire.
+///
+/// Both authenticated wire protocols (discovery and lookup) assign this
+/// discriminant to their data variant; the shared router relies on it when
+/// encoding outbound messages.
+pub(crate) const DATA_PREFIX: u8 = 0;
+
+/// The maximum overhead (in bytes) when encoding a `message` into a data frame.
+///
+/// The byte overhead is calculated as the sum of the following:
+/// - 1: Frame discriminant
+/// - 10: Channel varint
+/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
+pub(crate) const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
+
 /// Pre-encoded data ready for transmission.
 ///
 /// Contains the channel ID (for metrics) and the pre-encoded payload bytes.

@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     Recipients,
-    authenticated::{data::EncodedData, discovery::channels::Channels, relay::Relay},
+    authenticated::{channels::Channels, data::EncodedData, relay::Relay},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -75,13 +75,13 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 
     /// Starts a new task that runs the router [Actor].
     /// Returns a [Handle] that can be used to await the completion of the task,
-    /// which will run until its `control` receiver is closed.
+    /// which will run until its `control` receiver is closed or shutdown is signaled.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
         spawn_cell!(self.context, self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming control and content messages.
-    /// Returns when the `control` channel is closed.
+    /// Returns when the `control` channel is closed or shutdown is signaled.
     async fn run(mut self, routing: Channels<P>) {
         select_loop! {
             self.context,
