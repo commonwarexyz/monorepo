@@ -149,6 +149,8 @@ impl<D: Digest> Tree<D> {
                 } else {
                     &chunk[0]
                 };
+
+                // Compute the parent digest
                 let digest = H::hash(&[chunk[0].as_ref(), right.as_ref()]);
                 next_level.push(digest);
             }
