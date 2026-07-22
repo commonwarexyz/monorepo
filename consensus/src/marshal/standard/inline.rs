@@ -429,6 +429,10 @@ where
         // while the block subscription / durable sync is still in flight. Inline verification
         // verdicts are scoped to the proposal context, while certification receives only a
         // notarized `(round, digest)`, so this gate records durability rather than validity.
+        // Unlike deferred, inline blocks do not embed their context, so no local check can
+        // rule out an honest notarization forming under a different header for this key. A
+        // notarization also implies f+1 honest validators already ran application
+        // verification, so durability is the only local fact certification still needs.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
@@ -491,9 +495,11 @@ where
                 let block = match decision {
                     Decision::Complete(valid) => {
                         // Re-proposal: a valid precheck already persisted the block
-                        // (durable), an invalid one is an epoch rejection. An invalid
-                        // precheck is not a certification verdict for a potentially
-                        // conflicting header.
+                        // (durable), an invalid one is an epoch rejection. The rejection
+                        // only speaks for this header: without an embedded context an
+                        // honest notarization may still form for the same
+                        // `(round, digest)` under another header, so certification must
+                        // recover rather than adopt it.
                         tx.send_lossy(valid);
                         durable_tx.send_lossy(if valid {
                             GateOutcome::Ready(true)
