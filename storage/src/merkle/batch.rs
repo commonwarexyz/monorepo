@@ -97,11 +97,6 @@ use core::ops::Range;
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
-/// Number of dirty positions handed to each strategy worker when merkleizing a height, so a
-/// worker can pair adjacent nodes for [`Hasher::node_digest_pair`] without the strategy
-/// scheduling each node individually.
-const HASH_PAIR_CHUNK: usize = 64;
-
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
     let h = height as usize;
@@ -429,8 +424,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Compute digests for one height's dirty nodes via the configured strategy.
     ///
-    /// Positions are handed to the strategy in chunks (rather than one at a time) so each worker
-    /// can pair adjacent nodes for [`Hasher::node_digest_pair`].
+    /// Positions are split evenly across the strategy's workers so each worker can pair
+    /// adjacent nodes for [`Hasher::node_digest_pair`]. The chunk size is rounded up to
+    /// even so no pair straddles a chunk boundary.
     fn merkleize_bucket(
         &mut self,
         base: &Mem<F, D>,
@@ -438,15 +434,22 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
-        let computed: Vec<Vec<(Position<F>, D)>> = self.parent.strategy.map_init_collect_vec(
-            positions.chunks(HASH_PAIR_CHUNK),
-            || hasher.clone(),
-            |hasher, positions| {
-                let mut computed = Vec::with_capacity(positions.len());
-                self.zip_nodes(base, &*hasher, positions, height, &mut computed);
-                computed
-            },
-        );
+        let chunk = positions
+            .len()
+            .div_ceil(self.parent.strategy.manual().parallelism())
+            .max(1)
+            .next_multiple_of(2);
+        let computed: Vec<Vec<(Position<F>, D)>> =
+            self.parent.strategy.map_init_collect_vec_with_multiplier(
+                positions.chunks(chunk),
+                chunk,
+                || hasher.clone(),
+                |hasher, positions| {
+                    let mut computed = Vec::with_capacity(positions.len());
+                    self.zip_nodes(base, &*hasher, positions, height, &mut computed);
+                    computed
+                },
+            );
         for nodes in computed {
             for (pos, digest) in nodes {
                 self.store_node(pos, digest);
