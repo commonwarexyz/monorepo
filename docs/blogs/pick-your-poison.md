@@ -11,17 +11,17 @@ image: "https://commonware.xyz/imgs/pick-your-poison.png"
 katex: true
 ---
 
-Encrypted mempools have emerged as the leading candidate for protecting the privacy of pending transactions. At a high level, users (threshold) encrypt transactions to the validator set, and once the chain fixes an ordering, validators quickly decrypt transactions and execute them. If we instantiate this scheme using a standard threshold encryption scheme such as ElGamal, each of the $n$ committee members must broadcast a decryption share for each of the $B$ ciphertexts in the block, for a total of $O(nB)$ communication, which can be orders of magnitude larger than the block itself.
+Encrypted mempools have emerged as the leading candidate for protecting the privacy of pending transactions. At a high level, users (threshold) encrypt transactions to the validator set, and once the chain finalizes an ordering, validators quickly decrypt transactions and execute them. If we instantiate this scheme using a standard threshold encryption scheme such as [ElGamal](https://link.springer.com/chapter/10.1007/3-540-39568-7_2), each of the $n$ committee members must broadcast a decryption share for each of the $B$ ciphertexts in the block, for a total of $O(nB)$ communication, which can be orders of magnitude larger than the block itself.
 
-[Batched threshold encryption](https://eprint.iacr.org/2024/669) (BTE) was introduced to address this communication bottleneck. Instead of decrypting ciphertexts independently, the committee publishes a *succinct* key that can be used to decrypt the entire batch of ciphertexts. Since the original construction of [CGPP24](https://eprint.iacr.org/2024/669), a long line of work has pushed (silent) batched threshold encryption schemes closer to practicality. We summarize them below.
+[Batched threshold encryption](https://eprint.iacr.org/2024/669) (BTE) was introduced to address this communication bottleneck. Instead of decrypting ciphertexts independently, the committee publishes a *succinct* key that can be used to decrypt the entire batch of ciphertexts. Since the original construction of [CGPP24](https://eprint.iacr.org/2024/669), a long line of work has pushed (silent) batched threshold encryption schemes closer to practicality. We summarize them below and then present two new constructions.
 
 ```{=html}
-<div id="pick-your-poison-magic-move" class="cw-magic-move" role="img" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.">
+<div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
   <noscript>
     This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
   </noscript>
 </div>
-<script type="module" src="pick-your-poison.magic-move.js?v=4"></script>
+<script type="module" src="pick-your-poison.magic-move.js"></script>
 ```
 
 ::: {#pick-your-poison-story-source .cw-magic-story-source}
@@ -29,16 +29,16 @@ The initial work of [CGPP24](https://eprint.iacr.org/2024/669) required a setup 
 
 Follow-up work [CGPW25](https://eprint.iacr.org/2024/1516) and [AFP25](https://eprint.iacr.org/2024/1575) simplified the construction to a one-time DKG setup at the start of the protocol, but ciphertexts needed to be encrypted to a particular batch number, which we refer to as an "epoch restriction". Failing to be included in the chosen batch would result in the ciphertext never being decrypted. Decryption requires $O(B \log^2{B})$ group operations.
 
-Concurrently, [BFOQ25](https://eprint.iacr.org/2024/1533) used very different techniques to also require just a one-time DKG setup, without the epoch restriction. However, the ciphertexts needed to be encrypted to a particular *index* in the batch. As a result, two conflicting transactions encrypted to the same index could not be included in the same batch. This gives rise to a censorship issue, where an attacker can censor a victim's transaction by paying a slightly higher priority fee.
+Concurrently, [BFOQ25](https://eprint.iacr.org/2024/1533) used very different techniques to also require just a one-time DKG setup, but without the epoch restriction. However, the ciphertexts needed to be encrypted to a particular *index* in the batch. As a result, two conflicting transactions encrypted to the same index could not be included in the same batch. This gives rise to a censorship issue, where an attacker can censor a victim's transaction by paying a slightly higher priority fee.
 
 [ABDGMPRY25](https://eprint.iacr.org/2025/2115) improved [BFOQ25](https://eprint.iacr.org/2024/1533) to support quasi-linear decryption $O(B \log{B})$ and weighted threshold decryption but suffered from the same censorship issues.
 They also propose a variant where censorship resistance can be improved by increasing the ciphertext size by essentially encrypting to multiple indices in the batch.
 
-[FPTX25](https://eprint.iacr.org/2025/2032) shows that the epoch restriction in [CGPW25](https://eprint.iacr.org/2024/1516), [AFP25](https://eprint.iacr.org/2024/1575) can be avoided if the CRS is allowed to grow with the number of batches $q$ that will *ever* be decrypted. Importantly, after $q$ decryption queries the public key must be re-sampled. Decryption requires $O(B \log^2{B})$ group operations.
+[FPTX25](https://eprint.iacr.org/2025/2032) shows that the epoch restriction in [CGPW25](https://eprint.iacr.org/2024/1516), [AFP25](https://eprint.iacr.org/2024/1575) can be partially mitigated if the CRS is allowed to grow with the number of batches $q$ that will *ever* be decrypted. Importantly, after $q$ decryption queries the public key must be re-sampled. Decryption requires $O(B \log^2{B})$ group operations.
 
 [BNRT26](https://eprint.iacr.org/2026/674) took a different approach and showed that if the committee is willing to pay for a more complicated setup, it is possible to avoid both the epoch restriction and censorship issues. Concretely, they use partial fraction techniques and their setup involves secure inversions in MPC. The size of secret keys held by each party grows with the batch size. Decryption requires $O(B \log{B})$ group operations.
 
-[Pol26a](https://eprint.iacr.org/2026/760) and [ADGRS26](https://eprint.iacr.org/2026/754) use a similar strategy but with a different algebraic structure -- "punctured powers-of-tau" -- to avoid the epoch restriction and censorship issues. Their setup uses secure multiplications and the size of secret keys held by each party grows with the batch size. Decryption requires $O(B \log{B})$ group operations but is slightly more efficient than [BNRT26](https://eprint.iacr.org/2026/674).
+[Pol26a](https://eprint.iacr.org/2026/760) and [ADGRS26](https://eprint.iacr.org/2026/754) use a similar strategy but with a different algebraic structure -- "punctured powers-of-tau" -- to avoid the epoch restriction and censorship issues. Their setup uses secure multiplications and the size of secret keys held by each party grows with the batch size. Decryption requires $O(B \log{B})$ group operations but is slightly more efficient than [BNRT26](https://eprint.iacr.org/2026/674). We covered [Pol26a](https://eprint.iacr.org/2026/760) in detail in [an earlier post](/blogs/bte).
 
 In a different line of work, [BCFGOPQW25](https://eprint.iacr.org/2025/1419) (suffers from censorship issues) and [GWWW25](https://eprint.iacr.org/2025/2103) (suffers from epoch restrictions) avoid interactive setup entirely and show that it is possible to have a batched threshold encryption scheme with Silent Setup (just a PKI).
 :::
@@ -80,7 +80,9 @@ Ideally, censorship resistance is the same as the maximum batch size $B$, i.e. c
 
 It may be acceptable to reduce the price of censorship to buying $10\%$ of the block (say), if we can proportionally reduce the cost of resharing secrets.
 
-In an updated version of [Pol26a](https://eprint.iacr.org/2026/760), we introduce Indexed Simple BTE, where the secret key size can be reduced from $O(B)$ to $O(\delta)$ to support a censorship resistance of $\delta$.
+In an updated version of [Pol26a](https://eprint.iacr.org/2026/760), we introduce Indexed Simple BTE, where the secret key size can be reduced from $O(B)$ to $O(\delta)$ to support a censorship resistance of $\delta$. Here, each ciphertext is encrypted to an index $\mathsf{idx} \in [B]$ and can be placed at any batch position $i \in [B]$ satisfying $|i - \mathsf{idx}| < \delta$. A batch is *admissible* (and can be decrypted) if every ciphertext can be packed into a distinct position satisfying this constraint. When users choose indices at random, the probability that a batch is inadmissible decays rapidly with $\delta$: even $\delta \approx 0.2B$ pushes it below $2^{-40}$ at $B = 512$, and larger batches need an even smaller fraction.
+
+![Upper bound on the probability that a batch of $B$ ciphertexts encrypted to randomly chosen indices is inadmissible.](/imgs/admissibility_probability.png)
 
 ### Epoch Restrictions v Forced DKG Re-setup
 
@@ -93,7 +95,7 @@ But this might be overkill for the epoch restriction issue. Recall that in [CGPW
 Naively, one can encrypt to multiple blocks, but this increases the ciphertext size linearly with the number of blocks. In [Pol26b](https://eprint.iacr.org/2026/1452), we construct Labeled Multi-Key Batched IBE, a batched threshold encryption scheme where we can decrypt $q$ different batches per label (epoch). Each user still encrypts to an epoch but each epoch now contains $q$ blocks, making it much more reliable to guess the current epoch number. Although we still require a larger $O(qB)$ CRS, $q$ can be chosen to be much smaller than in [FPTX25](https://eprint.iacr.org/2025/2032) as we only need the window to be long enough to ensure transactions are included. We also avoid the forced DKG re-setup as the same CRS and public key can be used across different epochs.
 
 ```{=html}
-<div id="pick-your-poison-new-constructions" class="cw-magic-final" role="img" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
+<div id="pick-your-poison-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
 ```
 
 As of this writing, no efficient construction achieves [the dream goal](#dream-goal). System designers are forced to make undesirable compromises. Indexed Simple BTE and Labeled Multi-Key Batched IBE make these compromises tunable, allowing deployments to choose the balance that best fits their operating constraints.

@@ -103,9 +103,10 @@ Vamsi Policharla</a></div>
         <p>Encrypted mempools have emerged as the leading candidate for
         protecting the privacy of pending transactions. At a high level,
         users (threshold) encrypt transactions to the validator set, and
-        once the chain fixes an ordering, validators quickly decrypt
+        once the chain finalizes an ordering, validators quickly decrypt
         transactions and execute them. If we instantiate this scheme
-        using a standard threshold encryption scheme such as ElGamal,
+        using a standard threshold encryption scheme such as <a
+        href="https://link.springer.com/chapter/10.1007/3-540-39568-7_2">ElGamal</a>,
         each of the <span class="math inline">n</span> committee members
         must broadcast a decryption share for each of the <span
         class="math inline">B</span> ciphertexts in the block, for a
@@ -120,13 +121,14 @@ Vamsi Policharla</a></div>
         Since the original construction of <a
         href="https://eprint.iacr.org/2024/669">CGPP24</a>, a long line
         of work has pushed (silent) batched threshold encryption schemes
-        closer to practicality. We summarize them below.</p>
-        <div id="pick-your-poison-magic-move" class="cw-magic-move" role="img" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.">
+        closer to practicality. We summarize them below and then present
+        two new constructions.</p>
+        <div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
           <noscript>
             This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
           </noscript>
         </div>
-        <script type="module" src="pick-your-poison.magic-move.js?v=4"></script>
+        <script type="module" src="pick-your-poison.magic-move.js"></script>
         <div id="pick-your-poison-story-source"
         class="cw-magic-story-source">
         <p>The initial work of <a
@@ -148,12 +150,13 @@ Vamsi Policharla</a></div>
         <p>Concurrently, <a
         href="https://eprint.iacr.org/2024/1533">BFOQ25</a> used very
         different techniques to also require just a one-time DKG setup,
-        without the epoch restriction. However, the ciphertexts needed
-        to be encrypted to a particular <em>index</em> in the batch. As
-        a result, two conflicting transactions encrypted to the same
-        index could not be included in the same batch. This gives rise
-        to a censorship issue, where an attacker can censor a victim’s
-        transaction by paying a slightly higher priority fee.</p>
+        but without the epoch restriction. However, the ciphertexts
+        needed to be encrypted to a particular <em>index</em> in the
+        batch. As a result, two conflicting transactions encrypted to
+        the same index could not be included in the same batch. This
+        gives rise to a censorship issue, where an attacker can censor a
+        victim’s transaction by paying a slightly higher priority
+        fee.</p>
         <p><a href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a>
         improved <a href="https://eprint.iacr.org/2024/1533">BFOQ25</a>
         to support quasi-linear decryption <span class="math inline">O(B
@@ -166,12 +169,12 @@ Vamsi Policharla</a></div>
         that the epoch restriction in <a
         href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
         href="https://eprint.iacr.org/2024/1575">AFP25</a> can be
-        avoided if the CRS is allowed to grow with the number of batches
-        <span class="math inline">q</span> that will <em>ever</em> be
-        decrypted. Importantly, after <span class="math inline">q</span>
-        decryption queries the public key must be re-sampled. Decryption
-        requires <span class="math inline">O(B \log^2{B})</span> group
-        operations.</p>
+        partially mitigated if the CRS is allowed to grow with the
+        number of batches <span class="math inline">q</span> that will
+        <em>ever</em> be decrypted. Importantly, after <span
+        class="math inline">q</span> decryption queries the public key
+        must be re-sampled. Decryption requires <span
+        class="math inline">O(B \log^2{B})</span> group operations.</p>
         <p><a href="https://eprint.iacr.org/2026/674">BNRT26</a> took a
         different approach and showed that if the committee is willing
         to pay for a more complicated setup, it is possible to avoid
@@ -188,7 +191,9 @@ Vamsi Policharla</a></div>
         the size of secret keys held by each party grows with the batch
         size. Decryption requires <span class="math inline">O(B
         \log{B})</span> group operations but is slightly more efficient
-        than <a href="https://eprint.iacr.org/2026/674">BNRT26</a>.</p>
+        than <a href="https://eprint.iacr.org/2026/674">BNRT26</a>. We
+        covered <a href="https://eprint.iacr.org/2026/760">Pol26a</a> in
+        detail in <a href="/blogs/bte">an earlier post</a>.</p>
         <p>In a different line of work, <a
         href="https://eprint.iacr.org/2025/1419">BCFGOPQW25</a> (suffers
         from censorship issues) and <a
@@ -281,7 +286,28 @@ Vamsi Policharla</a></div>
         Indexed Simple BTE, where the secret key size can be reduced
         from <span class="math inline">O(B)</span> to <span
         class="math inline">O(\delta)</span> to support a censorship
-        resistance of <span class="math inline">\delta</span>.</p>
+        resistance of <span class="math inline">\delta</span>. Here,
+        each ciphertext is encrypted to an index <span
+        class="math inline">\mathsf{idx} \in [B]</span> and can be
+        placed at any batch position <span class="math inline">i \in
+        [B]</span> satisfying <span class="math inline">|i -
+        \mathsf{idx}| &lt; \delta</span>. A batch is <em>admissible</em>
+        (and can be decrypted) if every ciphertext can be packed into a
+        distinct position satisfying this constraint. When users choose
+        indices at random, the probability that a batch is inadmissible
+        decays rapidly with <span class="math inline">\delta</span>:
+        even <span class="math inline">\delta \approx 0.2B</span> pushes
+        it below <span class="math inline">2^{-40}</span> at <span
+        class="math inline">B = 512</span>, and larger batches need an
+        even smaller fraction.</p>
+        <figure>
+        <img src="/imgs/admissibility_probability.png"
+        alt="Upper bound on the probability that a batch of B ciphertexts encrypted to randomly chosen indices is inadmissible." />
+        <figcaption aria-hidden="true">Upper bound on the probability
+        that a batch of <span class="math inline">B</span> ciphertexts
+        encrypted to randomly chosen indices is
+        inadmissible.</figcaption>
+        </figure>
         <h3 id="epoch-restrictions-v-forced-dkg-re-setup">Epoch
         Restrictions v Forced DKG Re-setup</h3>
         <p><a href="https://eprint.iacr.org/2025/2032">FPTX25</a> avoids
@@ -322,7 +348,7 @@ Vamsi Policharla</a></div>
         need the window to be long enough to ensure transactions are
         included. We also avoid the forced DKG re-setup as the same CRS
         and public key can be used across different epochs.</p>
-        <div id="pick-your-poison-new-constructions" class="cw-magic-final" role="img" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
+        <div id="pick-your-poison-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
         <p>As of this writing, no efficient construction achieves <a
         href="#dream-goal">the dream goal</a>. System designers are
         forced to make undesirable compromises. Indexed Simple BTE and
