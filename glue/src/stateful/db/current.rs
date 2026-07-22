@@ -2,17 +2,18 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to committed state. This module provides wrapper types
-//! that capture `Arc<TracedAsyncRwLock<Db>>` alongside the raw batch so the
+//! that capture a [`Shared`] database handle alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     index::{
@@ -41,14 +42,11 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
+use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{
     ops::{Deref, Range},
     sync::Arc,
 };
-
-type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
-    Arc<TracedAsyncRwLock<Db<F, E, C, I, H, U, N, S>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -64,7 +62,7 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, N, S>,
-    db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
+    db: Shared<Db<F, E, C, I, H, U, N, S>>,
     metadata: Option<U::Value>,
 }
 
@@ -86,7 +84,7 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, N, S>,
-    db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
+    db: Shared<Db<F, E, C, I, H, U, N, S>>,
     metadata: Option<U::Value>,
 }
 
@@ -112,7 +110,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get(key, &*db).await
+        self.batch.get(key, &db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
@@ -120,7 +118,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get_many(keys, &*db).await
+        self.batch.get_many(keys, &db).await
     }
 
     /// Read multiple values and return a staged batch for the same keys.
@@ -137,7 +135,7 @@ where
         } = self;
         let (values, staged) = {
             let guard = db.read().await;
-            batch.stage(keys, &*guard).await?
+            batch.stage(keys, &guard).await?
         };
         Ok((
             values,
@@ -170,7 +168,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, N, S>>,
-    db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
+    db: Shared<Db<F, E, C, I, H, U, N, S>>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, E, C, I, H, U, N, S>
@@ -245,7 +243,7 @@ where
         } = self;
         let (range, values, staged) = {
             let guard = db.read().await;
-            staged.expand(keys, &*guard).await?
+            staged.expand(keys, &guard).await?
         };
         Ok((
             range,
@@ -298,9 +296,7 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(updates, upserts, metadata, &*guard)
-                .await?
+            staged.merkleize(updates, upserts, metadata, &guard).await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -345,9 +341,7 @@ where
         } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(updates, upserts, metadata, &*guard)
-                .await?
+            staged.merkleize(updates, upserts, metadata, &guard).await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -368,7 +362,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get(key, &*db).await
+        self.inner.get(key, &db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
@@ -376,7 +370,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get_many(keys, &*db).await
+        self.inner.get_many(keys, &db).await
     }
 }
 
@@ -399,7 +393,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&*db, self.metadata).await?;
+        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -426,7 +420,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&*db, self.metadata).await?;
+        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -478,7 +472,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -520,10 +514,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         CurrentUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
         }
@@ -535,12 +529,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -552,16 +546,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -579,7 +573,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher + 'static,
@@ -621,10 +615,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         CurrentUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
         }
@@ -636,12 +630,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -653,16 +647,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -678,6 +672,7 @@ mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
+    use commonware_runtime::Spawner;
     use commonware_storage::{
         Context,
         merkle::Graftable,
@@ -709,7 +704,7 @@ mod open {
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Context,
+        E: Context + Spawner,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -726,7 +721,7 @@ mod open {
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
-        E: Context,
+        E: Context + Spawner,
         K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -752,7 +747,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -799,10 +794,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         CurrentUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
         }
@@ -814,12 +809,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -831,16 +826,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -858,7 +853,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -905,10 +900,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         CurrentUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
         }
@@ -920,12 +915,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -937,16 +932,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -964,7 +959,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -1019,7 +1014,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: value::FixedValue + 'static,
     H: Hasher,
@@ -1074,7 +1069,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key + Array,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -1130,7 +1125,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     >
 where
     F: Graftable,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
@@ -1176,6 +1171,7 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -1193,6 +1189,13 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
+
+    /// Finalize `batch` into `db`, boxing the future ([`ManagedDb::finalize`] embeds the
+    /// database in its state machine).
+    #[boxed]
+    async fn finalize<D: ManagedDb<deterministic::Context>>(db: D, batch: D::Merkleized) -> D {
+        D::finalize(db, batch).await.unwrap()
+    }
 
     type FixedDb = fixed::Db<
         mmr::Family,
@@ -1248,6 +1251,8 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 
@@ -1276,6 +1281,8 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 
@@ -1295,8 +1302,8 @@ mod tests {
         assert_managed_db::<OrderedVariableDb>();
         assert_state_sync_db::<OrderedFixedDb, Arc<OrderedFixedDb>>();
         assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
-        assert_database_set::<Arc<TracedAsyncRwLock<OrderedFixedDb>>>();
-        assert_database_set::<Arc<TracedAsyncRwLock<OrderedVariableDb>>>();
+        assert_database_set::<Shared<OrderedFixedDb>>();
+        assert_database_set::<Shared<OrderedVariableDb>>();
     }
 
     #[test]
@@ -1306,11 +1313,11 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
-            let missing = Sha256::hash(b"missing");
+            let db = Shared::new("test", db);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
+            let missing = Sha256::hash(&[b"missing"]);
 
             let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1322,10 +1329,8 @@ mod tests {
             let expected_root = merkleized.root();
 
             {
-                let mut guard = db.write().await;
-                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(finalize::<OrderedFixedDb>(database, merkleized).await);
             }
 
             let guard = db.read().await;
@@ -1353,11 +1358,11 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
-            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
-            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
-            let metadata = Sha256::hash(b"metadata");
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
             let mut seed = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
@@ -1368,10 +1373,8 @@ mod tests {
                 .await
                 .unwrap();
             {
-                let mut guard = db.write().await;
-                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(finalize::<OrderedFixedDb>(database, merkleized).await);
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
@@ -1434,11 +1437,11 @@ mod tests {
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
-            let missing = Sha256::hash(b"missing");
+            let db = Shared::new("test", db);
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
+            let missing = Sha256::hash(&[b"missing"]);
 
             let batch = <OrderedVariableDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1450,10 +1453,8 @@ mod tests {
             let expected_root = merkleized.root();
 
             {
-                let mut guard = db.write().await;
-                <OrderedVariableDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(finalize::<OrderedVariableDb>(database, merkleized).await);
             }
 
             let guard = db.read().await;
@@ -1476,11 +1477,11 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1490,15 +1491,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut verification_db =
+            let verification_db =
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("verification_db"), config)
                     .await
                     .unwrap();
-            verification_db
+            let (verification_db, _) = verification_db
                 .apply_batch(merkleized.inner.clone())
                 .await
                 .unwrap();
-            verification_db.sync().await.unwrap();
+            let verification_db = verification_db.sync().await.unwrap();
 
             let valid_target = <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
@@ -1507,7 +1508,7 @@ mod tests {
             ));
 
             let mut wrong_root = valid_target.clone();
-            wrong_root.root = Sha256::hash(b"wrong ops root");
+            wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,
@@ -1532,11 +1533,11 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
-            let key1 = Sha256::hash(b"key1");
-            let value1 = Sha256::hash(b"value1");
-            let metadata1 = Sha256::hash(b"metadata1");
+            let key1 = Sha256::hash(&[b"key1"]);
+            let value1 = Sha256::hash(&[b"value1"]);
+            let metadata1 = Sha256::hash(&[b"metadata1"]);
             let batch1 = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .write(key1, Some(value1))
@@ -1545,19 +1546,17 @@ mod tests {
                 .await
                 .unwrap();
             {
-                let mut guard = db.write().await;
-                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized1)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(finalize::<OrderedFixedDb>(database, merkleized1).await);
             }
             let target_after_first = {
                 let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
             };
 
-            let key2 = Sha256::hash(b"key2");
-            let value2 = Sha256::hash(b"value2");
-            let metadata2 = Sha256::hash(b"metadata2");
+            let key2 = Sha256::hash(&[b"key2"]);
+            let value2 = Sha256::hash(&[b"value2"]);
+            let metadata2 = Sha256::hash(&[b"metadata2"]);
             let batch2 = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .write(key2, Some(value2))
@@ -1566,24 +1565,24 @@ mod tests {
                 .await
                 .unwrap();
             {
-                let mut guard = db.write().await;
-                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized2)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(finalize::<OrderedFixedDb>(database, merkleized2).await);
             }
 
             {
-                let mut guard = db.write().await;
-                <OrderedFixedDb as ManagedDb<_>>::rewind_to_target(
-                    &mut *guard,
-                    target_after_first.clone(),
-                )
-                .await
-                .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(
+                    <OrderedFixedDb as ManagedDb<_>>::rewind_to_target(
+                        database,
+                        target_after_first.clone(),
+                    )
+                    .await
+                    .unwrap(),
+                );
             }
             let target_after_rewind = {
                 let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard)
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
         });
@@ -1596,11 +1595,11 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1610,14 +1609,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut verification_db = FixedDb::init(context.child("verification_db"), config)
+            let verification_db = FixedDb::init(context.child("verification_db"), config)
                 .await
                 .unwrap();
-            verification_db
+            let (verification_db, _) = verification_db
                 .apply_batch(merkleized.inner.clone())
                 .await
                 .unwrap();
-            verification_db.sync().await.unwrap();
+            let verification_db = verification_db.sync().await.unwrap();
 
             let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
@@ -1626,7 +1625,7 @@ mod tests {
             ));
 
             let mut wrong_root = valid_target.clone();
-            wrong_root.root = Sha256::hash(b"wrong ops root");
+            wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,

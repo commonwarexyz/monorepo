@@ -194,10 +194,9 @@ fn main() {
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
             .expect("private key must be in participants");
-        let (application, scheme, reporter, mailbox) = application::Application::new(
+        let (application, scheme, reporter, mailbox) = application::Application::<_, Sha256>::new(
             context.child("application"),
             application::Config {
-                hasher: Sha256::default(),
                 scheme,
                 mailbox_size: NZUsize!(1024),
             },
@@ -221,8 +220,8 @@ fn main() {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
-            activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            view_retention: ViewDelta::new(10),
+            skip_timeout: Duration::from_secs(11),
             fetch_concurrent: NZUsize!(32),
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,

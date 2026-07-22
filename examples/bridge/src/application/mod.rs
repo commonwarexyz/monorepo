@@ -18,17 +18,12 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Returns the initial payload for the single consensus epoch.
 pub fn genesis<H: Hasher>() -> H::Digest {
     // Use the digest of the genesis message as the initial payload.
-    let mut hasher = H::default();
-    hasher.update(GENESIS);
-    hasher.finalize()
+    H::hash(&[GENESIS])
 }
 
 /// Configuration for the application.
-pub struct Config<H: Hasher, Si: Sink, St: Stream> {
+pub struct Config<Si: Sink, St: Stream> {
     pub indexer: (Sender<Si>, Receiver<St>),
-
-    /// Hashing scheme to use.
-    pub hasher: H,
 
     /// Signing scheme for this network.
     pub this_network: Scheme,

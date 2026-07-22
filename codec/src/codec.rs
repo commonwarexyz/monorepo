@@ -225,7 +225,7 @@ pub trait Read: Sized {
     #[doc(hidden)]
     #[inline]
     fn read_vec(buf: &mut impl Buf, len: usize, cfg: &Self::Cfg) -> Result<Vec<Self>, Error> {
-        let mut values = Vec::with_capacity(len);
+        let mut values = Vec::with_capacity(len.min(buf.remaining()));
         for _ in 0..len {
             values.push(Self::read_cfg(buf, cfg)?);
         }

@@ -69,12 +69,12 @@ where
     let items = context.random_range(16..96);
     for i in 0..items {
         let item = seed.wrapping_add(i as u64);
-        journal.append(&item).await?;
+        (journal, _) = journal.append(&item).await?;
     }
-    journal.sync().await?;
+    let journal = journal.sync().await?;
 
     if items > 32 {
-        journal
+        let (journal, _) = journal
             .prune(crate::merkle::Location::new(items as u64 / 3))
             .await?;
         journal.sync().await?;
@@ -105,9 +105,10 @@ impl StorageWorkload for ContiguousFixedWorkload {
         context.fill(&mut data_to_write[..]);
 
         for item in data_to_write.iter() {
-            journal.append(item).await?;
+            (journal, _) = journal.append(item).await?;
         }
-        journal.sync().await
+        journal.sync().await?;
+        Ok(())
     }
 }
 
@@ -140,9 +141,10 @@ impl StorageWorkload for ContiguousVariableWorkload {
         }
 
         for item in data_to_write {
-            journal.append(&item).await?;
+            (journal, _) = journal.append(&item).await?;
         }
-        journal.sync().await
+        journal.sync().await?;
+        Ok(())
     }
 }
 
@@ -312,9 +314,12 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal =
-            oversized::Oversized::<_, TestEntry, Vec<u8>>::init(context.child("journal"), config)
-                .await?;
+        let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
+            context.child("journal"),
+            config,
+            None,
+        )
+        .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

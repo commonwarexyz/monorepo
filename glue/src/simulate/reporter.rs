@@ -47,7 +47,7 @@ where
         if let Update::Tip(round, _, ref digest) = activity {
             let _ = self.monitor.try_send(FinalizationUpdate {
                 pk: self.pk.clone(),
-                view: round.view(),
+                round,
                 block_digest: digest.as_ref().to_vec(),
             });
         }

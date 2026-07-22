@@ -116,7 +116,7 @@ struct ExpectedBounds {
 }
 
 async fn run_operations<F: MerkleFamily>(
-    merkle: &mut Merkle<F>,
+    mut merkle: Merkle<F>,
     hasher: &StandardHasher<Sha256>,
     operations: &[MerkleOperation],
 ) -> ExpectedBounds {
@@ -127,21 +127,21 @@ async fn run_operations<F: MerkleFamily>(
     let mut min_pruned = 0u64;
     let mut max_pruned = merkle.bounds().start.as_u64();
 
+    // A failed operation breaks out of the loop.
     for op in operations.iter() {
-        let failed = match op {
+        merkle = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle.new_batch().add(hasher, data);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
-                merkle.apply_batch(&batch).unwrap();
+                let merkle = merkle.apply_batch(&batch).unwrap();
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
-                false
+                merkle
             }
 
-            MerkleOperation::Sync => {
-                if merkle.sync().await.is_err() {
-                    true
-                } else {
+            MerkleOperation::Sync => match merkle.sync().await {
+                Err(_) => break,
+                Ok(merkle) => {
                     let size = merkle.size().as_u64();
                     let leaves = merkle.leaves().as_u64();
                     let pruned = merkle.bounds().start.as_u64();
@@ -151,30 +151,30 @@ async fn run_operations<F: MerkleFamily>(
                     max_leaves = max_leaves.max(leaves);
                     min_pruned = pruned;
                     max_pruned = max_pruned.max(pruned);
-                    false
+                    merkle
                 }
-            }
+            },
 
             MerkleOperation::PruneToLoc { loc } => {
                 let leaves = *merkle.leaves();
                 let current_pruned = *merkle.bounds().start;
                 let safe_loc = (*loc).min(leaves);
 
-                if safe_loc <= current_pruned {
-                    false
-                } else {
+                if safe_loc > current_pruned {
                     match merkle.prune(Location::new(safe_loc)).await {
                         Err(_) => {
                             max_pruned = max_pruned.max(safe_loc);
-                            true
+                            break;
                         }
-                        Ok(_) => {
+                        Ok(merkle) => {
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            false
+                            merkle
                         }
                     }
+                } else {
+                    merkle
                 }
             }
 
@@ -182,28 +182,24 @@ async fn run_operations<F: MerkleFamily>(
                 let leaves = merkle.leaves().as_u64();
                 let current_pruned = merkle.bounds().start.as_u64();
 
-                if leaves == 0 || current_pruned >= leaves {
-                    false
-                } else {
+                if leaves != 0 && current_pruned < leaves {
                     match merkle.prune_all().await {
                         Err(_) => {
                             max_pruned = max_pruned.max(leaves);
-                            true
+                            break;
                         }
-                        Ok(_) => {
+                        Ok(merkle) => {
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            false
+                            merkle
                         }
                     }
+                } else {
+                    merkle
                 }
             }
         };
-
-        if failed {
-            break;
-        }
     }
 
     ExpectedBounds {
@@ -238,7 +234,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = operations.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let mut merkle = Merkle::<F>::init(
+            let merkle = Merkle::<F>::init(
                 ctx.child("merkle"),
                 &hasher,
                 merkle_config(
@@ -260,7 +256,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 ..Default::default()
             };
 
-            run_operations(&mut merkle, &hasher, &operations).await
+            run_operations(merkle, &hasher, &operations).await
         }
     });
 
@@ -270,7 +266,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let mut merkle = Merkle::<F>::init(
+        let merkle = Merkle::<F>::init(
             ctx.child("recovered"),
             &hasher,
             merkle_config(
@@ -331,7 +327,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let test_data = [0xABu8; DATA_SIZE];
         let batch = merkle.new_batch().add(&hasher, &test_data);
         let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-        merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.apply_batch(&batch).unwrap();
         merkle.destroy().await.expect("should be able to destroy");
     });
 }

@@ -15,7 +15,7 @@ mod tests {
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        Sha256::hash(&[&[v]])
     }
 
     #[test]

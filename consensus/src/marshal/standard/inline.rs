@@ -174,7 +174,13 @@ impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -218,7 +224,13 @@ impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -349,6 +361,7 @@ where
                             consensus_context.clone(),
                         ),
                         ancestor_stream,
+                        (),
                     )
                     .instrument(info_span!(
                         "marshal.inline.application.propose",
@@ -558,7 +571,13 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -707,7 +726,13 @@ mod tests {
     where
         E: Rng + Spawner + Metrics + Clock,
         S: Scheme,
-        A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+        A: Application<
+                E,
+                Block = B,
+                SigningScheme = S,
+                Context = Context<B::Digest, S::PublicKey>,
+                Input = (),
+            >,
         B: Block + Clone,
         ES: crate::types::Epocher,
     {
@@ -746,7 +771,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -827,7 +852,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -899,7 +924,7 @@ mod tests {
             let marshal = setup.mailbox;
             let marshal_actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(context.child("inline"),
                 mock_app,
@@ -998,7 +1023,7 @@ mod tests {
             let buffer = setup.extra;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -1097,7 +1122,7 @@ mod tests {
             let marshal = setup.mailbox;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Seed the parent at its round so `propose` can fetch it locally.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
@@ -1200,7 +1225,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -1276,7 +1301,7 @@ mod tests {
             let marshal = setup.mailbox;
             let buffer = setup.extra;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new();
             let mut inline = Inline::new(
@@ -1374,7 +1399,7 @@ mod tests {
 
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let ctx = Ctx {
                 round,
                 leader: me.clone(),

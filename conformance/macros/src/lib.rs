@@ -15,6 +15,9 @@ use syn::{
     punctuated::Punctuated,
 };
 
+mod naming;
+use naming::type_to_ident;
+
 /// A single conformance test entry: `Type` or `Type => n_cases`
 struct ConformanceEntry {
     ty: Type,
@@ -46,49 +49,6 @@ impl Parse for ConformanceInput {
         let entries = Punctuated::parse_terminated(input)?;
         Ok(Self { entries })
     }
-}
-
-/// Convert a type to a valid snake_case function name suffix.
-///
-/// Inserts underscores at PascalCase boundaries and replaces punctuation
-/// with underscores. Consecutive separators are collapsed.
-fn type_to_ident(ty: &Type) -> String {
-    let type_str = quote!(#ty).to_string();
-
-    let mut result = String::with_capacity(type_str.len());
-    let mut prev_was_separator = true;
-
-    for c in type_str.chars() {
-        match c {
-            'A'..='Z' => {
-                if !prev_was_separator && !result.is_empty() {
-                    result.push('_');
-                }
-                result.push(c.to_ascii_lowercase());
-                prev_was_separator = false;
-            }
-            'a'..='z' | '0'..='9' => {
-                result.push(c);
-                prev_was_separator = false;
-            }
-            '_' => {
-                if !prev_was_separator && !result.is_empty() {
-                    result.push('_');
-                }
-                prev_was_separator = true;
-            }
-            '<' | '>' | ',' | ' ' | ':' => {
-                if !prev_was_separator && !result.is_empty() {
-                    result.push('_');
-                }
-                prev_was_separator = true;
-            }
-            // Skip other characters
-            _ => {}
-        }
-    }
-
-    result.trim_end_matches("_").to_string()
 }
 
 /// Define tests for types implementing the
@@ -125,8 +85,9 @@ pub fn conformance_tests(input: TokenStream) -> TokenStream {
             .map(|e| quote!(#e))
             .unwrap_or_else(|| quote!(::commonware_conformance::DEFAULT_CASES));
 
-        let type_name_str = quote!(#ty).to_string().replace(' ', "");
-        let fn_name_suffix = type_to_ident(ty);
+        let type_name = quote!(#ty).to_string();
+        let type_name_str = type_name.replace(' ', "");
+        let fn_name_suffix = type_to_ident(&type_name);
         let fn_name = Ident::new(&format!("test_{fn_name_suffix}"), Span::call_site());
 
         quote! {
@@ -157,7 +118,7 @@ mod tests {
 
     fn ident_for(type_str: &str) -> String {
         let ty: Type = syn::parse_str(type_str).unwrap();
-        type_to_ident(&ty)
+        type_to_ident(&quote!(#ty).to_string())
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! replaying the fetched operations.
 
 use crate::{Hasher, Key, Value};
-use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufferPooler, buffer};
 use commonware_storage::{
@@ -61,15 +61,10 @@ pub fn create_config(context: &impl BufferPooler) -> fixed::Config<Sequential> {
 /// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
 pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
-    let mut hasher = <Hasher as CryptoHasher>::new();
     let floor = Location::new(starting_loc);
 
     for i in 0..count {
-        let value = {
-            hasher.update(&i.to_be_bytes());
-            hasher.update(&seed.to_be_bytes());
-            hasher.finalize()
-        };
+        let value = Hasher::hash(&[&i.to_be_bytes(), &seed.to_be_bytes()]);
 
         operations.push(Operation::Append(value));
 
@@ -95,13 +90,13 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -111,14 +106,14 @@ where
                     batch = batch.append(value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor).await;
-                    self.apply_batch(merkleized).await?;
-                    self.commit().await?;
+                    let merkleized = batch.merkleize(&self, metadata, floor).await;
+                    (self, _) = self.apply_batch(merkleized).await?;
+                    self = self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

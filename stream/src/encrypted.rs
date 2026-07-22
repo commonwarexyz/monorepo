@@ -392,7 +392,7 @@ impl<O: Sink> Sender<O> {
         let mut chunks = Vec::with_capacity(lower.max(1));
         let mut batch = Vec::new();
         let mut batch_total = 0usize;
-        let max_batch_size = self.pool.config().max_size.get();
+        let max_batch_size = self.pool.config().max_size().get();
 
         for buf in bufs {
             let msg = buf.into();
@@ -534,7 +534,7 @@ mod test {
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{NZUsize, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use std::{
         sync::{
             Arc,
@@ -799,8 +799,7 @@ mod test {
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
                     .with_pool_min_size(256)
-                    .with_min_size(NZUsize!(256))
-                    .with_max_size(NZUsize!(256)),
+                    .with_size_class_range(NZUsize!(256), NZUsize!(256), NZU32!(4096)),
             ),
         );
         executor.start(|context| async move {
@@ -870,8 +869,7 @@ mod test {
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
                     .with_pool_min_size(128)
-                    .with_min_size(NZUsize!(128))
-                    .with_max_size(NZUsize!(128)),
+                    .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
             ),
         );
         executor.start(|context| async move {

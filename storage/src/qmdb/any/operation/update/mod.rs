@@ -38,6 +38,9 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// The updated key.
     fn key(&self) -> &Self::Key;
 
+    /// Consumes the update and returns its owned key.
+    fn into_key(self) -> Self::Key;
+
     /// The updated value.
     fn value(&self) -> &Self::Value;
 
