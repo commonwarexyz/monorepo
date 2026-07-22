@@ -2,11 +2,11 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture `Arc<TracedAsyncRwLock<Immutable>>`
+//! deletions. The wrapper types here capture a [`Shared`] database handle
 //! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -31,11 +31,11 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
+use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
-    Arc<TracedAsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
+/// Shared handle to an immutable database.
+type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -106,7 +106,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get(key, &*db).await
+        self.batch.get(key, &db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
@@ -114,7 +114,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get_many(keys, &*db).await
+        self.batch.get_many(keys, &db).await
     }
 
     /// Set `key` to `value` in the speculative batch.
@@ -176,7 +176,7 @@ where
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get(key, &*db).await
+        self.inner.get(key, &db).await
     }
 
     /// Read multiple values by key, falling back to committed state.
@@ -184,7 +184,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get_many(keys, &*db).await
+        self.inner.get_many(keys, &db).await
     }
 }
 
@@ -208,7 +208,7 @@ where
         let merkleized = self
             .batch
             .merkleize(
-                &*db,
+                &db,
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
@@ -294,10 +294,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         ImmutableUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
             inactivity_floor: None,
@@ -310,12 +310,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -327,16 +327,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -386,10 +386,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         ImmutableUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
             inactivity_floor: None,
@@ -402,12 +402,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -419,16 +419,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 

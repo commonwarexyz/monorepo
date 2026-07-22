@@ -18,11 +18,6 @@ use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
 };
 
-/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we
-/// will encounter. The hashmap will grow as needed, but this is a good starting point (covering the
-/// entire [crate::translator::OneCap] range).
-const INITIAL_CAPACITY: usize = 256;
-
 /// Implementation of [IndexEntry] for [OccupiedEntry].
 impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
     type Key = K;
@@ -67,15 +62,60 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         vacant.insert(v);
     }
 
-    /// Create a new index with the given translator and metrics registry.
+    /// Create a new index with the given translator and metrics registry. The maps start without
+    /// capacity and grow as needed, so unused indices (e.g. empty partitions) cost no memory.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         Self {
             translator: translator.clone(),
             overflow: HashMap::with_hasher(translator.clone()),
-            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
+            map: HashMap::with_hasher(translator),
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
+        }
+    }
+
+    /// Create an empty index with this index's translator and metric handles. Parallel
+    /// snapshot-build workers use it for their partition slots.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn empty(&self) -> Self {
+        Self {
+            translator: self.translator.clone(),
+            overflow: HashMap::with_hasher(self.translator.clone()),
+            map: HashMap::with_hasher(self.translator.clone()),
+            keys: self.keys.clone(),
+            items: self.items.clone(),
+            pruned: self.pruned.clone(),
+        }
+    }
+
+    /// Move `other`'s contents into self, which must be empty. Wholesale moves are what let
+    /// [`Self::empty`] build-worker slots install without re-inserting each entry.
+    /// Metrics need no adjustment, since `other` updated self's handles directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if self is not empty.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn absorb(&mut self, other: Self) {
+        assert!(
+            self.map.is_empty() && self.overflow.is_empty(),
+            "absorb target must be empty"
+        );
+        self.map = other.map;
+        self.overflow = other.overflow;
+    }
+
+    /// Visit every value held by the index (inline and overflow), in unspecified order.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for v in self.map.values() {
+            f(v);
+        }
+        for chain in self.overflow.values() {
+            for v in chain {
+                f(v);
+            }
         }
     }
 }
@@ -223,7 +263,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     #[cfg(test)]
     fn keys(&self) -> usize {
-        self.map.len()
+        self.keys.get() as usize
     }
 
     #[cfg(test)]

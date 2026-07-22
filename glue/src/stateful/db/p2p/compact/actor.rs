@@ -1,6 +1,7 @@
 //! Actor for compact QMDB sync over P2P.
 
 use super::{Mailbox, handler, mailbox};
+use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
@@ -12,17 +13,13 @@ use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncRwLock,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
 use rand_core::Rng;
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::info;
 
-type DbResolver<DB> = Arc<TracedAsyncRwLock<DB>>;
-type DbOp<DB> = <DbResolver<DB> as compact::Resolver>::Op;
+type DbOp<DB> = <Shared<DB> as compact::Resolver>::Op;
 type Pending<F, Op, D> =
     oneshot::Sender<Result<compact::FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<Pending<F, Op, D>>>;
@@ -41,7 +38,7 @@ where
     pub blocker: B,
 
     /// Local database used to serve incoming requests when available.
-    pub database: Option<DbResolver<DB>>,
+    pub database: Option<Shared<DB>>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -67,7 +64,7 @@ where
 
 enum State<DB> {
     NoDb,
-    HasDb(DbResolver<DB>),
+    HasDb(Shared<DB>),
 }
 
 enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
@@ -85,7 +82,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
-    DbResolver<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
+    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     context: ContextCell<E>,
@@ -103,7 +100,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
-    DbResolver<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
+    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     /// Create a new compact resolver actor and mailbox.
@@ -359,9 +356,8 @@ mod tests {
         NZUsize,
         channel::{mpsc, oneshot},
         sequence::U64,
-        sync::TracedAsyncRwLock,
     };
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -404,7 +400,7 @@ mod tests {
     type TestOp = KeylessOp<mmr::Family, U64>;
 
     fn test_config(
-        database: Option<Arc<TracedAsyncRwLock<TestDb>>>,
+        database: Option<Shared<TestDb>>,
     ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
         Config {
             peer_provider: DummyProvider,
@@ -451,23 +447,19 @@ mod tests {
         compact::Target<mmr::Family, sha256::Digest>,
         compact::FetchResult<mmr::Family, TestOp, sha256::Digest>,
     ) {
-        let mut db = init_db(context).await;
-        db.apply_batch(
-            db.new_batch()
-                .append(U64::new(7))
-                .merkleize(&db, None, db.inactivity_floor_loc())
-                .await,
-        )
-        .unwrap();
-        db.sync().await.unwrap();
+        let db = init_db(context).await;
+        let batch = db
+            .new_batch()
+            .append(U64::new(7))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(batch).unwrap();
+        let db = db.sync().await.unwrap();
 
         let target = db.target();
-        let fetch = compact::Resolver::get_compact_state(
-            &Arc::new(TracedAsyncRwLock::new("test", db)),
-            target.clone(),
-        )
-        .await
-        .expect("compact state should be available");
+        let fetch = compact::Resolver::get_compact_state(&Shared::new("test", db), target.clone())
+            .await
+            .expect("compact state should be available");
         (target, fetch)
     }
 
@@ -577,7 +569,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
             let target = db.target();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();

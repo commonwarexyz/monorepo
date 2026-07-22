@@ -1,0 +1,48 @@
+name: Stale
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *' # Run at 08:00 UTC every day
+
+permissions:
+  # Persist state in the Actions cache between runs when operations-per-run
+  # is exhausted mid-backlog.
+  actions: write
+  # PR labels and comments go through the issues API, so both are required
+  # even though this workflow only manages PRs.
+  pull-requests: write
+  issues: write
+
+jobs:
+  stale:
+    name: Close Stale PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Label and close stale PRs
+        uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
+        with:
+          # Warn after 60 days of inactivity, then close 14 days after the
+          # warning if there is still no response. Any comment or push after
+          # the warning removes the label and resets the clock.
+          days-before-pr-stale: 60
+          days-before-pr-close: 14
+          # Only manage PRs; leave issues untouched.
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          stale-pr-label: stale
+          # PRs with either label are never marked stale (e.g. blocked on
+          # another PR, or intentionally long-lived).
+          exempt-pr-labels: blocked,keep-open
+          stale-pr-message: >
+            This PR has been inactive for 60 days and will be closed in 14 days.
+            Comment or push to keep it open, or add the `keep-open` label.
+          close-pr-message: >
+            Closed as stale. Rebase and reopen if you'd like to pick it back up.
+          # Process oldest PRs first so the existing backlog is handled before
+          # newer PRs.
+          ascending: true
+          # Cap API calls per run (a close costs ~3 operations); unfinished
+          # work resumes on the next run.
+          operations-per-run: 100

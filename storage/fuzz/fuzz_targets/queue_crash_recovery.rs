@@ -210,21 +210,22 @@ fn make_item(value: u8) -> Vec<u8> {
 
 /// Run operations on the queue, tracking state for recovery verification.
 async fn run_operations(
-    queue: &mut Queue<deterministic::Context, Vec<u8>>,
+    mut queue: Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
 ) -> RecoveryState {
     let mut state = RecoveryState::new();
 
     for op in operations {
-        match op {
+        queue = match op {
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
                 match queue.enqueue(item).await {
-                    Ok(pos) => {
+                    Ok((queue, pos)) => {
                         // enqueue = append + commit, so success means ALL
                         // previously uncommitted items are now durable too.
                         state.commit_succeeded();
                         state.enqueue_succeeded(pos, *value);
+                        queue
                     }
                     Err(_) => {
                         state.enqueue_failed(*value);
@@ -237,8 +238,9 @@ async fn run_operations(
             QueueOperation::Append { value } => {
                 let item = make_item(*value);
                 match queue.append(item).await {
-                    Ok(pos) => {
+                    Ok((queue, pos)) => {
                         state.append_succeeded(pos, *value);
+                        queue
                     }
                     Err(_) => {
                         state.append_failed(*value);
@@ -249,8 +251,9 @@ async fn run_operations(
             }
 
             QueueOperation::Commit => match queue.commit().await {
-                Ok(()) => {
+                Ok(queue) => {
                     state.commit_succeeded();
+                    queue
                 }
                 Err(_) => {
                     state.commit_failed();
@@ -265,11 +268,13 @@ async fn run_operations(
                 {
                     state.update_ack_floor(queue.ack_floor());
                 }
+                queue
             }
 
             QueueOperation::DequeueNoAck => {
                 // Dequeue without acking - item should be re-delivered on recovery
                 let _ = queue.dequeue().await;
+                queue
             }
 
             QueueOperation::AckOffset { offset } => {
@@ -288,6 +293,7 @@ async fn run_operations(
                         }
                     }
                 }
+                queue
             }
 
             QueueOperation::AckUpToOffset { offset } => {
@@ -302,28 +308,29 @@ async fn run_operations(
                         return state;
                     }
                 }
+                queue
             }
 
-            QueueOperation::Sync => {
-                match queue.sync().await {
-                    Ok(()) => {
-                        // sync = commit + prune, so success means ALL
-                        // previously uncommitted items are now durable too.
-                        state.commit_succeeded();
-                        state.update_ack_floor(queue.ack_floor());
-                    }
-                    Err(_) => {
-                        state.commit_failed();
-                        state.mark_mutable_error();
-                        return state;
-                    }
+            QueueOperation::Sync => match queue.sync().await {
+                Ok(queue) => {
+                    // sync = commit + prune, so success means ALL
+                    // previously uncommitted items are now durable too.
+                    state.commit_succeeded();
+                    state.update_ack_floor(queue.ack_floor());
+                    queue
                 }
-            }
+                Err(_) => {
+                    state.commit_failed();
+                    state.mark_mutable_error();
+                    return state;
+                }
+            },
 
             QueueOperation::Reset => {
                 queue.reset();
+                queue
             }
-        }
+        };
     }
 
     state
@@ -333,7 +340,7 @@ async fn run_operations(
 ///
 /// Mutable errors may leave storage temporarily inconsistent, so we only assert
 /// that the queue can be re-initialized and used again for basic operations.
-async fn verify_recovery_after_mutable_error(queue: &mut Queue<deterministic::Context, Vec<u8>>) {
+async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Context, Vec<u8>>) {
     // Basic read-path sanity should not fail.
     let size_before = queue.size();
     queue
@@ -342,7 +349,7 @@ async fn verify_recovery_after_mutable_error(queue: &mut Queue<deterministic::Co
         .expect("dequeue should not error after recovery");
 
     // Queue should remain writable after recovery.
-    let new_pos = queue
+    let (queue, new_pos) = queue
         .enqueue(make_item(0xFF))
         .await
         .expect("enqueue should succeed after recovery");
@@ -359,10 +366,7 @@ async fn verify_recovery_after_mutable_error(queue: &mut Queue<deterministic::Co
 }
 
 /// Verify the queue state after recovery.
-async fn verify_recovery(
-    queue: &mut Queue<deterministic::Context, Vec<u8>>,
-    state: &RecoveryState,
-) {
+async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, state: &RecoveryState) {
     if state.saw_mutable_error() {
         verify_recovery_after_mutable_error(queue).await;
         return;
@@ -444,7 +448,7 @@ async fn verify_recovery(
     );
 
     // Verify we can enqueue new items after recovery
-    let new_pos = queue.enqueue(make_item(0xFF)).await.unwrap();
+    let (_queue, new_pos) = queue.enqueue(make_item(0xFF)).await.unwrap();
     assert_eq!(new_pos, size, "new item should be at position {}", size);
 }
 
@@ -474,7 +478,7 @@ fn fuzz(input: FuzzInput) {
                 write_buffer,
             };
 
-            let mut queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
+            let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
                 .await
                 .unwrap();
 
@@ -487,7 +491,7 @@ fn fuzz(input: FuzzInput) {
             let faults = ctx.storage_fault_config();
             *faults.write() = fault_config;
 
-            run_operations(&mut queue, &operations).await
+            run_operations(queue, &operations).await
         }
     });
 
@@ -506,11 +510,11 @@ fn fuzz(input: FuzzInput) {
             write_buffer,
         };
 
-        let mut queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
+        let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
             .await
             .expect("Queue recovery should succeed");
 
-        verify_recovery(&mut queue, &state).await;
+        verify_recovery(queue, &state).await;
     });
 }
 

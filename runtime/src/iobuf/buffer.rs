@@ -830,10 +830,7 @@ impl BufMut<PooledBacking> {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{
-            BufferPool, BufferPoolConfig, cache_line_size, page_size,
-            pool::BufferPoolThreadCacheConfig,
-        },
+        iobuf::{BufferPool, BufferPoolConfig, cache_line_size, page_size},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -846,16 +843,14 @@ mod tests {
     }
 
     fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
-        BufferPoolConfig {
-            pool_min_size: 0,
-            min_size: NZUsize!(min_size),
-            max_size: NZUsize!(max_size),
-            max_per_class: NZU32!(max_per_class),
-            parallelism: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
-            prefill: false,
-            alignment: NZUsize!(page_size()),
-        }
+        BufferPoolConfig::for_network()
+            .with_pool_min_size(0)
+            .with_size_class_range(
+                NZUsize!(min_size),
+                NZUsize!(max_size),
+                NZU32!(max_per_class),
+            )
+            .with_alignment(NZUsize!(page_size()))
     }
 
     #[test]

@@ -1,4 +1,7 @@
-use crate::{simplex::elector, types::Round};
+use crate::{
+    simplex::elector::{self, Terms},
+    types::Round,
+};
 use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
@@ -69,10 +72,7 @@ impl<S> Scheme<S> {
 
         // Hash the signer and signature bytes to derive a deterministic starting
         // point for the single-bit flip search.
-        let mut hasher = Sha256::default();
-        hasher.update(&signer.encode());
-        hasher.update(&encoded);
-        let digest = hasher.finalize();
+        let digest = Sha256::hash(&[&signer.encode(), &encoded]);
 
         // Start from a deterministic but non-trivial bit so tests do not always
         // mutate the same low-order bit first.
@@ -131,6 +131,10 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    fn terms(&self) -> Terms {
+        self.inner.terms()
+    }
+
     fn elect(
         &self,
         round: Round,

@@ -19,8 +19,11 @@ use std::{
 const PARTITION: &str = "variable-test-partition";
 
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
-    let reader = journal.snapshot().await.unwrap();
+async fn bench_run(
+    journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
+    buffer: usize,
+) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+    let (journal, reader) = journal.snapshot().await.unwrap();
     let stream = reader
         .replay(0, NZUsize!(buffer))
         .await
@@ -34,6 +37,7 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, buffer
             Err(err) => panic!("Failed to read item: {err}"),
         }
     }
+    journal
 }
 
 /// Benchmark the replaying of items from a variable journal containing exactly that
@@ -56,15 +60,14 @@ fn bench_variable_replay(c: &mut Criterion) {
                     // Setup: populate journal (once, on first sample).
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
-                            let mut j = get_variable_journal(
+                            let j = get_variable_journal(
                                 ctx,
                                 PARTITION,
                                 ITEMS_PER_BLOB,
                                 PAGE_CACHE_SIZE,
                             )
                             .await;
-                            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
-                            j.sync().await.unwrap();
+                            append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
                         });
                         initialized = true;
                     }
@@ -82,7 +85,7 @@ fn bench_variable_replay(c: &mut Criterion) {
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            bench_run(&mut j, buffer).await;
+                            j = bench_run(j, buffer).await;
                             duration += start.elapsed();
                         }
                         duration

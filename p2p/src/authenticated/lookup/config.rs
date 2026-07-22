@@ -10,10 +10,11 @@ use std::{
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
-/// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `listen`, `allow_private_ips`, `mailbox_size`, and `send_batch_size`).
-/// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
-/// and/or peers will rate limit each other during normal operation.
+/// It is recommended to synchronize this configuration across peers in the network (with
+/// the exception of `crypto`, `listen`, `allow_private_ips`, `mailbox_size`,
+/// `send_batch_size`, and `dial_timeout`). If this is not synchronized, connections could
+/// be unnecessarily dropped, messages could be parsed incorrectly, and/or peers will rate
+/// limit each other during normal operation.
 #[derive(Clone)]
 pub struct Config<C: Signer> {
     /// Cryptographic primitives.
@@ -67,6 +68,12 @@ pub struct Config<C: Signer> {
     /// This is often set to some value less than the connection read timeout to prevent
     /// unauthenticated peers from holding open connection.
     pub handshake_timeout: Duration,
+
+    /// Timeout for an outbound dial attempt.
+    ///
+    /// This bounds address resolution, connection establishment, and the handshake so a
+    /// peer reservation cannot be held indefinitely.
+    pub dial_timeout: Duration,
 
     /// Minimum time between connection reservations for a single peer.
     pub peer_connection_cooldown: Duration,
@@ -128,6 +135,7 @@ impl<C: Signer> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(60),
             max_concurrent_handshakes: NZU32!(512),
             allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
@@ -160,6 +168,7 @@ impl<C: Signer> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(1),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
@@ -187,6 +196,7 @@ impl<C: Signer> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_millis(250),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP

@@ -114,9 +114,7 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
-    let mut hasher = H::default();
-    hasher.update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
-    hasher.finalize()
+    H::hash(&[&(Bytes::from(GENESIS_BYTES), epoch).encode()])
 }
 
 type Latency = (f64, f64);
@@ -148,8 +146,6 @@ pub enum Certifier<D: Digest> {
 }
 
 pub struct Config<H: Hasher, P: PublicKey> {
-    pub hasher: H,
-
     pub relay: Arc<Relay<H::Digest, P>>,
 
     /// The public key of the participant.
@@ -168,7 +164,6 @@ pub struct Config<H: Hasher, P: PublicKey> {
 
 pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     context: ContextCell<E>,
-    hasher: H,
     me: P,
 
     relay: Arc<Relay<H::Digest, P>>,
@@ -224,7 +219,6 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         (
             Self {
                 context: ContextCell::new(context),
-                hasher: cfg.hasher,
                 me: cfg.me,
 
                 relay: cfg.relay,
@@ -299,8 +293,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         // Generate the payload
         let rand = self.context.random::<u64>();
         let payload = (context.round, context.parent.1, rand).encode();
-        self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
+        let digest = H::hash(&[&payload]);
 
         // Mark verified
         self.verified.insert(digest);

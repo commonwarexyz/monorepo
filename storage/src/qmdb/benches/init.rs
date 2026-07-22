@@ -7,6 +7,7 @@ use crate::common::{
     Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
     make_var_value,
 };
+use commonware_macros::boxed;
 use commonware_runtime::{
     Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
@@ -37,13 +38,14 @@ cfg_if::cfg_if! {
 }
 
 /// Populate, prune, and sync a database (used in setup phase).
+#[boxed]
 async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
-    db: &mut C,
+    db: C,
     elements: u64,
     operations: u64,
     make_value: impl Fn(&mut TestRng) -> C::Value,
-) {
-    gen_random_kv::<F, _>(
+) -> C {
+    let db = gen_random_kv::<F, _>(
         db,
         elements,
         operations,
@@ -55,8 +57,9 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
         make_value,
     )
     .await;
-    db.prune(db.sync_boundary()).await.unwrap();
-    db.sync().await.unwrap();
+    let boundary = db.sync_boundary();
+    let db = db.prune(boundary).await.unwrap();
+    db.sync().await.unwrap()
 }
 
 // -- Fixed-value variants (16 = 8 db shapes x 2 merkle families) --
@@ -91,7 +94,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                                 |ctx| async move {
                                     dispatch_fixed!(ctx, variant, |db| {
                                         populate_and_sync(
-                                            &mut db,
+                                            db,
                                             elements,
                                             operations,
                                             make_fixed_value,
@@ -157,13 +160,8 @@ fn bench_var_value_init(c: &mut Criterion) {
                             commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                                 |ctx| async move {
                                     dispatch_var!(ctx, variant, |db| {
-                                        populate_and_sync(
-                                            &mut db,
-                                            elements,
-                                            operations,
-                                            make_var_value,
-                                        )
-                                        .await;
+                                        populate_and_sync(db, elements, operations, make_var_value)
+                                            .await;
                                     });
                                 },
                             );

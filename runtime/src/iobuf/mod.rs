@@ -23,7 +23,9 @@ use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
 use crossbeam_utils::CachePadded;
-pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
+pub use pool::{
+    BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache, PoolError,
+};
 use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, ops::RangeBounds};
 
 /// Returns the system page size.
@@ -2428,12 +2430,10 @@ mod tests {
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under miri.
-                let pool_config = BufferPoolConfig {
-                    pool_min_size: 0,
-                    max_per_class: commonware_utils::NZU32!(32),
-                    ..BufferPoolConfig::for_network()
-                };
+                // Reduce the class limits to avoid slow atomics under miri.
+                let pool_config = BufferPoolConfig::for_network()
+                    .with_pool_min_size(0)
+                    .with_max_per_class(commonware_utils::NZU32!(32));
             } else {
                 let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }

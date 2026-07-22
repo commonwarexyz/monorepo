@@ -33,7 +33,10 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::timeout,
+};
 use tracing::warn;
 
 /// Default read buffer size (64 KB).
@@ -52,6 +55,10 @@ pub struct Config {
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     pub zero_linger: bool,
+    /// Timeout for establishing an outbound TCP connection.
+    ///
+    /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
+    pub connect_timeout: Duration,
     /// Timeout budget applied to each top-level send/recv call.
     ///
     /// This is a network-level policy and is independent from io_uring loop
@@ -75,6 +82,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            connect_timeout: Duration::from_secs(10),
             read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
@@ -95,6 +103,8 @@ pub struct Network {
     send_handle: iouring::Handle,
     /// Used to submit recv operations to the recv io_uring event loop.
     recv_handle: iouring::Handle,
+    /// Timeout for establishing an outbound TCP connection.
+    connect_timeout: Duration,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -144,6 +154,7 @@ impl Network {
             zero_linger: cfg.zero_linger,
             send_handle,
             recv_handle,
+            connect_timeout: cfg.connect_timeout,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
             pool,
@@ -174,8 +185,9 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        let stream = TcpStream::connect(socket)
+        let stream = timeout(self.connect_timeout, TcpStream::connect(socket))
             .await
+            .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
@@ -610,6 +622,18 @@ mod tests {
             .expect("Failed to start io_uring")
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_timeout() {
+        let connect_timeout = Duration::from_millis(100);
+        let network = test_network(Config {
+            connect_timeout,
+            ..Default::default()
+        })
+        .expect("Failed to start io_uring");
+
+        tests::test_network_connect_timeout(network, connect_timeout).await;
     }
 
     #[test_group("slow")]

@@ -15,6 +15,10 @@ use core::{
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
 
+#[cfg(feature = "std")]
+mod atomic;
+#[cfg(feature = "std")]
+pub use atomic::Atomic;
 mod prunable;
 pub use prunable::Prunable;
 
@@ -106,6 +110,23 @@ impl<const N: usize> BitMap<N> {
         // Clear trailing bits to maintain invariant
         result.clear_trailing_bits();
         result
+    }
+
+    /// Create a bitmap of `len` bits directly from its chunk representation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk count does not match `len` or a bit at index >= `len` is set.
+    #[cfg(feature = "std")]
+    fn from_chunks(chunks: VecDeque<[u8; N]>, len: u64) -> Self {
+        assert_eq!(
+            chunks.len() as u64,
+            len.div_ceil(Self::CHUNK_SIZE_BITS),
+            "chunk count does not match len"
+        );
+        let mut bitmap = Self { chunks, len };
+        assert!(!bitmap.clear_trailing_bits(), "bit past len set");
+        bitmap
     }
 
     /* Length */

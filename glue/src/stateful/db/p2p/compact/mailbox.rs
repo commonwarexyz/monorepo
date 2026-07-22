@@ -1,12 +1,12 @@
 //! Mailbox for the compact QMDB P2P resolver.
 
 use super::handler;
-use crate::stateful::db::AttachableResolver;
+use crate::stateful::db::{AttachableResolver, Shared};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
-use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock};
-use std::{collections::VecDeque, future::Future, sync::Arc};
+use commonware_utils::channel::oneshot;
+use std::{collections::VecDeque, future::Future};
 
 struct CancelGuard<DB, F: Family, Op, D: Digest> {
     sender: Sender<Message<DB, F, Op, D>>,
@@ -41,7 +41,7 @@ impl<DB, F: Family, Op, D: Digest> Drop for CancelGuard<DB, F, Op, D> {
 pub struct ResponseDropped;
 
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
-    AttachDatabase(Arc<TracedAsyncRwLock<DB>>),
+    AttachDatabase(Shared<DB>),
     GetState {
         request: handler::Request<F, D>,
         response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
@@ -61,7 +61,7 @@ impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
 }
 
 pub(super) struct Pending<DB, F: Family, Op, D: Digest> {
-    database: Option<Arc<TracedAsyncRwLock<DB>>>,
+    database: Option<Shared<DB>>,
     messages: VecDeque<Message<DB, F, Op, D>>,
 }
 
@@ -140,7 +140,7 @@ impl<DB, F: Family, Op, H: Hasher> Mailbox<DB, F, Op, H> {
 }
 
 impl<DB: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<DB, F, Op, H> {
-    pub fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) {
+    pub fn attach_database(&self, db: Shared<DB>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
     }
 }
@@ -181,7 +181,7 @@ where
     Op: Send + Sync + Clone + 'static,
     H: Hasher,
 {
-    fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) -> impl Future<Output = ()> + Send {
+    fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send {
         Self::attach_database(self, db);
         std::future::ready(())
     }
