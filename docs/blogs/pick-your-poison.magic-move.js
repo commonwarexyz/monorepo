@@ -12,7 +12,7 @@ const BOXES = [
   { id: 'beat', title: 'BEAT-MEV(++)', papers: 'BFOQ25, ABDGMPRY25', slide1: { x: 63, y: 28 }, slide2: { x: MIDDLE_COLUMN_X, y: 27 } },
   { id: 'pfbte', title: 'Partial Fraction-BTE', papers: 'BNRT26', slide1: { x: 15.75, y: 31.5 }, slide2: { x: RIGHT_COLUMN_X, y: 27 } },
   { id: 'btibe', title: 'Batched Threshold IBE', papers: 'CGPW25, AFP25, GWWW25', slide1: { x: 47.25, y: 44 }, slide2: { x: LEFT_COLUMN_X, y: 41 } },
-  { id: 'simple', title: 'Simple-BTE, BTX', papers: 'Pol26a, ADGRS26', slide1: { x: 20.75, y: 56.25 }, slide2: { x: RIGHT_COLUMN_X, y: 41 } },
+  { id: 'simple', title: 'Simple BTE, BTX', papers: 'Pol26a, ADGRS26', slide1: { x: 20.75, y: 56.25 }, slide2: { x: RIGHT_COLUMN_X, y: 41 } },
   { id: 'trx', title: 'TrX', papers: 'FPTX25', slide1: { x: 43.75, y: 62.5 }, slide2: { x: LEFT_COLUMN_X, y: 69 } },
   { id: 'sbtibe', title: 'Silent Batched (T)IBE', papers: 'GWWW25', slide1: { x: 65.25, y: 62.5 }, slide2: { x: LEFT_COLUMN_X, y: 55 } },
   { id: 'beast', title: 'BEAST-MEV', papers: 'BCFGOPQW25', slide1: { x: 88.75, y: 62.5 }, slide2: { x: MIDDLE_COLUMN_X, y: 41 } },
@@ -953,8 +953,13 @@ function initFinalFigure(mount) {
 }
 
 // Module scripts run after the document is parsed, so the mounts already exist.
+// Under prefers-reduced-motion the injected styles hide the animation and show
+// the prose sources instead, so skip the scroll machinery entirely: its key
+// handler would otherwise compute stops against a display:none track and
+// swallow arrow-key scrolling at the top of the page.
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const mount = document.getElementById(MOUNT_ID);
-if (mount) initMagicMove(mount);
+if (mount && !reducedMotion) initMagicMove(mount);
 
 const finalMount = document.getElementById(FINAL_MOUNT_ID);
 if (finalMount) initFinalFigure(finalMount);

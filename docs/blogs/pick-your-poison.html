@@ -9,19 +9,23 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Pick Your Poison</title>
-    <meta name="description" content="fill">
+    <meta name="description" content="Every construction of batched
+threshold encryption comes with caveats of epoch restrictions,
+censorship issues, or a complicated setup. Pick your poison. Or two?">
     <meta name="author" content="Guru Vamsi Policharla">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
     <meta property="og:url" content="https://commonware.xyz/blogs/pick-your-poison" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/pick-your-poison.png" />
     <meta property="og:title" content="Pick Your Poison" />
-    <meta property="og:description" content="fill" />
+    <meta property="og:description" content="Every construction of
+batched threshold encryption comes with caveats of epoch restrictions,
+censorship issues, or a complicated setup. Pick your poison. Or two?" />
     <meta property="article:author" content="Guru Vamsi Policharla" />
-    <meta property="article:published_time" content="fill" />
-    <meta property="article:modified_time" content="fill" />
+    <meta property="article:published_time" content="2026-07-22T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-07-22T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/pick-your-poison" />
 
@@ -29,8 +33,10 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/pick-your-poison" />
     <meta property="twitter:title" content="Pick Your Poison" />
-    <meta property="twitter:description" content="fill" />
-    <meta property="twitter:image" content="" />
+    <meta property="twitter:description" content="Every construction of
+batched threshold encryption comes with caveats of epoch restrictions,
+censorship issues, or a complicated setup. Pick your poison. Or two?" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/pick-your-poison.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/guruvamsip" />
     
@@ -92,7 +98,7 @@
 
                         <div class="author">By <a href="https://x.com/guruvamsip">Guru
 Vamsi Policharla</a></div>
-                        <div class="date">fill</div>
+                        <div class="date">July 22nd, 2026</div>
         </div>
         <p>Encrypted mempools have emerged as the leading candidate for
         protecting the privacy of pending transactions. At a high level,
@@ -120,12 +126,12 @@ Vamsi Policharla</a></div>
             This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
           </noscript>
         </div>
-        <script type="module" src="pick-your-poison.magic-move.js?v=3"></script>
+        <script type="module" src="pick-your-poison.magic-move.js?v=4"></script>
         <div id="pick-your-poison-story-source"
         class="cw-magic-story-source">
         <p>The initial work of <a
         href="https://eprint.iacr.org/2024/669">CGPP24</a> required a
-        setup involving secure multiplications in MPC and the size of
+        setup involving secure multiplications in MPC, and the size of
         secret keys held by each party grows with the batch size. They
         additionally required an interactive setup involving a constant
         number of secure multiplications for every batch that was
@@ -141,14 +147,13 @@ Vamsi Policharla</a></div>
         class="math inline">O(B \log^2{B})</span> group operations.</p>
         <p>Concurrently, <a
         href="https://eprint.iacr.org/2024/1533">BFOQ25</a> used very
-        different techniques to also just require a one-time DKG setup,
-        and without the epoch restriction. However, the ciphertexts
-        needed to be encrypted to a particular <em>index</em> in the
-        batch. As a result, two conflicting transactions encrypted to
-        the same index could not be included in the same batch. This
-        gives rise to a censorship issue, where an attacker can censor a
-        victim’s transaction by paying a slightly higher priority
-        fee.</p>
+        different techniques to also require just a one-time DKG setup,
+        without the epoch restriction. However, the ciphertexts needed
+        to be encrypted to a particular <em>index</em> in the batch. As
+        a result, two conflicting transactions encrypted to the same
+        index could not be included in the same batch. This gives rise
+        to a censorship issue, where an attacker can censor a victim’s
+        transaction by paying a slightly higher priority fee.</p>
         <p><a href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a>
         improved <a href="https://eprint.iacr.org/2024/1533">BFOQ25</a>
         to support quasi-linear decryption <span class="math inline">O(B
@@ -157,7 +162,7 @@ Vamsi Policharla</a></div>
         where censorship resistance can be improved by increasing the
         ciphertext size by essentially encrypting to multiple indices in
         the batch.</p>
-        <p><a href="https://eprint.iacr.org/2025/2032">FPTX25</a> show
+        <p><a href="https://eprint.iacr.org/2025/2032">FPTX25</a> shows
         that the epoch restriction in <a
         href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
         href="https://eprint.iacr.org/2024/1575">AFP25</a> can be
@@ -177,14 +182,14 @@ Vamsi Policharla</a></div>
         class="math inline">O(B \log{B})</span> group operations.</p>
         <p><a href="https://eprint.iacr.org/2026/760">Pol26a</a> and <a
         href="https://eprint.iacr.org/2026/754">ADGRS26</a> use a
-        similar strategy but use a different algebraic structure –
+        similar strategy but with a different algebraic structure –
         “punctured powers-of-tau” – to avoid the epoch restriction and
         censorship issues. Their setup uses secure multiplications and
         the size of secret keys held by each party grows with the batch
         size. Decryption requires <span class="math inline">O(B
         \log{B})</span> group operations but is slightly more efficient
         than <a href="https://eprint.iacr.org/2026/674">BNRT26</a>.</p>
-        <p>In a different line of work <a
+        <p>In a different line of work, <a
         href="https://eprint.iacr.org/2025/1419">BCFGOPQW25</a> (suffers
         from censorship issues) and <a
         href="https://eprint.iacr.org/2025/2103">GWWW25</a> (suffers
@@ -210,18 +215,18 @@ Vamsi Policharla</a></div>
         </div>
         <h2 id="just-a-little-bit-of-everything">(Just) A Little Bit of
         Everything</h2>
-        <p>Observe that all constructions occupy an extreme point in the
-        tradeoff space.</p>
+        <p>Observe that each construction occupies an extreme point in
+        the tradeoff space.</p>
         <ul>
         <li><a href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
         href="https://eprint.iacr.org/2024/1575">AFP25</a>, <a
         href="https://eprint.iacr.org/2025/2103">GWWW25</a>: no
-        censorship issues and DKG Setup at the cost of epoch
+        censorship issues and DKG/silent setup at the cost of epoch
         restrictions</li>
         <li><a href="https://eprint.iacr.org/2024/1533">BFOQ25</a>, <a
         href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a>, <a
         href="https://eprint.iacr.org/2025/1419">BCFGOPQW25</a>: no
-        epoch restrictions and DKG/Silent Setup at the cost of
+        epoch restrictions and DKG/silent setup at the cost of
         censorship issues</li>
         <li><a href="https://eprint.iacr.org/2025/2032">FPTX25</a>: no
         censorship issues/epoch restrictions and DKG setup at the cost
@@ -243,9 +248,9 @@ Vamsi Policharla</a></div>
         <p>We quantify censorship resistance as the minimum number of
         ciphertexts an attacker needs to include in a batch before a
         victim’s transaction is forced to be excluded. Ideally,
-        censorship resistance is the same as maximum batch size <span
-        class="math inline">B</span> i.e. censoring a transaction is as
-        expensive as buying up the entire block. <a
+        censorship resistance is the same as the maximum batch size
+        <span class="math inline">B</span>, i.e. censoring a transaction
+        is as expensive as buying up the entire block. <a
         href="https://eprint.iacr.org/2024/1533">BFOQ25</a>, <a
         href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a> only
         achieve a censorship resistance of <span
@@ -256,10 +261,10 @@ Vamsi Policharla</a></div>
         maximum censorship resistance <span class="math inline">B</span>
         but they all have an <span class="math inline">O(B)</span>
         secret key size. This makes changing the committee at large
-        batch sizes <span class="math inline">B \mathbin{&gt;\!\!&gt;}
-        n</span> quite expensive as it requires <span
-        class="math inline">O(B/n)</span> DKGs to reshare the secrets to
-        the new committee even with the trick of <a
+        batch sizes <span class="math inline">B \gg n</span> quite
+        expensive as it requires <span class="math inline">O(B/n)</span>
+        DKGs to reshare the secrets to the new committee even with the
+        trick of <a
         href="https://cs.au.dk/fileadmin/www.cfem.au.dk/Downloads/MPC_workshop/Martin_Hirt_slides-stacked.pdf">Hyper-Invertible
         Matrices</a>.</p>
         <blockquote>
@@ -272,10 +277,10 @@ Vamsi Policharla</a></div>
         secrets.</p>
         <p>In an updated version of <a
         href="https://eprint.iacr.org/2026/760">Pol26a</a>, we introduce
-        Indexed Simple BTE where the secret key size can be reduced from
-        <span class="math inline">O(B) \to O(\delta)</span> to support a
-        censorship resistance of <span
-        class="math inline">\delta</span>.</p>
+        Indexed Simple BTE, where the secret key size can be reduced
+        from <span class="math inline">O(B)</span> to <span
+        class="math inline">O(\delta)</span> to support a censorship
+        resistance of <span class="math inline">\delta</span>.</p>
         <h3 id="epoch-restrictions-v-forced-dkg-re-setup">Epoch
         Restrictions v Forced DKG Re-setup</h3>
         <p><a href="https://eprint.iacr.org/2025/2032">FPTX25</a> avoids
@@ -303,41 +308,26 @@ Vamsi Policharla</a></div>
         increases the ciphertext size linearly with the number of
         blocks. In <a
         href="https://eprint.iacr.org/2026/1452">Pol26b</a>, we
-        construct a batched threshold encryption scheme where we can
-        decrypt <span class="math inline">q</span> different batches per
-        label. Each user still encrypts to an epoch but each epoch now
+        construct Labeled Multi-Key Batched IBE, a batched threshold
+        encryption scheme where we can decrypt <span
+        class="math inline">q</span> different batches per label
+        (epoch). Each user still encrypts to an epoch but each epoch now
         contains <span class="math inline">q</span> blocks, making it
         much more reliable to guess the current epoch number. Although
         we still require a larger <span class="math inline">O(qB)</span>
         CRS, <span class="math inline">q</span> can be chosen to be much
-        smaller than <a
+        smaller than in <a
         href="https://eprint.iacr.org/2025/2032">FPTX25</a> as we only
-        need it to be long enough to ensure transactions are included.
-        We also avoid the forced DKG re-setup as the same CRS and public
-        key can be used across different epochs.</p>
+        need the window to be long enough to ensure transactions are
+        included. We also avoid the forced DKG re-setup as the same CRS
+        and public key can be used across different epochs.</p>
         <div id="pick-your-poison-new-constructions" class="cw-magic-final" role="img" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
-        <p>As of writing this post, no efficient construction achieves
-        <a href="#dream-goal">the dream goal</a>. System designers are
+        <p>As of this writing, no efficient construction achieves <a
+        href="#dream-goal">the dream goal</a>. System designers are
         forced to make undesirable compromises. Indexed Simple BTE and
         Labeled Multi-Key Batched IBE make these compromises tunable,
         allowing deployments to choose the balance that best fits their
         operating constraints.</p>
-        <!-- ## References
-        - CGPP24: [2024/669](https://eprint.iacr.org/2024/669)
-        - GKPW24: [2024/263](https://eprint.iacr.org/2024/263)
-        - CGPW25: [2024/1516](https://eprint.iacr.org/2024/1516)
-        - BFOQ25: [2024/1533](https://eprint.iacr.org/2024/1533)
-        - AFP25: [2024/1575](https://eprint.iacr.org/2024/1575)
-        - BLT25: [2025/1254](https://eprint.iacr.org/2025/1254)
-        - BCFGOPQW25: [2025/1419](https://eprint.iacr.org/2025/1419)
-        - WW25: [2025/1547](https://eprint.iacr.org/2025/1547)
-        - FPTX25: [2025/2032](https://eprint.iacr.org/2025/2032)
-        - GWWW25: [2025/2103](https://eprint.iacr.org/2025/2103)
-        - ABDGMPRY25: [2025/2115](https://eprint.iacr.org/2025/2115)
-        - BNRT26: [2026/674](https://eprint.iacr.org/2026/674)
-        - ADGRS26: [2026/754](https://eprint.iacr.org/2026/754)
-        - Pol26a: [2026/760](https://eprint.iacr.org/2026/760)
-        - Pol26b: [2026/1452](https://eprint.iacr.org/2026/1452) -->
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
