@@ -1320,7 +1320,8 @@ mod tests {
             assert_eq!(decoded, patterned_u64(offset as usize));
 
             // A sealed handle over the same blob serves the same decodes.
-            let sealed = writer.seal().await.unwrap();
+            let (sealed, sync) = writer.seal().await.unwrap();
+            sync.await.unwrap();
             let decoded: u64 = sealed.try_decode_sync(offset, 8, &()).unwrap().unwrap();
             assert_eq!(decoded, patterned_u64(offset as usize));
         });
