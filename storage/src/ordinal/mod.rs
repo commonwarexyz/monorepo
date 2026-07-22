@@ -2148,6 +2148,9 @@ mod tests {
                 store.put(4, DummyValue { value: 4 }).await.unwrap();
 
                 store.sync().await.unwrap();
+
+                // A record whose CRC matches but whose value fails to parse is invalid
+                assert!(matches!(store.get(2).await, Err(Error::InvalidRecord(2))));
             }
 
             // Reinitialize without bits and verify uncheckpointed data is deleted.

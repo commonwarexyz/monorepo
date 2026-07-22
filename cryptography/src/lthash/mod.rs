@@ -142,9 +142,7 @@ impl LtHash {
         for (chunk, val) in bytes.chunks_exact_mut(2).zip(&self.state) {
             chunk.copy_from_slice(&val.to_le_bytes());
         }
-        let mut hasher = Blake3::new();
-        hasher.update(&bytes);
-        hasher.finalize()
+        Blake3::hash(&[&bytes])
     }
 
     /// Reset the [LtHash] to the initial zero state.
@@ -283,11 +281,11 @@ mod tests {
         let empty_hash = lthash.checksum();
 
         // Empty state should produce the hash of all zero u16s in little-endian
-        let mut hasher = Blake3::new();
+        let mut hasher = Blake3::default();
         for _ in 0..LTHASH_ELEMENTS {
             hasher.update(&0u16.to_le_bytes());
         }
-        let expected = hasher.finalize();
+        let (_, expected) = hasher.finalize();
 
         assert_eq!(empty_hash, expected);
     }

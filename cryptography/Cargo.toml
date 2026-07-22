@@ -18,7 +18,7 @@ ahash = { workspace = true, features = ["no-rng"] }
 anyhow = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 blake3 = { workspace = true, features = ["zeroize"] }
-blst = { workspace = true, features = ["no-threads"] }
+blst = { workspace = true, optional = true, features = ["no-threads"] }
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
@@ -84,6 +84,7 @@ bench = false
 
 [features]
 default = [ "std" ]
+bls12381 = [ "dep:blst" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
@@ -99,6 +100,7 @@ std = [
 	"ahash/std",
 	"anyhow?/std",
 	"blake3/std",
+	"bls12381",
 	"bytes/std",
 	"chacha20poly1305/getrandom",
 	"commonware-codec/std",
@@ -129,6 +131,7 @@ std = [
 name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
+required-features = [ "std" ]
 
 [[bench]]
 name = "ed25519"
@@ -174,3 +177,4 @@ path = "src/bloomfilter/benches/bench.rs"
 name = "bulletproofs"
 harness = false
 path = "src/zk/bulletproofs/benches/bench.rs"
+required-features = [ "std" ]

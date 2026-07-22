@@ -187,6 +187,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             self.context.child("dialer"),
             dialer::Config {
                 stream_cfg,
+                dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,

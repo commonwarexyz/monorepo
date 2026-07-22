@@ -1,7 +1,8 @@
 //! Single-owner, append-only access to a [Blob].
 //!
 //! A [Writer] exclusively owns its blob and cannot be cloned. Appended bytes can be read back
-//! immediately but are not durable until [Writer::sync].
+//! immediately but are not durable until a sync completes ([Writer::sync], or the handles
+//! returned by [Writer::start_sync] and [Writer::seal]).
 //!
 //! # Snapshot
 //!
@@ -9,7 +10,8 @@
 //!
 //! # Seal
 //!
-//! [Writer::seal] consumes the writer and turns it into an immutable [super::Sealed] view.
+//! [Writer::seal] consumes the writer, returning an immutable [super::Sealed] view plus a
+//! completion handle for the sync it starts.
 //!
 //! # Paging
 //!
@@ -925,8 +927,7 @@ impl<B: Blob> Writer<B> {
     /// writer.
     ///
     /// This writes buffered bytes to the blob layout but does not make them durable. Call
-    /// [`Self::sync`] or [`super::Sealed::sync`] if the returned handle's bytes must survive a
-    /// crash.
+    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
     /// If this writer later rewinds or truncates into the returned handle's range, reads from that
     /// handle may observe unspecified contents.
@@ -963,6 +964,37 @@ impl<B: Blob> Writer<B> {
             return Handle::ready(Err(err));
         }
         self.sync_state.start_sync(&self.blob).await
+    }
+
+    /// Length of the longest contiguous prefix of well-formed pages on the blob.
+    ///
+    /// [`Self::new`] sizes a blob by scanning backward to its last valid page, which cannot
+    /// detect an earlier page that was lost or corrupted. This scans forward instead, stopping
+    /// at the first invalid or short page.
+    ///
+    /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
+    /// still buffered in this writer is unreadable from the blob and fails the scan.
+    pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
+        let logical_page_size = self.cache_ref.page_size();
+        let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
+        let mut valid_len = 0u64;
+        for page in 0..total_pages {
+            match super::get_page_with_checksum_from_blob(&self.blob, page, logical_page_size).await
+            {
+                Ok((logical, _)) => {
+                    let len = logical.len() as u64;
+                    valid_len += len;
+                    // A partial page can only legitimately be the last one, so stop here.
+                    if len < logical_page_size {
+                        break;
+                    }
+                }
+                // First torn/invalid page: the contiguous valid prefix ends here.
+                Err(Error::InvalidChecksum) => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(valid_len)
     }
 
     /// Wait for any started sync to complete without starting a new sync.
@@ -1132,16 +1164,16 @@ impl<B: Blob> Writer<B> {
         )
     }
 
-    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
-    /// blob.
+    /// Consume the write handle, flushing buffered bytes and beginning a sync of the blob.
     ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    pub async fn seal(mut self) -> Result<super::Sealed<B>, Error> {
+    /// Returns an immutable [`super::Sealed`] read handle plus a completion handle for the started
+    /// sync. Reads through the [`super::Sealed`] handle observe flushed bytes immediately;
+    /// durability isn't guaranteed until the sync handle completes.
+    pub async fn seal(mut self) -> Result<(super::Sealed<B>, Handle<()>), Error> {
         self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.id))
+        let handle = self.sync_state.start_sync(&self.blob).await;
+        Ok((self.sealed_handle(self.id), handle))
     }
 }
 
@@ -1170,6 +1202,103 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    /// `recoverable_prefix_len` returns the full logical size when every page is well-formed.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_clean")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 0);
+
+            let total = PAGE_SIZE.get() as usize * 2 + 50;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
+        });
+    }
+
+    /// The scan stops at the first torn page even when later pages remain valid, catching the
+    /// interior hole the backward scan in `Writer::new` misses.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_torn_interior_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let total = PAGE_SIZE.get() as usize * 3 + 10;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Tear page 1, leaving pages 0 and 2+ valid.
+            let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
+            let offset = physical_page_size + 7;
+            let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
+            blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF])
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            assert_eq!(
+                writer.recoverable_prefix_len().await.unwrap(),
+                PAGE_SIZE.get() as u64
+            );
+        });
+    }
+
+    /// A valid-but-short interior page ends the prefix: a partial page's durable state can
+    /// survive a crash while its extension to a full page is lost.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_stale_short_interior_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_stale")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Persist a partial first page and capture its physical bytes.
+            let total = PAGE_SIZE.get() as usize * 2;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data[..20]).await.unwrap();
+            writer.sync().await.unwrap();
+            let physical_page_size = (PAGE_SIZE.get() as u64 + CHECKSUM_SIZE) as usize;
+            let stale = blob
+                .read_at(0, physical_page_size)
+                .await
+                .unwrap()
+                .coalesce();
+            let stale = stale.as_ref().to_vec();
+
+            // Extend past the first page, persist, then restore page 0 to its stale partial
+            // state as if the extension never reached disk.
+            writer.append(&data[20..]).await.unwrap();
+            writer.sync().await.unwrap();
+            blob.write_at(0, stale).await.unwrap();
+            blob.sync().await.unwrap();
+
+            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 20);
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {
@@ -2364,8 +2493,13 @@ mod tests {
 
             // Release the started sync so seal can flush.
             deferred.release.send(Ok(())).unwrap();
-            let sealed = seal.await.unwrap().unwrap();
+            let (sealed, sync) = seal.await.unwrap().unwrap();
             prior.await.unwrap();
+
+            // Release the sync started by seal itself.
+            let deferred = next_pending_sync(&pending);
+            deferred.release.send(Ok(())).unwrap();
+            sync.await.unwrap();
             let read = sealed
                 .read_at(0, b"hello world".len())
                 .await
@@ -2374,7 +2508,7 @@ mod tests {
             assert_eq!(read.as_ref(), b"hello world");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
         });
     }

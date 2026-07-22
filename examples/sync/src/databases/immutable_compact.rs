@@ -50,16 +50,16 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let Some(last) = operations.last() else {
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         };
         if !matches!(last, Operation::Commit(..)) {
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -69,14 +69,14 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor).await;
-                    self.apply_batch(merkleized)?;
-                    self.sync().await?;
+                    let merkleized = batch.merkleize(&self, metadata, floor).await;
+                    (self, _) = self.apply_batch(merkleized)?;
+                    self = self.sync().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

@@ -172,7 +172,7 @@ mod harnesses {
     }
 
     async fn apply_unordered_fixed_ops<F: merkle::Graftable>(
-        mut db: UnorderedFixedDb<F>,
+        db: UnorderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
     ) -> UnorderedFixedDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
@@ -192,13 +192,12 @@ mod harnesses {
             }
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     async fn apply_unordered_variable_ops<F: merkle::Graftable>(
-        mut db: UnorderedVariableDb<F>,
+        db: UnorderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
     ) -> UnorderedVariableDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
@@ -218,13 +217,12 @@ mod harnesses {
             }
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     async fn apply_ordered_fixed_ops<F: merkle::Graftable>(
-        mut db: OrderedFixedDb<F>,
+        db: OrderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
     ) -> OrderedFixedDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
@@ -244,13 +242,12 @@ mod harnesses {
             }
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     async fn apply_ordered_variable_ops<F: merkle::Graftable>(
-        mut db: OrderedVariableDb<F>,
+        db: OrderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
     ) -> OrderedVariableDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
@@ -270,9 +267,8 @@ mod harnesses {
             }
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        db
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     pub struct UnorderedFixedHarness<F>(std::marker::PhantomData<F>);
@@ -507,8 +503,8 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
                 .merkleize(&target_db, None)
                 .await
                 .unwrap();
-            target_db.apply_batch(merkleized).await.unwrap();
-            target_db.commit().await.unwrap();
+            (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
+            target_db = target_db.commit().await.unwrap();
         }
 
         assert!(
@@ -516,7 +512,8 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             "expected inactivity floor past chunk 0"
         );
 
-        target_db.prune(target_db.sync_boundary()).await.unwrap();
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
 
         let sync_root = SyncDatabase::root(&target_db);
         let verification_root = target_db.root();
@@ -599,12 +596,12 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
         }
         let prune_loc = crate::merkle::Location::new(256);
         assert!(db.sync_boundary() >= prune_loc);
-        db.prune(prune_loc).await.unwrap();
+        let db = db.prune(prune_loc).await.unwrap();
 
         let bounds = db.bounds();
         let local_start = bounds.start;

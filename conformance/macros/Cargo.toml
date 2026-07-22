@@ -13,10 +13,20 @@ documentation = "https://docs.rs/commonware-conformance-macros"
 [lib]
 proc-macro = true
 
+[features]
+fixtures = [ "dep:serde", "dep:serde_json", "dep:toml" ]
+
+[[bin]]
+name = "fixtures"
+required-features = ["fixtures"]
+
 [dependencies]
 proc-macro2.workspace = true
 quote.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
 syn = { workspace = true, features = ["full", "parsing"] }
+toml = { workspace = true, optional = true }
 
 [lints]
 workspace = true

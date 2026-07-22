@@ -225,11 +225,10 @@ fn main() {
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
                 .expect("share must be in participants");
         let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
-        let (application, scheme, mailbox) = application::Application::new(
+        let (application, scheme, mailbox) = application::Application::<_, Sha256, _, _>::new(
             context.child("application"),
             application::Config {
                 indexer,
-                hasher: Sha256::default(),
                 this_network,
                 other_network,
                 mailbox_size: NZUsize!(1024),
@@ -256,8 +255,8 @@ fn main() {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                view_retention: ViewDelta::new(10),
+                skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,

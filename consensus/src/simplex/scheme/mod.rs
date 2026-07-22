@@ -18,8 +18,10 @@
 //!
 //! The [`CertificateScheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
-//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
-//! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
+//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). To
+//! observe all exported activity, process all messages passed through the [`crate::Reporter`] interface (note that reports
+//! are not exhaustive: votes below the activity window are dropped without being reported, see
+//! [`crate::simplex::types::Activity`]).
 //!
 //! # BLS12-381 Threshold Variants
 //!

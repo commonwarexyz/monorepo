@@ -177,22 +177,22 @@ fn fuzz(input: FuzzInput) {
         let mut reference = ReferenceQueue::new();
 
         for op in input.operations.iter() {
-            match op {
+            queue = match op {
                 QueueOperation::Enqueue { value } => {
-                    let pos = queue.enqueue(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
+                    queue
                 }
 
                 QueueOperation::Append { value } => {
-                    let pos = queue.append(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.append(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
+                    queue
                 }
 
-                QueueOperation::Commit => {
-                    queue.commit().await.unwrap();
-                }
+                QueueOperation::Commit => queue.commit().await.unwrap(),
 
                 QueueOperation::Dequeue => {
                     let result = queue.dequeue().await.unwrap();
@@ -208,6 +208,7 @@ fn fuzz(input: FuzzInput) {
                             panic!("dequeue mismatch: got {actual:?}, expected {expected:?}");
                         }
                     }
+                    queue
                 }
 
                 QueueOperation::Ack { pos_offset } => {
@@ -226,6 +227,7 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack result mismatch for pos {pos}"
                     );
+                    queue
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
@@ -241,17 +243,17 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack_up_to result mismatch for up_to {up_to}"
                     );
+                    queue
                 }
 
                 QueueOperation::Reset => {
                     queue.reset();
                     reference.reset();
+                    queue
                 }
 
-                QueueOperation::Sync => {
-                    queue.sync().await.unwrap();
-                }
-            }
+                QueueOperation::Sync => queue.sync().await.unwrap(),
+            };
 
             // Verify invariants after each operation
             assert_eq!(queue.size(), reference.size(), "size mismatch after {op:?}");

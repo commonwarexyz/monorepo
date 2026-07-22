@@ -9,16 +9,50 @@
 use super::{Config, Error, Queue};
 use crate::Context;
 use commonware_codec::CodecShared;
-use commonware_utils::{channel::mpsc, sync::AsyncMutex};
+use commonware_utils::{
+    channel::mpsc,
+    sync::{AsyncMutex, AsyncMutexGuard},
+};
 use std::{ops::Range, sync::Arc};
 use tracing::debug;
+
+/// The shared queue cell.
+///
+/// Queue mutations take the queue by value, so shared handles keep it in an `Option`:
+/// taken out for each mutation and put back on success. If a mutation fails or its future
+/// is dropped mid-flight, the cell is left empty and every later call returns
+/// [Error::Unavailable]; reopen the queue to recover.
+type Cell<E, V> = Arc<AsyncMutex<Option<Queue<E, V>>>>;
+
+/// Take the queue out of a locked cell, or report it lost.
+fn take<E: Context, V: CodecShared>(
+    guard: &mut AsyncMutexGuard<'_, Option<Queue<E, V>>>,
+) -> Result<Queue<E, V>, Error> {
+    guard.take().ok_or(Error::Unavailable)
+}
+
+/// Borrow the queue in a locked cell, or report it lost.
+fn peek<'a, E: Context, V: CodecShared>(
+    guard: &'a AsyncMutexGuard<'_, Option<Queue<E, V>>>,
+) -> Result<&'a Queue<E, V>, Error> {
+    guard.as_ref().ok_or(Error::Unavailable)
+}
+
+/// Mutably borrow the queue in a locked cell, or report it lost.
+fn peek_mut<'a, E: Context, V: CodecShared>(
+    guard: &'a mut AsyncMutexGuard<'_, Option<Queue<E, V>>>,
+) -> Result<&'a mut Queue<E, V>, Error> {
+    guard.as_mut().ok_or(Error::Unavailable)
+}
 
 /// Writer handle for enqueueing items.
 ///
 /// This handle can be cloned to allow multiple tasks to enqueue items concurrently.
-/// All clones share the same underlying queue and notification channel.
+/// All clones share the same underlying queue and notification channel. Any method
+/// returns [Error::Unavailable] if an earlier mutation failed or was interrupted;
+/// reopen the queue to recover.
 pub struct Writer<E: Context, V: CodecShared> {
-    queue: Arc<AsyncMutex<Queue<E, V>>>,
+    queue: Cell<E, V>,
     notify: mpsc::Sender<()>,
 }
 
@@ -39,7 +73,10 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn enqueue(&self, item: V) -> Result<u64, Error> {
-        let pos = self.queue.lock().await.enqueue(item).await?;
+        let mut guard = self.queue.lock().await;
+        let (queue, pos) = take(&mut guard)?.enqueue(item).await?;
+        *guard = Some(queue);
+        drop(guard);
 
         // Fire-and-forget so the writer never blocks on reader wake-up.
         // The reader always checks the queue under lock, so a missed
@@ -61,16 +98,18 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
         &self,
         items: impl IntoIterator<Item = V>,
     ) -> Result<Range<u64>, Error> {
-        let mut queue = self.queue.lock().await;
+        let mut guard = self.queue.lock().await;
+        let mut queue = take(&mut guard)?;
         let start = queue.size();
         for item in items {
-            queue.append(item).await?;
+            (queue, _) = queue.append(item).await?;
         }
         let end = queue.size();
         if end > start {
-            queue.commit().await?;
+            queue = queue.commit().await?;
         }
-        drop(queue);
+        *guard = Some(queue);
+        drop(guard);
 
         if start < end {
             let _ = self.notify.try_send(());
@@ -87,7 +126,10 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn append(&self, item: V) -> Result<u64, Error> {
-        let pos = self.queue.lock().await.append(item).await?;
+        let mut guard = self.queue.lock().await;
+        let (queue, pos) = take(&mut guard)?.append(item).await?;
+        *guard = Some(queue);
+        drop(guard);
         let _ = self.notify.try_send(());
         debug!(position = pos, "writer: appended item");
         Ok(pos)
@@ -95,25 +137,33 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
 
     /// See [Queue::commit](super::Queue::commit).
     pub async fn commit(&self) -> Result<(), Error> {
-        self.queue.lock().await.commit().await
+        let mut guard = self.queue.lock().await;
+        let queue = take(&mut guard)?.commit().await?;
+        *guard = Some(queue);
+        Ok(())
     }
 
     /// See [Queue::sync](super::Queue::sync).
     pub async fn sync(&self) -> Result<(), Error> {
-        self.queue.lock().await.sync().await
+        let mut guard = self.queue.lock().await;
+        let queue = take(&mut guard)?.sync().await?;
+        *guard = Some(queue);
+        Ok(())
     }
 
     /// Returns the total number of items that have been enqueued.
-    pub async fn size(&self) -> u64 {
-        self.queue.lock().await.size()
+    pub async fn size(&self) -> Result<u64, Error> {
+        Ok(peek(&self.queue.lock().await)?.size())
     }
 }
 
 /// Reader handle for dequeuing and acknowledging items.
 ///
-/// There should only be one reader per shared queue.
+/// There should only be one reader per shared queue. Any method returns
+/// [Error::Unavailable] if an earlier mutation failed or was interrupted; reopen the
+/// queue to recover.
 pub struct Reader<E: Context, V: CodecShared> {
-    queue: Arc<AsyncMutex<Queue<E, V>>>,
+    queue: Cell<E, V>,
     notify: mpsc::Receiver<()>,
 }
 
@@ -131,7 +181,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     pub async fn recv(&mut self) -> Result<Option<(u64, V)>, Error> {
         loop {
             // Try to dequeue an item
-            if let Some(item) = self.queue.lock().await.dequeue().await? {
+            if let Some(item) = self.dequeue().await? {
                 return Ok(Some(item));
             }
 
@@ -139,7 +189,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
             // Returns None if writer is dropped
             if self.notify.recv().await.is_none() {
                 // Writer dropped, drain any remaining items
-                return self.queue.lock().await.dequeue().await;
+                return self.dequeue().await;
             }
         }
     }
@@ -155,7 +205,12 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
         // Drain pending notification (capacity is 1, so at most 1 buffered).
         let _ = self.notify.try_recv();
 
-        self.queue.lock().await.dequeue().await
+        self.dequeue().await
+    }
+
+    /// Dequeue through the shared cell.
+    async fn dequeue(&self) -> Result<Option<(u64, V)>, Error> {
+        peek_mut(&mut self.queue.lock().await)?.dequeue().await
     }
 
     /// See [Queue::ack].
@@ -164,7 +219,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns [super::Error::PositionOutOfRange] if the position is invalid.
     pub async fn ack(&self, position: u64) -> Result<(), Error> {
-        self.queue.lock().await.ack(position)
+        peek_mut(&mut self.queue.lock().await)?.ack(position)
     }
 
     /// See [Queue::ack_up_to].
@@ -173,27 +228,28 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// Returns [super::Error::PositionOutOfRange] if `up_to` is invalid.
     pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
-        self.queue.lock().await.ack_up_to(up_to)
+        peek_mut(&mut self.queue.lock().await)?.ack_up_to(up_to)
     }
 
     /// See [Queue::ack_floor].
-    pub async fn ack_floor(&self) -> u64 {
-        self.queue.lock().await.ack_floor()
+    pub async fn ack_floor(&self) -> Result<u64, Error> {
+        Ok(peek(&self.queue.lock().await)?.ack_floor())
     }
 
     /// See [Queue::read_position].
-    pub async fn read_position(&self) -> u64 {
-        self.queue.lock().await.read_position()
+    pub async fn read_position(&self) -> Result<u64, Error> {
+        Ok(peek(&self.queue.lock().await)?.read_position())
     }
 
     /// See [Queue::is_empty].
-    pub async fn is_empty(&self) -> bool {
-        self.queue.lock().await.is_empty()
+    pub async fn is_empty(&self) -> Result<bool, Error> {
+        Ok(peek(&self.queue.lock().await)?.is_empty())
     }
 
     /// See [Queue::reset].
-    pub async fn reset(&self) {
-        self.queue.lock().await.reset();
+    pub async fn reset(&self) -> Result<(), Error> {
+        peek_mut(&mut self.queue.lock().await)?.reset();
+        Ok(())
     }
 }
 
@@ -225,7 +281,7 @@ pub async fn init<E: Context, V: CodecShared>(
     context: E,
     cfg: Config<V::Cfg>,
 ) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
-    let queue = Arc::new(AsyncMutex::new(Queue::init(context, cfg).await?));
+    let queue = Arc::new(AsyncMutex::new(Some(Queue::init(context, cfg).await?)));
     let (notify_tx, notify_rx) = mpsc::channel(1);
 
     let writer = Writer {
@@ -285,7 +341,7 @@ mod tests {
 
             // Ack the item
             reader.ack(recv_pos).await.unwrap();
-            assert!(reader.is_empty().await);
+            assert!(reader.is_empty().await.unwrap());
         });
     }
 
@@ -319,7 +375,7 @@ mod tests {
             }
 
             reader.ack(0).await.unwrap();
-            assert!(reader.is_empty().await);
+            assert!(reader.is_empty().await.unwrap());
         });
     }
 
@@ -342,7 +398,7 @@ mod tests {
                 assert_eq!(item, vec![i as u8]);
                 reader.ack(pos).await.unwrap();
             }
-            assert!(reader.is_empty().await);
+            assert!(reader.is_empty().await.unwrap());
         });
     }
 

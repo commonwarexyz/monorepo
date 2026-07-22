@@ -1,7 +1,7 @@
 //! Immutable database types and helpers for the sync example.
 
 use crate::{Hasher, Key, Translator, Value};
-use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::BufferPooler;
 use commonware_storage::{
@@ -51,6 +51,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig,
         },
         translator: commonware_storage::translator::EightCap,
         init_cache_size: Some(NZUsize!(1 << 16)),
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 
@@ -61,21 +62,11 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig,
 /// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
 pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
-    let mut hasher = <Hasher as CryptoHasher>::new();
     let floor = Location::new(starting_loc);
 
     for i in 0..count {
-        let key = {
-            hasher.update(&i.to_be_bytes());
-            hasher.update(&seed.to_be_bytes());
-            hasher.finalize()
-        };
-
-        let value = {
-            hasher.update(&key);
-            hasher.update(b"value");
-            hasher.finalize()
-        };
+        let key = Hasher::hash(&[&i.to_be_bytes(), &seed.to_be_bytes()]);
+        let value = Hasher::hash(&[&key, b"value"]);
 
         operations.push(Operation::Set(key, value));
 
@@ -101,13 +92,13 @@ where
     }
 
     async fn add_operations(
-        &mut self,
+        mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error<mmr::Family>> {
+    ) -> Result<Self, commonware_storage::qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(());
+            return Ok(self);
         }
 
         let mut batch = self.new_batch();
@@ -117,14 +108,14 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata, floor) => {
-                    let merkleized = batch.merkleize(self, metadata, floor).await;
-                    self.apply_batch(merkleized).await?;
-                    self.commit().await?;
+                    let merkleized = batch.merkleize(&self, metadata, floor).await;
+                    (self, _) = self.apply_batch(merkleized).await?;
+                    self = self.commit().await?;
                     batch = self.new_batch();
                 }
             }
         }
-        Ok(())
+        Ok(self)
     }
 
     fn current_floor(&self) -> u64 {

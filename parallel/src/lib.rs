@@ -472,6 +472,28 @@ commonware_macros::stability_scope!(BETA {
             self.map_init_collect_vec(iter, init, map_op)
         }
 
+        /// Maps each element with a per-item work multiplier.
+        ///
+        /// Convenience over
+        /// [`map_init_collect_vec_with_multiplier`](Self::map_init_collect_vec_with_multiplier)
+        /// for stateless map operations.
+        #[track_caller]
+        fn map_collect_vec_with_multiplier<I, F, R>(
+            &self,
+            iter: I,
+            multiplier: usize,
+            map_op: F,
+        ) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.map_init_collect_vec_with_multiplier(iter, multiplier, || (), |_, item| {
+                map_op(item)
+            })
+        }
+
         /// Maps each element, filtering out `None` results and tracking their keys.
         ///
         /// This is a convenience method that applies `map_op` to each element. The

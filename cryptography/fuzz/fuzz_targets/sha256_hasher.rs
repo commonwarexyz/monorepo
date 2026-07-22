@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Hasher, Sha256 as OurSha256, sha256::Digest};
+use commonware_cryptography::{Hasher, Sha256 as OurSha256, fuzz::Plan, sha256::Digest};
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
 use zeroize::Zeroize;
@@ -11,12 +11,13 @@ use zeroize::Zeroize;
 pub struct FuzzInput {
     pub chunks: Vec<Vec<u8>>,
     pub data: Vec<u8>,
+    pub plan: Plan<OurSha256>,
     pub case_selector: u8,
 }
 
 // Basic hashing comparison with chunks
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
-    let mut our_hasher = OurSha256::new();
+    let mut our_hasher = OurSha256::default();
     let mut ref_hasher = RefSha256::new();
 
     for chunk in chunks {
@@ -24,14 +25,18 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
         ref_hasher.update(chunk);
     }
 
-    let our_result = our_hasher.finalize();
+    let (_, our_result) = our_hasher.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_slice());
+
+    // The one-shot API should agree with streaming.
+    let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
+    assert_eq!(OurSha256::hash(&parts), our_result);
 }
 
-// Reset functionality
+// Reset functionality: the hasher returned by `finalize` is freshly reset.
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
-    let mut our_hasher = OurSha256::new();
+    let mut our_hasher = OurSha256::default();
     let mut ref_hasher = RefSha256::new();
 
     // First round
@@ -39,12 +44,12 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
         our_hasher.update(chunk);
         ref_hasher.update(chunk);
     }
-    let our_result = our_hasher.finalize();
+    let (our_hasher, our_result) = our_hasher.finalize();
     let ref_result = ref_hasher.finalize();
     assert_eq!(our_result.as_ref(), ref_result.as_slice());
 
-    // Reset and second round
-    our_hasher.reset();
+    // Reuse the reset hasher for the second round
+    let mut our_hasher = our_hasher;
     let mut ref_hasher = RefSha256::new();
 
     for chunk in chunks {
@@ -52,7 +57,7 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
         ref_hasher.update(chunk);
     }
 
-    let our_result_after_reset = our_hasher.finalize();
+    let (_, our_result_after_reset) = our_hasher.finalize();
     let ref_result_after_reset = ref_hasher.finalize();
     assert_eq!(our_result, our_result_after_reset);
     assert_eq!(
@@ -63,7 +68,7 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
 
 // Chunked vs all-at-once hashing
 fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
-    let mut our_hasher = OurSha256::new();
+    let mut our_hasher = OurSha256::default();
     let mut all_data = Vec::new();
 
     for chunk in chunks {
@@ -71,23 +76,23 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
         our_hasher.update(chunk);
     }
 
-    let our_final = our_hasher.finalize();
+    let (_, our_final) = our_hasher.finalize();
     let ref_final = RefSha256::digest(&all_data);
     assert_eq!(our_final.as_ref(), ref_final.as_slice());
 }
 
 // Differential fuzzing
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurSha256::hash(data);
+    let our_hash_result = OurSha256::hash(&[data]);
     let ref_hash_result = RefSha256::digest(data);
     assert_eq!(our_hash_result.as_ref(), ref_hash_result.as_slice());
 }
 
 // Encode/decode functionality
 fn fuzz_encode_decode(data: &[u8]) {
-    let mut hasher = OurSha256::new();
+    let mut hasher = OurSha256::default();
     hasher.update(data);
-    let digest = hasher.finalize();
+    let (_, digest) = hasher.finalize();
 
     let encoded = digest.encode();
     assert_eq!(encoded.len(), 32); // DIGEST_LENGTH = 32
@@ -97,14 +102,14 @@ fn fuzz_encode_decode(data: &[u8]) {
     assert_eq!(digest, decoded);
 }
 
-// Test Default and Clone implementations
+// Two independently-constructed default hashers produce the same result
 fn fuzz_default_clone() {
-    let mut hasher1 = OurSha256::default();
-    let mut hasher2 = hasher1.clone();
+    let hasher1 = OurSha256::default();
+    let hasher2 = OurSha256::default();
 
     // Both should produce the same result for empty input
-    let digest1 = hasher1.finalize();
-    let digest2 = hasher2.finalize();
+    let (_, digest1) = hasher1.finalize();
+    let (_, digest2) = hasher2.finalize();
     assert_eq!(digest1, digest2);
 }
 
@@ -137,7 +142,7 @@ fn fuzz_zeroize() {
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 8 {
+    match input.case_selector % 9 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -146,6 +151,7 @@ fn fuzz(input: FuzzInput) {
         5 => fuzz_default_clone(),
         6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
         7 => fuzz_zeroize(),
+        8 => input.plan.run(),
         _ => unreachable!(),
     }
 }

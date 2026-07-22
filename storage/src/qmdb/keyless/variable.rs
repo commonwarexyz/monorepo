@@ -263,14 +263,13 @@ mod test {
                         ));
                 }
                 let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
-                db.apply_batch(batch.merkleize(&db, None, new_commit_loc).await)
-                    .await
-                    .unwrap();
+                let merkleized = batch.merkleize(&db, None, new_commit_loc).await;
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
             // commit is at 8.
-            db.prune(Location::new(8)).await.unwrap();
+            let db = db.prune(Location::new(8)).await.unwrap();
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
@@ -336,8 +335,8 @@ mod test {
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
-        let mut db = open_db::<F>(ctx.child("db")).await;
-        let mut compact = open_compact::<F>(ctx.child("compact")).await;
+        let db = open_db::<F>(ctx.child("db")).await;
+        let compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let v1 = b"hello".to_vec();
@@ -360,10 +359,10 @@ mod test {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        db.apply_batch(retained).await.unwrap();
-        compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
-        compact.sync().await.unwrap();
+        let (db, _) = db.apply_batch(retained).await.unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let db = db.commit().await.unwrap();
+        let compact = compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));
@@ -395,7 +394,7 @@ mod test {
     fn test_keyless_db_pruning() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_pruning(db).await;
+            tests::test_keyless_db_pruning(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -491,7 +490,7 @@ mod test {
     fn test_keyless_stale_batch() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_stale_batch(db).await;
+            tests::test_keyless_stale_batch(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -555,7 +554,8 @@ mod test {
     fn test_keyless_rewind_pruned_target_errors() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+            tests::test_keyless_db_rewind_pruned_target_errors(ctx, db, reopen::<mmr::Family>())
+                .await;
         });
     }
 
@@ -654,7 +654,7 @@ mod test {
     fn test_keyless_db_pruning_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_pruning(db).await;
+            tests::test_keyless_db_pruning(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 
@@ -742,7 +742,7 @@ mod test {
     fn test_keyless_stale_batch_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_stale_batch(db).await;
+            tests::test_keyless_stale_batch(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 
@@ -798,7 +798,8 @@ mod test {
     fn test_keyless_rewind_pruned_target_errors_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+            tests::test_keyless_db_rewind_pruned_target_errors(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 
@@ -814,7 +815,8 @@ mod test {
     fn test_keyless_variable_floor_regression_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_regression_rejected(db).await;
+            tests::test_keyless_db_floor_regression_rejected(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 
@@ -822,7 +824,12 @@ mod test {
     fn test_keyless_variable_floor_beyond_commit_loc_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(
+                ctx,
+                db,
+                reopen::<mmb::Family>(),
+            )
+            .await;
         });
     }
 
@@ -864,7 +871,12 @@ mod test {
     fn test_keyless_variable_ancestor_floor_regression_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(
+                ctx,
+                db,
+                reopen::<mmb::Family>(),
+            )
+            .await;
         });
     }
 
@@ -904,7 +916,8 @@ mod test {
     fn test_keyless_variable_floor_regression_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_regression_rejected(db).await;
+            tests::test_keyless_db_floor_regression_rejected(ctx, db, reopen::<mmr::Family>())
+                .await;
         });
     }
 
@@ -912,7 +925,12 @@ mod test {
     fn test_keyless_variable_floor_beyond_commit_loc_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(
+                ctx,
+                db,
+                reopen::<mmr::Family>(),
+            )
+            .await;
         });
     }
 
@@ -954,7 +972,12 @@ mod test {
     fn test_keyless_variable_ancestor_floor_regression_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(
+                ctx,
+                db,
+                reopen::<mmr::Family>(),
+            )
+            .await;
         });
     }
 
@@ -986,13 +1009,17 @@ mod test {
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(
-        db: &mut TestDb<mmr::Family>,
+        db: TestDb<mmr::Family>,
         loc: crate::merkle::Location<mmr::Family>,
     ) {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
-        is_send(db.sync());
         is_send(db.get(loc));
+        is_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_rewind_is_send(db: TestDb<mmr::Family>, loc: crate::merkle::Location<mmr::Family>) {
         is_send(db.rewind(loc));
     }
 }
