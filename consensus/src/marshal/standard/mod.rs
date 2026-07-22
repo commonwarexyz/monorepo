@@ -43,11 +43,11 @@ pub use variant::Standard;
 mod tests {
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Reporter,
+        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
-            application::gates::Gates,
+            application::gates::{GateOutcome, Gates},
             config::{Config, Start},
             core::{
                 Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _,
@@ -57,8 +57,8 @@ mod tests {
                 harness::{
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
                     InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
-                    QUORUM, S, StandardHarness, TestHarness, UNRELIABLE_LINK, V, ValidatorHandle,
-                    default_leader, make_raw_block, setup_network_links,
+                    QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
+                    ValidatorHandle, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants,
                 },
                 verifying::MockVerifyingApp,
@@ -66,16 +66,21 @@ mod tests {
             resolver::handler,
         },
         simplex::{
-            Plan,
+            self, Plan,
+            config::ForwardingPolicy,
+            elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-            types::{Finalization, Proposal},
+            types::{
+                Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
+                Proposal, Vote,
+            },
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::Encode;
+    use commonware_codec::{DecodeExt as _, Encode};
     use commonware_cryptography::{
         Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -84,7 +89,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients,
+        Manager as _, Receiver as _, Recipients, Sender as _,
         simulated::{self, Network},
     };
     use commonware_parallel::Sequential;
@@ -102,7 +107,7 @@ mod tests {
         Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
-        ordered::Set,
+        ordered::{Quorum as _, Set},
         sequence::U64,
         sync::Mutex,
         vec::NonEmptyVec,
@@ -1734,6 +1739,7 @@ mod tests {
     type InlineWrapper = Inline<Runtime, S, App, B, FixedEpocher>;
     type DeferredWrapper = Deferred<Runtime, S, App, B, FixedEpocher>;
 
+    #[derive(Clone)]
     enum Wrapper {
         Inline(InlineWrapper),
         Deferred(DeferredWrapper),
@@ -1789,6 +1795,419 @@ mod tests {
                 Self::Deferred(deferred) => deferred.certify(round, digest).await,
             }
         }
+    }
+
+    impl Automaton for Wrapper {
+        type Context = Ctx;
+        type Digest = D;
+
+        async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+            Self::propose(self, context).await
+        }
+
+        async fn verify(
+            &mut self,
+            context: Self::Context,
+            digest: Self::Digest,
+        ) -> oneshot::Receiver<bool> {
+            Self::verify(self, context, digest).await
+        }
+    }
+
+    impl CertifiableAutomaton for Wrapper {
+        async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+            Self::certify(self, round, digest).await
+        }
+    }
+
+    impl Relay for Wrapper {
+        type Digest = D;
+        type PublicKey = PublicKey;
+        type Plan = Plan<PublicKey>;
+
+        fn broadcast(&mut self, digest: Self::Digest, plan: Self::Plan) -> Feedback {
+            match self {
+                Self::Inline(inline) => inline.broadcast(digest, plan),
+                Self::Deferred(deferred) => deferred.broadcast(digest, plan),
+            }
+        }
+    }
+
+    fn pending_conflicting_verify_does_not_poison_certification(kind: WrapperKind) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(
+                &mut context,
+                NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let setup = StandardHarness::setup_validator(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let certified_round = Round::new(Epoch::zero(), View::new(1));
+            let certified_block = B::new::<Sha256>(
+                Ctx {
+                    round: certified_round,
+                    leader: participants[0].clone(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let certified_digest = certified_block.digest();
+            assert!(marshal.verified(certified_round, certified_block).await);
+
+            let skipped_round = Round::new(Epoch::zero(), View::new(2));
+            let skipped_block = B::new::<Sha256>(
+                Ctx {
+                    round: skipped_round,
+                    leader: participants[1].clone(),
+                    parent: (View::new(1), certified_digest),
+                },
+                certified_digest,
+                Height::new(2),
+                200,
+            );
+            let skipped_digest = skipped_block.digest();
+            assert!(marshal.verified(skipped_round, skipped_block).await);
+
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let block = B::new::<Sha256>(
+                Ctx {
+                    round,
+                    leader: participants[1].clone(),
+                    parent: (View::new(2), skipped_digest),
+                },
+                skipped_digest,
+                Height::new(3),
+                300,
+            );
+            let digest = block.digest();
+            let conflicting_context = Ctx {
+                round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), certified_digest),
+            };
+            let mut wrapper = Wrapper::new(
+                kind,
+                context.child("wrapper"),
+                MockVerifyingApp::new(),
+                marshal,
+            );
+
+            // `verify` registers the gate synchronously but cannot resolve it
+            // until the leader's block arrives. A notarization can arrive in
+            // this window, causing Simplex's sole `certify` request to consume
+            // and await that still-pending gate.
+            let verify_rx = wrapper.verify(conflicting_context, digest).await;
+            let certify_rx = wrapper.certify(round, digest).await;
+            assert!(
+                buffer
+                    .broadcast(Recipients::Some(vec![]), block)
+                    .accepted(),
+                "candidate broadcast should be accepted"
+            );
+
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        !result.expect("verify result missing"),
+                        "{kind:?}: the conflicting proposal must be rejected"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("{kind:?}: conflicting verification did not resolve");
+                },
+            }
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "{kind:?}: pending certification must not adopt the conflicting verification verdict"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("{kind:?}: pending certification did not resolve");
+                },
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_inline_pending_conflicting_verify_does_not_poison_certification() {
+        pending_conflicting_verify_does_not_poison_certification(WrapperKind::Inline);
+    }
+
+    #[test_traced("WARN")]
+    fn test_deferred_pending_conflicting_verify_does_not_poison_certification() {
+        pending_conflicting_verify_does_not_poison_certification(WrapperKind::Deferred);
+    }
+
+    fn scripted_byzantine_parent_equivocation(kind: WrapperKind) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(
+                &mut context,
+                NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            // At epoch 0, round-robin elects participant 3 for view 3. Pin the
+            // mapping: with a different leader the scripted proposal never
+            // reaches verify, and certification would pass through the no-gate
+            // recovery path with or without a poisoned gate.
+            let byzantine = participants[3].clone();
+            let victim = participants[1].clone();
+            let observer = participants[0].clone();
+            let elector: RoundRobinElector<S> =
+                RoundRobin::<Sha256>::default().build(schemes[1].participants());
+            assert_eq!(
+                schemes[1]
+                    .participants()
+                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), None)),
+                Some(&byzantine),
+            );
+
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let setup = StandardHarness::setup_validator(
+                context.child("marshal"),
+                &mut oracle,
+                victim.clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            let mut marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            // Start Simplex from a finalized view 1, then skip view 2. The
+            // victim may therefore accept a view-3 proposal naming view 1,
+            // while validators that certified view 2 build on view 2.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let floor_round = Round::new(Epoch::zero(), View::new(1));
+            let floor_block = B::new::<Sha256>(
+                Ctx {
+                    round: floor_round,
+                    leader: byzantine.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let floor_digest = floor_block.digest();
+            assert!(marshal.verified(floor_round, floor_block).await);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(floor_round, View::zero(), floor_digest),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut marshal, floor_finalization.clone()).await;
+
+            let skipped_round = Round::new(Epoch::zero(), View::new(2));
+            let skipped_block = B::new::<Sha256>(
+                Ctx {
+                    round: skipped_round,
+                    leader: participants[3].clone(),
+                    parent: (View::new(1), floor_digest),
+                },
+                floor_digest,
+                Height::new(2),
+                200,
+            );
+            let skipped_digest = skipped_block.digest();
+            assert!(marshal.verified(skipped_round, skipped_block).await);
+
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let embedded_context = Ctx {
+                round,
+                leader: byzantine.clone(),
+                parent: (View::new(2), skipped_digest),
+            };
+            let block = B::new::<Sha256>(
+                embedded_context,
+                skipped_digest,
+                Height::new(3),
+                300,
+            );
+            let digest = block.digest();
+            assert!(
+                buffer
+                    .broadcast(Recipients::Some(vec![]), block)
+                    .accepted(),
+                "candidate broadcast should be accepted"
+            );
+
+            // Channels 1 and 2 are owned by marshal. Keep the three Simplex
+            // channels separate, register the Byzantine peer as the scripted
+            // sender, and tap the observer's vote receiver.
+            let victim_control = oracle.control(victim.clone());
+            let vote_network = victim_control.register(3, TEST_QUOTA).await.unwrap();
+            let certificate_network = victim_control.register(4, TEST_QUOTA).await.unwrap();
+            let resolver_network = victim_control.register(5, TEST_QUOTA).await.unwrap();
+            let byzantine_control = oracle.control(byzantine.clone());
+            let (mut byzantine_vote_sender, _byzantine_vote_receiver) =
+                byzantine_control.register(3, TEST_QUOTA).await.unwrap();
+            let (mut byzantine_certificate_sender, _byzantine_certificate_receiver) =
+                byzantine_control.register(4, TEST_QUOTA).await.unwrap();
+            let _byzantine_resolver = byzantine_control.register(5, TEST_QUOTA).await.unwrap();
+            let (_observer_vote_sender, mut observer_vote_receiver) = oracle
+                .control(observer)
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let wrapper = Wrapper::new(
+                kind,
+                context.child("wrapper"),
+                MockVerifyingApp::new(),
+                marshal.clone(),
+            );
+            let engine = simplex::Engine::new(
+                context.child("simplex"),
+                simplex::config::Config {
+                    scheme: schemes[1].clone(),
+                    elector: RoundRobin::<Sha256>::default(),
+                    blocker: oracle.control(victim.clone()),
+                    automaton: wrapper.clone(),
+                    relay: wrapper,
+                    reporter: marshal,
+                    strategy: Sequential,
+                    partition: format!("scripted-equivocation-{kind:?}"),
+                    mailbox_size: NZUsize!(128),
+                    epoch: Epoch::zero(),
+                    floor: simplex::config::Floor::Finalized(floor_finalization),
+                    replay_buffer: NZUsize!(1024),
+                    write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    leader_timeout: Duration::from_secs(2),
+                    certification_timeout: Duration::from_secs(4),
+                    timeout_retry: Duration::from_secs(3),
+                    view_retention: ViewDelta::new(10),
+                    skip_timeout: Duration::from_secs(6),
+                    fetch_timeout: Duration::from_secs(1),
+                    fetch_concurrent: NZUsize!(3),
+                    forwarding: ForwardingPolicy::Disabled,
+                },
+            );
+            let _engine = engine.start(vote_network, certificate_network, resolver_network);
+
+            let nullifies: Vec<_> = [0usize, 2, 3]
+                .into_iter()
+                .map(|index| Nullify::sign::<D>(&schemes[index], skipped_round).unwrap())
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&schemes[0], &nullifies, &Sequential).unwrap();
+            byzantine_certificate_sender.send(
+                Recipients::One(victim.clone()),
+                Certificate::<S, D>::Nullification(nullification).encode(),
+                true,
+            );
+            context.sleep(Duration::from_millis(250)).await;
+
+            // The Byzantine leader reuses the honest block commitment in a
+            // conflicting header that declares the older certified parent.
+            let bad_proposal = Proposal::new(round, View::new(1), digest);
+            let good_proposal = Proposal::new(round, View::new(2), digest);
+            assert_eq!(bad_proposal.payload, good_proposal.payload);
+            assert_ne!(bad_proposal, good_proposal);
+            let bad_vote = Notarize::sign(&schemes[3], bad_proposal).unwrap();
+            byzantine_vote_sender.send(
+                Recipients::One(victim.clone()),
+                Vote::<S, D>::Notarize(bad_vote).encode(),
+                true,
+            );
+
+            // InvalidProposal is the deterministic barrier proving that the
+            // conflicting header reached verify and was rejected before the
+            // honest notarization arrives.
+            select! {
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("{kind:?}: victim did not reject the conflicting proposal");
+                },
+                result = async {
+                    loop {
+                        let (_, message) = observer_vote_receiver.recv().await.unwrap();
+                        let vote = Vote::<S, D>::decode(message).unwrap();
+                        if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == round) {
+                            break;
+                        }
+                    }
+                } => result,
+            }
+            context.sleep(Duration::from_millis(250)).await;
+
+            // The Byzantine validator and the other two honest validators
+            // notarize the header naming view 2 without the victim's vote.
+            let good_votes: Vec<_> = [0usize, 2, 3]
+                .into_iter()
+                .map(|index| Notarize::sign(&schemes[index], good_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&schemes[0], &good_votes, &Sequential).unwrap();
+            byzantine_certificate_sender.send(
+                Recipients::One(victim),
+                Certificate::<S, D>::Notarization(notarization).encode(),
+                true,
+            );
+
+            // Certification is single-shot. The victim already nullified view
+            // 3, so same-term vote safety correctly prevents a finalize vote.
+            // Successful certification must instead advance it to view 4,
+            // where the silent leader eventually causes a new nullify vote.
+            let next_round = Round::new(Epoch::zero(), View::new(4));
+            select! {
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("{kind:?}: victim did not advance after certification");
+                },
+                result = async {
+                    loop {
+                        let (_, message) = observer_vote_receiver.recv().await.unwrap();
+                        let vote = Vote::<S, D>::decode(message).unwrap();
+                        if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == next_round) {
+                            break;
+                        }
+                    }
+                } => result,
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_inline_scripted_byzantine_parent_equivocation() {
+        scripted_byzantine_parent_equivocation(WrapperKind::Inline);
+    }
+
+    #[test_traced("WARN")]
+    fn test_deferred_scripted_byzantine_parent_equivocation() {
+        scripted_byzantine_parent_equivocation(WrapperKind::Deferred);
     }
 
     #[test_traced("WARN")]
@@ -7348,9 +7767,10 @@ mod tests {
             assert_eq!(rx.await.expect("id published"), digest);
             let gate = gates.take(round, digest).expect("gate registered");
             gates.flush_unrelayed(&mailbox, round, digest);
-            assert!(
+            assert_eq!(
                 gate.await.expect("gate resolved"),
-                "certify flush must resolve the gate durably"
+                GateOutcome::Ready(true),
+                "certify flush must resolve the gate durably",
             );
 
             // The relay finds nothing staged and must forward the persisted
@@ -7434,9 +7854,10 @@ mod tests {
 
             // The relayed proposal is persisted through the staged ack, so
             // the certification gate resolves durably.
-            assert!(
+            assert_eq!(
                 gate.await.expect("gate resolved"),
-                "relay handshake must resolve the gate durably"
+                GateOutcome::Ready(true),
+                "relay handshake must resolve the gate durably",
             );
         });
     }
