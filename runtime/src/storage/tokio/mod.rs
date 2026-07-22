@@ -131,20 +131,20 @@ impl crate::Storage for Storage {
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
         let existing = Self::resolve_header(&mut file, len, &versions, partition, name).await?;
-        let (file, (logical_size, blob_version, data_offset)) = match existing {
-            Some(resolved) => (file, resolved),
+        let (file, guard, (logical_size, blob_version, data_offset)) = match existing {
+            Some(resolved) => (file, guard, resolved),
             None => {
                 // Run creation to completion on a task that owns the filesystem lock:
                 // dropping the open future must not abandon the sequence half-done (a
                 // straggling truncate could clobber a successor's blob) or leave a later
-                // open trusting a header whose syncs never ran.
+                // open trusting a header whose syncs never ran. The task hands the lock
+                // back so the open holds it until the blob is returned, like the reopen
+                // path.
                 let parent = parent.to_path_buf();
                 let storage_directory = self.cfg.storage_directory.clone();
                 let err_partition = partition.to_string();
                 let err_name = hex(name);
                 let creation = tokio::task::spawn(async move {
-                    let _guard = guard;
-
                     // Sync the directories before writing the header so a parseable
                     // header always implies durable directory entries (an open that
                     // parses a header never re-runs these). The storage directory is
@@ -174,7 +174,7 @@ impl crate::Storage for Storage {
                         .await
                         .map_err(|e| Error::BlobSyncFailed(err_partition, err_name, e.into()))?;
 
-                    Ok::<_, Error>((file, (0, blob_version, data_offset)))
+                    Ok::<_, Error>((file, guard, (0, blob_version, data_offset)))
                 });
                 match creation.await {
                     Ok(result) => result?,
@@ -184,27 +184,14 @@ impl crate::Storage for Storage {
             }
         };
 
+        // Convert to a blocking std::fs::File
         #[cfg(unix)]
-        {
-            // Convert to a blocking std::fs::File
-            let file = file.into_std().await;
+        let file = file.into_std().await;
 
-            // Construct the blob
-            Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
-                logical_size,
-                blob_version,
-            ))
-        }
-        #[cfg(not(unix))]
-        {
-            // Construct the blob
-            Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
-                logical_size,
-                blob_version,
-            ))
-        }
+        // Construct the blob while still holding the filesystem lock.
+        let blob = Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset);
+        drop(guard);
+        Ok((blob, logical_size, blob_version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
