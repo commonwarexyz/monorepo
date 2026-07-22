@@ -29,6 +29,7 @@ impl<P: PublicKey> A for Automaton<P> {
 
         let Self::Context { sequencer, height } = context;
         let payload = Bytes::from(format!("hello world, {sequencer} {height}"));
+
         // Inject an invalid digest by hashing the payload twice.
         let digest = if (self.invalid_when)(height) {
             Sha256::hash(&[&payload, &payload])
