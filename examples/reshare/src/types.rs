@@ -176,7 +176,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 

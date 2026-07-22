@@ -951,7 +951,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut marshaled = Deferred::new(
@@ -1082,7 +1082,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1186,7 +1186,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut marshaled = Deferred::new(
@@ -1277,7 +1277,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.child("deferred"),
@@ -1353,7 +1353,7 @@ mod tests {
             let marshal = setup.mailbox;
             let buffer = setup.extra;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new();
             let mut marshaled = Deferred::new(
@@ -1462,7 +1462,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let ctx = Ctx {
                 round,
@@ -1548,7 +1548,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Stash a stale block built against genesis as its parent at round V=2.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1562,7 +1562,7 @@ mod tests {
 
             // Simulate a replay where parent selection now points to a
             // different parent view than the cached block was built for.
-            let new_parent_digest = Sha256::hash(b"late-certified-parent");
+            let new_parent_digest = Sha256::hash(&[b"late-certified-parent"]);
             let new_ctx = Ctx {
                 round,
                 leader: me.clone(),
@@ -1616,7 +1616,7 @@ mod tests {
             let marshal = setup.mailbox;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Seed the parent at its round so `propose` can fetch it locally.
             let parent_round = Round::new(Epoch::zero(), View::new(1));

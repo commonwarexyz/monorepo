@@ -490,7 +490,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
                     None => {
                         for _ in 0..gets {
                             let index = rng.random_range(0..keyspace);
-                            let key = Sha256::hash(&index.to_be_bytes());
+                            let key = Sha256::hash(&[&index.to_be_bytes()]);
                             if db.get(&key).await.unwrap().is_some() {
                                 found += 1;
                             }
@@ -503,7 +503,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
                             let keys: Vec<_> = (0..n)
                                 .map(|_| {
                                     let index = rng.random_range(0..keyspace);
-                                    Sha256::hash(&index.to_be_bytes())
+                                    Sha256::hash(&[&index.to_be_bytes()])
                                 })
                                 .collect();
                             let refs: Vec<_> = keys.iter().collect();

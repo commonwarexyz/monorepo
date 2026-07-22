@@ -19,7 +19,7 @@ fn bench_insert_and_retain(c: &mut Criterion) {
         let mut rng = test_rng();
         let mut kvs = Vec::with_capacity(items);
         for i in 0..items {
-            kvs.push((Sha256::hash(&i.to_be_bytes()), i as u64));
+            kvs.push((Sha256::hash(&[&i.to_be_bytes()]), i as u64));
         }
         kvs.shuffle(&mut rng);
 

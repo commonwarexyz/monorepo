@@ -23,7 +23,6 @@ pub struct Config<S: certificate::Scheme, L: elector::Config<S>, H: Hasher> {
     pub elector: L,
     pub epoch: Epoch,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
-    pub hasher: H,
 }
 
 pub struct Equivocator<
@@ -37,7 +36,6 @@ pub struct Equivocator<
     elector: L::Elector,
     epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
-    hasher: H,
     sent: HashSet<View>,
 }
 
@@ -52,7 +50,6 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             relay: cfg.relay,
-            hasher: cfg.hasher,
             elector,
             sent: HashSet::new(),
         }
@@ -128,10 +125,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
             let payload_b = (next_round, parent, self.context.random::<u64>()).encode();
 
             // Compute digests
-            self.hasher.update(&payload_a);
-            let digest_a = self.hasher.finalize();
-            self.hasher.update(&payload_b);
-            let digest_b = self.hasher.finalize();
+            let digest_a = H::hash(&[&payload_a]);
+            let digest_b = H::hash(&[&payload_b]);
 
             let proposal_a = Proposal::new(next_round, view, digest_a);
             let proposal_b = Proposal::new(next_round, view, digest_b);

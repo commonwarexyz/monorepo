@@ -1314,10 +1314,10 @@ mod tests {
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
-            let missing = Sha256::hash(b"missing");
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
+            let missing = Sha256::hash(&[b"missing"]);
 
             let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1360,9 +1360,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
-            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
-            let metadata = Sha256::hash(b"metadata");
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
             let mut seed = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
@@ -1438,10 +1438,10 @@ mod tests {
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
-            let missing = Sha256::hash(b"missing");
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
+            let missing = Sha256::hash(&[b"missing"]);
 
             let batch = <OrderedVariableDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1479,9 +1479,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1508,7 +1508,7 @@ mod tests {
             ));
 
             let mut wrong_root = valid_target.clone();
-            wrong_root.root = Sha256::hash(b"wrong ops root");
+            wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,
@@ -1535,9 +1535,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key1 = Sha256::hash(b"key1");
-            let value1 = Sha256::hash(b"value1");
-            let metadata1 = Sha256::hash(b"metadata1");
+            let key1 = Sha256::hash(&[b"key1"]);
+            let value1 = Sha256::hash(&[b"value1"]);
+            let metadata1 = Sha256::hash(&[b"metadata1"]);
             let batch1 = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .write(key1, Some(value1))
@@ -1554,9 +1554,9 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
             };
 
-            let key2 = Sha256::hash(b"key2");
-            let value2 = Sha256::hash(b"value2");
-            let metadata2 = Sha256::hash(b"metadata2");
+            let key2 = Sha256::hash(&[b"key2"]);
+            let value2 = Sha256::hash(&[b"value2"]);
+            let metadata2 = Sha256::hash(&[b"metadata2"]);
             let batch2 = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .write(key2, Some(value2))
@@ -1597,9 +1597,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = Sha256::hash(b"key");
-            let value = Sha256::hash(b"value");
-            let metadata = Sha256::hash(b"metadata");
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -1625,7 +1625,7 @@ mod tests {
             ));
 
             let mut wrong_root = valid_target.clone();
-            wrong_root.root = Sha256::hash(b"wrong ops root");
+            wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,

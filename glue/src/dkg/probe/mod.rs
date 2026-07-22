@@ -659,13 +659,11 @@ mod tests {
         let parent = if height == Height::zero() {
             mocks::TestDigest::EMPTY
         } else {
-            Sha256::hash(
-                &height
-                    .previous()
-                    .expect("non-genesis height")
-                    .get()
-                    .to_be_bytes(),
-            )
+            Sha256::hash(&[&height
+                .previous()
+                .expect("non-genesis height")
+                .get()
+                .to_be_bytes()])
         };
         let context = mocks::TestContext {
             round: Round::new(
@@ -812,8 +810,8 @@ mod tests {
             let mut subscription = harness.joiner.subscribe();
 
             // Two different valid replies from the same peer must count once.
-            let first = harness.latest_finalization(Epoch::new(1), Sha256::hash(b"first"));
-            let second = harness.latest_finalization(Epoch::new(2), Sha256::hash(b"second"));
+            let first = harness.latest_finalization(Epoch::new(1), Sha256::hash(&[b"first"]));
+            let second = harness.latest_finalization(Epoch::new(2), Sha256::hash(&[b"second"]));
             harness.reply_latest_from_client(first);
             harness.reply_latest_from_client(second);
 
@@ -847,7 +845,7 @@ mod tests {
                 harness.participants[0].clone(),
                 &harness.participants,
             );
-            let stale = harness.latest_finalization(Epoch::new(1), Sha256::hash(b"stale"));
+            let stale = harness.latest_finalization(Epoch::new(1), Sha256::hash(&[b"stale"]));
             let newest = harness.latest_finalization(Epoch::new(2), newer_boundary.digest());
             harness.reply_latest_from_client(stale);
             harness.reply_latest_from_backup(newest.clone());
@@ -874,7 +872,8 @@ mod tests {
             // The whole sample reports epoch-zero finalizations: the artifact
             // resolves from the locally known genesis info without any
             // boundary fetch.
-            let floor = harness.latest_finalization(Epoch::zero(), Sha256::hash(b"genesis floor"));
+            let floor =
+                harness.latest_finalization(Epoch::zero(), Sha256::hash(&[b"genesis floor"]));
             harness.reply_latest_from_client(floor.clone());
             harness.reply_latest_from_backup(floor.clone());
 
@@ -911,7 +910,7 @@ mod tests {
 
             // Valid replies below the bootstrap epoch are stale by definition
             // and must be ignored without blocking.
-            let stale = harness.latest_finalization(Epoch::zero(), Sha256::hash(b"stale"));
+            let stale = harness.latest_finalization(Epoch::zero(), Sha256::hash(&[b"stale"]));
             harness.reply_latest_from_client(stale.clone());
             harness.reply_latest_from_backup(stale);
             context.sleep(Duration::from_millis(100)).await;
@@ -947,7 +946,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::new(1), View::new(2)),
                     View::new(1),
-                    Sha256::hash(b"foreign"),
+                    Sha256::hash(&[b"foreign"]),
                 ),
                 &foreign.schemes,
             );

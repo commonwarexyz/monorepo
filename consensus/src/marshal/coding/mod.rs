@@ -457,7 +457,7 @@ mod tests {
             leader: default_leader(),
             parent: (View::zero(), genesis_commitment()),
         };
-        make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0)
+        make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0)
     }
 
     fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
@@ -1031,7 +1031,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1113,7 +1113,7 @@ mod tests {
 
             // Build a 2-block chain: parent at height 1, descendant at height 2.
             let parent_block = CodingHarness::make_test_block(
-                Sha256::hash(b""),
+                Sha256::hash(&[b""]),
                 CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
                 Height::new(1),
                 1,
@@ -1233,7 +1233,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Create parent block at height 1
             let parent_ctx = CodingCtx {
@@ -1355,7 +1355,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
             // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
@@ -1561,7 +1561,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let cfg = MarshaledConfig {
@@ -1665,7 +1665,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Build a valid boundary re-proposal, but keep it unavailable until
             // after the optimistic verify receiver has been dropped.
@@ -1762,9 +1762,9 @@ mod tests {
 
             // Re-proposal payload with valid coding config, but no block available.
             let missing_payload = Commitment::from((
-                Sha256::hash(b"missing_block"),
-                Sha256::hash(b"missing_root"),
-                Sha256::hash(b"missing_context"),
+                Sha256::hash(&[b"missing_block"]),
+                Sha256::hash(&[b"missing_root"]),
+                Sha256::hash(&[b"missing_context"]),
                 coding_config,
             ));
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1838,9 +1838,9 @@ mod tests {
 
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
             let missing_commitment = Commitment::from((
-                Sha256::hash(b"missing_block"),
-                Sha256::hash(b"missing_root"),
-                Sha256::hash(b"missing_context"),
+                Sha256::hash(&[b"missing_block"]),
+                Sha256::hash(&[b"missing_root"]),
+                Sha256::hash(&[b"missing_context"]),
                 coding_config,
             ));
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1942,7 +1942,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let limited_epocher = LimitedEpocher {
@@ -2046,7 +2046,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
@@ -2214,7 +2214,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let cfg = MarshaledConfig {
@@ -2291,9 +2291,9 @@ mod tests {
         // A validly-constructed Commitment must still round-trip.
         let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
         let valid = Commitment::from((
-            Sha256::hash(b"block"),
-            Sha256::hash(b"root"),
-            Sha256::hash(b"context"),
+            Sha256::hash(&[b"block"]),
+            Sha256::hash(&[b"root"]),
+            Sha256::hash(&[b"context"]),
             coding_config,
         ));
         let encoded = valid.encode();
@@ -2337,7 +2337,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             // 2) Force application verification to fail in deferred verification.
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::with_verify_result(false);
@@ -2446,7 +2446,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let round1 = Round::new(Epoch::zero(), View::new(1));
             let block1_ctx = CodingCtx {
@@ -2531,7 +2531,8 @@ mod tests {
                 leader: participants[0].clone(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let parent = make_coding_block(parent_context, Sha256::hash(b""), Height::new(1), 100);
+            let parent =
+                make_coding_block(parent_context, Sha256::hash(&[b""]), Height::new(1), 100);
 
             let floor_round = Round::new(Epoch::zero(), View::new(2));
             let bad_context = CodingCtx {
@@ -2667,7 +2668,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Push parent (height 1) and child (height 2) into the shards
             // engine. These are reconstructable but NOT durably persisted.
@@ -2791,7 +2792,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Build the block we want propose() to return. Its embedded context
@@ -2916,7 +2917,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             let propose_round = Round::new(Epoch::zero(), View::new(1));
@@ -3028,7 +3029,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -3133,7 +3134,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Stash a stale block built against genesis as its parent at round V=2.
@@ -3151,9 +3152,9 @@ mod tests {
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.
             let new_parent_commitment = Commitment::from((
-                Sha256::hash(b"different-parent-block"),
-                Sha256::hash(b"different-parent-inner"),
-                Sha256::hash(b"different-parent-ctx"),
+                Sha256::hash(&[b"different-parent-block"]),
+                Sha256::hash(&[b"different-parent-inner"]),
+                Sha256::hash(&[b"different-parent-ctx"]),
                 coding_config,
             ));
             let new_ctx = CodingCtx {

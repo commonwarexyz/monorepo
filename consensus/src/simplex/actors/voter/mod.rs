@@ -231,11 +231,10 @@ mod tests {
             elector: elector.clone(),
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let relay = Arc::new(mocks::relay::Relay::new());
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
 
-        let application_cfg = mocks::application::Config {
-            hasher: Sha256::default(),
+        let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (1.0, 0.0),
@@ -397,10 +396,9 @@ mod tests {
             elector: elector.clone(),
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let relay = Arc::new(mocks::relay::Relay::new());
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(schemes[0].participants());
-        let application_cfg = mocks::application::Config {
-            hasher: Sha256::default(),
+        let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (1.0, 0.0),
@@ -531,7 +529,7 @@ mod tests {
             let old_proposal = Proposal::new(
                 Round::new(epoch, old_view),
                 old_view.previous().unwrap(),
-                Sha256::hash(b"old-journal-finalization"),
+                Sha256::hash(&[b"old-journal-finalization"]),
             );
             let (_, old_finalization) = build_finalization(&schemes, &old_proposal, quorum);
             seed_voter_journal(
@@ -548,7 +546,7 @@ mod tests {
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
                 floor_view.previous().unwrap(),
-                Sha256::hash(b"newer-floor-finalization"),
+                Sha256::hash(&[b"newer-floor-finalization"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
             let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
@@ -611,7 +609,7 @@ mod tests {
             let journal_proposal = Proposal::new(
                 Round::new(epoch, journal_view),
                 journal_view.previous().unwrap(),
-                Sha256::hash(b"newer-journal-finalization"),
+                Sha256::hash(&[b"newer-journal-finalization"]),
             );
             let (_, journal_finalization) = build_finalization(&schemes, &journal_proposal, quorum);
             seed_voter_journal(
@@ -628,7 +626,7 @@ mod tests {
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
                 floor_view.previous().unwrap(),
-                Sha256::hash(b"older-floor-finalization"),
+                Sha256::hash(&[b"older-floor-finalization"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
             let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
@@ -689,7 +687,7 @@ mod tests {
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
                 floor_view.previous().unwrap(),
-                Sha256::hash(b"static-replay-floor"),
+                Sha256::hash(&[b"static-replay-floor"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
 
@@ -700,7 +698,7 @@ mod tests {
             let journal_proposal = Proposal::new(
                 Round::new(epoch, journal_view),
                 journal_view.previous().unwrap(),
-                Sha256::hash(b"same-section-finalize"),
+                Sha256::hash(&[b"same-section-finalize"]),
             );
             let (mut finalizes, journal_finalization) =
                 build_finalization(&schemes, &journal_proposal, quorum);
@@ -761,7 +759,7 @@ mod tests {
         target: View,
     ) -> Sha256Digest {
         let prev_view = target.previous().expect("target view must be > 0");
-        let payload = Sha256::hash(prev_view.get().to_be_bytes().as_slice());
+        let payload = Sha256::hash(&[&prev_view.get().to_be_bytes()]);
         let proposal = Proposal::new(
             Round::new(Epoch::new(333), prev_view),
             prev_view.previous().unwrap_or(View::zero()),
@@ -830,9 +828,8 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
@@ -905,7 +902,7 @@ mod tests {
             }
 
             // Send finalization via voter mailbox (view 100)
-            let payload = Sha256::hash(b"test");
+            let payload = Sha256::hash(&[b"test"]);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(100)),
                 View::new(50),
@@ -950,7 +947,7 @@ mod tests {
             }
 
             // Send old notarization from resolver that should be ignored (view 50)
-            let payload = Sha256::hash(b"test2");
+            let payload = Sha256::hash(&[b"test2"]);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(50)),
                 View::new(49),
@@ -960,7 +957,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization));
 
             // Send new finalization via voter mailbox (view 300)
-            let payload = Sha256::hash(b"test3");
+            let payload = Sha256::hash(&[b"test3"]);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(300)),
                 View::new(100),
@@ -1061,9 +1058,8 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(signing.participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let app_config = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let app_config = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -1153,7 +1149,7 @@ mod tests {
             let proposal_lf = Proposal::new(
                 Round::new(Epoch::new(333), lf_target),
                 lf_target.previous().unwrap(),
-                Sha256::hash(b"test"),
+                Sha256::hash(&[b"test"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -1197,7 +1193,7 @@ mod tests {
             let proposal_jft = Proposal::new(
                 Round::new(Epoch::new(333), journal_floor_target),
                 journal_floor_target.previous().unwrap(),
-                Sha256::hash(b"test2"),
+                Sha256::hash(&[b"test2"]),
             );
             let (_, notarization_for_floor) = build_notarization(&schemes, &proposal_jft, quorum);
             mailbox.recovered(Certificate::Notarization(notarization_for_floor));
@@ -1225,7 +1221,7 @@ mod tests {
             let proposal_bft = Proposal::new(
                 Round::new(Epoch::new(333), problematic_view),
                 problematic_view.previous().unwrap(),
-                Sha256::hash(b"test3"),
+                Sha256::hash(&[b"test3"]),
             );
             let (_, notarization_for_bft) = build_notarization(&schemes, &proposal_bft, quorum);
             mailbox.recovered(Certificate::Notarization(notarization_for_bft));
@@ -1249,7 +1245,7 @@ mod tests {
             let proposal_lf = Proposal::new(
                 Round::new(Epoch::new(333), View::new(100)),
                 View::new(99),
-                Sha256::hash(b"test4"),
+                Sha256::hash(&[b"test4"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -1358,7 +1354,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"finalize_without_notarization"),
+                Sha256::hash(&[b"finalize_without_notarization"]),
             );
             let (_, expected_finalization) = build_finalization(&schemes, &proposal, quorum);
 
@@ -1476,7 +1472,7 @@ mod tests {
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_a"),
+                Sha256::hash(&[b"proposal_a"]),
             );
             mailbox.proposal(proposal_a.clone());
 
@@ -1487,7 +1483,7 @@ mod tests {
             let proposal_b = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_b"),
+                Sha256::hash(&[b"proposal_b"]),
             );
             let (_, notarization_b) = build_notarization(&schemes, &proposal_b, quorum);
 
@@ -1598,12 +1594,12 @@ mod tests {
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_a"),
+                Sha256::hash(&[b"proposal_a"]),
             );
             let proposal_b = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_b"),
+                Sha256::hash(&[b"proposal_b"]),
             );
 
             // Send certificate for proposal A FIRST
@@ -1701,9 +1697,8 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -1773,7 +1768,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"same_proposal"),
+                Sha256::hash(&[b"same_proposal"]),
             );
 
             // Send proposal from batcher first
@@ -1880,9 +1875,8 @@ mod tests {
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: leader.clone(),
                 propose_latency: (50.0, 10.0),
@@ -1969,7 +1963,7 @@ mod tests {
             // Now create a finalization certificate for view 1 to advance to view 2
             let view1_round = Round::new(epoch, View::new(1));
             let view1_proposal =
-                Proposal::new(view1_round, View::new(0), Sha256::hash(b"view1_payload"));
+                Proposal::new(view1_round, View::new(0), Sha256::hash(&[b"view1_payload"]));
 
             let (_, finalization) = build_finalization(&schemes, &view1_proposal, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -1998,8 +1992,11 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
 
             // Create a conflicting proposal from ourselves (equivocating) for view 2
-            let conflicting_proposal =
-                Proposal::new(view2_round, View::new(1), Sha256::hash(b"leader_proposal"));
+            let conflicting_proposal = Proposal::new(
+                view2_round,
+                View::new(1),
+                Sha256::hash(&[b"leader_proposal"]),
+            );
 
             // Send the proposal via mailbox (simulating batcher receiving leader's notarize)
             // This happens AFTER we requested a proposal but BEFORE the automaton responds
@@ -2080,9 +2077,8 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -2165,7 +2161,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"finalize_without_notarization"),
+                Sha256::hash(&[b"finalize_without_notarization"]),
             );
             let (_, expected_finalization) = build_finalization(&schemes, &proposal, quorum);
 
@@ -2315,10 +2311,9 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -2524,13 +2519,12 @@ mod tests {
             }
 
             let view_1 = View::new(1);
-            let mut hasher = Sha256::default();
-            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
-            let genesis = hasher.finalize();
+            let genesis =
+                Sha256::hash(&[&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode()]);
             let proposal_1 = Proposal::new(
                 Round::new(Epoch::new(333), view_1),
                 View::zero(),
-                Sha256::hash(b"same_term_timeout_view_1"),
+                Sha256::hash(&[b"same_term_timeout_view_1"]),
             );
             let contents = (proposal_1.round, genesis, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents));
@@ -2648,7 +2642,7 @@ mod tests {
             let proposal_1 = Proposal::new(
                 Round::new(Epoch::new(333), view_1),
                 View::zero(),
-                Sha256::hash(b"finalize_resume_view_1"),
+                Sha256::hash(&[b"finalize_resume_view_1"]),
             );
             let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
             mailbox.resolved(Certificate::Notarization(notarization_1));
@@ -2657,7 +2651,7 @@ mod tests {
             let proposal_2 = Proposal::new(
                 Round::new(Epoch::new(333), view_2),
                 view_1,
-                Sha256::hash(b"finalize_resume_view_2"),
+                Sha256::hash(&[b"finalize_resume_view_2"]),
             );
             let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
             mailbox.resolved(Certificate::Notarization(notarization_2));
@@ -2682,7 +2676,7 @@ mod tests {
             let proposal_3 = Proposal::new(
                 Round::new(Epoch::new(333), view_3),
                 view_2,
-                Sha256::hash(b"finalize_resume_view_3"),
+                Sha256::hash(&[b"finalize_resume_view_3"]),
             );
             let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
             mailbox.resolved(Certificate::Notarization(notarization_3));
@@ -2773,7 +2767,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"finalization_from_resolver"),
+                Sha256::hash(&[b"finalization_from_resolver"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Finalization(finalization.clone()));
@@ -2868,7 +2862,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"no_resolver_boomerang"),
+                Sha256::hash(&[b"no_resolver_boomerang"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.resolved(Certificate::Finalization(finalization.clone()));
@@ -2947,10 +2941,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3028,7 +3021,7 @@ mod tests {
             let mut prev_proposal = Proposal::new(
                 Round::new(Epoch::new(333), current_view),
                 View::zero(),
-                Sha256::hash(b"v0"),
+                Sha256::hash(&[b"v0"]),
             );
 
             let (target_view, leader) = loop {
@@ -3061,7 +3054,7 @@ mod tests {
                 prev_proposal = Proposal::new(
                     Round::new(Epoch::new(333), current_view),
                     current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
             };
 
@@ -3069,19 +3062,17 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
 
             // Broadcast the payload contents so verification can complete (the automaton waits
             // for the contents via the relay).
-            let parent_payload = Sha256::hash(
-                target_view
-                    .previous()
-                    .unwrap()
-                    .get()
-                    .to_be_bytes()
-                    .as_slice(),
-            );
+            let parent_payload = Sha256::hash(&[target_view
+                .previous()
+                .unwrap()
+                .get()
+                .to_be_bytes()
+                .as_slice()]);
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal);
@@ -3162,10 +3153,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3237,7 +3227,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3360,10 +3350,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3436,7 +3425,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3525,10 +3514,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3599,7 +3587,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3627,18 +3615,16 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"drop_verify"),
+                Sha256::hash(&[b"drop_verify"]),
             );
             let contents = (
                 proposal.round,
-                Sha256::hash(
-                    target_view
-                        .previous()
-                        .unwrap()
-                        .get()
-                        .to_be_bytes()
-                        .as_slice(),
-                ),
+                Sha256::hash(&[target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice()]),
                 7u64,
             )
                 .encode();
@@ -3751,7 +3737,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3781,7 +3767,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 invalid_parent,
-                Sha256::hash(b"invalid_parent_before_finalized"),
+                Sha256::hash(&[b"invalid_parent_before_finalized"]),
             );
             mailbox.proposal(proposal);
 
@@ -3871,10 +3857,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3964,7 +3949,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -4015,7 +4000,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -4045,18 +4030,16 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"drop_verify_after_ready"),
+                Sha256::hash(&[b"drop_verify_after_ready"]),
             );
             let contents = (
                 proposal.round,
-                Sha256::hash(
-                    target_view
-                        .previous()
-                        .unwrap()
-                        .get()
-                        .to_be_bytes()
-                        .as_slice(),
-                ),
+                Sha256::hash(&[target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice()]),
                 11u64,
             )
                 .encode();
@@ -4151,12 +4134,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let me = participants[0].clone();
 
             // Create application with certify tracking
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4221,7 +4203,7 @@ mod tests {
             let proposal2 = Proposal::new(
                 Round::new(Epoch::new(333), view2),
                 View::new(1),
-                Sha256::hash(b"finalized_payload"),
+                Sha256::hash(&[b"finalized_payload"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal2, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -4244,7 +4226,7 @@ mod tests {
 
             // Step 2: Send notarization for view 3 (certify SHOULD be called)
             let view3 = View::new(3);
-            let digest3 = Sha256::hash(b"payload_for_certification");
+            let digest3 = Sha256::hash(&[b"payload_for_certification"]);
             let proposal3 = Proposal::new(Round::new(Epoch::new(333), view3), view2, digest3);
 
             // Broadcast payload and send proposal
@@ -4277,8 +4259,7 @@ mod tests {
 
             // Create new application with same tracker
             let tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4407,7 +4388,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Install propose + verify observers from the start so we can assert the
             // leader's propose call fires but no verify call is issued for our proposal.
@@ -4415,8 +4396,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4576,12 +4556,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can
             // cleanly propose and journal its own notarize vote for view 2.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4674,8 +4653,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4831,7 +4809,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-crash: drop every propose response. The leader calls
             // `automaton.propose`, the mock swallows the request, and nothing
@@ -4841,8 +4819,7 @@ mod tests {
             // the voter even became leader.
             let pre_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let pre_propose_tracker = pre_propose_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4956,8 +4933,7 @@ mod tests {
             // exactly one call for the target view.
             let post_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let post_propose_tracker = post_propose_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5126,12 +5102,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can verify
             // the leader's proposal and journal its own notarize vote for view 3.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5184,7 +5159,7 @@ mod tests {
             );
 
             // Wait for startup, then advance to view 3 via a synthetic finalization for
-            // view 2. `advance_to_view` uses Sha256::hash(prev_view.to_be_bytes()) as the
+            // view 2. `advance_to_view` uses Sha256::hash(&[prev_view.to_be_bytes()]) as the
             // parent payload, which we reuse below.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
@@ -5209,7 +5184,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"follower_proposal"),
+                Sha256::hash(&[b"follower_proposal"]),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader_pk, Recipients::All, (proposal.payload, contents));
@@ -5237,8 +5212,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5400,14 +5374,13 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Install a certify observer to confirm the leader certifies its own
             // proposal for the leader-owned view.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5581,12 +5554,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can
             // cleanly propose and journal its own notarize vote for view 2.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5678,8 +5650,7 @@ mod tests {
             handle.abort();
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5842,7 +5813,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Stall the propose response so the slot is never populated with
             // a locally-built proposal. The slot stays empty (proposal=None,
@@ -5855,8 +5826,7 @@ mod tests {
             // leader-owned proposal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5937,7 +5907,7 @@ mod tests {
             // (distinct payload) and build its notarization from all validator
             // schemes. The notarization is well-formed; quorum-worth of signers
             // cover the proposal so it will pass `add_notarization`.
-            let foreign_payload = Sha256::hash(b"foreign_leader_owned_proposal");
+            let foreign_payload = Sha256::hash(&[b"foreign_leader_owned_proposal"]);
             let foreign_proposal = Proposal::new(
                 Round::new(target_epoch, target_view),
                 target_view.previous().unwrap_or(View::zero()),
@@ -6040,10 +6010,9 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -6102,12 +6071,12 @@ mod tests {
 
             // Send a notarization for view 5 to trigger certification
             let view5 = View::new(5);
-            let digest5 = Sha256::hash(b"payload_to_certify");
+            let digest5 = Sha256::hash(&[b"payload_to_certify"]);
             let proposal5 =
                 Proposal::new(Round::new(Epoch::new(333), view5), View::new(0), digest5);
 
             // Broadcast payload
-            let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
+            let contents = (proposal5.round, Sha256::hash(&[b"genesis"]), 42u64).encode();
             relay.broadcast(&me, Recipients::All, (digest5, contents));
 
             // Send proposal to verify
@@ -6227,10 +6196,9 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let elector = elector.build(schemes[0].participants());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -6289,12 +6257,12 @@ mod tests {
 
             // Send a notarization for view 5 to trigger certification
             let view5 = View::new(5);
-            let digest5 = Sha256::hash(b"payload_to_certify");
+            let digest5 = Sha256::hash(&[b"payload_to_certify"]);
             let proposal5 =
                 Proposal::new(Round::new(Epoch::new(333), view5), View::new(0), digest5);
 
             // Broadcast payload
-            let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
+            let contents = (proposal5.round, Sha256::hash(&[b"genesis"]), 42u64).encode();
             relay.broadcast(&me, Recipients::All, (digest5, contents));
 
             // Send proposal and notarization
@@ -6419,7 +6387,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"late_notarization_after_nullification"),
+                Sha256::hash(&[b"late_notarization_after_nullification"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.resolved(Certificate::Notarization(notarization));
@@ -6549,7 +6517,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"timeout_test"),
+                Sha256::hash(&[b"timeout_test"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Notarization(notarization));
@@ -6652,7 +6620,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"follower_test"),
+                Sha256::hash(&[b"follower_test"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -6942,7 +6910,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7185,14 +7153,13 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             let partition = "cancelled_certification_recertifies_after_restart".to_string();
             let epoch = Epoch::new(333);
 
             // First run: certification receiver gets cancelled.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -7264,7 +7231,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"restart_recertify_payload"),
+                Sha256::hash(&[b"restart_recertify_payload"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7304,8 +7271,7 @@ mod tests {
             // Second run: certification should succeed from replayed state.
             // Use a longer certify latency so there is a real window where an
             // incorrect immediate nullify could fire after restart.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -7490,7 +7456,7 @@ mod tests {
             let proposal_4 = Proposal::new(
                 Round::new(Epoch::new(333), view_4),
                 view_4.previous().unwrap(),
-                Sha256::hash(b"view_4_proposal"),
+                Sha256::hash(&[b"view_4_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal_4.round, parent_payload, 0u64).encode();
@@ -7522,7 +7488,7 @@ mod tests {
             let proposal_5 = Proposal::new(
                 Round::new(Epoch::new(333), view_5),
                 view_4, // Parent is view 4 (certified by the advanced validators)
-                Sha256::hash(b"view_5_proposal"),
+                Sha256::hash(&[b"view_5_proposal"]),
             );
             let (_, notarization_5) = build_notarization(&schemes, &proposal_5, quorum);
 
@@ -7692,7 +7658,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7829,7 +7795,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7980,7 +7946,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"proposal_clears_leader_timeout"),
+                Sha256::hash(&[b"proposal_clears_leader_timeout"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -8126,7 +8092,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"recovered_proposal_clears_leader_timeout"),
+                Sha256::hash(&[b"recovered_proposal_clears_leader_timeout"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
@@ -8407,13 +8373,12 @@ mod tests {
             }
 
             // Build a valid first-view proposal (parent is genesis at view 0).
-            let mut hasher = Sha256::default();
-            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
-            let genesis = hasher.finalize();
+            let genesis =
+                Sha256::hash(&[&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode()]);
             let proposal = Proposal::new(
                 first_round,
                 View::zero(),
-                Sha256::hash(b"first_view_progress_without_timeout"),
+                Sha256::hash(&[b"first_view_progress_without_timeout"]),
             );
             let contents = (proposal.round, genesis, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
@@ -8553,7 +8518,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg.clone());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
             let target_view = View::new(3);
 
@@ -8565,8 +8530,7 @@ mod tests {
             let pending_syncs_for_certifier = pending_syncs.clone();
 
             // Arm the sync gate immediately before the target certification succeeds.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8666,7 +8630,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"cert_replay_payload"),
+                Sha256::hash(&[b"cert_replay_payload"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -8808,8 +8772,7 @@ mod tests {
             // Second run: replay should process Artifact::Certification from journal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8963,12 +8926,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
 
             // First run: certify fails (returns false).
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9038,7 +9000,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"failed_cert_replay_payload"),
+                Sha256::hash(&[b"failed_cert_replay_payload"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -9080,8 +9042,7 @@ mod tests {
             handle.abort();
 
             // Second run: replay should process Artifact::Certification(false) from journal.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9219,12 +9180,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
 
             // First run: trigger timeout and nullification.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9340,8 +9300,7 @@ mod tests {
 
             // Second run: replay should process Artifact::Nullify and
             // Artifact::Nullification from journal.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9477,10 +9436,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9552,10 +9510,10 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"batcher_timeout_view3"),
+                Sha256::hash(&[b"batcher_timeout_view3"]),
             );
             let leader = participants[1].clone();
-            let contents = (proposal.round, Sha256::hash(b"genesis"), 0u64).encode();
+            let contents = (proposal.round, Sha256::hash(&[b"genesis"]), 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);

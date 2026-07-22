@@ -679,7 +679,7 @@ mod tests {
         leader: mocks::TestPublicKey,
         participants: u16,
     ) -> CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256> {
-        let parent = Sha256::hash(b"parent");
+        let parent = Sha256::hash(&[b"parent"]);
         let context = CodingContext {
             round: Round::new(Epoch::zero(), View::new(1)),
             leader,
@@ -728,9 +728,9 @@ mod tests {
                 &fixture.schemes,
             );
             finalization.proposal.payload = Commitment::from((
-                Sha256::hash(b"tampered block"),
-                Sha256::hash(b"tampered root"),
-                Sha256::hash(b"tampered context"),
+                Sha256::hash(&[b"tampered block"]),
+                Sha256::hash(&[b"tampered root"]),
+                Sha256::hash(&[b"tampered context"]),
                 coding_config_for_participants(
                     fixture
                         .participants

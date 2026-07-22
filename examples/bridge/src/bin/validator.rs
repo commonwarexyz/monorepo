@@ -225,11 +225,10 @@ fn main() {
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
                 .expect("share must be in participants");
         let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
-        let (application, scheme, mailbox) = application::Application::new(
+        let (application, scheme, mailbox) = application::Application::<_, Sha256, _, _>::new(
             context.child("application"),
             application::Config {
                 indexer,
-                hasher: Sha256::default(),
                 this_network,
                 other_network,
                 mailbox_size: NZUsize!(1024),

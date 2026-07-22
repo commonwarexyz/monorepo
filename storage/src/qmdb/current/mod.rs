@@ -575,10 +575,10 @@ pub mod tests {
             #[test_traced("WARN")]
             pub fn $name() {
                 fn key(i: u64) -> Digest {
-                    Sha256::hash(&i.to_be_bytes())
+                    Sha256::hash(&[&i.to_be_bytes()])
                 }
                 fn val(i: u64) -> Digest {
-                    Sha256::hash(&(i + 10000).to_be_bytes())
+                    Sha256::hash(&[&(i + 10000).to_be_bytes()])
                 }
 
                 deterministic::Runner::default().start(|ctx| async move {
@@ -1891,11 +1891,11 @@ pub mod tests {
     // computation on top of the `any` batch.
 
     fn key(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
+        Sha256::hash(&[&i.to_be_bytes()])
     }
 
     fn val(i: u64) -> Digest {
-        Sha256::hash(&(i + 10000).to_be_bytes())
+        Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
     #[boxed]

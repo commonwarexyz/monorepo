@@ -847,7 +847,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -865,8 +865,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1104,7 +1103,7 @@ mod tests {
                 .build(schemes[0].participants())
                 .terms()
                 .length();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
 
@@ -1124,8 +1123,7 @@ mod tests {
                 );
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1247,8 +1245,7 @@ mod tests {
                 mocks::reporter::Reporter::new(joiner_context.child("reporter"), reporter_config);
             reporters.push(joiner_reporter.clone());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: joiner.clone(),
                 propose_latency: (10.0, 5.0),
@@ -1368,7 +1365,7 @@ mod tests {
             let elector = RoundRobin::default();
             let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
             let built_elector = elector.clone().build(&participants_set);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             let dishonest = Participant::new(0);
@@ -1385,8 +1382,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1526,7 +1522,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
 
             for (idx, validator) in participants.iter().enumerate() {
@@ -1551,8 +1547,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -1687,7 +1682,7 @@ mod tests {
 
                 // Create engines
                 let elector = L::default();
-                let relay = Arc::new(mocks::relay::Relay::new());
+                let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
@@ -1705,8 +1700,7 @@ mod tests {
                     let reporter_rng = StdRng::from_seed(reporter_seed);
                     let reporter = mocks::reporter::Reporter::new(reporter_rng, reporter_config);
                     reporters.insert(validator.clone(), reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -1860,7 +1854,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -1883,8 +1877,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2007,8 +2000,7 @@ mod tests {
             let mut reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             reporters.push(reporter.clone());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
@@ -2119,7 +2111,7 @@ mod tests {
             .await;
 
             // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2142,8 +2134,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2348,7 +2339,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2367,8 +2358,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 let application_cfg = if idx_scheme == 0 {
-                    mocks::application::Config {
-                        hasher: Sha256::default(),
+                    mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
@@ -2377,8 +2367,7 @@ mod tests {
                         should_certify: mocks::application::Certifier::Always,
                     }
                 } else {
-                    mocks::application::Config {
-                        hasher: Sha256::default(),
+                    mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -2522,7 +2511,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -2540,8 +2529,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2711,7 +2699,7 @@ mod tests {
             // Participant 0 never starts an engine and no links exist yet, so no
             // view can produce a certificate before the crash below.
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2734,8 +2722,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2852,8 +2839,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2954,7 +2940,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -2972,8 +2958,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3142,7 +3127,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -3160,8 +3145,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3327,7 +3311,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -3356,8 +3340,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -3508,7 +3491,7 @@ mod tests {
 
             // Create engines
             let elector = wrapped::Config(L::default());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -3525,8 +3508,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3675,7 +3657,7 @@ mod tests {
             .await;
 
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 let context = context
@@ -3690,8 +3672,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -3837,7 +3818,7 @@ mod tests {
             let quorum = quorum(n) as usize;
             let notarization = |view: View, parent: View, payload: &[u8]| {
                 let proposal =
-                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(payload));
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(&[payload]));
                 let votes: Vec<_> = schemes
                     .iter()
                     .take(quorum)
@@ -3848,7 +3829,7 @@ mod tests {
             };
             let finalization = |view: View, parent: View, payload: &[u8]| {
                 let proposal =
-                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(payload));
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(&[payload]));
                 let votes: Vec<_> = schemes
                     .iter()
                     .take(quorum)
@@ -3879,9 +3860,8 @@ mod tests {
             let mut monitor_reporter = reporter.clone();
             let (mut latest, mut monitor) = monitor_reporter.subscribe().await;
 
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (0.0, 0.0),
@@ -3967,7 +3947,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -3999,8 +3979,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4118,7 +4097,7 @@ mod tests {
             // Create engines
             let elector = L::default();
             let mut engines = Vec::new();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4139,11 +4118,10 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::equivocator::Config {
+                    let cfg = mocks::equivocator::Config::<_, _, Sha256> {
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
                         relay: relay.clone(),
-                        hasher: Sha256::default(),
                         elector: elector.clone(),
                     };
 
@@ -4153,8 +4131,7 @@ mod tests {
                     );
                     engines.push(engine.start(pending, recovered));
                 } else {
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4249,8 +4226,7 @@ mod tests {
             let (pending, recovered, resolver) =
                 register_validator(&mut oracle, validator.clone()).await;
             reporters.push(reporter.clone());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),
@@ -4369,7 +4345,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4400,8 +4376,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4518,7 +4493,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4546,8 +4521,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4680,7 +4654,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
@@ -4709,8 +4683,7 @@ mod tests {
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
@@ -4820,7 +4793,7 @@ mod tests {
 
             // Create engines
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -4838,8 +4811,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.push(reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (100.0, 50.0),
@@ -4962,9 +4934,8 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -5112,7 +5083,7 @@ mod tests {
 
             // Create engines with `AttributableReporter` wrapper
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 let context = context
@@ -5137,8 +5108,7 @@ mod tests {
                 );
                 reporters.push(mock_reporter.clone());
 
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5344,15 +5314,15 @@ mod tests {
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
             let round_f = Round::new(Epoch::new(333), View::new(f_view));
-            let payload_b0 = Sha256::hash(b"B_F");
+            let payload_b0 = Sha256::hash(&[b"B_F"]);
             let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
-            let payload_b1a = Sha256::hash(b"B_G1");
+            let payload_b1a = Sha256::hash(&[b"B_G1"]);
             let proposal_b1a = Proposal::new(
                 Round::new(Epoch::new(333), View::new(f_view + 1)),
                 View::new(f_view),
                 payload_b1a,
             );
-            let payload_b1b = Sha256::hash(b"B_G2");
+            let payload_b1b = Sha256::hash(&[b"B_G2"]);
             let proposal_b1b = Proposal::new(
                 Round::new(Epoch::new(333), View::new(f_view + 2)),
                 View::new(f_view),
@@ -5434,7 +5404,7 @@ mod tests {
             // recovered channel (ensuring processing before any leader attempts to issue a
             // conflicting vote).
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
                 let (pending, recovered, resolver) = registrations
@@ -5472,8 +5442,7 @@ mod tests {
                     );
                     honest_reporters.push(reporter.clone());
 
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (250.0, 50.0), // ensure we process certificates first
@@ -5656,7 +5625,7 @@ mod tests {
 
             // Create engines and reporters
             let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
             let monitor_reporter = Arc::new(Mutex::new(None));
@@ -5680,8 +5649,7 @@ mod tests {
                 }
 
                 // Configure application
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5808,7 +5776,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -5826,8 +5794,7 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.insert(idx, reporter.clone());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -5927,8 +5894,7 @@ mod tests {
                 // Start engine
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
+                let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -6240,7 +6206,7 @@ mod tests {
                     &scenario,
                     n as usize,
                 );
-                let relay = Arc::new(mocks::relay::Relay::new());
+                let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
                 let twin_index_set: HashSet<usize> = twin_indices.iter().copied().collect();
@@ -6348,8 +6314,7 @@ mod tests {
                         );
                         reporters.push(reporter.clone());
 
-                        let application_cfg = mocks::application::Config {
-                            hasher: Sha256::default(),
+                        let application_cfg = mocks::application::Config::<Sha256, _> {
                             relay: relay.clone(),
                             me: validator.clone(),
                             propose_latency: (10.0, 5.0),
@@ -6418,8 +6383,7 @@ mod tests {
                         mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     reporters.push(reporter.clone());
 
-                    let application_cfg = mocks::application::Config {
-                        hasher: Sha256::default(),
+                    let application_cfg = mocks::application::Config::<Sha256, _> {
                         relay: relay.clone(),
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
