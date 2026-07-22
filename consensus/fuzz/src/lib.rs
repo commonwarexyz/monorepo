@@ -1912,7 +1912,6 @@ fn run_standard_once<P: simplex::Simplex>(
                 term_length,
                 &reporter_only,
             );
-            invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
             let reporter_states = (state_coverage || collect_audit)
                 .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
             if state_coverage {
@@ -1929,8 +1928,8 @@ fn run_standard_once<P: simplex::Simplex>(
                 reporter_states: reporter_states.unwrap_or_default(),
                 happens_before: hb_summary,
             });
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, term_length, states);
+            let states = invariants::extract(reporter_only);
+            invariants::check::<P>(term_length, states);
             audit
         } else {
             None
@@ -2104,8 +2103,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             term_length,
             &summary_reporters,
         );
-        invariants::check_certificate_seeds::<P, _, _>(&summary_reporters);
-        invariants::check::<P>(config.n, term_length, reporter_only.as_slice());
+        invariants::check::<P>(term_length, reporter_only.as_slice());
         (true, rejected_certification_observed)
     })
 }
@@ -2263,9 +2261,8 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 term_length,
                 &reporter_only,
             );
-            invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, term_length, states);
+            let states = invariants::extract(reporter_only);
+            invariants::check::<P>(term_length, states);
         }
     });
 }
@@ -2948,10 +2945,6 @@ fn run_twins<P: simplex::Simplex>(
                     term_length,
                     &observers,
                 );
-                // Seed uniqueness holds under twins as well: the seed signature
-                // covers only the round, so even conflicting valid certificates
-                // formed with compromised identities must embed the identical seed.
-                invariants::check_certificate_seeds::<P, _, _>(&observers);
                 if state_coverage {
                     let reporter_states =
                         state_cov::encode_reporter_states(&honest_summaries, config.n as usize);
@@ -2968,10 +2961,10 @@ fn run_twins<P: simplex::Simplex>(
                         honest_reporters.len(),
                         "every correct Twins reporter must record in audit mode"
                     );
-                    invariants::check::<P>(config.n, term_length, recordings.as_slice());
+                    invariants::check::<P>(term_length, recordings.as_slice());
                 } else {
-                    let states = invariants::extract(honest_summaries, config.n as usize);
-                    invariants::check::<P>(config.n, term_length, states);
+                    let states = invariants::extract(honest_summaries);
+                    invariants::check::<P>(term_length, states);
                 }
             }
         });

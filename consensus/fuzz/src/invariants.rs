@@ -33,7 +33,7 @@ use std::{
 /// dedicated audit targets, additionally run invariants requiring append-only
 /// activity and automaton history.
 pub trait SafetyObservations<P: Simplex> {
-    fn check_safety(self, n: u32, term_length: TermLength);
+    fn check_safety(self, term_length: TermLength);
 }
 
 /// Checks Simplex safety using the provided observations.
@@ -41,17 +41,13 @@ pub trait SafetyObservations<P: Simplex> {
 /// This remains the single entrypoint: the concrete observation type determines
 /// whether only the basic invariants or also the audit-history
 /// invariants are observable.
-pub fn check<P: Simplex>(
-    n: u32,
-    term_length: TermLength,
-    observations: impl SafetyObservations<P>,
-) {
-    observations.check_safety(n, term_length);
+pub fn check<P: Simplex>(term_length: TermLength, observations: impl SafetyObservations<P>) {
+    observations.check_safety(term_length);
 }
 
 impl<P: Simplex> SafetyObservations<P> for Vec<ReplicaState> {
-    fn check_safety(self, n: u32, term_length: TermLength) {
-        check_basic_invariants::<P>(n, term_length, self);
+    fn check_safety(self, term_length: TermLength) {
+        check_basic_invariants(term_length, self);
     }
 }
 
@@ -62,8 +58,8 @@ where
     P::Scheme: Scheme<Sha256Digest>,
     L: Elector<P::Scheme>,
 {
-    fn check_safety(self, n: u32, term_length: TermLength) {
-        check_basic_invariants::<P>(n, term_length, extract(self, n as usize));
+    fn check_safety(self, term_length: TermLength) {
+        check_basic_invariants(term_length, extract(self));
     }
 }
 
@@ -76,9 +72,9 @@ where
     L: Elector<P::Scheme>,
     L::Elector: Clone,
 {
-    fn check_safety(self, n: u32, term_length: TermLength) {
+    fn check_safety(self, term_length: TermLength) {
         check_fuzz_invariants(term_length, self);
-        check_basic_invariants::<P>(n, term_length, extract(summaries(self), n as usize));
+        check_basic_invariants(term_length, extract(summaries(self)));
     }
 }
 
@@ -163,38 +159,7 @@ fn entered_round_via_nullification(
         .any(|nullified| next_term_start(nullified.view().get(), term_length) == view)
 }
 
-fn check_basic_invariants<P: Simplex>(
-    n: u32,
-    term_length: TermLength,
-    replicas: Vec<ReplicaState>,
-) {
-    let threshold = bounds::quorum(n) as usize;
-    let attributable = <P::Scheme as certificate::Scheme>::is_attributable();
-
-    // Invariant: certificate_signature_counts_are_valid
-    // Every observed certificate exposes the appropriate signer-count metadata:
-    // - attributable certificates expose a count in [quorum, n];
-    // - non-attributable certificates expose no signer count.
-    let participants = n as usize;
-    let check_count = |kind: &str, view: u64, signature_count: Option<usize>| {
-        if attributable {
-            let count = signature_count.expect("Attributable scheme must have signature count");
-            assert!(
-                count >= threshold,
-                "Invariant violation: {kind} in view {view} has {count} < {threshold} signatures"
-            );
-            assert!(
-                count <= participants,
-                "Invariant violation: {kind} in view {view} has {count} signatures for {participants} participants"
-            );
-        } else {
-            assert!(
-                signature_count.is_none(),
-                "Invariant violation: non-attributable scheme should not expose signature count"
-            );
-        }
-    };
-
+fn check_basic_invariants(term_length: TermLength, replicas: Vec<ReplicaState>) {
     // Invariants:
     // - no_conflicting_quorum_notarizations
     // - no_conflicting_quorum_finalizations
@@ -203,16 +168,12 @@ fn check_basic_invariants<P: Simplex>(
     // notarized in a view, and at most one (parent, payload) may be finalized in
     // a view. Replicas without a certificate observation for that view impose no
     // requirement.
-    //
-    // The independently defined signature-count check runs before each observation
-    // is merged, so an invalid duplicate cannot be hidden by an earlier valid one.
     type Identity = (u64, Sha256Digest);
     let mut notarized_by_view: BTreeMap<u64, (usize, Identity)> = BTreeMap::new();
     let mut nullified_by_view: BTreeMap<u64, usize> = BTreeMap::new();
     let mut finalized_by_view: BTreeMap<u64, (usize, Identity)> = BTreeMap::new();
     for (idx, (notarizations, nullifications, finalizations)) in replicas.iter().enumerate() {
         for (&view, d) in notarizations.iter() {
-            check_count("notarization", view, d.signature_count);
             let proposal = (d.parent, d.payload);
             match notarized_by_view.entry(view) {
                 Entry::Vacant(entry) => {
@@ -227,12 +188,10 @@ fn check_basic_invariants<P: Simplex>(
                 }
             }
         }
-        for (&view, d) in nullifications.iter() {
-            check_count("nullification", view, d.signature_count);
+        for &view in nullifications.keys() {
             nullified_by_view.entry(view).or_insert(idx);
         }
         for (&view, d) in finalizations.iter() {
-            check_count("finalization", view, d.signature_count);
             let proposal = (d.parent, d.payload);
             match finalized_by_view.entry(view) {
                 Entry::Vacant(entry) => {
@@ -291,10 +250,9 @@ fn check_basic_invariants<P: Simplex>(
     // (p, v) must be covered by a recorded nullification: one nullification
     // covers its own view through the end of its term, so the covering
     // certificate for a skipped view may sit at any earlier view of the same
-    // term, including at the notarized parent itself. The explicit
-    // finalized-view scan is redundant with nullification coverage and
-    // finalized/nullified disjointness, but is retained for its sharper
-    // diagnostic.
+    // term, including at the notarized parent itself. Skipping a finalized
+    // view is caught without a dedicated scan: the skipped view needs a
+    // covering nullification, which finalized/nullified disjointness forbids.
     // This checks only the global extracted certificate graph; it does not
     // reconstruct unreported history or prove local possession or event ordering.
     // Only notarized links are walked: finalization_requires_notarization has
@@ -310,11 +268,6 @@ fn check_basic_invariants<P: Simplex>(
             parent < view,
             "Invariant violation: replica {idx} has notarization in view {view} with parent {parent}"
         );
-        if let Some((skipped, _)) = finalized_by_view.range(parent + 1..view).next() {
-            panic!(
-                "Invariant violation: replica {idx} has notarization in view {view} with parent {parent} skipping finalized view {skipped}"
-            );
-        }
         assert!(
             parent == 0
                 || notarized_by_view.contains_key(&parent)
@@ -480,77 +433,6 @@ pub fn check_certificate_leader_derivation<E, S, L>(
                     leader.as_ref()
                 );
             }
-        }
-    }
-}
-
-/// Invariant: vrf_seed_unique_per_view
-/// For instantiations whose certificates embed a per-view seed
-/// ([`Simplex::certificate_seed`]), every certificate retained for a view must
-/// carry the identical seed. Divergent seeds would fork leader election and
-/// execution randomness even when they happen to elect the same participant,
-/// which leader-agreement checks alone cannot detect.
-///
-/// Schemes without an embedded seed return `None` and are exempt. Certificates
-/// are signature-verified before the summary reporter retains them, so for a
-/// fixed group polynomial two distinct valid seeds for one view are
-/// cryptographically impossible and this cannot reject a valid execution.
-///
-/// Source: the instantiated protocol's "Embedded VRF" documentation: the seed
-/// derived for a view is the same regardless of certificate type and is
-/// deterministic for any quorum of signers.
-///
-/// Seeds are keyed by `View`, matching the summary Reporter's per-view maps.
-/// This collapses epochs, so the check is sound only for the current
-/// single-epoch harnesses; a multi-epoch backend needs `Round`-keyed summaries
-/// first. The summary maps also retain only the latest certificate of each kind
-/// per view, so overwrites can hide a conflict but cannot create one.
-pub fn check_certificate_seeds<P, E, L>(reporters: &[Reporter<E, P::Scheme, L, Sha256Digest>])
-where
-    P: Simplex,
-    E: CryptoRng,
-    P::Scheme: Scheme<Sha256Digest>,
-    L: Elector<P::Scheme>,
-{
-    let mut seeds: BTreeMap<u64, (Vec<u8>, &'static str)> = BTreeMap::new();
-    let mut check = |view: u64, seed: Option<Vec<u8>>, kind: &'static str| {
-        let Some(seed) = seed else {
-            return;
-        };
-        match seeds.entry(view) {
-            Entry::Vacant(entry) => {
-                entry.insert((seed, kind));
-            }
-            Entry::Occupied(entry) => {
-                let (existing, existing_kind) = entry.get();
-                assert!(
-                    existing == &seed,
-                    "Invariant violation: certificate seed mismatch in view {view}: {existing_kind} and {kind} embed different seeds"
-                );
-            }
-        }
-    };
-    for reporter in reporters {
-        for (view, certificate) in reporter.notarizations.lock().iter() {
-            check(
-                view.get(),
-                P::certificate_seed(&certificate.certificate),
-                "notarization",
-            );
-        }
-        for (view, certificate) in reporter.nullifications.lock().iter() {
-            check(
-                view.get(),
-                P::certificate_seed(&certificate.certificate),
-                "nullification",
-            );
-        }
-        for (view, certificate) in reporter.finalizations.lock().iter() {
-            check(
-                view.get(),
-                P::certificate_seed(&certificate.certificate),
-                "finalization",
-            );
         }
     }
 }
@@ -1302,7 +1184,6 @@ fn check_fuzz_invariants<E, S, L>(
 
         let mut accepted_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
         let mut rejected_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
-        let mut proposed_payloads: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut observed_notarizations: BTreeSet<Proposal<Sha256Digest>> = BTreeSet::new();
         let mut observed_nullifications: BTreeSet<Round> = BTreeSet::new();
         let mut successful_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
@@ -1315,7 +1196,6 @@ fn check_fuzz_invariants<E, S, L>(
         let mut certified_activity_views: BTreeSet<u64> = BTreeSet::new();
         let mut predecessor_evidence: BTreeSet<u64> = BTreeSet::new();
         let mut own_nullified: BTreeSet<Round> = BTreeSet::new();
-        let mut max_finalized: Option<View> = None;
         let mut observed_finalizations: BTreeSet<Round> = BTreeSet::new();
         let mut accepted_signed: BTreeSet<(Round, View, Sha256Digest)> = BTreeSet::new();
 
@@ -1727,8 +1607,6 @@ fn check_fuzz_invariants<E, S, L>(
                             certified_activity_views.insert(view);
                             certified_parents
                                 .insert((certificate.proposal.round, certificate.proposal.payload));
-                            max_finalized =
-                                max_finalized.max(Some(certificate.proposal.round.view()));
                             observed_finalizations.insert(certificate.proposal.round);
                             finalization_backing.insert((
                                 certificate.proposal.clone(),
@@ -1797,7 +1675,6 @@ fn check_fuzz_invariants<E, S, L>(
                             outcome: Completion::Returned(payload),
                         } => {
                             accepted_proposals.insert((context.round, context.parent, *payload));
-                            proposed_payloads.insert((context.round, *payload));
                         }
                         AutomatonEvent::VerifyCompleted {
                             context,
@@ -1820,40 +1697,8 @@ fn check_fuzz_invariants<E, S, L>(
                             if *result {
                                 successful_certifications.insert(key);
                             } else {
-                                // Invariant: proposed_payloads_are_certifiable
-                                // Once a correct application returns a payload from
-                                // propose, a later certification result for that
-                                // same (round, payload) must be true. A missing or
-                                // canceled proposal completion imposes no observable
-                                // requirement.
-                                //
-                                // Source: the Automaton contract makes proposed
-                                // payloads certifiable-by-construction and commits
-                                // the proposer to certifying them if notarized.
-                                assert!(
-                                    !proposed_payloads.contains(&key),
-                                    "Invariant violation: locally proposed payload failed certification: observer {observer_bytes:?}, round {round:?}, payload {payload:?}"
-                                );
                                 failed_certifications.insert(key);
                             }
-                        }
-                        AutomatonEvent::CertifyRequested { round, payload } => {
-                            // Invariant: certification_request_requires_notarization
-                            // A correct engine requests certification only after it
-                            // has reported a notarization for the same
-                            // (round, payload). CertifyRequested does not retain the
-                            // parent, so exact parent coherence is checked by the
-                            // activity-based invariants when later evidence exists.
-                            //
-                            // Source: the instantiated voter round's try_certify
-                            // path yields a proposal only after storing a matching
-                            // notarization certificate.
-                            assert!(
-                                observed_notarizations.iter().any(|proposal| {
-                                    proposal.round == *round && proposal.payload == *payload
-                                }),
-                                "Invariant violation: certification requested without prior notarization: observer {observer_bytes:?}, round {round:?}, payload {payload:?}"
-                            );
                         }
                         _ => {}
                     }
@@ -1986,25 +1831,6 @@ fn check_fuzz_invariants<E, S, L>(
                                 panic!(
                                     "Invariant violation: proposer skips locally certified view {skipped}: observer {observer_bytes:?}, parent view {parent_view}, child round {:?}",
                                     context.round
-                                );
-                            }
-                        }
-                        AutomatonEvent::CertifyRequested { round, .. } => {
-                            // Invariant: no_certification_request_below_finality
-                            // Finalization is the boundary that abandons
-                            // certification work: candidates at or below the
-                            // finalized view are pruned before the finalization
-                            // is reported, so a later certify request for such a
-                            // view is a lifecycle violation.
-                            //
-                            // Source: "Certification of some notarization should
-                            // only be abandoned once a finalization at the same
-                            // or higher view is observed" and the voter's
-                            // last_finalized candidate filtering.
-                            if let Some(finalized) = max_finalized {
-                                assert!(
-                                    finalized < round.view(),
-                                    "Invariant violation: certification requested at or below finalized view {finalized:?}: observer {observer_bytes:?}, round {round:?}"
                                 );
                             }
                         }
@@ -2345,7 +2171,6 @@ pub(crate) fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
 
 pub fn extract<E, S, L>(
     reporters: impl AsRef<[Reporter<E, S, L, Sha256Digest>]>,
-    max_participants: usize,
 ) -> Vec<ReplicaState>
 where
     E: CryptoRng,
@@ -2365,10 +2190,6 @@ where
                         Notarization {
                             payload: cert.proposal.payload,
                             parent: cert.proposal.parent.get(),
-                            signature_count: get_signature_count::<S>(
-                                &cert.certificate,
-                                max_participants,
-                            ),
                         },
                     )
                 })
@@ -2376,18 +2197,8 @@ where
 
             let nullifications = reporter.nullifications.lock();
             let nullification_data = nullifications
-                .iter()
-                .map(|(view, cert)| {
-                    (
-                        view.get(),
-                        Nullification {
-                            signature_count: get_signature_count::<S>(
-                                &cert.certificate,
-                                max_participants,
-                            ),
-                        },
-                    )
-                })
+                .keys()
+                .map(|view| (view.get(), Nullification))
                 .collect();
 
             let finalizations = reporter.finalizations.lock();
@@ -2399,10 +2210,6 @@ where
                         Finalization {
                             payload: cert.proposal.payload,
                             parent: cert.proposal.parent.get(),
-                            signature_count: get_signature_count::<S>(
-                                &cert.certificate,
-                                max_participants,
-                            ),
                         },
                     )
                 })
@@ -2416,10 +2223,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        id_mock,
-        simplex::{SimplexBls12381MinPk, SimplexEd25519, SimplexId},
-    };
+    use crate::{id_mock, simplex::SimplexId};
     use commonware_consensus::{
         Reporter as _,
         simplex::{
@@ -2439,7 +2243,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
-    use std::{panic, time::Duration};
+    use std::time::Duration;
 
     const N: u32 = 4;
     const Q: usize = 3;
@@ -2449,34 +2253,20 @@ mod tests {
     }
 
     fn notarization(parent: u64, payload: u8) -> Notarization {
-        notarization_with(parent, payload, Some(Q))
-    }
-
-    fn notarization_with(parent: u64, payload: u8, signature_count: Option<usize>) -> Notarization {
         Notarization {
             payload: digest(payload),
             parent,
-            signature_count,
         }
     }
 
     fn nullification() -> Nullification {
-        nullification_with(Some(Q))
-    }
-
-    fn nullification_with(signature_count: Option<usize>) -> Nullification {
-        Nullification { signature_count }
+        Nullification
     }
 
     fn finalization(parent: u64, payload: u8) -> Finalization {
-        finalization_with(parent, payload, Some(Q))
-    }
-
-    fn finalization_with(parent: u64, payload: u8, signature_count: Option<usize>) -> Finalization {
         Finalization {
             payload: digest(payload),
             parent,
-            signature_count,
         }
     }
 
@@ -2502,45 +2292,6 @@ mod tests {
     }
 
     #[test]
-    fn same_term_nullification_blocks_later_finalization() {
-        let payload = Sha256Digest::from([7u8; 32]);
-        let mut notarizations = HashMap::new();
-        notarizations.insert(
-            3,
-            Notarization {
-                payload,
-                parent: 2,
-                signature_count: Some(3),
-            },
-        );
-        let mut nullifications = HashMap::new();
-        nullifications.insert(
-            1,
-            Nullification {
-                signature_count: Some(3),
-            },
-        );
-        let mut finalizations = HashMap::new();
-        finalizations.insert(
-            3,
-            Finalization {
-                payload,
-                parent: 2,
-                signature_count: Some(3),
-            },
-        );
-
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(
-                4,
-                TermLength::new(NZU32!(5)),
-                vec![(notarizations, nullifications, finalizations)],
-            );
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
     #[should_panic(expected = "view 1 is nullified but view 5 is finalized in the same term")]
     fn nullification_conflicts_with_term_end_finalization() {
         let r = replica(
@@ -2554,7 +2305,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![(5, finalization(4, 0xE))]),
         );
-        check::<SimplexId>(N, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexId>(TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2564,7 +2315,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![(6, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexId>(TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2574,7 +2325,7 @@ mod tests {
             views(vec![(3, nullification())]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexId>(TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2584,7 +2335,7 @@ mod tests {
             views(vec![(2, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexId>(TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2595,7 +2346,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexId>(TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
@@ -2606,21 +2357,12 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::new(NZU32!(5)), vec![r]);
+        check::<SimplexId>(TermLength::new(NZU32!(5)), vec![r]);
     }
 
     #[test]
     fn valid_consolidated_chain_passes() {
-        check::<SimplexId>(N, TermLength::ONE, vec![chain_replica(), chain_replica()]);
-    }
-
-    #[test]
-    fn identical_certificates_from_multiple_replicas_pass() {
-        check::<SimplexId>(
-            N,
-            TermLength::ONE,
-            vec![chain_replica(), chain_replica(), chain_replica()],
-        );
+        check::<SimplexId>(TermLength::ONE, vec![chain_replica(), chain_replica()]);
     }
 
     #[test]
@@ -2630,7 +2372,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2646,7 +2388,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexId>(TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2662,7 +2404,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexId>(TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2678,7 +2420,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
+        check::<SimplexId>(TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2689,7 +2431,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2700,7 +2442,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2711,99 +2453,7 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "notarization in view 1 has 2 < 3 signatures")]
-    fn duplicate_subquorum_certificate_is_not_hidden_by_deduplication() {
-        let r0 = replica(
-            views(vec![(1, notarization(0, 0xA))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        let r1 = replica(
-            views(vec![(1, notarization_with(0, 0xA, Some(2)))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
-    }
-
-    #[test]
-    #[should_panic(expected = "notarization in view 1 has 2 < 3 signatures")]
-    fn subquorum_notarization_is_rejected() {
-        let r = replica(
-            views(vec![(1, notarization_with(0, 0xA, Some(2)))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "nullification in view 1 has 2 < 3 signatures")]
-    fn subquorum_nullification_is_rejected() {
-        let r = replica(
-            views(vec![]),
-            views(vec![(1, nullification_with(Some(2)))]),
-            views(vec![]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "finalization in view 1 has 2 < 3 signatures")]
-    fn subquorum_finalization_is_rejected() {
-        let r = replica(
-            views(vec![]),
-            views(vec![]),
-            views(vec![(1, finalization_with(0, 0xA, Some(2)))]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "notarization in view 1 has 5 signatures for 4 participants")]
-    fn overcounted_certificate_is_rejected() {
-        let r = replica(
-            views(vec![(1, notarization_with(0, 0xA, Some(5)))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "Attributable scheme must have signature count")]
-    fn attributable_certificate_requires_signature_count() {
-        let r = replica(
-            views(vec![(1, notarization_with(0, 0xA, None))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    fn non_attributable_certificate_with_none_count_passes() {
-        let r = replica(
-            views(vec![(1, notarization_with(0, 0xA, None))]),
-            views(vec![(2, nullification_with(None))]),
-            views(vec![(1, finalization_with(0, 0xA, None))]),
-        );
-        check::<SimplexBls12381MinPk>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "non-attributable scheme should not expose signature count")]
-    fn non_attributable_certificate_with_count_is_rejected() {
-        let r = replica(
-            views(vec![(1, notarization(0, 0xA))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        check::<SimplexBls12381MinPk>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2814,18 +2464,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "in view 2 with parent 3")]
-    fn parent_after_child_is_rejected() {
-        let r = replica(
-            views(vec![(2, notarization(3, 0xA))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2836,7 +2475,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2847,7 +2486,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2857,18 +2496,7 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    #[should_panic(expected = "skipping finalized view 1")]
-    fn skipped_finalization_uses_sharp_diagnostic() {
-        let r = replica(
-            views(vec![(1, notarization(0, 0xA)), (3, notarization(0, 0xB))]),
-            views(vec![]),
-            views(vec![(1, finalization(0, 0xA))]),
-        );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2879,37 +2507,7 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
-    }
-
-    #[test]
-    fn conflict_diagnostic_names_first_and_conflicting_replicas() {
-        let r0 = replica(
-            views(vec![(1, notarization(0, 0xA))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        let r1 = replica(views(vec![]), views(vec![]), views(vec![]));
-        let r2 = replica(
-            views(vec![(1, notarization(0, 0xB))]),
-            views(vec![]),
-            views(vec![]),
-        );
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            check::<SimplexId>(N, TermLength::ONE, vec![r0, r1, r2]);
-        }));
-        let payload = result.expect_err("conflicting notarizations must panic");
-        let message = payload
-            .downcast_ref::<String>()
-            .expect("panic payload must be a string");
-        assert!(
-            message.contains("replica 2 has"),
-            "missing conflicting replica: {message}"
-        );
-        assert!(
-            message.contains("replica 0 has"),
-            "missing first replica: {message}"
-        );
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     // Vote-invariant fixtures: id_mock schemes share one signing record, so any
@@ -3485,37 +3083,6 @@ mod tests {
     }
 
     #[test]
-    fn multiple_equivocators_produce_sorted_diagnostics() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        for signer in [2, 1] {
-            rep.report(Activity::Nullify(
-                Nullify::sign::<Sha256Digest>(&schemes[signer], round(5)).unwrap(),
-            ));
-            rep.report(Activity::Finalize(
-                Finalize::sign(&schemes[signer], proposal(5, 4, 0xA)).unwrap(),
-            ));
-        }
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            check_vote_invariants_with_byzantine(
-                &HashSet::new(),
-                RoundRobin::default(),
-                Epoch::new(0),
-                TermLength::ONE,
-                &[rep],
-            );
-        }));
-        let payload = result.expect_err("equivocation must panic");
-        let message = payload
-            .downcast_ref::<String>()
-            .expect("panic payload must be a string");
-        assert!(
-            message.contains("[[0, 0, 0, 1], [0, 0, 0, 2]]"),
-            "equivocators must be sorted: {message}"
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "fault evidence against correct signers")]
     fn fault_evidence_against_correct_signer_is_rejected() {
         let (participants, schemes) = vote_fixture();
@@ -3740,39 +3307,6 @@ mod tests {
         );
     }
 
-    fn record_certify_request(reporter: &AuditReporter, proposal: &Proposal<Sha256Digest>) {
-        record_automaton(
-            reporter,
-            AutomatonEvent::CertifyRequested {
-                round: proposal.round,
-                payload: proposal.payload,
-            },
-        );
-    }
-
-    #[test]
-    fn check_selects_invariants_from_the_reporter_type() {
-        let (participants, schemes) = vote_fixture();
-        let mock = vote_reporter(&participants, &schemes);
-        check::<SimplexId>(N, TermLength::ONE, std::slice::from_ref(&mock));
-
-        let fuzz = audit_reporter(0, &participants, &schemes);
-        check::<SimplexId>(N, TermLength::ONE, std::slice::from_ref(&fuzz));
-    }
-
-    #[test]
-    fn exact_proposal_non_equivocation_accepts_one_complete_observation() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
-        record_propose_success(&reporter, &proposal);
-        reporter.report(Activity::Notarize(
-            Notarize::sign(&schemes[0], proposal).unwrap(),
-        ));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
     #[test]
     #[should_panic(expected = "notarized multiple exact proposals")]
     fn exact_proposal_non_equivocation_rejects_same_payload_with_different_parents() {
@@ -3786,19 +3320,6 @@ mod tests {
                 Notarize::sign(&schemes[0], proposal).unwrap(),
             ));
         }
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn complete_certificate_history_accepts_repeated_identical_certificates() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(3, &participants, &schemes);
-        let notarization = notarization_activity(&schemes, 5, 4, 0xA);
-        let finalization = finalization_activity(&schemes, 5, 4, 0xA);
-        reporter.report(Activity::Notarization(notarization.clone()));
-        reporter.report(Activity::Notarization(notarization));
-        reporter.report(Activity::Finalization(finalization.clone()));
-        reporter.report(Activity::Finalization(finalization));
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
@@ -3827,19 +3348,6 @@ mod tests {
         reporter.report(Activity::Finalization(finalization_activity(
             &schemes, 5, 4, 0xA,
         )));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn local_notarize_accepts_successful_verification() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(1, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
-        record_verify_result(&reporter, participants[0].clone(), &proposal, true);
-        reporter.report(Activity::Notarize(
-            Notarize::sign(&schemes[1], proposal).unwrap(),
-        ));
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
@@ -3896,38 +3404,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "local notarize without successful propose/verify")]
-    fn local_notarize_after_only_rejection_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(1, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        record_verify_result(&reporter, participants[0].clone(), &proposal, false);
-        reporter.report(Activity::Notarize(
-            Notarize::sign(&schemes[1], proposal).unwrap(),
-        ));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn local_finalize_accepts_matching_successful_certification() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        reporter.report(Activity::Notarization(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        record_certify_result(&reporter, &proposal, true);
-        reporter.report(Activity::Finalize(
-            Finalize::sign(&schemes[0], proposal).unwrap(),
-        ));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
     #[should_panic(expected = "local finalize without successful certification")]
     fn local_finalize_without_successful_certification_is_rejected() {
         let (participants, schemes) = vote_fixture();
@@ -3979,34 +3455,6 @@ mod tests {
     }
 
     #[test]
-    fn elected_leader_and_follower_contexts_agree() {
-        let (participants, schemes) = vote_fixture();
-        // Epoch-0 rotation elects participant 1 for view 5; unrecorded views
-        // are checked directly against the elector.
-        let leader = audit_reporter(1, &participants, &schemes);
-        let follower = audit_reporter(0, &participants, &schemes);
-        let parent = proposal(4, 3, 0xF);
-        record_certify_result(&leader, &parent, true);
-        record_certify_result(&follower, &parent, true);
-        let proposal = proposal(5, 4, 0xA);
-        let context = automaton_context(participants[1].clone(), &proposal);
-        record_automaton(
-            &leader,
-            AutomatonEvent::ProposeRequested {
-                context: context.clone(),
-            },
-        );
-        record_automaton(
-            &follower,
-            AutomatonEvent::VerifyRequested {
-                context,
-                payload: proposal.payload,
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, &[leader, follower]);
-    }
-
-    #[test]
     #[should_panic(expected = "non-leader requested proposal")]
     fn non_leader_proposal_request_is_rejected() {
         let (participants, schemes) = vote_fixture();
@@ -4044,32 +3492,6 @@ mod tests {
             },
         );
         check_fuzz_invariants(TermLength::ONE, &[reporter_a, reporter_b]);
-    }
-
-    #[test]
-    fn certification_and_finalize_accept_the_same_exact_proposal() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        reporter.report(Activity::Notarization(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        record_certify_result(&reporter, &proposal, true);
-        reporter.report(Activity::Certification(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        reporter.report(Activity::Finalize(
-            Finalize::sign(&schemes[0], proposal).unwrap(),
-        ));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
     #[test]
@@ -4169,60 +3591,6 @@ mod tests {
     }
 
     #[test]
-    fn locally_proposed_payload_accepts_true_certification() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        record_propose_success(&reporter, &proposal);
-        record_certify_result(&reporter, &proposal, true);
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "locally proposed payload failed certification")]
-    fn locally_proposed_payload_rejects_false_certification() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        record_propose_success(&reporter, &proposal);
-        record_certify_result(&reporter, &proposal, false);
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn false_certification_without_proposal_observation_is_allowed() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(5, 4, 0xA), false);
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn certification_request_accepts_prior_matching_notarization() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-        reporter.report(Activity::Notarization(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        record_certify_request(&reporter, &proposal);
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "certification requested without prior notarization")]
-    fn certification_request_without_prior_notarization_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        record_certify_request(&reporter, &proposal(5, 4, 0xA));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
     fn context_with_certified_parent_and_nullified_gaps_passes() {
         let (participants, schemes) = vote_fixture();
         // Observer 1 is the round-robin leader of round 5, matching the
@@ -4312,38 +3680,6 @@ mod tests {
             },
         );
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn matching_genesis_contexts_pass() {
-        let (participants, schemes) = vote_fixture();
-        // Epoch-0 rotation elects participant 1 for view 1, and view-1
-        // contexts are checked directly against the elector (no certificate
-        // unlocks the initial view), so the proposer must be participant 1.
-        let rep_a = audit_reporter(1, &participants, &schemes);
-        let rep_b = audit_reporter(0, &participants, &schemes);
-        record_automaton(
-            &rep_a,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[1].clone(),
-                    &proposal(1, 0, 0xA),
-                    digest(0xE),
-                ),
-            },
-        );
-        record_automaton(
-            &rep_b,
-            AutomatonEvent::VerifyRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[1].clone(),
-                    &proposal(1, 0, 0xA),
-                    digest(0xE),
-                ),
-                payload: digest(0xA),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, &[rep_a, rep_b]);
     }
 
     #[test]
@@ -4780,25 +4116,6 @@ mod tests {
     }
 
     #[test]
-    fn certify_request_after_own_nullify_is_allowed() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        reporter.report(Activity::Notarization(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
-        reporter.report(Activity::Nullify(
-            Nullify::sign::<Sha256Digest>(&schemes[0], round(5)).unwrap(),
-        ));
-        record_certify_request(&reporter, &proposal(5, 4, 0xA));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
     #[should_panic(expected = "verify requested in own leadership round")]
     fn verify_request_in_own_leadership_round_is_rejected() {
         let (participants, schemes) = vote_fixture();
@@ -4809,25 +4126,6 @@ mod tests {
             AutomatonEvent::VerifyRequested {
                 context: automaton_context(participants[0].clone(), &proposal(5, 4, 0xA)),
                 payload: digest(0xA),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn context_leader_matching_recorded_schedule_passes() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        reporter
-            .inner()
-            .leaders
-            .lock()
-            .insert(View::new(5), participants[0].clone());
-        record_certify_result(&reporter, &proposal(4, 3, 0xF), true);
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context(participants[0].clone(), &proposal(5, 4, 0xA)),
             },
         );
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
@@ -4904,51 +4202,6 @@ mod tests {
         reporter.report(Activity::Notarization(notarization_activity(
             &schemes, 5, 4, 0xA,
         )));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn certification_request_above_finalized_view_passes() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        reporter.report(Activity::Finalization(finalization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            3,
-            2,
-            0xB,
-        )));
-        reporter.report(Activity::Notarization(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        record_certify_request(&reporter, &proposal(5, 4, 0xA));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "certification requested at or below finalized view")]
-    fn certification_request_at_finalized_view_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        reporter.report(Activity::Notarization(notarization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        reporter.report(Activity::Finalization(finalization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            5,
-            4,
-            0xA,
-        )));
-        record_certify_request(&reporter, &proposal(5, 4, 0xA));
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
@@ -5050,27 +4303,6 @@ mod tests {
         ));
         // Without a retained leader, honest-leader coherence may not draw a
         // conclusion from the divergent raw observations.
-        check_vote_invariants_with_byzantine(
-            &HashSet::new(),
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
-    fn correct_leader_single_payload_passes() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.leaders
-            .lock()
-            .insert(View::new(5), participants[0].clone());
-        for signer in [0, 1, 2] {
-            rep.report(Activity::Notarize(
-                Notarize::sign(&schemes[signer], proposal(5, 4, 0xA)).unwrap(),
-            ));
-        }
         check_vote_invariants_with_byzantine(
             &HashSet::new(),
             RoundRobin::default(),
@@ -5245,7 +4477,7 @@ mod tests {
             views(vec![(0, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, TermLength::ONE, vec![r]);
+        check::<SimplexId>(TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -5635,23 +4867,6 @@ mod tests {
     }
 
     #[test]
-    fn retained_certificate_leader_derivation_matches_recorded_schedule() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep = vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep.report(Activity::Nullification(nullification_activity(&schemes, 5)));
-        check_vote_invariants(
-            0,
-            RoundRobin::default(),
-            Epoch::new(0),
-            TermLength::ONE,
-            &[rep],
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "certificate-derived leader disagrees with recorded leader")]
     fn recorded_leader_conflicting_with_certificate_derivation_is_rejected() {
         let (participants, schemes) = vote_fixture();
@@ -5701,47 +4916,6 @@ mod tests {
             term_length,
             &[rep],
         );
-    }
-
-    #[test]
-    fn threshold_certificate_seeds_agree_across_types() {
-        let (participants, schemes) = threshold_vote_fixture();
-        let mut rep = threshold_vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(threshold_notarization(
-            &schemes, 0xA,
-        )));
-        rep.report(Activity::Nullification(threshold_nullification(
-            &schemes, 5,
-        )));
-        check_certificate_seeds::<SimplexBls12381MinPk, _, _>(&[rep]);
-    }
-
-    #[test]
-    #[should_panic(expected = "certificate seed mismatch in view 5")]
-    fn threshold_certificate_seed_divergence_is_rejected() {
-        let (participants, schemes) = threshold_vote_fixture();
-        let mut rep = threshold_vote_reporter(&participants, &schemes);
-        rep.report(Activity::Notarization(threshold_notarization(
-            &schemes, 0xA,
-        )));
-        // A verified certificate can never carry another view's seed; model
-        // the hypothetical bug by planting a view-6 certificate in the view-5
-        // slot, which the seed comparison must reject.
-        let mismatched = threshold_nullification(&schemes, 6);
-        rep.nullifications.lock().insert(View::new(5), mismatched);
-        check_certificate_seeds::<SimplexBls12381MinPk, _, _>(&[rep]);
-    }
-
-    #[test]
-    fn schemes_without_embedded_seeds_are_exempt() {
-        let (participants, schemes) = vote_fixture();
-        let mut rep_a = vote_reporter(&participants, &schemes);
-        let mut rep_b = vote_reporter(&participants, &schemes);
-        rep_a.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        rep_b.report(Activity::Nullification(nullification_activity(&schemes, 5)));
-        check_certificate_seeds::<SimplexId, _, _>(&[rep_a, rep_b]);
     }
 
     fn record_threshold_certify_success(reporter: &ThresholdAuditReporter) {

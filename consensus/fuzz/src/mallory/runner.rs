@@ -1530,8 +1530,8 @@ fn run_inner<P: Simplex>(
             TermLength::ONE,
             &observers,
         );
-        let states = invariants::extract(reporters, n);
-        invariants::check::<P>(config.n, TermLength::ONE, states);
+        let states = invariants::extract(reporters);
+        invariants::check::<P>(TermLength::ONE, states);
     });
 }
 

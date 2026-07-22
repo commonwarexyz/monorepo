@@ -561,8 +561,8 @@ where
             .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
             .collect();
 
-        let states = invariants::extract(correct_reporters, config.n as usize);
-        invariants::check::<P>(config.n, TermLength::ONE, states);
+        let states = invariants::extract(correct_reporters);
+        invariants::check::<P>(TermLength::ONE, states);
     });
 }
 

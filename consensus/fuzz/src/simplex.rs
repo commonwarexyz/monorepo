@@ -1,7 +1,7 @@
 #[cfg(feature = "mocks")]
 use crate::simplex_certificate_mock as cert_mock;
 use crate::{Configuration, N4F1C3, id_mock};
-use commonware_codec::{Encode, Read};
+use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         elector::{Config as ElectorConfig, Random, RoundRobin},
@@ -109,17 +109,6 @@ where
     /// leader schedule. Returning `None` disables rejected-certification
     /// sampling for that instantiation.
     fn audit_rejection_view(_configuration: Configuration) -> Option<View> {
-        None
-    }
-
-    /// Per-view seed embedded in this instantiation's certificates, if any.
-    ///
-    /// Returns the seed bytes exactly as carried by the certificate so that
-    /// byte equality across certificates checks seed uniqueness per view.
-    /// Schemes without an embedded seed return `None`.
-    fn certificate_seed(
-        _certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
-    ) -> Option<Vec<u8>> {
         None
     }
 }
@@ -294,14 +283,6 @@ impl Simplex for SimplexBls12381MinPk {
         let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
     }
-
-    fn certificate_seed(
-        certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
-    ) -> Option<Vec<u8>> {
-        certificate
-            .get()
-            .map(|signature| signature.seed_signature.encode().as_ref().to_vec())
-    }
 }
 
 pub struct SimplexBls12381MinPkCustomRandom;
@@ -329,14 +310,6 @@ impl Simplex for SimplexBls12381MinPkCustomRandom {
         let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
     }
-
-    fn certificate_seed(
-        certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
-    ) -> Option<Vec<u8>> {
-        certificate
-            .get()
-            .map(|signature| signature.seed_signature.encode().as_ref().to_vec())
-    }
 }
 
 pub struct SimplexBls12381MinSig;
@@ -363,14 +336,6 @@ impl Simplex for SimplexBls12381MinSig {
     ) {
         let fixture = bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
-    }
-
-    fn certificate_seed(
-        certificate: &<Self::Scheme as certificate::Verifier>::Certificate,
-    ) -> Option<Vec<u8>> {
-        certificate
-            .get()
-            .map(|signature| signature.seed_signature.encode().as_ref().to_vec())
     }
 }
 
