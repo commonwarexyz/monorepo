@@ -550,12 +550,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.0.size(section)
     }
 
-    /// Rewind the journal to a specific section and byte offset.
+    /// Rewind the journal to a specific section and byte size.
     ///
     /// This truncates the section to the given size. All sections
     /// after `section` are removed.
-    pub async fn rewind(mut self, section: u64, offset: u64) -> Result<Self, Error> {
-        self.0.rewind(section, offset).await?;
+    pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.rewind(section, size).await?;
         Ok(self)
     }
 

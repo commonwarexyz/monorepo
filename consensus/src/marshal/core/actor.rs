@@ -901,10 +901,7 @@ where
                     return self;
                 }
 
-                self = self
-                    .prune_finalized_archives(height)
-                    .await
-                    .expect("failed to prune finalized archives");
+                self = self.prune_finalized_archives(height).await;
 
                 // Intentionally keep existing block subscriptions alive. Canceling
                 // waiters can have catastrophic consequences because actors do not
@@ -1373,10 +1370,7 @@ where
         self.pending_acks.clear();
 
         // The floor is durable, so cache/finalized data below it can be pruned.
-        self = self
-            .prune_after_floor(height)
-            .await
-            .expect("failed to prune data below floor");
+        self = self.prune_after_floor(height).await;
 
         // Intentionally keep existing block subscriptions alive. Canceling
         // waiters can have catastrophic consequences (nodes can get stuck in
@@ -2444,14 +2438,11 @@ where
     }
 
     /// Prunes finalized blocks and certificates below the given height.
-    async fn prune_finalized_archives(
-        mut self: Box<Self>,
-        height: Height,
-    ) -> Result<Box<Self>, BoxedError> {
+    async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
         // Prune the finalized block and finalization certificate archives in parallel.
         let finalized_blocks = self.finalized_blocks;
         let finalizations_by_height = self.finalizations_by_height;
-        let (finalized_blocks, finalizations_by_height) = try_join!(
+        match try_join!(
             async {
                 let store = finalized_blocks.prune(height).await.map_err(Box::new)?;
                 Ok::<_, BoxedError>(store)
@@ -2463,21 +2454,22 @@ where
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(store)
             }
-        )?;
-        self.finalized_blocks = finalized_blocks;
-        self.finalizations_by_height = finalizations_by_height;
-        Ok(self)
+        ) {
+            Ok((finalized_blocks, finalizations_by_height)) => {
+                self.finalized_blocks = finalized_blocks;
+                self.finalizations_by_height = finalizations_by_height;
+            }
+            Err(e) => panic!("failed to prune finalized archives: {e}"),
+        }
+        self
     }
 
     /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
-    async fn prune_after_floor(
-        mut self: Box<Self>,
-        height: Height,
-    ) -> Result<Box<Self>, BoxedError> {
+    async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
         let cache = self.cache;
         let finalized_blocks = self.finalized_blocks;
         let finalizations_by_height = self.finalizations_by_height;
-        let (cache, finalized_blocks, finalizations_by_height) = try_join!(
+        match try_join!(
             async {
                 let cache = cache.prune_by_height(height).await;
                 Ok::<_, BoxedError>(cache)
@@ -2493,10 +2485,14 @@ where
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(store)
             }
-        )?;
-        self.cache = cache;
-        self.finalized_blocks = finalized_blocks;
-        self.finalizations_by_height = finalizations_by_height;
-        Ok(self)
+        ) {
+            Ok((cache, finalized_blocks, finalizations_by_height)) => {
+                self.cache = cache;
+                self.finalized_blocks = finalized_blocks;
+                self.finalizations_by_height = finalizations_by_height;
+            }
+            Err(e) => panic!("failed to prune data below floor: {e}"),
+        }
+        self
     }
 }

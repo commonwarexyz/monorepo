@@ -1105,7 +1105,7 @@ impl<
         let (sequencer, journal) = self
             .journals
             .remove_entry(&node.chunk.sequencer)
-            .expect("journal does not exist");
+            .expect("journal must be initialized");
         let (journal, _, _) = journal
             .append(section, &node)
             .await
@@ -1122,7 +1122,7 @@ impl<
         let (sequencer, journal) = self
             .journals
             .remove_entry(sequencer)
-            .expect("journal does not exist");
+            .expect("journal must be initialized");
 
         // Sync journal
         let journal = journal.sync(section).await.expect("unable to sync journal");

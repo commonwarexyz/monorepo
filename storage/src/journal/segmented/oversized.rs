@@ -499,8 +499,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Start syncing both journals for the given `sections`.
     ///
     /// The returned handle completes once both journals' syncs complete, failing with the first
-    /// error encountered. An error reported by the handle is fatal to the journal: the caller
-    /// must stop using the returned journal and recover by re-initializing.
+    /// error encountered. An error reported by the returned [Handle] is fatal to the journal:
+    /// the caller must stop using the returned journal and recover by re-initializing.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,

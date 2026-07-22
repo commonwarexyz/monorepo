@@ -365,8 +365,8 @@ pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inne
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Archive")
-            .field("first_index", &self.0.ordinal.first_index())
-            .field("last_index", &self.0.ordinal.last_index())
+            .field("first_index", &self.0.first_index())
+            .field("last_index", &self.0.last_index())
             .finish_non_exhaustive()
     }
 }
