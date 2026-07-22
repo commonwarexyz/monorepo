@@ -13,7 +13,8 @@
 
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
-    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
+    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, SyncCompletion, Writable},
+    durability::DurableSize,
     fixed,
     metrics::Metrics,
     position_to_blob,
@@ -37,7 +38,10 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
 };
 use commonware_utils::NZUsize;
-use futures::{Stream, future::try_join_all};
+use futures::{
+    FutureExt as _, Stream,
+    future::{try_join, try_join_all},
+};
 use std::{
     collections::BTreeMap,
     io::Cursor,
@@ -407,6 +411,12 @@ struct Inner<E: Context, V: Codec> {
 
     /// Journal and Reader metrics.
     metrics: Arc<Metrics<E>>,
+
+    /// The jointly proven-durable size: covered by observed data AND offsets syncs. The offsets
+    /// watermark (this journal's recovery anchor) only ever takes this joint value — a value
+    /// proven for one journal alone could anchor replay past the other's surviving data,
+    /// turning init's cheap repair into a full rebuild from the offsets start.
+    durable_size: DurableSize,
 }
 
 /// A reader over a variable journal.
@@ -1154,6 +1164,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let metrics = Metrics::new(context);
         metrics.update(bounds.end, bounds.start, items_per_blob);
 
+        // The offsets watermark is this journal's recovery anchor; init proved it against both
+        // journals, so it is the jointly proven durability floor to resume from.
+        let durable_size = DurableSize::new(offsets.recovery_watermark());
         Ok(Self {
             blobs,
             offsets,
@@ -1164,6 +1177,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
+            durable_size,
         })
     }
 
@@ -1225,6 +1239,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
+            durable_size: DurableSize::new(size),
         })
     }
 
@@ -1333,6 +1348,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
 
         self.bounds.end = size;
+        self.durable_size.truncate(size);
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1557,6 +1573,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // Prune data before offsets so a crash leaves offsets behind, which init repairs by
         // pruning offsets to match.
         self.offsets.prune(new_boundary).await?;
+        // Both prunes drained their in-flight syncs, so the pending observation is resolved.
+        self.durable_size.observe();
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1566,10 +1584,31 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(true)
     }
 
-    /// In-place [Journal::start_commit].
-    pub(crate) async fn start_commit(&mut self) -> Handle<()> {
-        self.metrics.start_commit_calls.inc();
-        self.blobs.start_sync().await
+    /// In-place [Journal::start_sync].
+    pub(crate) async fn start_sync(&mut self) -> Handle<()> {
+        self.metrics.start_sync_calls.inc();
+        let data = self.blobs.start_sync().await;
+        let offsets = self.offsets.start_data_sync().await;
+        // The blob layers waited out the previous syncs, which may have resolved the pending
+        // observation.
+        self.durable_size.observe();
+
+        // Best effort: advance the offsets watermark to the jointly proven size, riding the
+        // returned handle so the caller drives it.
+        let watermark = self
+            .offsets
+            .start_advance_watermark(self.durable_size.proven())
+            .await;
+
+        let joint: SyncCompletion = async move { try_join(data, offsets).await.map(|_| ()) }
+            .boxed()
+            .shared();
+        self.durable_size.record(self.bounds.end, joint.clone());
+        Handle::from_future(async move {
+            let result = joint.await;
+            let _ = watermark.await;
+            result
+        })
     }
 
     /// In-place [Journal::commit].
@@ -1584,9 +1623,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
+        let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
-        self.offsets.sync().await
+        self.offsets.sync().await?;
+        self.durable_size.prove(size);
+        Ok(())
     }
 
     /// See [Journal::destroy].
@@ -1612,6 +1654,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.offsets.clear_to_size(new_size).await?;
 
         self.bounds = new_size..new_size;
+        self.durable_size = DurableSize::new(new_size);
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -2276,19 +2319,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(self)
     }
 
-    /// Begin persisting data blobs so committed data survives a crash.
+    /// Begin persisting the data and offsets blobs.
     ///
-    /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
-    /// the previous `sync()`.
+    /// Awaiting the returned [Handle] guarantees state appended before this call survives a
+    /// crash. Best effort, this also advances the recovery watermark to the previous
+    /// proven-durable size, bounding startup recovery; use `sync()` for a guaranteed, current
+    /// watermark.
     ///
-    /// At most one commit's sync is in flight at a time: this call waits for the sync the prior
-    /// commit started before starting another. It does not wait for a pending rollover fsync:
-    /// the returned handle joins it, so an earlier commit's handle may still be pending when
+    /// At most one sync is in flight at a time: this call waits for the sync the prior
+    /// call started before starting another. It does not wait for a pending rollover fsync:
+    /// the returned handle joins it, so an earlier call's handle may still be pending when
     /// this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
-    /// the in-flight fsync). Dropping the handle does not cancel the sync.
-    pub async fn start_commit(mut self) -> (Self, Handle<()>) {
-        let handle = self.0.start_commit().await;
+    /// the in-flight fsync). Dropping the handle does not cancel the sync, but the watermark
+    /// advance only completes while the handle is driven.
+    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
+        let handle = self.0.start_sync().await;
         (self, handle)
     }
 
@@ -2396,8 +2442,8 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::rewind(self, size).await
     }
 
-    async fn start_commit(self) -> Result<(Self, Handle<()>), Error> {
-        Ok(Self::start_commit(self).await)
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
+        Ok(Self::start_sync(self).await)
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -2512,10 +2558,13 @@ mod tests {
         Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
         buffer::paged::{CacheRef, Writer},
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync,
+            release_pending_syncs,
+        },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
-    use futures::{FutureExt as _, StreamExt as _};
+    use futures::StreamExt as _;
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -2526,7 +2575,7 @@ mod tests {
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
     #[test]
-    fn test_start_commit_keeps_predecessor_sync() {
+    fn test_start_sync_keeps_predecessor_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2546,12 +2595,107 @@ mod tests {
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
-            let handle = journal.start_commit().await;
+            let handle = journal.start_sync().await;
             assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_advances_offsets_watermark_lagged() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-watermark-lagged".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let make = |pending: PendingSyncs| {
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending,
+                    },
+                    cfg.clone(),
+                )
+            };
+            let mut journal = make(pending.clone()).await.unwrap();
+
+            // Nothing proven while the first sync is parked: the anchor must not move.
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let h1 = journal.start_sync().await;
+            assert_eq!(journal.offsets.recovery_watermark(), 0);
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, h1).await.unwrap();
+
+            // The first sync is jointly proven (data and offsets), so the next call advances
+            // the offsets watermark to its size — one interval behind the tip.
+            journal.append(&4).await.unwrap();
+            let h2 = journal.start_sync().await;
+            assert_eq!(journal.offsets.recovery_watermark(), 3);
+            drive_pending_syncs(&pending, h2).await.unwrap();
+
+            // The advanced anchor is durable: a reopen replays only past it, then init's align
+            // catches the anchor up to the recovered size.
+            pending.unblock();
+            drop(journal);
+            let journal = make(pending.clone()).await.unwrap();
+            assert_eq!(journal.offsets.recovery_watermark(), 4);
+            assert_eq!(journal.bounds(), 0..4);
+            for i in 0..4u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i + 1);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_watermark_requires_joint_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-watermark-joint".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Inner::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            // Fail the data sync but let the offsets sync land: offsets durability alone must
+            // not advance the anchor, which would point recovery past the surviving data.
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let h1 = journal.start_sync().await;
+            let data = next_pending_sync(&pending);
+            release_pending_syncs(&pending);
+            data.release
+                .send(Err(commonware_runtime::Error::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            assert!(h1.await.is_err());
+
+            let h2 = journal.start_sync().await;
+            assert_eq!(journal.offsets.recovery_watermark(), 0);
+            assert!(h2.await.is_err());
         });
     }
 
@@ -2594,7 +2738,7 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_commit` never reaches the writer's sync state, so only the
+    /// A flush failure inside `start_sync` never reaches the writer's sync state, so only the
     /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
@@ -2613,14 +2757,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Buffer an item, then fail the flush inside start_commit, dropping the returned
+            // Buffer an item, then fail the flush inside start_sync, dropping the returned
             // handle unobserved.
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(1.0),
                 ..Default::default()
             };
-            drop(journal.start_commit().await);
+            drop(journal.start_sync().await);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
             // Appending through the blob boundary must surface the retained failure.
@@ -7474,7 +7618,7 @@ mod tests {
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
-            (journal, handle) = journal.start_commit().await;
+            (journal, handle) = journal.start_sync().await;
             handle.await.unwrap();
             (journal, _) = journal.prune(2).await.unwrap();
             journal = journal.rewind(4).await.unwrap();
@@ -7490,7 +7634,7 @@ mod tests {
                 "variable_metrics_read_calls_total 1",
                 "variable_metrics_read_many_calls_total 1",
                 "variable_metrics_items_read_total 4",
-                "variable_metrics_start_commit_calls_total 1",
+                "variable_metrics_start_sync_calls_total 1",
                 "variable_metrics_commit_calls_total 1",
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",

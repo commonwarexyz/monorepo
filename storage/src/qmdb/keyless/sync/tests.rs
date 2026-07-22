@@ -20,6 +20,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
+use commonware_macros::boxed;
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -886,6 +887,7 @@ pub(crate) mod harnesses {
             VariableDb::<F>::init(ctx, config).await.unwrap()
         }
 
+        #[boxed]
         async fn destroy(db: Self::Db) {
             db.destroy().await.unwrap();
         }

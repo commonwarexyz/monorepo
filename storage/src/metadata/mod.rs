@@ -91,9 +91,108 @@ mod tests {
     use super::*;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{Blob, Metrics as _, Runner, Storage, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Blob, Metrics as _, Runner, Storage, Supervisor as _, deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs},
+    };
     use commonware_utils::sequence::U64;
     use rand::{Rng, RngExt as _};
+
+    #[test_traced]
+    fn test_start_sync_pipelined_destroy() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Two pipelined syncs back to back: the second drains the first before targeting
+            // the copy it left as last-known-durable.
+            let key = U64::new(1);
+            metadata.put(key.clone(), vec![3]);
+            let h1 = metadata.start_sync().await.unwrap();
+            metadata.put(key.clone(), vec![4]);
+            let h2 = metadata.start_sync().await.unwrap();
+            h1.await.unwrap();
+            h2.await.unwrap();
+            metadata.destroy().await.unwrap();
+
+            // Destroy drained the pending sync; nothing survives the reopen.
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&key), None, "destroyed store must be empty");
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_failure_is_retained() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                DelayedSyncContext {
+                    inner: context.child("first"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            metadata.put(U64::new(1), vec![3]);
+            let handle = metadata.start_sync().await.unwrap();
+            fail_pending_syncs(&pending);
+            assert!(handle.await.is_err());
+
+            // The failed copy's on-disk state is unknown, so every later sync must keep
+            // failing rather than write to the only durable copy.
+            metadata.put(U64::new(1), vec![4]);
+            assert!(metadata.start_sync().await.is_err());
+            assert!(metadata.sync().await.is_err());
+
+            // Destroy ignores the retained failure: everything is being removed.
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_newest_copy_wins_on_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            let key = U64::new(1);
+            metadata.put(key.clone(), vec![3]);
+            let h1 = metadata.start_sync().await.unwrap();
+            metadata.put(key.clone(), vec![4]);
+            let h2 = metadata.start_sync().await.unwrap();
+            h1.await.unwrap();
+            h2.await.unwrap();
+            drop(metadata);
+
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&key), Some(&vec![4]));
+        });
+    }
 
     #[test_traced]
     fn test_put_get_clear() {

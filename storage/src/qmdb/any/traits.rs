@@ -114,9 +114,10 @@ pub trait DbAny<F: Family>:
     /// Begin durably persisting the database.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
-    /// for the state applied before the call. Use [Self::sync] to also eliminate recovery on
+    /// for the state applied before the call, plus a best-effort advance of the recovery
+    /// watermarks (bounding startup recovery); use [Self::sync] to eliminate recovery on
     /// startup.
-    fn start_commit(self) -> impl Future<Output = Result<(Self, Handle<()>), Error<F>>> + Send;
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     ///
@@ -228,13 +229,13 @@ macro_rules! impl_db_any {
                 <$ty>::prune(self, loc).await
             }
 
-            async fn start_commit(
+            async fn start_sync(
                 self,
             ) -> ::core::result::Result<
                 (Self, ::commonware_runtime::Handle<()>),
                 $crate::qmdb::Error<$fam>,
             > {
-                <$ty>::start_commit(self).await
+                <$ty>::start_sync(self).await
             }
 
             async fn commit(self) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {

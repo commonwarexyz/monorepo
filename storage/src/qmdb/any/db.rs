@@ -851,15 +851,15 @@ where
         Ok(self)
     }
 
-    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
-    /// the Merkle state is not durably persisted, so recovery may be required on startup in the
-    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
-    /// the prior commit's sync before starting. Failures of the deferred durability work
-    /// surface on the returned handle and again on the next durability operation.
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// Best effort, this also advances the recovery watermarks toward the proven-durable state,
+    /// bounding startup recovery (use [Self::sync] for the guarantee that no recovery is
+    /// needed). A new sync waits for the prior sync before starting. Failures of the deferred
+    /// durability work surface on the returned handle and again on the next durability operation.
     #[tracing::instrument(
-        name = "qmdb.any.db.start_commit",
+        name = "qmdb.any.db.start_sync",
         level = "info",
         skip_all,
         fields(
@@ -869,9 +869,9 @@ where
         ),
     )]
     #[boxed]
-    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
-        self.metrics.start_commit_calls.inc();
-        let (log, handle) = self.log.start_commit().await?;
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
+        self.metrics.start_sync_calls.inc();
+        let (log, handle) = self.log.start_sync().await?;
         self.log = log;
         Ok((self, handle))
     }
@@ -890,6 +890,8 @@ where
     )]
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, crate::qmdb::Error<F>> {
+        // Runs the log's commit rather than awaiting a start_sync handle so journal-level
+        // commit-duration metrics keep covering this path.
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;

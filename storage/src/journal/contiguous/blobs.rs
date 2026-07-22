@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
 /// Shared completion for an in-flight runtime sync.
-type SyncCompletion = Shared<BoxFuture<'static, Result<(), RError>>>;
+pub(super) type SyncCompletion = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// Metrics for a journal's blobs.
 struct Metrics {
