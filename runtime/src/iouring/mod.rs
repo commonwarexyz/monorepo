@@ -1115,10 +1115,11 @@ pub(crate) mod testing {
         /// waker once the driver is drained (parked results resolve without
         /// one).
         fn waker(&self) -> TaskWaker {
-            match &self.driver {
-                Some(driver) => arc_waker(Arc::new(Unpark(driver.waker()))),
-                None => futures::task::noop_waker(),
-            }
+            self.driver
+                .as_ref()
+                .map_or_else(futures::task::noop_waker, |driver| {
+                    arc_waker(Arc::new(Unpark(driver.waker())))
+                })
         }
 
         /// Drive `fut` to completion, servicing the ring between polls.
