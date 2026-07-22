@@ -82,7 +82,7 @@ Ideally, censorship resistance is the same as the maximum batch size $B$, i.e. c
 
 It may be acceptable to reduce the price of censorship to buying $10\%$ of the block (say), if we can proportionally reduce the cost of resharing secrets.
 
-In an updated version of [Pol26a](https://eprint.iacr.org/2026/760), we introduce Indexed Simple BTE, where the secret key size can be reduced from $O(B)$ to $O(\delta)$ to support a censorship resistance of $\delta$. Here, each ciphertext is encrypted to an index $\mathsf{idx} \in [B]$ and can be placed at any batch position $i \in [B]$ satisfying $|i - \mathsf{idx}| < \delta$. A batch is *admissible* (and can be decrypted) if every ciphertext can be packed into a distinct position satisfying this constraint. When users choose indices at random, the probability that a batch is inadmissible decays rapidly with $\delta$: even $\delta \approx 0.2B$ pushes it below $2^{-40}$ at $B = 512$, and larger batches need an even smaller fraction.
+In an updated version of [Pol26a](https://eprint.iacr.org/2026/760), we introduce Indexed Simple BTE, where the secret key size can be reduced from $O(B)$ to $O(\delta)$ to support a censorship resistance of $\delta$. Here, each ciphertext is encrypted to an index $\mathsf{idx} \in [B]$ and can be placed at any batch position $i \in [B]$ satisfying $|i - \mathsf{idx}| < \delta$. A batch is *admissible* (and can be decrypted) if every ciphertext can be packed into a distinct position satisfying this constraint. When users choose indices at random, the probability that a batch is inadmissible decays rapidly with $\delta$: even $\delta \approx 0.2B$ pushes it below $2^{-40}$ at $B = 512$, and larger batches need a smaller fraction still.
 
 ![Upper bound on the probability that a batch of $B$ ciphertexts encrypted to randomly chosen indices is inadmissible.](/imgs/admissibility_probability.png)
 
@@ -97,7 +97,11 @@ But this might be overkill for the epoch restriction issue. Recall that in [CGPW
 Naively, one can encrypt to multiple blocks, but this increases the ciphertext size linearly with the number of blocks. In [Pol26b](https://eprint.iacr.org/2026/1452), we construct Labeled Multi-Key Batched IBE, a batched threshold encryption scheme where we can decrypt $q$ different batches per label (epoch). Each user still encrypts to an epoch but each epoch now contains $q$ blocks, making it much more reliable to guess the current epoch number. Although we still require a larger $O(qB)$ CRS, $q$ can be chosen to be much smaller than in [FPTX25](https://eprint.iacr.org/2025/2032) as we only need the window to be long enough to ensure transactions are included. We also avoid the forced DKG re-setup as the same CRS and public key can be used across different epochs.
 
 ```{=html}
-<div id="pick-your-poisons-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
+<div id="pick-your-poisons-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions.">
+  <noscript>
+    This section contains a figure extending the batched threshold encryption landscape with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions.
+  </noscript>
+</div>
 ```
 
 As of this writing, no efficient construction achieves [the dream goal](#dream-goal), but
