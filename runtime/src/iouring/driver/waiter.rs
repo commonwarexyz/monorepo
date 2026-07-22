@@ -666,7 +666,7 @@ mod tests {
     use super::*;
     use crate::{
         IoBuf, IoBufMut, IoBufs,
-        iouring::request::{ReadAtRequest, RecvRequest, SendRequest, SyncRequest},
+        iouring::driver::request::{ReadAtRequest, RecvRequest, SendRequest, SyncRequest},
     };
     use futures::task::noop_waker;
     use std::{

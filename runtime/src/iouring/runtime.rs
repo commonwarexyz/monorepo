@@ -3,9 +3,9 @@
 //!
 //! The thread that calls [crate::Runner::start] runs both the task executor
 //! and the io_uring event loop: each iteration polls every ready task, then
-//! services the ring via [IoUringLoop::turn] so completions wake tasks and
+//! services the ring via [Driver::turn] so completions wake tasks and
 //! staged submissions reach the kernel. When nothing is runnable, the thread
-//! parks via [IoUringLoop::park] until a completion arrives, a timer fires, a
+//! parks via [Driver::park] until a completion arrives, a timer fires, a
 //! producer enqueues work, or another thread wakes a task.
 //!
 //! Ordinary tasks run inline on the executor thread. Tasks spawned with
@@ -20,7 +20,10 @@
 //! helper thread, registering a sleeper alarm, delivering a stop signal)
 //! remain supported through each loop's latched wake state.
 
-use super::{Driver, RingConfig, driver::Affine, waker::Waker as RingWaker};
+use super::{
+    Driver, RingConfig,
+    driver::{Affine, waker::Waker as RingWaker},
+};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
