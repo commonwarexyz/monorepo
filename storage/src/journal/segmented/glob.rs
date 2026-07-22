@@ -50,7 +50,7 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// The glob's state; boxed so the public [Glob] handle stays pointer-sized.
+/// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
 struct Inner<E: BufferPooler + Storage + Metrics, V: Codec> {
     manager: Manager<E, WriteFactory>,
 
@@ -256,7 +256,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
 ///
 /// Mutating functions consume the glob and return it only on success: an error (or a dropped
 /// future) destroys the handle. Mutations on pruned sections fail with
-/// [Error::AlreadyPrunedToSection] without mutating; check [Glob::pruned] first to keep the
+/// [Error::AlreadyPrunedToSection] without mutating. Check [Glob::pruned] first to keep the
 /// handle.
 pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
 
@@ -365,6 +365,9 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     }
 
     /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
     pub fn pruned(&self, section: u64) -> bool {
         self.0.pruned(section)
     }

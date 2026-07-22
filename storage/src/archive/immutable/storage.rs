@@ -85,7 +85,7 @@ impl EncodeSize for Record {
     }
 }
 
-/// The archive's state; boxed so the public [Archive] handle stays pointer-sized.
+/// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
 struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
@@ -360,6 +360,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
+///
+/// Mutating functions consume the archive and return it only on success: an error (or a
+/// dropped future) destroys the handle.
 pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {

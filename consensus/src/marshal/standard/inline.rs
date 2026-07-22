@@ -427,7 +427,7 @@ where
     ) -> oneshot::Receiver<bool> {
         // Register the certification gate synchronously so `certify` always finds it, even
         // while the block subscription / durable sync is still in flight. A `true` result means
-        // the block is durably persisted; a `false` result is a live local verdict; a dropped
+        // the block is durably persisted, a `false` result is a live local verdict, and a dropped
         // sender means verification did not complete and certification should use recovery fetch.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
@@ -491,7 +491,7 @@ where
                 let block = match decision {
                     Decision::Complete(valid) => {
                         // Re-proposal: precheck already persisted the block (durable) when
-                        // valid; epoch-reject when invalid. Hand the verdict to certify.
+                        // valid (and epoch-rejected it when invalid). Hand the verdict to certify.
                         tx.send_lossy(valid);
                         durable_tx.send_lossy(valid);
                         return;

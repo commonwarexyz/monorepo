@@ -58,7 +58,7 @@ where
     }
 }
 
-/// The cache's state; boxed so the public [Cache] handle stays pointer-sized.
+/// The cache's state, boxed so the public [Cache] handle stays pointer-sized.
 struct Inner<E: Storage + Metrics, V: CodecShared> {
     items_per_blob: u64,
     journal: Journal<E, Record<V>>,
@@ -324,6 +324,9 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     }
 
     /// Returns true when `index` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so an
+    /// index pruned in a previous execution reports false.
     pub fn pruned(&self, index: u64) -> bool {
         self.0.pruned(index)
     }
@@ -353,7 +356,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Store an item in the [Cache].
     ///
     /// If the index already exists, put does nothing and returns. Storing below the prune
-    /// floor fails with [Error::AlreadyPrunedTo] without mutating; check [Cache::pruned]
+    /// floor fails with [Error::AlreadyPrunedTo] without mutating. Check [Cache::pruned]
     /// first to keep the handle.
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
         self.0 = self.0.put(index, value).await?;

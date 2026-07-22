@@ -162,7 +162,7 @@ where
 
 /// Durable state-sync metadata.
 ///
-/// Mutating functions consume the metadata and return it only on success; storage failures
+/// Mutating functions consume the metadata and return it only on success. Storage failures
 /// panic.
 pub(crate) struct StateSyncMetadata<E, S, C>
 where

@@ -491,7 +491,7 @@ impl<
 
     /// Handles an ack.
     ///
-    /// Returns whether the ack was accepted; an ack is rejected if it is invalid or
+    /// Returns whether the ack was accepted. An ack is rejected if it is invalid or
     /// inapplicable (e.g. unknown scheme, non-pending height, digest mismatch).
     /// Duplicate acks are accepted as no-ops.
     async fn handle_ack(mut self, ack: &Ack<P::Scheme, D>) -> (Self, bool) {

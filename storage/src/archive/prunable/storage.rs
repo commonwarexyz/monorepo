@@ -100,7 +100,7 @@ where
     }
 }
 
-/// The archive's state; boxed so the public [Archive] handle stays pointer-sized.
+/// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
 struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> {
     items_per_section: u64,
 
@@ -582,6 +582,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 }
 
 /// Implementation of `Archive` storage.
+///
+/// Mutating functions consume the archive and return it only on success: an error (or a
+/// dropped future) destroys the handle. Puts below the prune floor fail with
+/// [Error::AlreadyPrunedTo] without mutating. Check [Archive::pruned] first to keep the
+/// handle.
 pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>(
     Box<Inner<T, E, K, V>>,
 );
@@ -609,6 +614,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     /// Returns true when `index` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so an
+    /// index pruned in a previous execution reports false.
     pub fn pruned(&self, index: u64) -> bool {
         self.0.pruned(index)
     }

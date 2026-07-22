@@ -130,7 +130,7 @@ struct ReplayState<'a, B: Blob, C> {
     done: bool,
 }
 
-/// The journal's state; boxed so the public [Journal] handle stays pointer-sized.
+/// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 struct Inner<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
@@ -591,9 +591,11 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// replay (not init) because any blob could have trailing bytes.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle. Mutations on pruned sections fail with
-/// [Error::AlreadyPrunedToSection] without mutating; check [Journal::pruned] first to keep the
-/// handle.
+/// future) destroys the handle. [Journal::replay] borrows the journal instead but is not
+/// read-only (it flushes buffered pages and repairs invalid tails), so an error from the call
+/// or the yielded stream is equally fatal: stop using the journal. Mutations on pruned
+/// sections fail with [Error::AlreadyPrunedToSection] without mutating. Check
+/// [Journal::pruned] first to keep the handle.
 pub struct Journal<E: Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
@@ -728,6 +730,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     }
 
     /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
     pub fn pruned(&self, section: u64) -> bool {
         self.0.pruned(section)
     }
@@ -1042,6 +1047,11 @@ mod tests {
             // Prune sections < 3
             (journal, _) = journal.prune(3).await.expect("Failed to prune");
 
+            // The public accessor mirrors the guard
+            assert!(journal.pruned(1));
+            assert!(journal.pruned(2));
+            assert!(!journal.pruned(3));
+
             // Test that accessing pruned sections returns the correct error
 
             // Test append on pruned section
@@ -1102,6 +1112,8 @@ mod tests {
             (journal, _) = journal.prune(5).await.expect("Failed to prune");
 
             // Verify sections 3 and 4 are now pruned
+            assert!(journal.pruned(4));
+            assert!(!journal.pruned(5));
             match journal.get(3, 0).await {
                 Err(Error::AlreadyPrunedToSection(5)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(5), got {other:?}"),
@@ -1152,6 +1164,10 @@ mod tests {
                 let journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to re-initialize journal");
+
+                // The floor is execution-scoped, so pruned reports false after restart
+                assert!(!journal.pruned(1));
+                assert!(!journal.pruned(2));
 
                 // But the actual sections 1 and 2 should be gone from storage
                 // so get should return SectionOutOfRange, not AlreadyPrunedToSection

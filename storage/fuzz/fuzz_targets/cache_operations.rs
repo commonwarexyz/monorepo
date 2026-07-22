@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::cache::{Cache, Config};
+use commonware_storage::cache::{Cache, Config, Error};
 use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
@@ -154,16 +154,26 @@ fn fuzz(input: FuzzInput) {
             match op {
                 Operation::Put { index, value } => {
                     if let Some(cache) = cache_opt.take() {
-                        // Skip puts below the pruned floor: they would return
-                        // AlreadyPrunedTo, which consumes the cache.
-                        if !cache.pruned(index) {
+                        if cache.pruned(index) {
+                            // A put below the prune floor must fail with AlreadyPrunedTo
+                            // and consume the cache. Reinitialize to recover.
+                            match cache.put(index, value).await {
+                                Err(Error::AlreadyPrunedTo(_)) => {}
+                                Ok(_) => panic!("put below prune floor must fail"),
+                                Err(e) => panic!("unexpected put error: {e}"),
+                            }
+                            let cache =
+                                Cache::<_, u32>::init(context.child("storage"), cfg.clone())
+                                    .await
+                                    .expect("Failed to reinitialize cache");
+                            pruned_min = None;
+                            cache_opt = Some(cache);
+                        } else {
                             let cache =
                                 cache.put(index, value).await.expect("Put should not error");
                             // Cache put only inserts if index doesn't already exist
                             // Only update expected_data if this is a new index
                             expected_data.entry(index).or_insert(value);
-                            cache_opt = Some(cache);
-                        } else {
                             cache_opt = Some(cache);
                         }
                     }

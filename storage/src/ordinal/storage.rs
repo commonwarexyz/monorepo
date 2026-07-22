@@ -79,7 +79,7 @@ where
     }
 }
 
-/// The store's state; boxed so the public [Ordinal] handle stays pointer-sized.
+/// The store's state, boxed so the public [Ordinal] handle stays pointer-sized.
 struct Inner<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,

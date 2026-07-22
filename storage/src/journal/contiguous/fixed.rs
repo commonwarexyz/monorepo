@@ -328,7 +328,7 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// The journal's state; boxed so the public [Journal] handle stays pointer-sized.
+/// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 pub(super) struct Inner<E: Context, A> {
     /// The blobs that comprise the journal.
     blobs: Writable<E>,
@@ -4542,7 +4542,7 @@ mod tests {
                 journal.0.clear_to_size(u64::MAX).await,
                 Err(Error::SizeOverflow)
             ));
-            // The failed clear consumed the journal; reopen to exercise the staging path.
+            // The failed clear consumed the journal. Reopen to exercise the staging path.
             let journal = Journal::<_, Digest>::init(context.child("journal_intent"), cfg)
                 .await
                 .unwrap();

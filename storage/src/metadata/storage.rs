@@ -68,7 +68,7 @@ struct State<B: Blob, K: Span> {
     blobs: [Wrapper<B, K>; 2],
 }
 
-/// The store's state; boxed so the public [Metadata] handle stays pointer-sized.
+/// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
 struct Inner<E: Context, K: Span, V: Codec> {
     context: E,
 

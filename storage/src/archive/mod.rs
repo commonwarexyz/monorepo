@@ -47,7 +47,7 @@ pub enum Error {
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
 /// dropped future) destroys the handle. Pruning implementations reject puts below the prune
-/// floor with [Error::AlreadyPrunedTo] without mutating; check [prunable::Archive::pruned]
+/// floor with [Error::AlreadyPrunedTo] without mutating. Check [prunable::Archive::pruned]
 /// first to keep the handle.
 pub trait Archive: Send + Sized {
     /// The type of the key.
@@ -1219,7 +1219,7 @@ mod tests {
     fn assert_send<T: Send>(_: T) {}
 
     // Mutators consume the archive, so each consuming future is constructed in
-    // its own match arm (only one arm ever runs; all are type-checked). Every arm
+    // its own match arm (only one arm ever runs, but all are type-checked). Every arm
     // but the last needs its own key/value, so clippy's per-path analysis flags
     // the clones as redundant.
     #[allow(dead_code)]

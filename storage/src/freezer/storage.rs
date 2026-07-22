@@ -394,7 +394,7 @@ where
     }
 }
 
-/// The freezer's state; boxed so the public [Freezer] handle stays pointer-sized.
+/// The freezer's state, boxed so the public [Freezer] handle stays pointer-sized.
 struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,

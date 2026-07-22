@@ -373,7 +373,7 @@ impl<C> Config<C> {
     }
 }
 
-/// The journal's state; boxed so the public [Journal] handle stays pointer-sized.
+/// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 struct Inner<E: Context, V: Codec> {
     /// The data blobs: sealed history plus the writable tail.
     blobs: Writable<E>,

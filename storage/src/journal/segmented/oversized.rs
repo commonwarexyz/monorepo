@@ -108,9 +108,10 @@ pub struct Config<C> {
 /// Provides coordinated operations and crash recovery.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle. Mutations on pruned sections fail with
-/// [Error::AlreadyPrunedToSection] without mutating; check [Oversized::pruned] first to keep the
-/// handle.
+/// future) destroys the handle. [Oversized::replay] borrows the journal instead but is not
+/// read-only (it flushes buffered pages), so an error from the call or the yielded stream is
+/// equally fatal: stop using the journal. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the handle.
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
@@ -632,6 +633,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
     pub fn pruned(&self, section: u64) -> bool {
         self.index.pruned(section)
     }

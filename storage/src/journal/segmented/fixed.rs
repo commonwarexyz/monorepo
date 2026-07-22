@@ -56,7 +56,7 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// The journal's state; boxed so the public [Journal] handle stays pointer-sized.
+/// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 struct Inner<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
@@ -400,8 +400,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// init by checking each blob's size.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle. Mutations on pruned sections fail with
-/// [Error::AlreadyPrunedToSection] without mutating; check [Journal::pruned] first to keep the
+/// future) destroys the handle. [Journal::replay] borrows the journal instead but is not
+/// read-only (it flushes buffered pages), so an error from the call or the yielded stream is
+/// equally fatal: stop using the journal. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection] without mutating. Check [Journal::pruned] first to keep the
 /// handle.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed>(Box<Inner<E, A>>);
 
@@ -521,6 +523,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
     pub fn pruned(&self, section: u64) -> bool {
         self.0.pruned(section)
     }

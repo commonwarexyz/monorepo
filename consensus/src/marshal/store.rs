@@ -117,7 +117,7 @@ pub trait Certificates: Send + Sync + Sized + 'static {
     ///
     /// # Returns
     ///
-    /// The store when pruning is applied or unnecessary; `Err` if pruning fails.
+    /// The store when pruning is applied or unnecessary, or `Err` if pruning fails.
     fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Retrieves the highest stored finalization's application height.
@@ -208,7 +208,7 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ///
     /// # Returns
     ///
-    /// The store when pruning is applied or unnecessary; `Err` if pruning fails.
+    /// The store when pruning is applied or unnecessary, or `Err` if pruning fails.
     fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Returns up to `max` missing items starting from `start`.
