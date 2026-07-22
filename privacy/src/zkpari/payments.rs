@@ -487,6 +487,21 @@ where
     }
 }
 
+#[cfg(feature = "simulator")]
+impl<E: Pairing> ZkPariBackend<E> {
+    /// Like [`Backend::setup`], but also returns the setup [`Trapdoor`],
+    /// deriving both from the same seed so simulated proofs verify against the
+    /// returned parameters.
+    ///
+    /// The trapdoor is toxic waste: retaining it breaks soundness. A real
+    /// deployment must use [`Backend::setup`].
+    pub fn setup_with_trapdoor(input: &[u8; 32]) -> (PaymentsParams<E>, Trapdoor<E>) {
+        let mut rng = StdRng::from_seed(*input);
+        let (range_pk, range_vk, trapdoor) = ZkPari::<E>::keygen_with_trapdoor(&mut rng);
+        (PaymentsParams { range_pk, range_vk }, trapdoor)
+    }
+}
+
 #[cfg(feature = "codec")]
 pub mod codec {
     use super::{PaymentCommitment, PaymentOpening, PaymentsParams, TransferProof, ZkPariBackend};
