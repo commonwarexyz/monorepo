@@ -1573,8 +1573,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // Prune data before offsets so a crash leaves offsets behind, which init repairs by
         // pruning offsets to match.
         self.offsets.prune(new_boundary).await?;
-        // Both prunes drained their in-flight syncs, so the pending observation is resolved.
-        self.durable_size.observe();
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1589,9 +1587,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.start_sync_calls.inc();
         let data = self.blobs.start_sync().await;
         let offsets = self.offsets.start_data_sync().await;
-        // The blob layers waited out the previous syncs, which may have resolved the pending
-        // observation.
-        self.durable_size.observe();
 
         // Advance the offsets watermark to the jointly proven size, joined into the returned
         // handle so the caller drives it.
@@ -1627,7 +1622,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let handle = self.blobs.start_sync().await;
         handle.await?;
         self.offsets.sync().await?;
-        self.durable_size.prove(size);
+        self.durable_size.mark_durable(size);
         Ok(())
     }
 

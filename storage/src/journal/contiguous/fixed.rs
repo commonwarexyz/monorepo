@@ -93,14 +93,9 @@
 //! data sync is in flight. The invariants:
 //!
 //! - The watermark only takes values the durable size has held (never an in-flight size).
-//! - The durable size advances only on an observed sync success; failures are retained by the
-//!   blob layer and block advancement until they resurface.
+//! - The durable size advances only on an observed sync success.
 //! - Operations that move blob state backward (rewind, clear) lower the durable size and
 //!   durably lower the watermark first, draining any in-flight watermark write.
-//!
-//! Every durable state this produces is reachable with `sync()` alone (sync at the proven size,
-//! then keep appending), so recovery handles no new crash shapes. A lagging watermark only costs
-//! extra startup replay.
 //!
 //! # Consistency
 //!
@@ -365,7 +360,7 @@ pub(super) struct Inner<E: Context, A> {
     /// Shared with [Reader]s.
     metrics: Arc<Metrics<E>>,
 
-    /// The proven-durable size of the data blobs.
+    /// The known-durable size of the journal.
     durable_size: DurableSize,
 
     _phantom: PhantomData<A>,
@@ -832,7 +827,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Begin durably persisting the data blobs.
     pub(super) async fn start_data_sync(&mut self) -> Handle<()> {
         let handle = self.blobs.start_sync().await;
-        self.durable_size.observe();
         let completion: SyncCompletion = handle.boxed().shared();
         self.durable_size
             .record(self.bounds.end, completion.clone());
@@ -846,7 +840,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// operation. The returned handle never yields an error, but must still be driven (awaited
     /// or joined into a caller-driven handle) for the advance to complete.
     pub(super) async fn start_advance_watermark(&mut self, to: u64) -> Handle<()> {
-        self.durable_size.observe();
         let to = to.min(self.durable_size.size());
         match self.checkpoint.start_advance(to).await {
             Ok(handle) => Handle::from_future(async move {
@@ -882,7 +875,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
-        self.durable_size.prove(size);
+        self.durable_size.mark_durable(size);
         Ok(())
     }
 
@@ -893,7 +886,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
-        self.durable_size.prove(size);
+        self.durable_size.mark_durable(size);
         self.checkpoint
             .persist(self.items_per_blob.get(), self.bounds.start, size)
             .await
@@ -1106,8 +1099,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;
-        // The prune drained any in-flight syncs, so the pending observation is resolved.
-        self.durable_size.observe();
         self.bounds.start = new_boundary;
 
         self.metrics.update(

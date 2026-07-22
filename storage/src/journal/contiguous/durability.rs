@@ -21,15 +21,15 @@ impl DurableSize {
         }
     }
 
-    /// The highest proven size.
-    pub(super) const fn size(&self) -> u64 {
+    /// The highest proven size, observing the pending sync completion if any.
+    pub(super) fn size(&mut self) -> u64 {
+        self.observe();
         self.size
     }
 
     /// Observe the outcome of the last started sync without blocking: on success, advance the
-    /// proven size. A failure is discarded here — the blob layer retains it and resurfaces it
-    /// on the next durability operation.
-    pub(super) fn observe(&mut self) {
+    /// proven size.
+    fn observe(&mut self) {
         let Some((size, completion)) = &self.pending else {
             return;
         };
@@ -39,12 +39,14 @@ impl DurableSize {
         if result.is_ok() {
             self.size = self.size.max(*size);
         }
+        // A failure is discarded here — the blob layer retains it and resurfaces it on the
+        // next durability operation.
         self.pending = None;
     }
 
     /// Record that all items below `size` were proven durable, discarding any pending
     /// observation it supersedes.
-    pub(super) fn prove(&mut self, size: u64) {
+    pub(super) fn mark_durable(&mut self, size: u64) {
         self.size = self.size.max(size);
         if matches!(self.pending, Some((pending, _)) if pending <= size) {
             self.pending = None;
@@ -53,6 +55,8 @@ impl DurableSize {
 
     /// Track a sync started at `size` until its outcome is observed.
     pub(super) fn record(&mut self, size: u64, completion: SyncCompletion) {
+        // Observe the completion of the previously tracked sync before replacing it.
+        self.observe();
         self.pending = Some((size, completion));
     }
 
