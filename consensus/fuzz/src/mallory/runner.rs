@@ -38,7 +38,7 @@ use crate::{
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::{TermLength, View},
+    types::{Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -752,7 +752,7 @@ fn run_inner<P: Simplex>(
         // oracle and rebuilds an engine over the participant set.
         let (mut oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
-        crate::print_fuzz_input(crate::Mode::MalloryContainer, &input);
+        crate::print_fuzz_input::<P>(crate::Mode::MalloryContainer, &input);
 
         let config = input.configuration;
         let n = config.n as usize;
@@ -1523,7 +1523,13 @@ fn run_inner<P: Simplex>(
         // must not feed the honest-reporter invariants.
         let mut observers = reporters.clone();
         observers.extend(managed.iter().map(|m| m.reporter()));
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &observers);
+        invariants::check_vote_invariants_with_byzantine(
+            &byzantine,
+            P::elector(TermLength::ONE),
+            Epoch::new(crate::EPOCH),
+            TermLength::ONE,
+            &observers,
+        );
         let states = invariants::extract(reporters, n);
         invariants::check::<P>(config.n, TermLength::ONE, states);
     });

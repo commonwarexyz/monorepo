@@ -88,13 +88,13 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn generate_key(seed: u64) -> Digest {
-    Sha256::hash(&seed.to_be_bytes())
+    Sha256::hash(&[&seed.to_be_bytes()])
 }
 
 fn generate_value(rng: &mut impl CryptoRng, size: usize) -> Digest {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
     let bytes = (0..actual_size).map(|_| rng.random()).collect::<Vec<u8>>();
-    Sha256::hash(&bytes)
+    Sha256::hash(&[bytes.as_slice()])
 }
 
 #[allow(clippy::type_complexity)]

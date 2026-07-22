@@ -483,7 +483,7 @@ where
         let gate = FaultGate::new();
         let setup =
             setup_engines::<P>(&mut context, &mut input, gate.clone(), "byzzfuzz", None).await;
-        crate::print_fuzz_input(crate::Mode::Byzzfuzz, &input);
+        crate::print_fuzz_input::<P>(crate::Mode::Byzzfuzz, &input);
         let mut reporters = setup.reporters;
         let byzantine_view = setup.byzantine_view;
         let proc_schedule = setup.proc_schedule;
@@ -544,7 +544,13 @@ where
         }
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
+        invariants::check_vote_invariants_with_byzantine(
+            &byzantine,
+            P::elector(TermLength::ONE),
+            Epoch::new(EPOCH),
+            TermLength::ONE,
+            &reporters,
+        );
 
         // State-extraction invariants assume each reporter is honest;
         // include only correct reporters here. Quorum thresholds still

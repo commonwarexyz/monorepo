@@ -258,7 +258,7 @@ fn fuzz_family<F: Family, S: Strategy>(
         for op in &input.ops {
             db = match op {
                 Operation::Append { value_bytes } => {
-                    pending_appends.push(Sha256::hash(value_bytes));
+                    pending_appends.push(Sha256::hash(&[value_bytes.as_slice()]));
                     db
                 }
 
@@ -296,7 +296,9 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in &appends {
                         batch = batch.append(*v);
                     }
-                    let metadata = metadata_bytes.as_deref().map(Sha256::hash);
+                    let metadata = metadata_bytes
+                        .as_deref()
+                        .map(|bytes| Sha256::hash(&[bytes]));
                     let merkleized = batch.merkleize(&db, metadata, floor).await;
 
                     match expect_err {

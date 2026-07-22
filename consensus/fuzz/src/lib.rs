@@ -333,6 +333,7 @@ impl fmt::Debug for FuzzInputDebug<'_> {
         f.debug_struct("FuzzInput")
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("required_containers", &input.required_containers)
+            .field("term_length", &input.term_length)
             .field("degraded_network", &input.degraded_network)
             .field("configuration", &input.configuration)
             .field("partition", &input.partition)
@@ -355,6 +356,7 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
         f.debug_struct("NodeFuzzInput")
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("events", &input.events)
+            .field("term_length", &input.term_length)
             .field("mailbox_size", &input.mailbox_size)
             .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
@@ -364,19 +366,21 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
     }
 }
 
-fn print_fuzz_input(mode: Mode, input: &FuzzInput) {
+fn print_fuzz_input<P: simplex::Simplex>(mode: Mode, input: &FuzzInput) {
     if std::env::var_os(FUZZ_LOG_ENV).is_some() {
         eprintln!(
-            "consensus fuzz configuration: mode={mode:?} input={:?}",
+            "consensus fuzz configuration: mode={mode:?} effective_term_length={:?} input={:?}",
+            P::effective_term_length(input.term_length),
             FuzzInputDebug(input)
         );
     }
 }
 
-fn print_node_fuzz_input(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
+fn print_node_fuzz_input<P: simplex::Simplex>(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
     if std::env::var_os(FUZZ_LOG_ENV).is_some() {
         eprintln!(
-            "consensus node fuzz configuration: mode={mode:?} input={:?}",
+            "consensus node fuzz configuration: mode={mode:?} effective_term_length={:?} input={:?}",
+            P::effective_term_length(input.term_length),
             NodeFuzzInputDebug(input)
         );
     }
@@ -1901,7 +1905,13 @@ fn run_standard_once<P: simplex::Simplex>(
             }
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            invariants::check_vote_invariants(
+                config.faults as usize,
+                P::elector(term_length),
+                Epoch::new(EPOCH),
+                term_length,
+                &reporter_only,
+            );
             invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
             let reporter_states = (state_coverage || collect_audit)
                 .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
@@ -2087,7 +2097,13 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             })
         });
         invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
-        invariants::check_vote_invariants(config.faults as usize, &summary_reporters);
+        invariants::check_vote_invariants(
+            config.faults as usize,
+            P::elector(term_length),
+            Epoch::new(EPOCH),
+            term_length,
+            &summary_reporters,
+        );
         invariants::check_certificate_seeds::<P, _, _>(&summary_reporters);
         invariants::check::<P>(config.n, term_length, reporter_only.as_slice());
         (true, rejected_certification_observed)
@@ -2240,7 +2256,13 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            invariants::check_vote_invariants(
+                config.faults as usize,
+                P::elector(term_length),
+                Epoch::new(EPOCH),
+                term_length,
+                &reporter_only,
+            );
             invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, term_length, states);
@@ -2919,7 +2941,13 @@ fn run_twins<P: simplex::Simplex>(
                     .chain(reporters.iter())
                     .map(TwinsReporter::summary)
                     .collect();
-                invariants::check_vote_invariants_with_byzantine(&compromised, &observers);
+                invariants::check_vote_invariants_with_byzantine(
+                    &compromised,
+                    twin_elector.clone(),
+                    Epoch::new(EPOCH),
+                    term_length,
+                    &observers,
+                );
                 // Seed uniqueness holds under twins as well: the seed signature
                 // covers only the round, so even conflicting valid certificates
                 // formed with compromised identities must embed the identical seed.
@@ -2981,6 +3009,7 @@ where
     let forwarding = input.forwarding;
     let certify = input.certify;
     let reporting = input.reporting;
+    let term_length = P::effective_term_length(input.term_length);
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -2997,6 +3026,7 @@ where
                 checkpoint,
                 participants,
                 schemes,
+                term_length,
                 mailbox_size,
                 fetch_concurrent,
                 forwarding,
@@ -3281,7 +3311,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             // chosen strategy.
             input.partition = Partition::Adaptive(Vec::new());
         }
-        print_fuzz_input(M::MODE, &input);
+        print_fuzz_input::<P>(M::MODE, &input);
     }
 
     let raw_bytes = input.raw_bytes.clone();
@@ -3351,7 +3381,7 @@ pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
     {
         input.certify = CertifyChoice::RejectView { view };
     }
-    print_fuzz_input(Mode::Standard, &input);
+    print_fuzz_input::<P>(Mode::Standard, &input);
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -3372,7 +3402,7 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
         Mode::TwinsCampaign => TwinsRole::Campaign,
         mode => panic!("fuzz_twins_audit requires a Twins mode, got {mode:?}"),
     };
-    print_fuzz_input(M::MODE, &input);
+    print_fuzz_input::<P>(M::MODE, &input);
 
     let raw_bytes = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -3385,7 +3415,7 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
 }
 
 pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
-    print_node_fuzz_input(M::MODE, &input);
+    print_node_fuzz_input::<P>(M::MODE, &input);
 
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));

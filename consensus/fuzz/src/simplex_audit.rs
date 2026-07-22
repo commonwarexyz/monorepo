@@ -181,6 +181,10 @@ where
     /// this verifier RNG never perturbs the simulated consensus runtime.
     verifier: Arc<Mutex<TestRng>>,
     scheme: S,
+    /// Built copy of the configured elector: the inner mock keeps its own
+    /// instance private, and the audit invariants need certificate-less
+    /// election for views no certificate unlocked (view 1).
+    elector: L::Elector,
     audit: AuditLog<S, D>,
 }
 
@@ -197,6 +201,7 @@ where
             inner: self.inner.clone(),
             verifier: self.verifier.clone(),
             scheme: self.scheme.clone(),
+            elector: self.elector.clone(),
             audit: self.audit.clone(),
         }
     }
@@ -206,7 +211,7 @@ impl<E, S, L, D> RecordingReporter<E, S, L, D>
 where
     E: CryptoRng,
     S: certificate::Scheme,
-    L: ElectorConfig<S>,
+    L: ElectorConfig<S> + Clone,
     D: Digest + Eq + Hash + Clone,
 {
     /// Creates a recording layer over the existing mock Reporter.
@@ -218,10 +223,24 @@ where
     ) -> Self {
         Self {
             scheme: config.scheme.clone(),
+            elector: config.elector.clone().build(&config.participants),
             inner: reporter::Reporter::new(context, config),
             verifier: Arc::new(Mutex::new(TestRng::new(0))),
             audit: AuditLog::new(observer, generation),
         }
+    }
+}
+
+impl<E, S, L, D> RecordingReporter<E, S, L, D>
+where
+    E: CryptoRng,
+    S: certificate::Scheme,
+    L: ElectorConfig<S>,
+    D: Digest + Eq + Hash + Clone,
+{
+    /// Built copy of the configured elector.
+    pub(crate) const fn elector(&self) -> &L::Elector {
+        &self.elector
     }
 
     /// Existing mock Reporter used by legacy summaries and invariants.

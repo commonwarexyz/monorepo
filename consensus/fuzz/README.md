@@ -105,6 +105,7 @@ Available fuzz targets (node driver):
 - `simplex_ed25519_node_recovery`
 - `simplex_id_node`
 - `simplex_id_node_recovery`
+- `simplex_id_node_recovery_stable_term`
 - `simplex_secp256r1_node`
 - `simplex_bls12381_multisig_minpk_node`
 - `simplex_bls12381_multisig_minsig_node`

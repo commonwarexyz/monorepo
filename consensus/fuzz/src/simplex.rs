@@ -23,7 +23,7 @@ use commonware_runtime::deterministic;
 use std::time::Duration;
 
 /// Returns a round-robin elector config for the fuzzed term length.
-fn round_robin(term_length: TermLength) -> RoundRobin {
+pub(crate) fn round_robin(term_length: TermLength) -> RoundRobin {
     if term_length.get() == 1 {
         RoundRobin::default()
     } else {

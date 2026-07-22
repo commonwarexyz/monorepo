@@ -218,6 +218,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_node_recovery_stable_term"
+path = "fuzz_targets/simplex_id_node_recovery_stable_term.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_secp256r1_node"
 path = "fuzz_targets/simplex_secp256r1_node.rs"
 test = false
