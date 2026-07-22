@@ -169,6 +169,9 @@ pub struct Config {
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
 
+    /// See [crate::Storage::open_concurrency].
+    open_concurrency: NonZeroUsize,
+
     /// Network configuration.
     network_cfg: NetworkConfig,
 
@@ -192,6 +195,7 @@ impl Config {
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+            open_concurrency: crate::DEFAULT_OPEN_CONCURRENCY,
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
@@ -255,6 +259,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_open_concurrency(mut self, n: NonZeroUsize) -> Self {
+        self.open_concurrency = n;
+        self
+    }
+    /// See [Config]
     pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
@@ -309,6 +318,10 @@ impl Config {
     /// See [Config]
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
+    }
+    /// See [Config]
+    pub const fn open_concurrency(&self) -> NonZeroUsize {
+        self.open_concurrency
     }
 
     /// Returns the network buffer pool config, deriving pool parallelism from
@@ -426,6 +439,7 @@ impl crate::Runner for Runner {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
+                            open_concurrency: self.cfg.open_concurrency,
                         },
                         &mut iouring_registry,
                         storage_buffer_pool.clone(),
@@ -435,10 +449,14 @@ impl crate::Runner for Runner {
             } else {
                 let storage = MeteredStorage::new(
                     TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
-                        ),
+                        {
+                            let mut cfg = TokioStorageConfig::new(
+                                self.cfg.storage_directory.clone(),
+                                self.cfg.maximum_buffer_size,
+                            );
+                            cfg.open_concurrency = self.cfg.open_concurrency;
+                            cfg
+                        },
                         storage_buffer_pool.clone(),
                     ),
                     &mut runtime_registry,
@@ -816,6 +834,10 @@ impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
+
+    fn open_concurrency(&self) -> std::num::NonZeroUsize {
+        self.storage.open_concurrency()
+    }
 
     async fn open_versioned(
         &self,

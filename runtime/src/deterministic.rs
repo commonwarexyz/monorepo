@@ -1566,6 +1566,10 @@ impl TryCryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
+    fn open_concurrency(&self) -> std::num::NonZeroUsize {
+        self.storage.open_concurrency()
+    }
+
     async fn open_versioned(
         &self,
         partition: &str,
