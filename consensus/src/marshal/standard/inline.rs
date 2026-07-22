@@ -46,7 +46,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
     marshal::{
         Update,
-        application::gates::{self, Gates},
+        application::gates::{GateOutcome, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             Standard, relay,
@@ -426,9 +426,9 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // Register the certification gate synchronously so `certify` always finds it, even
-        // while the block subscription / durable sync is still in flight. A `true` result means
-        // the block is durably persisted; a `false` result is a live local verdict; a dropped
-        // sender means verification did not complete and certification should use recovery fetch.
+        // while the block subscription / durable sync is still in flight. Inline verification
+        // verdicts are scoped to the proposal context, while certification receives only a
+        // notarized `(round, digest)`, so this gate records durability rather than validity.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
@@ -491,9 +491,14 @@ where
                 let block = match decision {
                     Decision::Complete(valid) => {
                         // Re-proposal: precheck already persisted the block (durable) when
-                        // valid; epoch-reject when invalid. Hand the verdict to certify.
+                        // valid; epoch-reject when invalid. An invalid precheck is not a
+                        // certification verdict for a potentially conflicting header.
                         tx.send_lossy(valid);
-                        durable_tx.send_lossy(valid);
+                        durable_tx.send_lossy(if valid {
+                            GateOutcome::Ready(true)
+                        } else {
+                            GateOutcome::Recover
+                        });
                         return;
                     }
                     Decision::Continue(block) => block,
@@ -508,18 +513,20 @@ where
                 // parent fetch (which may hit the network) nor the verdict below.
                 // Storing before validation is intentional: these caches provide
                 // candidate availability/recovery, not a validity decision. The
-                // notarize vote follows the app verdict, while certify awaits the
-                // registered gate that resolves true only after both app
-                // verification succeeds and the store is durable.
+                // notarize vote follows the app verdict, while certify independently
+                // awaits the registered durability gate.
                 //
                 // The verify future below aborts when consensus drops its receiver
                 // (the view exited via nullification or finalization), even though
                 // certification can still fire for a nullified view. That is
-                // deliberate: inline's certify fallback does not need the app
+                // deliberate: inline certification does not need the local app
                 // verdict (a notarization implies f+1 honest validators already
-                // verified), and the store still completes through the join, so
-                // the fallback rides the verified write instead of re-persisting.
-                let store = marshal.verified(round, Arc::clone(&block));
+                // verified), and the store still completes through the join.
+                let store = async {
+                    if marshal.verified(round, Arc::clone(&block)).await {
+                        durable_tx.send_lossy(GateOutcome::Ready(true));
+                    }
+                };
                 let verify_then_vote = async {
                     // Non-reproposal path: validate the parent we already started
                     // fetching.
@@ -554,10 +561,7 @@ where
                     }
                     valid
                 };
-                let (verdict, durable) = futures::join!(verify_then_vote, store);
-                if let Some(valid) = gates::resolve(verdict, durable) {
-                    durable_tx.send_lossy(valid);
-                }
+                futures::join!(verify_then_vote, store);
             }
             .instrument(span)
         });
@@ -609,8 +613,8 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             async move {
-                // Preserve a live local verdict. Missing local state after an unclean restart
-                // has no task and falls through to the round-bound fetch path below.
+                // A ready gate proves the notarized block is durable. A gate that
+                // cannot speak for the notarized proposal falls through to recovery.
                 if let Some(task) = task {
                     let result = select! {
                         _ = tx.closed() => {
@@ -622,9 +626,12 @@ where
                         },
                         result = task => result,
                     };
-                    if let Ok(verdict) = result {
-                        tx.send_lossy(verdict);
-                        return;
+                    match result {
+                        Ok(GateOutcome::Ready(verdict)) => {
+                            tx.send_lossy(verdict);
+                            return;
+                        }
+                        Ok(GateOutcome::Recover) | Err(_) => {}
                     }
                 }
 

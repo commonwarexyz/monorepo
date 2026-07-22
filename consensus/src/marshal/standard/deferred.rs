@@ -75,7 +75,7 @@ use crate::{
     marshal::{
         Update,
         application::{
-            gates::{self, Gates},
+            gates::{self, GateOutcome, Gates},
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
@@ -247,7 +247,7 @@ where
         block: Arc<B>,
         parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -305,7 +305,7 @@ where
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
                 if let Some(application_valid) = gates::resolve(verdict, durable) {
-                    tx.send_lossy(application_valid);
+                    tx.send_lossy(GateOutcome::Ready(application_valid));
                 }
             }
             .instrument(span)
@@ -415,7 +415,7 @@ where
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
                     .await;
-                if let Ok(result) = verify_rx.await {
+                if let Ok(GateOutcome::Ready(result)) = verify_rx.await {
                     tx.send_lossy(result);
                 }
             }
@@ -433,7 +433,7 @@ where
         &mut self,
         round: Round,
         digest: B::Digest,
-        task: oneshot::Receiver<bool>,
+        task: oneshot::Receiver<GateOutcome>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
@@ -441,8 +441,9 @@ where
         // digest is also the variant commitment.
         self.marshal.hint_notarized(round, digest);
 
-        // A completed gate is a live local verdict. After an unclean restart the
-        // in-memory task is gone, so recover via the embedded-context fetch path.
+        // A completed gate either carries an applicable local verdict or requests
+        // recovery. After an unclean restart the in-memory task is gone, which also
+        // recovers via the embedded-context fetch path.
         let mut marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
@@ -771,7 +772,7 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
-                        task_tx.send_lossy(valid);
+                        task_tx.send_lossy(GateOutcome::Ready(valid));
                         tx.send_lossy(valid);
                         return;
                     }
@@ -797,7 +798,7 @@ where
                         block_context = ?block.context(),
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
-                    task_tx.send_lossy(false);
+                    task_tx.send_lossy(GateOutcome::Recover);
                     tx.send_lossy(false);
                     return;
                 }

@@ -47,7 +47,7 @@ mod tests {
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
-            application::gates::Gates,
+            application::gates::{GateOutcome, Gates},
             config::{Config, Start},
             core::{
                 Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _,
@@ -7753,9 +7753,10 @@ mod tests {
             assert_eq!(rx.await.expect("id published"), digest);
             let gate = gates.take(round, digest).expect("gate registered");
             gates.flush_unrelayed(&mailbox, round, digest);
-            assert!(
+            assert_eq!(
                 gate.await.expect("gate resolved"),
-                "certify flush must resolve the gate durably"
+                GateOutcome::Ready(true),
+                "certify flush must resolve the gate durably",
             );
 
             // The relay finds nothing staged and must forward the persisted
@@ -7839,9 +7840,10 @@ mod tests {
 
             // The relayed proposal is persisted through the staged ack, so
             // the certification gate resolves durably.
-            assert!(
+            assert_eq!(
                 gate.await.expect("gate resolved"),
-                "relay handshake must resolve the gate durably"
+                GateOutcome::Ready(true),
+                "relay handshake must resolve the gate durably",
             );
         });
     }
