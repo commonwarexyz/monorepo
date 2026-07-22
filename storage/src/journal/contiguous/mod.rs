@@ -12,6 +12,7 @@
 //! recoverable.
 
 use super::Error;
+use commonware_runtime::Handle;
 use futures::{Stream, StreamExt as _, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -291,7 +292,8 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - This operation is not guaranteed to survive restarts until the next commit or sync
+    ///   completes.
     ///
     /// # Errors
     ///
@@ -299,6 +301,15 @@ pub trait Mutable: Contiguous + Sized {
     /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
     /// fails.
     fn rewind(self, size: u64) -> impl std::future::Future<Output = Result<Self, Error>> + Send;
+
+    /// Begin durably persisting the current state of the journal.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
+    /// for the state present when the call begins (later appends need their own commit). Use
+    /// [Self::sync] to also guarantee that no recovery will be needed on startup.
+    fn start_commit(
+        self,
+    ) -> impl std::future::Future<Output = Result<(Self, Handle<()>), Error>> + Send;
 
     /// Durably persist the journal, guaranteeing the current state will survive a crash.
     ///
@@ -329,7 +340,8 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - This operation is not guaranteed to survive restarts until the next commit or sync
+    ///   completes.
     fn rewind_to<P>(
         mut self,
         predicate: P,

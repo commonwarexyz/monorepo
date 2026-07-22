@@ -1437,20 +1437,25 @@ mod tests {
         executor.start(full_flush_inner::<mmb::Family>);
     }
 
-    /// Flushed-but-unsynced nodes are lost on a crash, while synced nodes survive: the durability
-    /// barrier comes from `sync`, not `flush`.
+    /// Flushed-but-unsynced nodes in the tail blob are lost on a crash, while synced nodes
+    /// survive: the durability barrier comes from `sync`, not `flush`.
     fn full_flush_crash_inner<F: Family>() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
-        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch,
-        // then simulate an unclean shutdown.
+        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch into
+        // the tail blob, then simulate an unclean shutdown.
         let executor = deterministic::Runner::default();
         let (synced_size, checkpoint) = executor.start_and_recover(|context| async move {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("first"),
                 &hasher,
-                test_config(&context),
+                Config {
+                    // 512 items per blob keeps both batches in the tail blob: a rollover would
+                    // fsync the sealed predecessor and defeat the flushed-but-unsynced scenario.
+                    items_per_blob: NZU64!(512),
+                    ..test_config(&context)
+                },
             )
             .await
             .unwrap();
@@ -1482,7 +1487,12 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,
-                test_config(&context),
+                Config {
+                    // 512 items per blob keeps both batches in the tail blob: a rollover would
+                    // fsync the sealed predecessor and defeat the flushed-but-unsynced scenario.
+                    items_per_blob: NZU64!(512),
+                    ..test_config(&context)
+                },
             )
             .await
             .unwrap();

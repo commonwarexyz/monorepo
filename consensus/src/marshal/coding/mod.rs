@@ -328,7 +328,7 @@ mod tests {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),

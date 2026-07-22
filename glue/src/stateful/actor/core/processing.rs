@@ -1,5 +1,5 @@
 use crate::stateful::{
-    Application,
+    Application, Input,
     actor::{
         core::mailbox::Message,
         processor::{FinalizeStatus, Processor},
@@ -46,8 +46,8 @@ where
     /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    pub(super) input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    pub(super) provider: A::Provider,
 
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
@@ -102,16 +102,21 @@ where
                     span,
                     context,
                     ancestry,
+                    upstream,
                     response,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.propose");
+                    let input = Input {
+                        upstream,
+                        provider: self.provider.clone(),
+                    };
                     self.processor
                         .propose(
                             self.context.as_present(),
                             self.marshal.clone(),
                             context,
                             ancestry,
-                            &mut self.input_provider,
+                            input,
                             response,
                         )
                         .instrument(process)
