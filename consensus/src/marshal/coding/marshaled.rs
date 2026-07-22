@@ -995,6 +995,12 @@ where
                         },
                     };
 
+                    // A rejection here is safe to publish as a gate verdict because
+                    // the boundary check is intrinsic to `(round, commitment)`: it
+                    // reads only the block's height and the round's epoch. The
+                    // commitment also binds the original proposal context, so no
+                    // honest notarization can form for this key under a conflicting
+                    // header.
                     if !is_valid_reproposal_at_verify(&epocher, block.height(), round.epoch()) {
                         debug!(
                             height = %block.height(),
