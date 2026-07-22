@@ -1,6 +1,6 @@
 //! Tracks the journal size proven durable.
 
-use super::blobs::SyncCompletion;
+use crate::SyncCompletion;
 use futures::FutureExt as _;
 
 /// The highest size known to be durable.
@@ -27,8 +27,8 @@ impl DurableSize {
         self.size
     }
 
-    /// Observe the outcome of the last started sync without blocking: on success, advance the
-    /// proven size.
+    /// Observe the outcome of the last started sync without blocking.
+    /// On success, advance the proven size.
     fn observe(&mut self) {
         let Some((size, completion)) = &self.pending else {
             return;
@@ -44,8 +44,7 @@ impl DurableSize {
         self.pending = None;
     }
 
-    /// Record that all items below `size` were proven durable, discarding any pending
-    /// observation it supersedes.
+    /// Record that all items below `size` were proven durable.
     pub(super) fn mark_durable(&mut self, size: u64) {
         self.size = self.size.max(size);
         if matches!(self.pending, Some((pending, _)) if pending <= size) {

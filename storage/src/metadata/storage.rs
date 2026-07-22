@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::Context;
+use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
@@ -7,16 +7,9 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
-use futures::{
-    FutureExt as _,
-    future::{BoxFuture, Shared, try_join_all},
-};
+use futures::{FutureExt as _, future::try_join_all};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
-
-/// A shared in-flight sync result. Detached observers of the same completion: dropping one
-/// neither cancels the sync nor consumes its result.
-type SyncCompletion = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];

@@ -123,14 +123,14 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, SyncCompletion, Writable},
+    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
     durability::DurableSize,
 };
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
@@ -834,11 +834,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Begin raising the recovery watermark toward `size`, capped at the proven durable size.
-    ///
-    /// Best effort: a failure does not compromise data durability, so it is logged rather than
-    /// returned; the metadata layer retains it and resurfaces it on the next checkpoint
-    /// operation. The returned handle never yields an error, but must still be driven (awaited
-    /// or joined into a caller-driven handle) for the sync to complete.
     pub(super) async fn start_watermark_sync(&mut self, size: u64) -> Handle<()> {
         let size = size.min(self.durable_size.size());
         match self.checkpoint.start_watermark_sync(size).await {
@@ -859,10 +854,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn start_sync(&mut self) -> Handle<()> {
         self.metrics.start_sync_calls.inc();
         let data = self.start_data_sync().await;
-        // The watermark sync is joined into the returned handle so the caller drives it.
         let watermark = self.start_watermark_sync(u64::MAX).await;
         Handle::from_future(async move {
             let result = data.await;
+            // Watermark sync is best effort.
             let _ = watermark.await;
             result
         })
@@ -1241,8 +1236,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// the returned handle joins it, so an earlier call's handle may still be pending when
     /// this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
-    /// the in-flight fsync). Dropping the handle does not cancel the sync, but the watermark
-    /// advance only completes while the handle is driven.
+    /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_sync().await;
         (self, handle)

@@ -93,7 +93,10 @@ mod tests {
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         Blob, Metrics as _, Runner, Storage, Supervisor as _, deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
+            release_pending_syncs,
+        },
     };
     use commonware_utils::sequence::U64;
     use rand::{Rng, RngExt as _};
@@ -161,6 +164,76 @@ mod tests {
             assert!(metadata.sync().await.is_err());
 
             // Destroy ignores the retained failure: everything is being removed.
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_dropped_handle_does_not_cancel() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                DelayedSyncContext {
+                    inner: context.child("first"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Drop the handle while its sync is still parked: the sync must proceed anyway.
+            let key = U64::new(1);
+            metadata.put(key.clone(), vec![3]);
+            let handle = metadata.start_sync().await.unwrap();
+            drop(handle);
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            drop(metadata);
+
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&key), Some(&vec![3]));
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_dropped_handle_retains_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                DelayedSyncContext {
+                    inner: context.child("first"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            // Drop the handle before its sync fails: nobody observes the failure directly,
+            // but the store must still refuse every later sync.
+            metadata.put(U64::new(1), vec![3]);
+            let handle = metadata.start_sync().await.unwrap();
+            drop(handle);
+            fail_pending_syncs(&pending);
+
+            assert!(metadata.sync().await.is_err());
+            assert!(metadata.start_sync().await.is_err());
+
             metadata.destroy().await.unwrap();
         });
     }

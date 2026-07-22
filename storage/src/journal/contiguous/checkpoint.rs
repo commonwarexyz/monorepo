@@ -110,7 +110,10 @@ impl<E: Context> Checkpoint<E> {
     /// Begin raising the watermark to `watermark`, returning a completion handle. A `watermark`
     /// at or below the current one is ignored, returning a resolved handle.
     /// Invariant: all items below `watermark` are durable.
-    pub(super) async fn start_watermark_sync(&mut self, watermark: u64) -> Result<Handle<()>, Error> {
+    pub(super) async fn start_watermark_sync(
+        &mut self,
+        watermark: u64,
+    ) -> Result<Handle<()>, Error> {
         if matches!(self.watermark(), Some(current) if current >= watermark) {
             return Ok(Handle::ready(Ok(())));
         }

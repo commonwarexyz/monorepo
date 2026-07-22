@@ -13,7 +13,7 @@
 
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
-    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, SyncCompletion, Writable},
+    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     durability::DurableSize,
     fixed,
     metrics::Metrics,
@@ -22,7 +22,7 @@ use super::{
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::{
         Error,
         frame::{
@@ -1588,20 +1588,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data = self.blobs.start_sync().await;
         let offsets = self.offsets.start_data_sync().await;
 
-        // Raise the offsets watermark to the jointly proven size, joined into the returned
-        // handle so the caller drives it.
-        let watermark = self
+        let watermark_handle = self
             .offsets
             .start_watermark_sync(self.durable_size.size())
             .await;
 
-        let joint: SyncCompletion = async move { try_join(data, offsets).await.map(|_| ()) }
-            .boxed()
-            .shared();
-        self.durable_size.record(self.bounds.end, joint.clone());
+        let journal_handle: SyncCompletion =
+            async move { try_join(data, offsets).await.map(|_| ()) }
+                .boxed()
+                .shared();
+        self.durable_size
+            .record(self.bounds.end, journal_handle.clone());
         Handle::from_future(async move {
-            let result = joint.await;
-            let _ = watermark.await;
+            let result = journal_handle.await;
+            // Watermark sync is best effort.
+            let _ = watermark_handle.await;
             result
         })
     }
@@ -2314,7 +2315,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(self)
     }
 
-    /// Begin persisting the data and offsets blobs.
+    /// Begin persisting the journal.
     ///
     /// Awaiting the returned [Handle] guarantees state appended before this call survives a
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
@@ -2325,8 +2326,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// the returned handle joins it, so an earlier call's handle may still be pending when
     /// this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
-    /// the in-flight fsync). Dropping the handle does not cancel the sync, but the watermark
-    /// advance only completes while the handle is driven.
+    /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_sync().await;
         (self, handle)
