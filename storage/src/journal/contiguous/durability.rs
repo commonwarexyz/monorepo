@@ -8,7 +8,7 @@ pub(super) struct DurableSize {
     /// The highest size known to be durable.
     size: u64,
 
-    /// The size covered by the last started sync, and its completion.
+    /// The size at which the last sync was started, and its completion.
     pending: Option<(u64, SyncCompletion)>,
 }
 
@@ -51,7 +51,7 @@ impl DurableSize {
         }
     }
 
-    /// Track a started sync covering `size` until its outcome is observed.
+    /// Track a sync started at `size` until its outcome is observed.
     pub(super) fn record(&mut self, size: u64, completion: SyncCompletion) {
         self.pending = Some((size, completion));
     }
