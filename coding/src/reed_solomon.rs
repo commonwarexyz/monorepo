@@ -82,9 +82,7 @@ impl<D: Digest> Chunk<D> {
         }
 
         // Compute shard digest
-        let mut hasher = H::default();
-        hasher.update(&self.shard);
-        let (_, shard_digest) = hasher.finalize();
+        let shard_digest = H::hash(&[&self.shard]);
 
         // Verify proof
         self.proof
@@ -1235,10 +1233,7 @@ mod tests {
     ) {
         let mut builder = Builder::<Sha256>::new(shards.len());
         for shard in shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1814,10 +1809,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1848,9 +1840,7 @@ mod tests {
             encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
-        let mut hasher = Sha256::default();
-        hasher.update(b"malicious_data_that_wasnt_actually_encoded");
-        let (_, malicious_root) = hasher.finalize();
+        let malicious_root = Sha256::hash(&[b"malicious_data_that_wasnt_actually_encoded"]);
 
         // Verify all proofs at incorrect root
         for i in 0..total {
@@ -1952,10 +1942,7 @@ mod tests {
         // Build malicious tree
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &malicious_shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
@@ -2010,10 +1997,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let non_canonical_root = tree.root();
@@ -2069,10 +2053,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &oversized_shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let oversized_tree = builder.build();
         let oversized_root = oversized_tree.root();
@@ -2111,10 +2092,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -2148,10 +2126,7 @@ mod tests {
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
-            let mut hasher = Sha256::default();
-            hasher.update(shard);
-            let (_, digest) = hasher.finalize();
-            builder.add(&digest);
+            builder.add(&Sha256::hash(&[shard]));
         }
         let tree = builder.build();
         let root = tree.root();
