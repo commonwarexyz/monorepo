@@ -1588,11 +1588,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data = self.blobs.start_sync().await;
         let offsets = self.offsets.start_data_sync().await;
 
-        // Advance the offsets watermark to the jointly proven size, joined into the returned
+        // Raise the offsets watermark to the jointly proven size, joined into the returned
         // handle so the caller drives it.
         let watermark = self
             .offsets
-            .start_advance_watermark(self.durable_size.size())
+            .start_watermark_sync(self.durable_size.size())
             .await;
 
         let joint: SyncCompletion = async move { try_join(data, offsets).await.map(|_| ()) }

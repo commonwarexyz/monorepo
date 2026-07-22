@@ -833,15 +833,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Handle::from_future(completion)
     }
 
-    /// Begin advancing the recovery watermark toward `to`, capped at the proven durable size.
+    /// Begin raising the recovery watermark toward `size`, capped at the proven durable size.
     ///
     /// Best effort: a failure does not compromise data durability, so it is logged rather than
     /// returned; the metadata layer retains it and resurfaces it on the next checkpoint
     /// operation. The returned handle never yields an error, but must still be driven (awaited
-    /// or joined into a caller-driven handle) for the advance to complete.
-    pub(super) async fn start_advance_watermark(&mut self, to: u64) -> Handle<()> {
-        let to = to.min(self.durable_size.size());
-        match self.checkpoint.start_advance(to).await {
+    /// or joined into a caller-driven handle) for the sync to complete.
+    pub(super) async fn start_watermark_sync(&mut self, size: u64) -> Handle<()> {
+        let size = size.min(self.durable_size.size());
+        match self.checkpoint.start_watermark_sync(size).await {
             Ok(handle) => Handle::from_future(async move {
                 if let Err(err) = handle.await {
                     warn!(?err, "watermark advance failed");
@@ -859,8 +859,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn start_sync(&mut self) -> Handle<()> {
         self.metrics.start_sync_calls.inc();
         let data = self.start_data_sync().await;
-        // The watermark advance is joined into the returned handle so the caller drives it.
-        let watermark = self.start_advance_watermark(u64::MAX).await;
+        // The watermark sync is joined into the returned handle so the caller drives it.
+        let watermark = self.start_watermark_sync(u64::MAX).await;
         Handle::from_future(async move {
             let result = data.await;
             let _ = watermark.await;
