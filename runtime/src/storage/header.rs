@@ -268,8 +268,8 @@ stability_scope!(BETA {
     ///
     /// The magic selects the header region layout ([Layout]), and the layout fully
     /// determines the geometry: a V0 header region is the 8-byte prelude alone with data at
-    /// offset 8, while a V1 header region extends to [Layout::V1.data_offset()], so data begins on
-    /// an aligned boundary.
+    /// offset 8, while a V1 header region extends to the V1 [Layout::data_offset], so data
+    /// begins on an aligned boundary.
     ///
     /// The blob version is opaque to the runtime: creation stamps the newest version the caller
     /// requested, reopening rejects versions outside the caller's range, and the stored value is
@@ -309,7 +309,6 @@ stability_scope!(BETA {
                 Layout::V1.data_offset() as usize
             }
         }
-
 
         /// Creates the header region for a new blob using the latest version from the range and
         /// the latest header layout. Returns (encoded header region, blob version); the data
@@ -362,7 +361,6 @@ stability_scope!(BETA {
             let data_offset = layout.data_offset();
             Ok((raw_len - data_offset, header.blob_version, data_offset))
         }
-
 
         /// Validates the magic bytes and runtime version, returning the layout the magic
         /// identifies.
