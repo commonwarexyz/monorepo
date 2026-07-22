@@ -722,9 +722,6 @@ mod tests {
             GraftedHasher::<mmr::Family, _>::new(standard.clone(), grafting_height);
         let mut grafted_mmr = Mmr::new();
         if !chunks.is_empty() {
-            // Use a separate hasher for leaf digest computation to avoid borrow conflict
-            // with grafted_hasher (which borrows standard via fork()).
-            let leaf_hasher = qmdb::hasher::<Sha256>();
             let batch = {
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -733,7 +730,7 @@ mod tests {
                         .get_node(ops_pos)
                         .expect("ops tree missing node at mapped position");
                     batch = batch.add_leaf_digest(
-                        leaf_hasher.hash(&[chunk.as_ref(), ops_subtree_root.as_ref()]),
+                        standard.hash(&[chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
                 batch.merkleize(&grafted_mmr, &grafted_hasher)
