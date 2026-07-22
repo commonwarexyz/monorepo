@@ -3192,12 +3192,26 @@ mod tests {
     fn conflicting_parent_headers_share_payload_but_certify_notarized_proposal() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let (
-                Fixture {
-                    schemes, verifier, ..
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            // The state signs its own view-3 nullify below, so it needs a
+            // signing scheme rather than setup_state's verifier.
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: round_robin(&verifier),
+                    epoch: Epoch::new(1),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
                 },
-                mut state,
-            ) = setup_state(&mut context, 4, 1, 10, 1);
+            );
+            state.set_genesis(test_genesis());
 
             // Certify view 1 so it remains an eligible parent.
             let certified_view = View::new(1);
