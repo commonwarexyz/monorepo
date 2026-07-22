@@ -1012,8 +1012,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
-    // TODO: add an io_uring case once its blocking pool lands.
-    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_abort<R: Runner>(
         #[case] runner: R,
         #[values(
@@ -1831,8 +1830,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
-    // TODO: add an io_uring case once it supports dedicated tasks
-    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -2202,8 +2200,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
-    // TODO: add an io_uring case once its blocking pool lands.
-    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     fn test_spawn_blocking<R: Runner>(
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
@@ -2225,8 +2222,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
-    // TODO: add an io_uring case once its blocking pool lands.
-    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
+    #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
     #[should_panic(expected = "blocking task panicked")]
     fn test_spawn_blocking_panic<R: Runner>(
         #[case] runner: R,
@@ -2257,8 +2253,12 @@ mod tests {
     #[case::tokio(tokio::Runner::new(
         tokio::Config::default().with_catch_panics(true))
     )]
-    // TODO: add an io_uring case once its blocking pool lands.
-    // #[cfg_attr(feature = "iouring", case::iouring(iouring::Runner::default()))]
+    #[cfg_attr(
+        feature = "iouring",
+        case::iouring(iouring::Runner::new(
+            iouring::Config::default().with_catch_panics(true)
+        ))
+    )]
     fn test_spawn_blocking_panic_caught<R: Runner>(
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,

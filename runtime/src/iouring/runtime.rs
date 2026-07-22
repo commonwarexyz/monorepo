@@ -8,15 +8,17 @@
 //! parks via [IoUringLoop::park] until a completion arrives, a timer fires, a
 //! producer enqueues work, or another thread wakes a task.
 //!
-//! Every task runs inline on the executor thread. Tasks spawned with
+//! Ordinary tasks run inline on the executor thread. Tasks spawned with
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
-//! `blocking == true` are temporarily unsupported and panic at spawn: the
-//! single-threaded executor cannot absorb blocking work, and the runtime
-//! manages no worker threads to offload it to. Support is planned to return
-//! with a blocking pool. Cross-thread interactions that do not submit ring
-//! operations (waking a task from a helper thread, registering a sleeper
-//! alarm, delivering a stop signal) remain supported through the loop's
-//! latched wake state.
+//! `blocking == true` run as the root of a [Worker] on their own thread with
+//! its own ring, so blocking work cannot starve the executor thread and the
+//! task's context still submits IO thread-locally. (Blocking shared tasks
+//! currently alias dedicated ones; a shared blocking pool may replace this.)
+//! Resources created on one worker (blobs, sockets, listeners) are bound to
+//! that worker's thread and must not be driven from another. Cross-thread
+//! interactions that do not submit ring operations (waking a task from a
+//! helper thread, registering a sleeper alarm, delivering a stop signal)
+//! remain supported through each loop's latched wake state.
 
 use super::{IoUringLoop, RingConfig, driver::Affine, new_ring, waker::Waker as RingWaker};
 #[cfg(feature = "external")]
@@ -42,7 +44,11 @@ use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
 use commonware_utils::{channel::oneshot, sync::Mutex, sys_rng};
-use futures::task::{ArcWake, waker};
+use futures::{
+    FutureExt as _,
+    future::{AbortHandle, Abortable, Aborted},
+    task::{ArcWake, waker},
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use rayon::ThreadPoolBuilder;
@@ -276,15 +282,25 @@ impl Default for Config {
     }
 }
 
-/// Runtime state shared by every [Context].
-pub struct Executor {
+/// State shared by every worker thread of one runtime instance.
+struct Globals {
+    /// Configuration template used to construct workers.
+    cfg: Config,
     registry: Registry,
     metrics: Arc<Metrics>,
-    tasks: Arc<Tasks>,
-    sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
-    thread_stack_size: usize,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
+    /// Threads running dedicated workers, joined when the root worker exits.
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+/// Runtime state shared by every [Context] on one worker thread.
+pub struct Executor {
+    globals: Arc<Globals>,
+    tasks: Arc<Tasks>,
+    sleeping: Mutex<BinaryHeap<Alarm>>,
 }
 
 impl Executor {
@@ -328,140 +344,117 @@ impl Executor {
     }
 }
 
-/// Implementation of [crate::Runner] for the `iouring` runtime.
-pub struct Runner {
-    cfg: Config,
+/// A single-threaded executor bound to a ring owned by its thread.
+///
+/// The thread calling [crate::Runner::start] runs one worker for the root
+/// task, and every dedicated (or blocking shared) task runs on a worker of
+/// its own thread. All op state a worker's tasks submit IO through is local
+/// to its thread, so the driver's thread-affinity invariants hold per worker.
+struct Worker {
+    executor: Arc<Executor>,
+    io: Arc<super::driver::Driver>,
+    ioloop: IoUringLoop,
+    ring: io_uring::IoUring,
+    storage: Storage,
+    network: Network,
 }
 
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
-}
-
-impl Runner {
-    /// Initialize a new `iouring` runtime with the given configuration.
-    pub const fn new(cfg: Config) -> Self {
-        Self { cfg }
-    }
-}
-
-impl crate::Runner for Runner {
-    type Context = Context;
-
-    fn start<F, Fut>(self, f: F) -> Fut::Output
-    where
-        F: FnOnce(Self::Context) -> Fut,
-        Fut: Future,
-    {
-        // Create a new registry
-        let mut registry = Registry::new();
+impl Worker {
+    /// Create a worker on the current thread: the ring, driver, and all op
+    /// state become owned by this thread.
+    ///
+    /// Every worker registers its metric families under the same names, so
+    /// worker metrics aggregate into the runtime-wide families.
+    ///
+    /// Panics if the ring cannot be created.
+    fn new(globals: Arc<Globals>) -> Self {
+        let mut registry = globals.registry.clone();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
-        // Initialize metrics and panicker
-        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
-        let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
-
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            self.cfg.resolved_network_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            self.cfg.resolved_storage_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
-
-        // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable.
-        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
-            panic!(
-                "failed to sync storage filesystem at startup ({}): {e}",
-                self.cfg.storage_directory.display()
-            );
-        }
-
-        // Initialize the io_uring event loop and create the ring on this
-        // thread. The runtime thread is the ring's only submitter, so single
-        // issuer mode is always sound here.
-        let mut ring_cfg = self.cfg.ring.clone();
+        // The worker thread creates the ring and is its only submitter, so
+        // single issuer mode is always sound here.
+        let mut ring_cfg = globals.cfg.ring.clone();
         ring_cfg.single_issuer = true;
         ring_cfg.max_request_timeout = ring_cfg
             .max_request_timeout
-            .max(self.cfg.network_cfg.read_write_timeout)
-            .max(self.cfg.network_cfg.connect_timeout);
-        let (io, mut ioloop) =
+            .max(globals.cfg.network_cfg.read_write_timeout)
+            .max(globals.cfg.network_cfg.connect_timeout);
+        let (io, ioloop) =
             IoUringLoop::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"));
-        let mut ring = new_ring(&ioloop.cfg).unwrap_or_else(|err| {
+        let ring = new_ring(&ioloop.cfg).unwrap_or_else(|err| {
             panic!(
                 "unable to create io_uring instance ({err}): this runtime requires Linux 6.1+ \
                  (IORING_SETUP_SINGLE_ISSUER and IORING_SETUP_DEFER_TASKRUN)"
             )
         });
 
-        // Initialize storage
+        // Initialize storage and network against this worker's driver.
         let storage = MeteredStorage::new(
             IoUringStorage::new(
-                self.cfg.storage_directory.clone(),
+                globals.cfg.storage_directory.clone(),
                 io.clone(),
-                storage_buffer_pool.clone(),
+                globals.storage_buffer_pool.clone(),
             ),
             &mut runtime_registry,
         );
-
-        // Initialize network
         let network = MeteredNetwork::new(
             IoUringNetwork::new(
-                self.cfg.network_cfg.clone(),
+                globals.cfg.network_cfg.clone(),
                 io.clone(),
-                network_buffer_pool.clone(),
+                globals.network_buffer_pool.clone(),
             ),
             &mut runtime_registry,
         );
 
-        // Initialize executor
         let executor = Arc::new(Executor {
-            registry,
-            metrics,
             tasks: Arc::new(Tasks::new(ioloop.waker.clone())),
             sleeping: Mutex::new(BinaryHeap::new()),
-            shutdown: Mutex::new(Stopper::default()),
-            panicker,
-            thread_stack_size: self.cfg.thread_stack_size,
+            globals,
         });
-
-        // Collect process metrics.
-        //
-        // We prefer to collect process metrics outside of `Context` because
-        // we are using `runtime_registry` rather than the one provided by `Context`.
-        let process = MeteredProcess::init(&mut runtime_registry);
-        let process_executor = Arc::downgrade(&executor);
-        let collector = process.collect(move |duration| Sleeper {
-            executor: process_executor.clone(),
-            time: Instant::now() + duration.min(MAX_SLEEP),
-            registered: false,
-        });
-        let _ = Tasks::register(&executor.tasks, collector);
-
-        // Get metrics
-        let label = Label::root();
-        executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
-
-        // Build the root context and pin the root task to the heap
-        let root_tree = Tree::root();
-        let context = Context {
-            name: label.name(),
-            attributes: Vec::new(),
-            executor: Arc::downgrade(&executor),
+        Self {
+            executor,
+            io,
+            ioloop,
+            ring,
             storage,
             network,
-            network_buffer_pool,
-            storage_buffer_pool,
-            tree: root_tree.clone(),
+        }
+    }
+
+    /// Build a context rooted at `tree` for tasks on this worker.
+    fn context(&self, name: String, attributes: Vec<(String, String)>, tree: Arc<Tree>) -> Context {
+        Context {
+            name,
+            attributes,
+            executor: Arc::downgrade(&self.executor),
+            storage: self.storage.clone(),
+            network: self.network.clone(),
+            network_buffer_pool: self.executor.globals.network_buffer_pool.clone(),
+            storage_buffer_pool: self.executor.globals.storage_buffer_pool.clone(),
+            tree,
             execution: Execution::default(),
-        };
-        let mut root = Box::pin(panicked.interrupt(f(context)));
+        }
+    }
+
+    /// Drive `root` to completion, interleaving task polling with the ring,
+    /// then tear the worker down: abort `tree`, clear remaining tasks, and
+    /// drain in-flight ring work before the ring is destroyed.
+    ///
+    /// A panic from the loop or teardown is resumed only after the ring is
+    /// quiesced.
+    fn run<F>(self, root: F, tree: Arc<Tree>) -> F::Output
+    where
+        F: Future,
+    {
+        let Self {
+            executor,
+            io,
+            mut ioloop,
+            mut ring,
+            storage,
+            network,
+        } = self;
+        let mut root = Box::pin(root);
 
         // Build the root task's waker (the root starts ready).
         let root_waker = Tasks::root_waker(&executor.tasks);
@@ -514,9 +507,9 @@ impl crate::Runner for Runner {
             }
         }));
 
-        // Abort every task spawned under the root context so registrations
+        // Abort every task spawned under this worker's root so registrations
         // racing teardown observe the abort.
-        root_tree.abort();
+        tree.abort();
 
         // Clear remaining tasks and the root: task futures run arbitrary user
         // drop code, and a panic here must not skip the drain below while the
@@ -532,9 +525,11 @@ impl crate::Runner for Runner {
                 task.clear();
             }
 
-            // Drop the root task to release any Context references it may
-            // still hold.
+            // Drop the root task (and the worker's own handles) to release
+            // any Context references still held.
             drop(root);
+            drop(storage);
+            drop(network);
         }));
 
         // Close the driver so late admissions fail with their kind-specific
@@ -556,8 +551,8 @@ impl crate::Runner for Runner {
             std::process::abort();
         }
 
-        // Assert the context doesn't escape the start() function (behavior
-        // is undefined in this case)
+        // Assert the context doesn't escape the worker (behavior is undefined
+        // in this case)
         assert!(
             Arc::weak_count(&executor) == 0,
             "executor still has weak references"
@@ -565,13 +560,127 @@ impl crate::Runner for Runner {
 
         // Handle the result — resume the original panic after cleanup if one
         // was caught, preferring it over a panic from task teardown.
-        let output = match (result, teardown) {
+        match (result, teardown) {
             (Err(payload), _) => resume_unwind(payload),
             (Ok(_), Err(payload)) => resume_unwind(payload),
             (Ok(output), Ok(())) => output,
-        };
-        gauge.dec();
+        }
+    }
+}
 
+/// Implementation of [crate::Runner] for the `iouring` runtime.
+pub struct Runner {
+    cfg: Config,
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl Runner {
+    /// Initialize a new `iouring` runtime with the given configuration.
+    pub const fn new(cfg: Config) -> Self {
+        Self { cfg }
+    }
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future,
+    {
+        // Create a new registry
+        let registry = Registry::new();
+        let mut root_registry = registry.clone();
+        let mut runtime_registry = root_registry.sub_registry(METRICS_PREFIX);
+
+        // Initialize metrics and panicker
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
+
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            self.cfg.resolved_network_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            self.cfg.resolved_storage_buffer_pool_config(),
+            &mut runtime_registry.sub_registry("storage_buffer_pool"),
+        );
+
+        // Make any storage a prior process left in the page cache crash-durable before we open it,
+        // so the data read during init is durable.
+        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
+        }
+
+        // Initialize the state shared by every worker and run the root task's
+        // worker on this thread.
+        let globals = Arc::new(Globals {
+            cfg: self.cfg,
+            registry,
+            metrics,
+            shutdown: Mutex::new(Stopper::default()),
+            panicker,
+            network_buffer_pool,
+            storage_buffer_pool,
+            workers: Mutex::new(Vec::new()),
+        });
+        let worker = Worker::new(Arc::clone(&globals));
+
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = MeteredProcess::init(&mut runtime_registry);
+        let process_executor = Arc::downgrade(&worker.executor);
+        let collector = process.collect(move |duration| Sleeper {
+            executor: process_executor.clone(),
+            time: Instant::now() + duration.min(MAX_SLEEP),
+            registered: false,
+        });
+        let _ = Tasks::register(&worker.executor.tasks, collector);
+
+        // Get metrics
+        let label = Label::root();
+        globals.metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = globals.metrics.tasks_running.get_or_create(&label).clone();
+
+        // Build the root context and drive the root task on this worker.
+        let root_tree = Tree::root();
+        let context = worker.context(label.name(), Vec::new(), root_tree.clone());
+        let output = worker.run(panicked.interrupt(f(context)), root_tree);
+
+        // Join dedicated worker threads: the tree abort above cascaded to
+        // their roots, so each worker winds down once it observes the abort.
+        // Workers can spawn workers, so drain until the registry stays empty.
+        // A worker infrastructure panic is resumed only after every thread
+        // has been joined.
+        let mut worker_panic = None;
+        loop {
+            let workers = take(&mut *globals.workers.lock());
+            if workers.is_empty() {
+                break;
+            }
+            for worker in workers {
+                if let Err(payload) = worker.join() {
+                    let _ = worker_panic.get_or_insert(payload);
+                }
+            }
+        }
+        if let Some(payload) = worker_panic {
+            resume_unwind(payload);
+        }
+
+        gauge.dec();
         output
     }
 }
@@ -895,7 +1004,81 @@ impl Context {
 
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> Arc<Metrics> {
-        self.executor().metrics.clone()
+        self.executor().globals.metrics.clone()
+    }
+
+    /// Run `f` as the root task of a worker on its own thread.
+    ///
+    /// The handle is assembled from parts on the caller: the wrapper that
+    /// owns the result sender only exists once the worker thread has built
+    /// its ring. Panics on the worker thread outside the task itself (e.g.
+    /// ring creation failure) resolve the handle with [Error::Closed] and
+    /// are resumed when the runtime joins its workers at teardown.
+    fn spawn_worker<F, Fut, T>(
+        self,
+        f: F,
+        metric: utils::MetricHandle,
+        parent: Arc<Tree>,
+    ) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Drop the parent-worker context pieces (storage, network, executor
+        // reference): the task's context is rebuilt against its own worker.
+        let Self {
+            name,
+            attributes,
+            executor,
+            tree,
+            ..
+        } = self;
+        let globals = {
+            let executor = executor.upgrade().expect("executor already dropped");
+            Arc::clone(&executor.globals)
+        };
+
+        let (sender, receiver) = oneshot::channel();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let handle = Handle::from_parts(receiver, abort_handle, metric.clone());
+        if let Some(aborter) = handle.aborter() {
+            parent.register(aborter);
+        }
+
+        // Run the worker until the task completes or teardown aborts it.
+        let thread_globals = Arc::clone(&globals);
+        let worker = utils::thread::spawn(globals.cfg.thread_stack_size, move || {
+            let worker = Worker::new(Arc::clone(&thread_globals));
+            let context = worker.context(name, attributes, Arc::clone(&tree));
+
+            // Wrap the future with panic catching, abort support, and
+            // cleanup, mirroring the wrapper [Handle::init] builds for
+            // executor tasks.
+            let panicker = thread_globals.panicker.clone();
+            let wrapped = async move {
+                let result = Abortable::new(
+                    AssertUnwindSafe(f(context)).catch_unwind(),
+                    abort_registration,
+                )
+                .await;
+                match result {
+                    Ok(Ok(value)) => {
+                        let _ = sender.send(Ok(value));
+                    }
+                    Ok(Err(panic)) => {
+                        panicker.notify(panic);
+                        let _ = sender.send(Err(Error::Exited));
+                    }
+                    Err(Aborted) => {}
+                }
+                metric.finish();
+            };
+            worker.run(wrapped, tree);
+        });
+        globals.workers.lock().push(worker);
+
+        handle
     }
 }
 
@@ -929,13 +1112,12 @@ impl crate::Spawner for Context {
         }
         self.tree = child;
 
-        // The single-threaded executor cannot absorb blocking work, and the
-        // runtime manages no worker threads to offload it to. Support is
-        // planned to return with a blocking pool.
+        // Dedicated tasks (and, until a shared blocking pool lands, blocking
+        // shared tasks) run as the root of a worker on their own thread: the
+        // worker owns its own ring, so the task's context submits IO without
+        // touching this thread's loop.
         if !matches!(past, Execution::Shared(false)) {
-            panic!(
-                "blocking and dedicated tasks are temporarily unsupported on the io_uring runtime"
-            );
+            return self.spawn_worker(f, metric, parent);
         }
 
         // Wrap the future with panic catching, abort support, and cleanup.
@@ -944,7 +1126,7 @@ impl crate::Spawner for Context {
         let (task, handle) = Handle::init(
             future,
             metric.clone(),
-            executor.panicker.clone(),
+            executor.globals.panicker.clone(),
             Arc::clone(&parent),
         );
 
@@ -964,7 +1146,7 @@ impl crate::Spawner for Context {
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
             let executor = self.executor();
-            let mut shutdown = executor.shutdown.lock();
+            let mut shutdown = executor.globals.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -983,7 +1165,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor().shutdown.lock().stopped()
+        self.executor().globals.shutdown.lock().stopped()
     }
 }
 
@@ -995,7 +1177,7 @@ impl crate::Spawner for Context {
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let stack_size = self.executor().thread_stack_size;
+        let stack_size = self.executor().globals.cfg.thread_stack_size;
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
             .spawn_handler(move |thread| {
@@ -1052,7 +1234,7 @@ impl crate::Metrics for Context {
         let name = name.into();
         let help = help.into();
         let metric = Arc::new(metric);
-        self.executor().registry.register(
+        self.executor().globals.registry.register(
             prefixed_name(&self.name, &name),
             help,
             self.attributes.clone(),
@@ -1061,7 +1243,7 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        self.executor().registry.encode()
+        self.executor().globals.registry.encode()
     }
 }
 
@@ -1192,7 +1374,7 @@ impl crate::Resolver for Context {
         // DNS resolution.
         let host_port = format!("{host}:0");
         let (tx, rx) = oneshot::channel();
-        utils::thread::spawn(self.executor().thread_stack_size, move || {
+        utils::thread::spawn(self.executor().globals.cfg.thread_stack_size, move || {
             let result = std::net::ToSocketAddrs::to_socket_addrs(host_port.as_str())
                 .map(|addrs| addrs.map(|addr| addr.ip()).collect::<Vec<_>>())
                 .map_err(|e| Error::ResolveFailed(e.to_string()));
@@ -1257,26 +1439,101 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        IoBuf, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _, Sink as _,
-        Spawner as _, Strategizer as _, Stream as _, Supervisor as _,
+        Blob as _, IoBuf, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
+        Sink as _, Spawner as _, Storage as _, Strategizer as _, Stream as _, Supervisor as _,
     };
     use commonware_parallel::Strategy as _;
     use commonware_utils::{NZUsize, channel::oneshot};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+    /// A dedicated task runs on its own worker with its own ring: storage
+    /// and network operations issued from it must work end to end, including
+    /// against a listener owned by another worker.
     #[test]
-    #[should_panic(expected = "temporarily unsupported on the io_uring runtime")]
-    fn test_spawn_blocking_panics() {
+    fn test_dedicated_worker_io() {
         Runner::default().start(|context| async move {
-            context.child("blocking").shared(true).spawn(|_| async {});
+            // Bind a listener on the root worker.
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            // The dedicated task writes durable storage through its own ring
+            // and dials the root worker's listener over real TCP.
+            let dedicated =
+                context
+                    .child("dedicated")
+                    .dedicated()
+                    .spawn(move |context| async move {
+                        let (blob, len) = context.open("partition", b"blob").await.unwrap();
+                        assert_eq!(len, 0);
+                        blob.write_at(0, IoBuf::from(b"hello")).await.unwrap();
+                        blob.sync().await.unwrap();
+                        let read = blob.read_at(0, 5).await.unwrap();
+                        assert_eq!(read.coalesce(), b"hello");
+
+                        let (mut sink, mut stream) = context.dial(addr).await.unwrap();
+                        sink.send(IoBuf::from(b"ping")).await.unwrap();
+                        let response = stream.recv(4).await.unwrap();
+                        assert_eq!(response.coalesce(), b"pong");
+                    });
+
+            // Serve the dedicated task's connection from the root worker.
+            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+            let msg = stream.recv(4).await.unwrap();
+            assert_eq!(msg.coalesce(), b"ping");
+            sink.send(IoBuf::from(b"pong")).await.unwrap();
+
+            dedicated.await.unwrap();
         });
     }
 
+    /// Aborting a dedicated task tears its worker down promptly, and the
+    /// runtime joins the worker thread at teardown.
     #[test]
-    #[should_panic(expected = "temporarily unsupported on the io_uring runtime")]
-    fn test_spawn_dedicated_panics() {
+    fn test_dedicated_worker_abort() {
+        let start = std::time::Instant::now();
         Runner::default().start(|context| async move {
-            context.child("dedicated").dedicated().spawn(|_| async {});
+            let handle = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(|context| async move {
+                    loop {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                });
+            context.sleep(Duration::from_millis(50)).await;
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "worker teardown took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Until a shared blocking pool lands, blocking shared tasks alias
+    /// dedicated ones: std-blocking work must not starve the root executor.
+    #[test]
+    fn test_spawn_blocking_runs_off_thread() {
+        Runner::default().start(|context| async move {
+            let blocking = context
+                .child("blocking")
+                .shared(true)
+                .spawn(|_| async move {
+                    std::thread::sleep(Duration::from_millis(200));
+                    42
+                });
+
+            // The root worker keeps making progress while the blocking task
+            // holds its own thread.
+            let start = std::time::Instant::now();
+            context.sleep(Duration::from_millis(20)).await;
+            assert!(start.elapsed() < Duration::from_millis(150));
+
+            assert_eq!(blocking.await.unwrap(), 42);
         });
     }
 

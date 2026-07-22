@@ -138,6 +138,27 @@ where
         )
     }
 
+    /// Returns a task handle assembled from its parts.
+    ///
+    /// Used by executors that build the result channel before the task's
+    /// wrapper exists (e.g. work deferred to a thread that has not started
+    /// yet): the wrapper on the remote side owns `sender` and the paired
+    /// abort registration, mirroring what [Handle::init] builds inline.
+    #[cfg_attr(not(feature = "iouring"), allow(dead_code))]
+    pub(crate) const fn from_parts(
+        receiver: oneshot::Receiver<Result<T, Error>>,
+        abort_handle: AbortHandle,
+        metric: MetricHandle,
+    ) -> Self {
+        Self {
+            state: HandleState::Task {
+                receiver,
+                abort_handle,
+                metric,
+            },
+        }
+    }
+
     /// Returns a handle backed by a completion receiver.
     pub fn from_receiver(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
