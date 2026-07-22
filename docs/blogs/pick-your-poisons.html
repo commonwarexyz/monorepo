@@ -132,8 +132,58 @@ Vamsi Policharla</a></div>
         interpolate the Pareto frontier, allowing system designers to
         pick a tradeoff point that best fits their operating
         constraints.</p>
+        <style>
+          .cw-magic-move {
+            --cw-magic-track-height: 740vh;
+            height: var(--cw-magic-track-height);
+            margin: 44px 0 20px;
+            position: relative;
+          }
+
+          .cw-magic-final {
+            aspect-ratio: 1024 / 576;
+            margin: 20px 0;
+          }
+
+          .cw-magic-story-source,
+          .cw-magic-dream-source {
+            display: none;
+          }
+
+          @media (max-width: 600px) {
+            .cw-magic-move {
+              --cw-magic-track-height: 680vh;
+            }
+          }
+
+          @media (prefers-reduced-motion: reduce) {
+            .cw-magic-move {
+              display: none;
+            }
+
+            .cw-magic-story-source,
+            .cw-magic-dream-source {
+              display: block;
+            }
+          }
+        </style>
         <div id="pick-your-poisons-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
           <noscript>
+            <style>
+              .cw-magic-move {
+                height: auto;
+                margin: 0;
+              }
+
+              .cw-magic-final {
+                aspect-ratio: auto;
+              }
+
+              .cw-magic-story-source,
+              .cw-magic-dream-source {
+                display: block;
+              }
+            </style>
             This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
           </noscript>
         </div>
@@ -216,7 +266,7 @@ Vamsi Policharla</a></div>
         <p>Unfortunately, every single construction forces a choice:
         epoch restrictions, censorship issues, or a complicated
         setup.</p>
-        <p><span id="dream-goal">The dream goal</span> is:</p>
+        <p><span id="dream-goal">The dream</span> is:</p>
         <div data-align="center">
         <blockquote>
         <p><em>A batched threshold encryption scheme with a
@@ -363,9 +413,9 @@ Vamsi Policharla</a></div>
           </noscript>
         </div>
         <p>As of this writing, no efficient construction achieves <a
-        href="#dream-goal">the dream goal</a>, but Indexed Simple BTE
-        and Labeled Multi-Key Batched IBE let deployments trade one
-        poison at full strength for digestible doses of two.</p>
+        href="#dream-goal">the dream</a>, but Indexed Simple BTE and
+        Labeled Multi-Key Batched IBE let deployments trade one poison
+        at full strength for digestible doses of two.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

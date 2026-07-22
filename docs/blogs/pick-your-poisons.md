@@ -18,8 +18,58 @@ We summarize them below and, as we will see, every construction makes an all-or-
 We then present two new constructions that interpolate the Pareto frontier, allowing system designers to pick a tradeoff point that best fits their operating constraints.
 
 ```{=html}
+<style>
+  .cw-magic-move {
+    --cw-magic-track-height: 740vh;
+    height: var(--cw-magic-track-height);
+    margin: 44px 0 20px;
+    position: relative;
+  }
+
+  .cw-magic-final {
+    aspect-ratio: 1024 / 576;
+    margin: 20px 0;
+  }
+
+  .cw-magic-story-source,
+  .cw-magic-dream-source {
+    display: none;
+  }
+
+  @media (max-width: 600px) {
+    .cw-magic-move {
+      --cw-magic-track-height: 680vh;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cw-magic-move {
+      display: none;
+    }
+
+    .cw-magic-story-source,
+    .cw-magic-dream-source {
+      display: block;
+    }
+  }
+</style>
 <div id="pick-your-poisons-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
   <noscript>
+    <style>
+      .cw-magic-move {
+        height: auto;
+        margin: 0;
+      }
+
+      .cw-magic-final {
+        aspect-ratio: auto;
+      }
+
+      .cw-magic-story-source,
+      .cw-magic-dream-source {
+        display: block;
+      }
+    </style>
     This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
   </noscript>
 </div>
@@ -48,7 +98,7 @@ In a different line of work, [BCFGOPQW25](https://eprint.iacr.org/2025/1419) (su
 ::: {#pick-your-poisons-dream-source .cw-magic-dream-source}
 Unfortunately, every single construction forces a choice: epoch restrictions, censorship issues, or a complicated setup.
 
-[The dream goal]{#dream-goal} is:
+[The dream]{#dream-goal} is:
 
 ::: {data-align="center"}
 > *A batched threshold encryption scheme with a constant-sized ciphertext, DKG/silent setup, quasi-linear decryption, and no censorship issues/epoch restrictions*
@@ -104,5 +154,5 @@ Naively, one can encrypt to multiple blocks, but this increases the ciphertext s
 </div>
 ```
 
-As of this writing, no efficient construction achieves [the dream goal](#dream-goal), but
+As of this writing, no efficient construction achieves [the dream](#dream-goal), but
 Indexed Simple BTE and Labeled Multi-Key Batched IBE let deployments trade one poison at full strength for digestible doses of two.

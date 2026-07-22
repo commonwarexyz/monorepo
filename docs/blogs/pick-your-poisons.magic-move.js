@@ -142,6 +142,11 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const window01 = (p, [start, end]) => clamp((p - start) / (end - start), 0, 1);
 
+// Layout-critical rules (track height, source-div hiding, and the
+// prefers-reduced-motion swap) live in an inline <style> in the markdown so
+// they apply at first paint — before this module executes — and the prose
+// sources never flash. Everything here only styles elements this module
+// creates.
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) return;
 
@@ -156,20 +161,9 @@ function injectStyles() {
       display: block;
     }
 
-    .cw-magic-move {
-      --cw-magic-track-height: 740vh;
-      height: var(--cw-magic-track-height);
-      margin: 44px 0 20px;
-      position: relative;
-    }
-
     .cw-magic-move *,
     .cw-magic-final * {
       box-sizing: border-box;
-    }
-
-    .cw-magic-final {
-      margin: 20px 0;
     }
 
     .cw-magic-final .cw-magic-stage {
@@ -357,29 +351,9 @@ function injectStyles() {
       margin: 12px 0;
     }
 
-    .cw-magic-story-source,
-    .cw-magic-dream-source {
-      display: none;
-    }
-
     @media (max-width: 600px) {
-      .cw-magic-move {
-        --cw-magic-track-height: 680vh;
-      }
-
       .cw-magic-box {
         font-size: 21px;
-      }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .cw-magic-move {
-        display: none;
-      }
-
-      .cw-magic-story-source,
-      .cw-magic-dream-source {
-        display: block;
       }
     }
   `;
@@ -409,8 +383,9 @@ function renderMath(container) {
   });
 }
 
-// The source divs are hidden by the injected styles and shown again under
-// prefers-reduced-motion, so the prose stays readable without the animation.
+// The source divs are hidden by the inline styles in the markdown and shown
+// again under prefers-reduced-motion (or via <noscript> with scripting off),
+// so the prose stays readable without the animation.
 function readMarkdownSource() {
   const storySource = document.getElementById('pick-your-poisons-story-source');
   const dreamSource = document.getElementById('pick-your-poisons-dream-source');
@@ -956,8 +931,8 @@ function initFinalFigure(mount) {
 }
 
 // Module scripts run after the document is parsed, so the mounts already exist.
-// Under prefers-reduced-motion the injected styles hide the animation and show
-// the prose sources instead, so defer the scroll machinery until the
+// Under prefers-reduced-motion the markdown's inline styles hide the animation
+// and show the prose sources instead, so defer the scroll machinery until the
 // preference lifts. Its key handler must not run while the track is
 // display:none, since it would compute stops against a zero-height track
 // and swallow arrow-key scrolling at the top of the page.
