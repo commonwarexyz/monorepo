@@ -1,4 +1,4 @@
-//! Proven-durability tracking for best-effort watermark advancement.
+//! Tracks the journal size proven durable.
 
 use super::blobs::SyncCompletion;
 use futures::FutureExt as _;
@@ -18,7 +18,7 @@ pub(super) struct DurableSize {
 }
 
 impl DurableSize {
-    /// Track durability starting from the proven floor `proven`.
+    /// Create a tracker with `proven` size.
     pub(super) const fn new(proven: u64) -> Self {
         Self {
             proven,
@@ -61,7 +61,8 @@ impl DurableSize {
         self.pending = Some((size, completion));
     }
 
-    /// Clamp the proven size for a shrink to `size`, discarding any pending observation.
+    /// Lower the proven size to at most `size` after a shrink, discarding any pending
+    /// observation.
     pub(super) fn truncate(&mut self, size: u64) {
         self.proven = self.proven.min(size);
         self.pending = None;

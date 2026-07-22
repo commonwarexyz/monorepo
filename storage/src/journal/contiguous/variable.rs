@@ -412,10 +412,10 @@ struct Inner<E: Context, V: Codec> {
     /// Journal and Reader metrics.
     metrics: Arc<Metrics<E>>,
 
-    /// The jointly proven-durable size: covered by observed data AND offsets syncs. The offsets
-    /// watermark (this journal's recovery anchor) only ever takes this joint value — a value
-    /// proven for one journal alone could anchor replay past the other's surviving data,
-    /// turning init's cheap repair into a full rebuild from the offsets start.
+    /// The size proven durable for both the data and offsets journals. The offsets watermark
+    /// (this journal's recovery anchor) only ever takes this joint value: a size proven for one
+    /// journal alone could anchor replay past the other's surviving data, turning init's cheap
+    /// repair into a full rebuild from the offsets start.
     durable_size: DurableSize,
 }
 
@@ -1164,8 +1164,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let metrics = Metrics::new(context);
         metrics.update(bounds.end, bounds.start, items_per_blob);
 
-        // The offsets watermark is this journal's recovery anchor; init proved it against both
-        // journals, so it is the jointly proven durability floor to resume from.
+        // The offsets watermark is this journal's recovery anchor. Init validated it against
+        // both journals, so it is a proven size to start from.
         let durable_size = DurableSize::new(offsets.recovery_watermark());
         Ok(Self {
             blobs,
@@ -1593,8 +1593,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // observation.
         self.durable_size.observe();
 
-        // Best effort: advance the offsets watermark to the jointly proven size, riding the
-        // returned handle so the caller drives it.
+        // Advance the offsets watermark to the jointly proven size, joined into the returned
+        // handle so the caller drives it.
         let watermark = self
             .offsets
             .start_advance_watermark(self.durable_size.proven())
@@ -2322,9 +2322,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Begin persisting the data and offsets blobs.
     ///
     /// Awaiting the returned [Handle] guarantees state appended before this call survives a
-    /// crash. Best effort, this also advances the recovery watermark to the previous
-    /// proven-durable size, bounding startup recovery; use `sync()` for a guaranteed, current
-    /// watermark.
+    /// crash. Also tries to advance the recovery watermark to the previous proven durable
+    /// size, bounding startup recovery; only `sync()` guarantees a current watermark.
     ///
     /// At most one sync is in flight at a time: this call waits for the sync the prior
     /// call started before starting another. It does not wait for a pending rollover fsync:

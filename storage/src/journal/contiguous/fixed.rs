@@ -86,13 +86,11 @@
 //!
 //! # Watermark advancement
 //!
-//! `sync()` advances the watermark to the current size after completing the data sync — an
-//! ordered, guaranteed advance. `start_sync()` additionally advances it best effort using value
-//! discipline instead of ordering: the journal tracks the *durable size* — the highest size
-//! whose covering sync it has observed complete successfully, at the points where it already
-//! awaits sync completions — and watermark writes only ever persist that proven value. Such a
-//! write needs no ordering against in-flight data syncs, because it publishes past proofs. The
-//! invariants:
+//! `sync()` advances the watermark to the current size after completing the data sync.
+//! `start_sync()` also advances it, best effort, without ordering anything: the journal tracks
+//! its *durable size* — the highest size whose sync it has observed complete — and the watermark
+//! only ever takes that value. Writing an already-proven value is safe at any time, even while a
+//! data sync is in flight. The invariants:
 //!
 //! - The watermark only takes values the durable size has held (never an in-flight size).
 //! - The durable size advances only on an observed sync success; failures are retained by the
@@ -101,8 +99,8 @@
 //!   durably lower the watermark first, draining any in-flight watermark write.
 //!
 //! Every durable state this produces is reachable with `sync()` alone (sync at the proven size,
-//! then keep appending), so recovery handles no new crash shapes; a lagging watermark only costs
-//! startup replay, never correctness.
+//! then keep appending), so recovery handles no new crash shapes. A lagging watermark only costs
+//! extra startup replay.
 //!
 //! # Consistency
 //!
@@ -399,8 +397,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         items_per_blob: NonZeroU64,
         metrics: Metrics<E>,
     ) -> Self {
-        // Every init path persists the watermark before construction, and it is the proven
-        // durability floor to resume from.
+        // Every init path persists the watermark before construction, so it is a proven size
+        // to start from.
         let durable_size = DurableSize::new(checkpoint.watermark().unwrap_or(bounds.start));
         Self {
             blobs,
@@ -834,10 +832,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
-    /// Begin durably persisting the data blobs only, without touching the recovery watermark.
-    ///
-    /// For composing journals that prove durability jointly with sibling state (the variable
-    /// journal's offsets index).
+    /// Begin durably persisting the data blobs.
     pub(super) async fn start_data_sync(&mut self) -> Handle<()> {
         let handle = self.blobs.start_sync().await;
         // The blob layer waited out the previous tail sync, which may have resolved the
@@ -849,12 +844,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Handle::from_future(completion)
     }
 
-    /// Best effort, begin advancing the recovery watermark toward `to`, capped at the
-    /// proven-durable size. A failure is not a data-durability failure; the metadata layer
-    /// retains it and resurfaces it on the next checkpoint operation.
+    /// Begin advancing the recovery watermark toward `to`, capped at the proven durable size.
     ///
-    /// The returned handle must be driven (awaited or joined into a caller-driven handle) for
-    /// the advance to complete; it never yields an error.
+    /// Best effort: a failure does not compromise data durability, so it is logged rather than
+    /// returned; the metadata layer retains it and resurfaces it on the next checkpoint
+    /// operation. The returned handle never yields an error, but must still be driven (awaited
+    /// or joined into a caller-driven handle) for the advance to complete.
     pub(super) async fn start_advance_watermark(&mut self, to: u64) -> Handle<()> {
         self.durable_size.observe();
         let to = to.min(self.durable_size.proven());
@@ -876,7 +871,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn start_sync(&mut self) -> Handle<()> {
         self.metrics.start_sync_calls.inc();
         let data = self.start_data_sync().await;
-        // The watermark advance rides the returned handle so the caller drives it.
+        // The watermark advance is joined into the returned handle so the caller drives it.
         let watermark = self.start_advance_watermark(u64::MAX).await;
         Handle::from_future(async move {
             let result = data.await;
@@ -1252,9 +1247,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Begin durably persisting the current state of the structure.
     ///
     /// Awaiting the returned [Handle] guarantees state appended before this call survives a
-    /// crash. Best effort, this also advances the recovery watermark to the previous
-    /// proven-durable size, bounding startup recovery; use `sync()` for a guaranteed, current
-    /// watermark.
+    /// crash. Also tries to advance the recovery watermark to the previous proven durable
+    /// size, bounding startup recovery; only `sync()` guarantees a current watermark.
     ///
     /// At most one sync is in flight at a time: this call waits for the sync the prior
     /// call started before starting another. It does not wait for a pending rollover fsync:

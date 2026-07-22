@@ -854,10 +854,10 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Best effort, this also advances the recovery watermarks toward the proven-durable state,
-    /// bounding startup recovery (use [Self::sync] for the guarantee that no recovery is
-    /// needed). A new sync waits for the prior sync before starting. Failures of the deferred
-    /// durability work surface on the returned handle and again on the next durability operation.
+    /// Also makes a best-effort attempt to bound the recovery needed on startup; use
+    /// [Self::sync] to guarantee none is needed. A new sync waits for the prior sync before
+    /// starting. Failures of the deferred durability work surface on the returned handle and
+    /// again on the next durability operation.
     #[tracing::instrument(
         name = "qmdb.any.db.start_sync",
         level = "info",
@@ -890,8 +890,6 @@ where
     )]
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, crate::qmdb::Error<F>> {
-        // Runs the log's commit rather than awaiting a start_sync handle so journal-level
-        // commit-duration metrics keep covering this path.
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;

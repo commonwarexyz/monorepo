@@ -797,7 +797,7 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort advance of the recovery watermarks (bounding startup recovery).
+    /// plus a best-effort attempt to bound the recovery needed on startup.
     /// Bitmap metadata is only persisted by [Self::sync]. A new sync waits for the prior sync
     /// before starting. Failures of the deferred durability work surface on the returned
     /// handle and again on the next durability operation.

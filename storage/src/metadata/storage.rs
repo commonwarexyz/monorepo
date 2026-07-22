@@ -349,8 +349,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
     }
 
-    /// Wait for an in-flight sync started by [Self::start_sync], surfacing its failure if it was
-    /// never observed.
+    /// Wait for an in-flight sync started by [Self::start_sync], surfacing its failure.
     async fn wait_for_pending(&mut self) -> Result<(), Error> {
         let Some(pending) = &self.state.pending else {
             return Ok(());

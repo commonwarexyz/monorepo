@@ -306,10 +306,9 @@ pub trait Mutable: Contiguous + Sized {
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
-    /// for the state present when the call begins (later appends need their own sync). Best
-    /// effort, this also advances the recovery watermark to the previous proven-durable size,
-    /// bounding startup recovery; use [Self::sync] to also guarantee that no recovery will be
-    /// needed on startup.
+    /// for the state present when the call begins (later appends need their own sync). Also
+    /// tries to advance the recovery watermark to the previous proven durable size, bounding
+    /// startup recovery; use [Self::sync] to guarantee no recovery is needed.
     fn start_sync(
         self,
     ) -> impl std::future::Future<Output = Result<(Self, Handle<()>), Error>> + Send;

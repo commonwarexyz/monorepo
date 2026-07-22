@@ -378,18 +378,15 @@ where
     /// Begin durably persisting the journal and the Merkle structure.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Best effort, this also advances both layers' recovery watermarks toward their
-    /// proven-durable sizes, bounding startup recovery (use [Self::sync] for the guarantee that
-    /// no recovery is needed).
+    /// Also makes a best-effort attempt to bound the recovery needed on startup; use
+    /// [Self::sync] to guarantee none is needed.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let ((journal, journal_handle), (merkle, merkle_handle)) = try_join!(
+        let (journal_handle, merkle_handle);
+        ((self.journal, journal_handle), (self.merkle, merkle_handle)) = try_join!(
             self.journal.start_sync().map_err(Error::Journal),
             self.merkle.start_sync().map_err(Error::Merkle)
         )?;
-        (self.journal, self.merkle) = (journal, merkle);
 
-        // The Merkle sync rides the returned handle: best effort at that layer, but a failure
-        // still surfaces so callers do not mistake a partial sync for a full one.
         let handle =
             Handle::from_future(
                 async move { try_join!(journal_handle, merkle_handle).map(|_| ()) },
@@ -401,9 +398,6 @@ where
     /// Merkle structure is durably persisted, meaning recovery may be required on startup in the
     /// event of a crash.
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        // Runs the inner journal's commit rather than awaiting a start_sync handle so the
-        // journal's commit-duration metrics keep covering this path.
-        //
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
         // limit memory bloat.
         (self.journal, self.merkle) = try_join!(

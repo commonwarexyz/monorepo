@@ -27,9 +27,9 @@
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
 //! Persistence and cleanup are managed directly on the database: `commit()` makes applied state
-//! durable (`start_sync()` is its pipelined form, which also best-effort bounds startup
-//! recovery), `sync()` additionally eliminates recovery on startup, and `prune()`/`destroy()`
-//! reclaim storage.
+//! durable (`start_sync()` is its pipelined form, which also tries to bound startup recovery),
+//! `sync()` additionally eliminates recovery on startup, and `prune()`/`destroy()` reclaim
+//! storage.
 //!
 //! # Ownership
 //!
