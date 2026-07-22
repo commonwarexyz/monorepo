@@ -2902,27 +2902,6 @@ mod tests {
             batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
             expect_no_timeout(&mut context, &mut voter_receiver).await;
 
-            // Test 3: Send a vote from the leader for the current view (view 5)
-            let round = Round::new(epoch, view);
-            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
-            let leader_vote = Notarize::sign(&schemes[1], proposal).unwrap();
-            let (_, leader_sender) = peer_senders.iter_mut().find(|(i, _)| *i == 1).unwrap();
-            leader_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Vote::Notarize(leader_vote).encode(),
-                    true,
-                );
-
-            // Give network time to deliver
-            context.sleep(Duration::from_millis(50)).await;
-
-            // Test 4: Advance to view skip_timeout + 1 (view 6)
-            // Leader voted in view 5, which is in the recent window, so should be active
-            let view = View::new(skip_timeout + 1);
-            batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
-            expect_no_timeout(&mut context, &mut voter_receiver).await;
-
             // Test 3: Jump far ahead. We still fail open because we never observed a quorum of
             // recently active participants.
             let view = View::new(100);

@@ -233,8 +233,11 @@ impl<F: Graftable, H: HasherTrait<F>> GraftedHasher<F, H> {
 }
 
 impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
-    type Hasher = H::Hasher;
     type Digest = H::Digest;
+
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
+        self.inner.hash(parts)
+    }
 
     fn root_bagging(&self) -> merkle::Bagging {
         self.inner.root_bagging()
@@ -317,8 +320,11 @@ impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
 }
 
 impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
-    type Hasher = H;
     type Digest = H::Digest;
+
+    fn hash(&self, parts: &[&[u8]]) -> H::Digest {
+        self.hasher.hash(parts)
+    }
 
     fn root_bagging(&self) -> merkle::Bagging {
         <merkle::hasher::Standard<H> as HasherTrait<F>>::root_bagging(&self.hasher)

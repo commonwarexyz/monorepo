@@ -37,7 +37,6 @@
 //! let root = tree.root();
 //!
 //! // Generate a proof for leaf at index 1
-//! let mut hasher = Sha256::default();
 //! let proof = tree.proof(1).unwrap();
 //! assert!(proof.verify_element_inclusion::<Sha256>(&digests[1], 1, &root).is_ok());
 //! ```
@@ -75,7 +74,6 @@ pub enum Error {
 
 /// Constructor for a Binary Merkle Tree (BMT).
 pub struct Builder<H: Hasher> {
-    hasher: H,
     leaves: Vec<H::Digest>,
 }
 
@@ -83,7 +81,6 @@ impl<H: Hasher> Builder<H> {
     /// Creates a new Binary Merkle Tree builder.
     pub fn new(leaves: usize) -> Self {
         Self {
-            hasher: H::default(),
             leaves: Vec::with_capacity(leaves),
         }
     }
@@ -103,7 +100,7 @@ impl<H: Hasher> Builder<H> {
     /// It is valid to build a tree with no leaves, in which case
     /// just an "empty" node is included (no leaves will be provable).
     pub fn build(self) -> Tree<H::Digest> {
-        Tree::new(self.hasher, self.leaves)
+        Tree::new::<H>(self.leaves)
     }
 }
 
@@ -126,7 +123,7 @@ pub struct Tree<D: Digest> {
 
 impl<D: Digest> Tree<D> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new<H: Hasher<Digest = D>>(_hasher: H, mut leaves: Vec<D>) -> Self {
+    fn new<H: Hasher<Digest = D>>(mut leaves: Vec<D>) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -454,7 +451,7 @@ fn siblings_required_for_range_proof(
 
 impl<D: Digest> Proof<D> {
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
-    /// with `root` using the provided `hasher`.
+    /// with `root`.
     ///
     /// The proof consists of sibling hashes stored from the leaf up to the root. At each
     /// level, if the current node is a left child (even index), the sibling is combined
@@ -469,17 +466,13 @@ impl<D: Digest> Proof<D> {
         mut position: u32,
         root: &D,
     ) -> Result<(), Error> {
-        let mut hasher = H::default();
         // Validate position
         if position >= self.leaf_count {
             return Err(Error::InvalidPosition(position));
         }
 
         // Compute the position-hashed leaf
-        hasher.update(&position.to_be_bytes());
-        hasher.update(leaf);
-        let (next_hasher, mut computed) = hasher.finalize();
-        hasher = next_hasher;
+        let mut computed = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
 
         // Track level size to handle odd-sized levels
         let mut level_size = self.leaf_count as usize;
@@ -504,11 +497,7 @@ impl<D: Digest> Proof<D> {
             };
 
             // Compute the parent digest
-            hasher.update(left_node);
-            hasher.update(right_node);
-            let (next_hasher, digest) = hasher.finalize();
-            hasher = next_hasher;
-            computed = digest;
+            computed = H::hash(&[left_node.as_ref(), right_node.as_ref()]);
 
             // Move up the tree
             position /= 2;
@@ -522,9 +511,7 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&computed);
-        let (_, finalized) = hasher.finalize();
+        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), computed.as_ref()]);
 
         if finalized == *root {
             Ok(())
@@ -546,16 +533,12 @@ impl<D: Digest> Proof<D> {
         elements: &[(D, u32)],
         root: &D,
     ) -> Result<(), Error> {
-        let mut hasher = H::default();
         // Handle empty case
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
-                let (next_hasher, empty_tree_root) = hasher.finalize();
-                hasher = next_hasher;
-                hasher.update(&0u32.to_be_bytes());
-                hasher.update(&empty_tree_root);
-                let (_, finalized) = hasher.finalize();
+                let empty_tree_root = H::hash(&[]);
+                let finalized = H::hash(&[&0u32.to_be_bytes(), empty_tree_root.as_ref()]);
                 if finalized == *root {
                     return Ok(());
                 } else {
@@ -571,10 +554,7 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            hasher.update(&position.to_be_bytes());
-            hasher.update(leaf);
-            let (next_hasher, digest) = hasher.finalize();
-            hasher = next_hasher;
+            let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
             sorted.push((*position, digest));
         }
         sorted.sort_unstable_by_key(|(pos, _)| *pos);
@@ -626,10 +606,7 @@ impl<D: Digest> Proof<D> {
                 };
 
                 // Hash parent
-                hasher.update(&left);
-                hasher.update(&right);
-                let (next_hasher, digest) = hasher.finalize();
-                hasher = next_hasher;
+                let digest = H::hash(&[left.as_ref(), right.as_ref()]);
                 next_level.push((parent_pos, digest));
 
                 idx += 1;
@@ -653,9 +630,7 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        hasher.update(&self.leaf_count.to_be_bytes());
-        hasher.update(&tree_root);
-        let (_, finalized) = hasher.finalize();
+        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), tree_root.as_ref()]);
 
         if finalized == *root {
             Ok(())

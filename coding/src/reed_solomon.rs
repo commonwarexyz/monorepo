@@ -378,17 +378,9 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes = strategy.map_init_collect_vec_with_multiplier(
-        &shard_slices,
-        shard_len,
-        H::default,
-        |hasher, shard| {
-            hasher.update(shard);
-            let (next, digest) = core::mem::take(hasher).finalize();
-            *hasher = next;
-            digest
-        },
-    );
+    let shard_hashes =
+        strategy
+            .map_collect_vec_with_multiplier(&shard_slices, shard_len, |shard| H::hash(&[shard]));
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -764,17 +756,11 @@ fn verify_root<H: Hasher, S: Strategy>(
         })
         .collect::<Vec<_>>();
 
-    for (i, digest) in strategy.map_init_collect_vec_with_multiplier(
-        missing_shards,
-        shard_len,
-        H::default,
-        |hasher, (i, shard)| {
-            hasher.update(shard);
-            let (next, digest) = core::mem::take(hasher).finalize();
-            *hasher = next;
-            (i, digest)
-        },
-    ) {
+    for (i, digest) in
+        strategy.map_collect_vec_with_multiplier(missing_shards, shard_len, |(i, shard)| {
+            (i, H::hash(&[shard]))
+        })
+    {
         shard_digests[i] = Some(digest);
     }
 

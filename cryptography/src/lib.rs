@@ -594,6 +594,9 @@ mod tests {
         let hasher = H::default();
         let (_, digest) = hasher.finalize();
         assert!(H::Digest::decode(digest.as_ref()).is_ok());
+
+        // The zero-parts one-shot must equal the empty-message digest.
+        assert_eq!(H::hash(&[]), digest);
     }
 
     fn test_hasher_large_input<H: Hasher>() {
