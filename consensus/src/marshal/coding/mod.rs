@@ -100,7 +100,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::Recipients;
+    use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -1357,12 +1357,13 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
-            // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
-            // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
+            // Build a chain up to just below the epoch boundary (height 19 is the last
+            // block in epoch 0 with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights
+            // 0-19), so the boundary block below chains onto height 18.
             let mut parent = genesis.digest();
             let mut last_view = View::zero();
             let mut last_commitment = genesis_commitment();
-            for i in 1..BLOCKS_PER_EPOCH.get() {
+            for i in 1..BLOCKS_PER_EPOCH.get() - 1 {
                 let round = Round::new(Epoch::new(0), View::new(i));
                 let ctx = CodingCtx {
                     round,
@@ -2293,6 +2294,124 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("certify should complete within timeout");
+                },
+            }
+        })
+    }
+
+    /// A Byzantine leader can deliver assigned shards to only f+1 honest
+    /// validators and form a notarization with its own vote, leaving no peer
+    /// able to serve a full-block fetch. A validator that never saw the
+    /// proposal then holds only buffered sender-indexed gossip shards, and
+    /// draining them requires the reconstruction interest that `certify`
+    /// registers with the shard engine (`shards.notarized`).
+    #[test_traced("WARN")]
+    fn test_certify_reconstructs_from_buffered_gossip_shards() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            // Register the peers' shard-channel senders and link the network.
+            // No peer runs a marshal actor, so round-bound block fetches go
+            // unanswered.
+            let mut peer_senders = Vec::new();
+            for peer in participants.iter().skip(1) {
+                let (sender, _receiver) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                peer_senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The parent is available locally. The notarized candidate is not:
+            // this validator never saw its proposal.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.proposed(parent_round, coded_parent);
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = CodingCtx {
+                round: child_round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let coded_child: TestCodedBlock = CodedBlock::new(child, coding_config, &Sequential);
+            let child_commitment = coded_child.commitment();
+
+            // Deliver each peer's sender-indexed gossip shard. Without leader
+            // discovery or reconstruction interest, the shard engine only
+            // buffers them.
+            for (i, sender) in peer_senders.iter_mut().enumerate() {
+                let index = u16::try_from(i + 1).expect("peer index fits in u16");
+                let shard = coded_child.shard(index).expect("missing shard").encode();
+                sender.send(Recipients::One(me.clone()), shard, true);
+            }
+            context.sleep(Duration::from_millis(250)).await;
+
+            // Certify must register reconstruction interest with the shard
+            // engine, drain the buffered shards, and verify the reconstructed
+            // block through its embedded context.
+            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify must reconstruct the candidate from buffered gossip shards"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify did not reconstruct from buffered gossip shards");
                 },
             }
         })
