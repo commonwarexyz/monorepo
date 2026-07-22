@@ -55,8 +55,10 @@ std = [
     "commonware-codec?/std",
     "commonware-macros/std",
     "commonware-parallel/std",
-    "rand_core/std",
 ]
+
+[dev-dependencies]
+rand_chacha.workspace = true
 
 [lints]
 workspace = true

@@ -10,6 +10,7 @@ use crate::{
     zkpari::{
         data_structures::{CommittedInputOpening, Proof, ProvingKey, VerifyingKey},
         range::RangeProof,
+        rng::ArkRng,
         ZkPari,
     },
 };
@@ -21,7 +22,7 @@ use core::{
     marker::PhantomData,
     ops::{Add, Neg, Sub},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Concrete private payments backend implemented by ZK-Pari.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -228,7 +229,7 @@ where
         E::G1Affine: Send + Sync,
         E::ScalarField: Send + Sync,
     {
-        if strategy.parallelism_hint() <= 1 || transfers.len() + burns.len() <= 1 {
+        if strategy.manual().parallelism() <= 1 || transfers.len() + burns.len() <= 1 {
             return Self::range_claims(params, funds, transfers, burns);
         }
 
@@ -295,7 +296,7 @@ where
         funds: &[(u64, PaymentCommitment<E>, ())],
         transfers: &[(PaymentCommitment<E>, PaymentCommitment<E>, TransferProof<E>)],
         burns: &[(PaymentCommitment<E>, u64, BurnProof<E>)],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> bool
     where
         E::ScalarField: Send + Sync,
@@ -313,7 +314,7 @@ where
         funds: &[(u64, PaymentCommitment<E>, ())],
         transfers: &[(PaymentCommitment<E>, PaymentCommitment<E>, TransferProof<E>)],
         burns: &[(PaymentCommitment<E>, u64, BurnProof<E>)],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> bool
     where
         E::ScalarField: Send + Sync,
@@ -332,7 +333,7 @@ where
                 strategy,
                 &range_claims,
                 &params.range_vk,
-                rng,
+                &mut ArkRng(rng),
             )
     }
 }
@@ -366,7 +367,7 @@ where
     fn fund(
         params: &Self::Params,
         value: u64,
-        _rng: &mut impl CryptoRngCore,
+        _rng: &mut impl CryptoRng,
     ) -> (Self::Commitment, Self::Opening, Self::FundProof) {
         let opening = PaymentOpening {
             value,
@@ -388,8 +389,9 @@ where
         input_commitment: &Self::Commitment,
         input_opening: &Self::Opening,
         amount: u64,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> (Self::Commitment, Self::Opening, Self::TransferProof) {
+        let rng = &mut ArkRng(rng);
         let amount_opening = PaymentOpening {
             value: amount,
             opening: CommittedInputOpening::rand(rng),
@@ -416,8 +418,9 @@ where
         trapdoor: &Self::Trapdoor,
         input_commitment: &Self::Commitment,
         amount_commitment: &Self::Commitment,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> Self::TransferProof {
+        let rng = &mut ArkRng(rng);
         let remaining_commitment = input_commitment.clone() - amount_commitment;
         TransferProof {
             amount: slim_proof(ZkPari::<E>::simulate(
@@ -442,8 +445,9 @@ where
         commitment: &Self::Commitment,
         opening: &Self::Opening,
         amount: u64,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> Self::BurnProof {
+        let rng = &mut ArkRng(rng);
         let public_opening = PaymentOpening {
             value: amount,
             opening: CommittedInputOpening::zero(),
@@ -462,12 +466,13 @@ where
         funds: &[(u64, Self::Commitment, Self::FundProof)],
         transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> bool {
         let Some(range_claims) = Self::range_claims(params, funds, transfers, burns) else {
             return false;
         };
-        range_claims.is_empty() || ZkPari::<E>::batch_verify(&range_claims, &params.range_vk, rng)
+        range_claims.is_empty()
+            || ZkPari::<E>::batch_verify(&range_claims, &params.range_vk, &mut ArkRng(rng))
     }
 
     fn batch_verify_with_strategy(
@@ -476,7 +481,7 @@ where
         funds: &[(u64, Self::Commitment, Self::FundProof)],
         transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> bool {
         Self::batch_verify_with_strategy_impl(strategy, params, funds, transfers, burns, rng)
     }
@@ -1016,7 +1021,7 @@ pub mod codec {
                 fn fund(
                     params: &Self::Params,
                     value: u64,
-                    rng: &mut impl rand_core::CryptoRngCore,
+                    rng: &mut impl rand_core::CryptoRng,
                 ) -> (Self::Commitment, Self::Opening, Self::FundProof) {
                     let (commitment, opening, proof) =
                         ZkPariBackend::<Bn254>::fund(params, value, rng);
@@ -1028,7 +1033,7 @@ pub mod codec {
                     input_commitment: &Self::Commitment,
                     input_opening: &Self::Opening,
                     amount: u64,
-                    rng: &mut impl rand_core::CryptoRngCore,
+                    rng: &mut impl rand_core::CryptoRng,
                 ) -> (Self::Commitment, Self::Opening, Self::TransferProof) {
                     let (commitment, opening, proof) = ZkPariBackend::<Bn254>::transfer(
                         params,
@@ -1046,7 +1051,7 @@ pub mod codec {
                     trapdoor: &Self::Trapdoor,
                     input_commitment: &Self::Commitment,
                     amount_commitment: &Self::Commitment,
-                    rng: &mut impl rand_core::CryptoRngCore,
+                    rng: &mut impl rand_core::CryptoRng,
                 ) -> Self::TransferProof {
                     $wrapper(ZkPariBackend::<Bn254>::simulated_transfer_proof(
                         params,
@@ -1062,7 +1067,7 @@ pub mod codec {
                     commitment: &Self::Commitment,
                     opening: &Self::Opening,
                     amount: u64,
-                    rng: &mut impl rand_core::CryptoRngCore,
+                    rng: &mut impl rand_core::CryptoRng,
                 ) -> Self::BurnProof {
                     $wrapper(ZkPariBackend::<Bn254>::burn(
                         params,
@@ -1078,7 +1083,7 @@ pub mod codec {
                     funds: &[(u64, Self::Commitment, Self::FundProof)],
                     transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
                     burns: &[(Self::Commitment, u64, Self::BurnProof)],
-                    rng: &mut impl rand_core::CryptoRngCore,
+                    rng: &mut impl rand_core::CryptoRng,
                 ) -> bool {
                     let funds = funds
                         .iter()
@@ -1103,7 +1108,7 @@ pub mod codec {
                     funds: &[(u64, Self::Commitment, Self::FundProof)],
                     transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
                     burns: &[(Self::Commitment, u64, Self::BurnProof)],
-                    rng: &mut impl rand_core::CryptoRngCore,
+                    rng: &mut impl rand_core::CryptoRng,
                 ) -> bool {
                     let funds_valid = strategy.fold(
                         funds,
@@ -1171,7 +1176,7 @@ pub mod codec {
                             strategy,
                             &range_claims,
                             &params.range_vk,
-                            rng,
+                            &mut crate::zkpari::rng::ArkRng(rng),
                         )
                 }
             }
@@ -1187,7 +1192,7 @@ pub mod codec {
     mod tests {
         use super::*;
         use crate::{payments::Backend, zkpari::payments::ZkPariBackend};
-        use ark_std::rand::SeedableRng;
+        use rand_core::SeedableRng;
         use commonware_codec::{Decode, Encode};
         use core::hash::Hash;
 
@@ -1222,7 +1227,7 @@ pub mod codec {
         #[test]
         fn bn254_payment_types_roundtrip_all_codec_modes() {
             let params = ZkPariBackend::<Bn254>::setup(&[7u8; 32]).expect("setup is infallible");
-            let mut rng = ark_std::rand::rngs::StdRng::from_seed([3u8; 32]);
+            let mut rng = rand_chacha::ChaCha8Rng::from_seed([3u8; 32]);
             let (commitment, opening, _fund_proof) =
                 ZkPariBackend::<Bn254>::fund(&params, 10, &mut rng);
             let (amount, amount_opening, transfer_proof) =
@@ -1252,7 +1257,7 @@ pub mod codec {
             B::BurnProof: Copy + core::fmt::Debug + Eq + Hash + Decode<Cfg = ()> + Encode,
         {
             let params = B::setup(&[7u8; 32]).expect("setup is infallible");
-            let mut rng = ark_std::rand::rngs::StdRng::from_seed([9u8; 32]);
+            let mut rng = rand_chacha::ChaCha8Rng::from_seed([9u8; 32]);
             let (commitment, opening, proof) = B::fund(&params, 10, &mut rng);
             let decoded_commitment =
                 B::Commitment::decode_cfg(commitment.encode(), &()).expect("commitment decode");

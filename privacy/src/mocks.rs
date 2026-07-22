@@ -5,7 +5,7 @@
 //! private-payment transaction flow without paying prover cost.
 
 use crate::payments::{Backend, Commitment, Opening};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// Non-cryptographic private-payments backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -146,7 +146,7 @@ impl Backend for MockBackend {
     fn fund(
         _params: &Self::Params,
         value: u64,
-        _rng: &mut impl CryptoRngCore,
+        _rng: &mut impl CryptoRng,
     ) -> (Self::Commitment, Self::Opening, Self::FundProof) {
         (
             MockCommitment::new(value, 0),
@@ -160,7 +160,7 @@ impl Backend for MockBackend {
         _input_commitment: &Self::Commitment,
         _input_opening: &Self::Opening,
         amount: u64,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> (Self::Commitment, Self::Opening, Self::TransferProof) {
         let blind = rng.next_u64();
         (
@@ -179,7 +179,7 @@ impl Backend for MockBackend {
         _trapdoor: &Self::Trapdoor,
         _input_commitment: &Self::Commitment,
         _amount_commitment: &Self::Commitment,
-        _rng: &mut impl CryptoRngCore,
+        _rng: &mut impl CryptoRng,
     ) -> Self::TransferProof {
         MockProof
     }
@@ -189,7 +189,7 @@ impl Backend for MockBackend {
         commitment: &Self::Commitment,
         opening: &Self::Opening,
         amount: u64,
-        _rng: &mut impl CryptoRngCore,
+        _rng: &mut impl CryptoRng,
     ) -> Self::BurnProof {
         assert!(amount <= opening.value());
         assert!(amount <= commitment.value());
@@ -201,7 +201,7 @@ impl Backend for MockBackend {
         funds: &[(u64, Self::Commitment, Self::FundProof)],
         transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
-        _rng: &mut impl CryptoRngCore,
+        _rng: &mut impl CryptoRng,
     ) -> bool {
         funds
             .iter()
@@ -283,27 +283,28 @@ mod tests {
 
     struct Rng(u64);
 
-    impl rand_core::RngCore for Rng {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
+    impl rand_core::TryRng for Rng {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.try_next_u64()? as u32)
         }
 
-        fn next_u64(&mut self) -> u64 {
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            self.0
+            Ok(self.0)
         }
 
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
-            rand_core::impls::fill_bytes_via_next(self, dest);
-        }
-
-        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-            self.fill_bytes(dest);
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dest.chunks_mut(8) {
+                let bytes = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
             Ok(())
         }
     }
 
-    impl rand_core::CryptoRng for Rng {}
+    impl rand_core::TryCryptoRng for Rng {}
 
     #[test]
     fn transfer_pipeline_verifies() {

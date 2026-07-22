@@ -184,12 +184,13 @@ mod payments_backend {
         zkpari::payments::{PaymentCommitment, ZkPariBackend},
     };
     use ark_bn254::Bn254;
-    use ark_std::rand::{rngs::StdRng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+    use rand_core::SeedableRng;
 
     type Payments = ZkPariBackend<Bn254>;
 
-    fn rng() -> StdRng {
-        StdRng::seed_from_u64(0x1234_5678)
+    fn rng() -> ChaCha8Rng {
+        ChaCha8Rng::seed_from_u64(0x1234_5678)
     }
 
     fn params() -> <Payments as Backend>::Params {
@@ -319,7 +320,7 @@ mod payments_backend {
             funds: &[(u64, B::Commitment, B::FundProof)],
             transfers: &[(B::Commitment, B::Commitment, B::TransferProof)],
             burns: &[(B::Commitment, u64, B::BurnProof)],
-            rng: &mut impl rand_core::CryptoRngCore,
+            rng: &mut impl rand_core::CryptoRng,
         ) -> bool {
             B::batch_verify_with_strategy(strategy, params, funds, transfers, burns, rng)
         }
@@ -350,13 +351,14 @@ mod payments_backend {
             trapdoor: &B::Trapdoor,
             input_commitment: &B::Commitment,
             amount_commitment: &B::Commitment,
-            rng: &mut impl rand_core::CryptoRngCore,
+            rng: &mut impl rand_core::CryptoRng,
         ) -> B::TransferProof {
             B::simulated_transfer_proof(params, trapdoor, input_commitment, amount_commitment, rng)
         }
 
         let mut rng = rng();
-        let (range_pk, range_vk, trapdoor) = ZkPari::<Bn254>::keygen_with_trapdoor(&mut rng);
+        let (range_pk, range_vk, trapdoor) =
+            ZkPari::<Bn254>::keygen_with_trapdoor(&mut crate::zkpari::rng::ArkRng(&mut rng));
         let params = crate::zkpari::payments::PaymentsParams { range_pk, range_vk };
         let (commitment, _opening, _fund_proof) = Payments::fund(&params, 100, &mut rng);
         let (amount_commitment, _amount_opening, _transfer_proof) =

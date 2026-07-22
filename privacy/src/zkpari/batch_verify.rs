@@ -65,7 +65,7 @@ impl<E: Pairing> ZkPari<E> {
     /// Batch verification using a caller-provided parallel execution strategy.
     ///
     /// The proof list is split into roughly equal contiguous chunks based on
-    /// [`Strategy::parallelism_hint`]. Each worker accumulates one chunk, the
+    /// the strategy's manual parallelism. Each worker accumulates one chunk, the
     /// partial accumulators are reduced, and the final pairing is performed once.
     pub fn batch_verify_with_strategy(
         strategy: &impl Strategy,
@@ -85,7 +85,7 @@ impl<E: Pairing> ZkPari<E> {
             return Self::batch_verify_inner(proofs_and_inputs, vk, rng);
         }
 
-        let chunks = strategy.parallelism_hint().max(1).min(n);
+        let chunks = strategy.manual().parallelism().max(1).min(n);
         if chunks == 1 {
             return Self::batch_verify_inner(proofs_and_inputs, vk, rng);
         }

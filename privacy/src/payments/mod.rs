@@ -8,7 +8,7 @@
 
 use commonware_parallel::Strategy;
 use core::ops::{Add, Sub};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 /// A homomorphic commitment to a balance value.
 pub trait Commitment:
@@ -73,7 +73,7 @@ pub trait Backend: Sized {
     fn fund(
         params: &Self::Params,
         value: u64,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> (Self::Commitment, Self::Opening, Self::FundProof);
 
     /// mechanism to move funds between private accounts.
@@ -89,7 +89,7 @@ pub trait Backend: Sized {
         input_commitment: &Self::Commitment,
         input_opening: &Self::Opening,
         amount: u64,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> (Self::Commitment, Self::Opening, Self::TransferProof);
 
     /// simulate a transfer proof using trapdoor material
@@ -101,7 +101,7 @@ pub trait Backend: Sized {
         trapdoor: &Self::Trapdoor,
         input_commitment: &Self::Commitment,
         amount_commitment: &Self::Commitment,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> Self::TransferProof;
 
     /// mechanism to move funds from a private account into a public account
@@ -116,7 +116,7 @@ pub trait Backend: Sized {
         commitment: &Self::Commitment,
         opening: &Self::Opening,
         amount: u64,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> Self::BurnProof;
 
     /// batch verify a set of funds, transfers, and burns,
@@ -126,7 +126,7 @@ pub trait Backend: Sized {
         funds: &[(u64, Self::Commitment, Self::FundProof)],
         transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> bool;
 
     /// batch verify using a caller-provided parallel execution strategy
@@ -136,7 +136,7 @@ pub trait Backend: Sized {
         funds: &[(u64, Self::Commitment, Self::FundProof)],
         transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
     ) -> bool {
         let _ = strategy;
         Self::batch_verify(params, funds, transfers, burns, rng)
