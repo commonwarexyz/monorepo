@@ -4,7 +4,7 @@
 //! See [crate::iouring] for the full request flow and liveness discussion.
 
 mod handle;
-pub(crate) use handle::{AcceptTicket, Affine, Handle, Shared};
+pub(crate) use handle::{AcceptTicket, Affine, Handle, Ops};
 mod request;
 pub(crate) use request::RawSocketAddr;
 mod timeout;
@@ -65,7 +65,7 @@ impl Metrics {
 pub(crate) struct IoUringLoop {
     cfg: RingConfig,
     metrics: Arc<Metrics>,
-    /// Shared op state, also reachable from the front-ends' op futures.
+    /// Ops op state, also reachable from the front-ends' op futures.
     handle: Handle,
     timeout_wheel: TimeoutWheel,
     idle_spinner: Spinner,
@@ -104,13 +104,12 @@ impl FillResult {
     /// Otherwise waiter saturation is reported so the park path knows
     /// completions must free capacity before admissions resume.
     #[inline]
-    fn from_fill_state(shared: &Shared, submission_queue: &SubmissionQueue<'_>) -> Self {
-        if submission_queue.is_full()
-            && (!shared.staged.is_empty() || !shared.pending_cancels.is_empty())
+    fn from_fill_state(ops: &Ops, submission_queue: &SubmissionQueue<'_>) -> Self {
+        if submission_queue.is_full() && (!ops.staged.is_empty() || !ops.pending_cancels.is_empty())
         {
             return Self::AtSubmissionQueueCapacity;
         }
-        if shared.waiters.is_full() {
+        if ops.waiters.is_full() {
             Self::AtWaiterCapacity
         } else if submission_queue.is_full() {
             Self::AtSubmissionQueueCapacity
@@ -188,8 +187,8 @@ impl IoUringLoop {
     ///
     /// Called whenever a slot frees. Woken futures re-register if they lose
     /// the admission race.
-    fn notify_capacity(&mut self, shared: &mut Shared) {
-        self.pending_wakers.append(&mut shared.capacity);
+    fn notify_capacity(&mut self, ops: &mut Ops) {
+        self.pending_wakers.append(&mut ops.capacity);
     }
 
     /// Make progress on the ring without blocking.
@@ -202,25 +201,23 @@ impl IoUringLoop {
     pub(crate) fn turn(&mut self, ring: &mut IoUring) {
         let handle = self.handle.clone();
         loop {
-            let (fill_result, kernel_idle) = handle.with(|shared| {
+            let (fill_result, kernel_idle) = handle.with(|ops| {
                 // Process available completions.
                 for cqe in ring.completion() {
-                    self.handle_cqe(shared, cqe);
+                    self.handle_cqe(ops, cqe);
                 }
 
                 // Process due deadlines before staging new submissions so timed-out
                 // requests move to cancellation promptly and free capacity sooner.
-                self.advance_timeouts(shared);
+                self.advance_timeouts(ops);
 
                 // Stage as much admitted work as capacity allows.
-                let fill_result = self.fill_submission_queue(shared, ring);
+                let fill_result = self.fill_submission_queue(ops, ring);
 
                 // Update pending operations metric.
-                self.metrics
-                    .pending_operations
-                    .set(shared.waiters.len() as _);
+                self.metrics.pending_operations.set(ops.waiters.len() as _);
 
-                (fill_result, shared.waiters.pending() == 0)
+                (fill_result, ops.waiters.pending() == 0)
             });
 
             // Wake tasks whose results were parked, outside the state borrow.
@@ -273,12 +270,12 @@ impl IoUringLoop {
             (wheel, limit) => wheel.or(limit),
         };
 
-        let (fully_idle, waiters_full) = self.handle.with(|shared| {
+        let (fully_idle, waiters_full) = self.handle.with(|ops| {
             (
-                shared.waiters.pending() == 0
-                    && shared.staged.is_empty()
-                    && shared.pending_cancels.is_empty(),
-                shared.waiters.is_full(),
+                ops.waiters.pending() == 0
+                    && ops.staged.is_empty()
+                    && ops.pending_cancels.is_empty(),
+                ops.waiters.is_full(),
             )
         });
 
@@ -324,15 +321,15 @@ impl IoUringLoop {
     /// follow-up SQE.
     fn stage_request(
         &mut self,
-        shared: &mut Shared,
+        ops: &mut Ops,
         waiter_id: WaiterId,
         submission_queue: &mut SubmissionQueue<'_>,
     ) {
-        match shared.waiters.stage(waiter_id) {
+        match ops.waiters.stage(waiter_id) {
             StageOutcome::Timeout { waker, freed } => {
                 self.pending_wakers.extend(waker);
                 if freed {
-                    self.notify_capacity(shared);
+                    self.notify_capacity(ops);
                 }
             }
             StageOutcome::Orphaned { target_tick } => {
@@ -342,7 +339,7 @@ impl IoUringLoop {
                 if let Some(tick) = target_tick {
                     self.timeout_wheel.remove(tick);
                 }
-                self.notify_capacity(shared);
+                self.notify_capacity(ops);
             }
             StageOutcome::Submit(sqe) => {
                 // SAFETY:
@@ -368,17 +365,13 @@ impl IoUringLoop {
     /// Stops when all queued requests are staged or the SQ reaches capacity.
     /// Returns `true` when SQ capacity is hit and at least one staged request
     /// remains queued.
-    fn stage_staged(
-        &mut self,
-        shared: &mut Shared,
-        submission_queue: &mut SubmissionQueue<'_>,
-    ) -> bool {
+    fn stage_staged(&mut self, ops: &mut Ops, submission_queue: &mut SubmissionQueue<'_>) -> bool {
         while !submission_queue.is_full() {
-            let Some(waiter_id) = shared.staged.pop_front() else {
+            let Some(waiter_id) = ops.staged.pop_front() else {
                 return false;
             };
 
-            if let Some(deadline) = shared.waiters.deadline_to_schedule(waiter_id) {
+            if let Some(deadline) = ops.waiters.deadline_to_schedule(waiter_id) {
                 // Avoid per-request clock reads when no deadlines are active.
                 // When the first deadline arrives after an idle period, align
                 // wheel time once before converting deadlines to ticks.
@@ -387,19 +380,19 @@ impl IoUringLoop {
                 }
                 match self.timeout_wheel.target_tick(deadline) {
                     Some(tick) => {
-                        shared.waiters.set_target_tick(waiter_id, tick);
+                        ops.waiters.set_target_tick(waiter_id, tick);
                         self.timeout_wheel.schedule(waiter_id, tick);
                     }
                     // The deadline already expired: transition to cancellation
                     // so staging below completes the request with timeout.
-                    None => assert!(shared.waiters.cancel(waiter_id)),
+                    None => assert!(ops.waiters.cancel(waiter_id)),
                 }
             }
 
-            self.stage_request(shared, waiter_id, submission_queue);
+            self.stage_request(ops, waiter_id, submission_queue);
         }
 
-        !shared.staged.is_empty()
+        !ops.staged.is_empty()
     }
 
     /// Stage pending submission work into the SQ.
@@ -408,7 +401,7 @@ impl IoUringLoop {
     /// stage admitted requests.
     ///
     /// Returns why staging stopped.
-    fn fill_submission_queue(&mut self, shared: &mut Shared, ring: &mut IoUring) -> FillResult {
+    fn fill_submission_queue(&mut self, ops: &mut Ops, ring: &mut IoUring) -> FillResult {
         let mut submission_queue = ring.submission();
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
@@ -434,16 +427,16 @@ impl IoUringLoop {
         }
 
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
-        if self.stage_cancellations(shared, &mut submission_queue) {
-            return FillResult::from_fill_state(shared, &submission_queue);
+        if self.stage_cancellations(ops, &mut submission_queue) {
+            return FillResult::from_fill_state(ops, &submission_queue);
         }
 
         // Stage admitted requests in FIFO order.
-        if self.stage_staged(shared, &mut submission_queue) {
-            return FillResult::from_fill_state(shared, &submission_queue);
+        if self.stage_staged(ops, &mut submission_queue) {
+            return FillResult::from_fill_state(ops, &submission_queue);
         }
 
-        FillResult::from_fill_state(shared, &submission_queue)
+        FillResult::from_fill_state(ops, &submission_queue)
     }
 
     /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.
@@ -453,11 +446,11 @@ impl IoUringLoop {
     /// cancellation remains queued.
     fn stage_cancellations(
         &mut self,
-        shared: &mut Shared,
+        ops: &mut Ops,
         submission_queue: &mut SubmissionQueue<'_>,
     ) -> bool {
         while !submission_queue.is_full() {
-            let Some(waiter_id) = shared.pending_cancels.pop_front() else {
+            let Some(waiter_id) = ops.pending_cancels.pop_front() else {
                 return false;
             };
 
@@ -465,7 +458,7 @@ impl IoUringLoop {
             // have gone stale before we got around to staging it. If the
             // original op CQE already retired the outstanding SQE, there is
             // nothing left for the kernel to cancel.
-            if !shared.waiters.is_in_flight(waiter_id) {
+            if !ops.waiters.is_in_flight(waiter_id) {
                 continue;
             }
 
@@ -481,14 +474,14 @@ impl IoUringLoop {
             }
         }
 
-        !shared.pending_cancels.is_empty()
+        !ops.pending_cancels.is_empty()
     }
 
     /// Handle a single CQE from the ring.
     ///
     /// Internal wake CQEs are handled in-place. All other CQEs are forwarded to
     /// the request state machine for progress evaluation.
-    fn handle_cqe(&mut self, shared: &mut Shared, cqe: CqueueEntry) {
+    fn handle_cqe(&mut self, ops: &mut Ops, cqe: CqueueEntry) {
         let user_data = cqe.user_data();
         if user_data == WAKE_USER_DATA {
             assert!(
@@ -507,14 +500,14 @@ impl IoUringLoop {
             return;
         }
 
-        match shared.waiters.on_completion(user_data, cqe.result()) {
+        match ops.waiters.on_completion(user_data, cqe.result()) {
             CompletionOutcome::Cancel => {
                 // Async-cancel CQEs are handled entirely inside `Waiters` they do
                 // not directly complete or requeue a logical request here.
             }
             CompletionOutcome::Requeue(waiter_id) => {
                 // Request needs another SQE. Add it back to the staged queue.
-                shared.staged.push_back(waiter_id);
+                ops.staged.push_back(waiter_id);
             }
             CompletionOutcome::Complete {
                 waker,
@@ -526,7 +519,7 @@ impl IoUringLoop {
                 }
                 self.pending_wakers.extend(waker);
                 if freed {
-                    self.notify_capacity(shared);
+                    self.notify_capacity(ops);
                 }
             }
         }
@@ -536,12 +529,12 @@ impl IoUringLoop {
     ///
     /// This is a no-op when no active deadlines exist. Expired stale wheel
     /// entries are ignored when waiter generation no longer matches.
-    fn advance_timeouts(&mut self, shared: &mut Shared) {
+    fn advance_timeouts(&mut self, ops: &mut Ops) {
         // Release deadline accounting for ops whose tickets were dropped: the
         // wheel is loop-owned, so drop paths queue removals instead. Without
         // this the wheel would report the stale tick as the next deadline
         // forever once it elapsed.
-        for tick in shared.released_deadlines.drain(..) {
+        for tick in ops.released_deadlines.drain(..) {
             self.timeout_wheel.remove(tick);
         }
 
@@ -560,14 +553,14 @@ impl IoUringLoop {
         for entry in expired {
             // `false` means stale timeout entry (slot reused) or waiter already
             // transitioned to cancel-requested/completed.
-            if shared.waiters.cancel(entry.waiter_id) {
+            if ops.waiters.cancel(entry.waiter_id) {
                 // Once cancel is requested, this waiter is no longer deadline-active.
                 self.timeout_wheel.remove(entry.target_tick);
                 // Only timed-out waiters with an outstanding op SQE need
                 // AsyncCancel. Waiters parked in the staged queue have no
                 // kernel op to cancel and will time out locally when restaged.
-                if shared.waiters.is_in_flight(entry.waiter_id) {
-                    shared.pending_cancels.push_back(entry.waiter_id);
+                if ops.waiters.is_in_flight(entry.waiter_id) {
+                    ops.pending_cancels.push_back(entry.waiter_id);
                 }
             }
         }
@@ -578,13 +571,13 @@ impl IoUringLoop {
     /// Cancelled waiters leave the timeout wheel, in-flight waiters get an
     /// async-cancel SQE queued, and waiters parked in the staged queue retire
     /// locally when restaged.
-    fn cancel_all(&mut self, shared: &mut Shared) {
-        for (waiter_id, target_tick, in_flight) in shared.waiters.cancel_active() {
+    fn cancel_all(&mut self, ops: &mut Ops) {
+        for (waiter_id, target_tick, in_flight) in ops.waiters.cancel_active() {
             if let Some(tick) = target_tick {
                 self.timeout_wheel.remove(tick);
             }
             if in_flight {
-                shared.pending_cancels.push_back(waiter_id);
+                ops.pending_cancels.push_back(waiter_id);
             }
         }
     }
@@ -610,11 +603,11 @@ impl IoUringLoop {
         loop {
             // Always drain CQEs first, even after a timed wait: completions can
             // race with timeout expiry and still be pending in the queue.
-            let pending = handle.with(|shared| {
+            let pending = handle.with(|ops| {
                 for cqe in ring.completion() {
-                    self.handle_cqe(shared, cqe);
+                    self.handle_cqe(ops, cqe);
                 }
-                shared.waiters.pending()
+                ops.waiters.pending()
             });
             self.flush_wakers();
 
@@ -629,21 +622,21 @@ impl IoUringLoop {
             // request would free buffers the kernel may still write into.
             if remaining.is_some_and(|t| t.is_zero()) {
                 remaining = None;
-                handle.with(|shared| self.cancel_all(shared));
+                handle.with(|ops| self.cancel_all(ops));
             }
 
             // Keep userspace deadline processing alive during shutdown so
             // in-flight timed operations preserve their ETIMEDOUT semantics,
             // and continue staging requeued requests so partially-complete or
             // retrying requests can keep making progress.
-            let pending = handle.with(|shared| {
-                self.advance_timeouts(shared);
+            let pending = handle.with(|ops| {
+                self.advance_timeouts(ops);
                 {
                     let mut submission_queue = ring.submission();
-                    self.stage_cancellations(shared, &mut submission_queue);
-                    self.stage_staged(shared, &mut submission_queue);
+                    self.stage_cancellations(ops, &mut submission_queue);
+                    self.stage_staged(ops, &mut submission_queue);
                 }
-                shared.waiters.pending()
+                ops.waiters.pending()
             });
             self.flush_wakers();
 
@@ -672,10 +665,8 @@ impl IoUringLoop {
         }
 
         let handle = self.handle.clone();
-        handle.with(|shared| {
-            self.metrics
-                .pending_operations
-                .set(shared.waiters.len() as _);
+        handle.with(|ops| {
+            self.metrics.pending_operations.set(ops.waiters.len() as _);
         });
     }
 
@@ -823,7 +814,7 @@ impl Driver {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! Shared single-threaded harness for tests that drive the loop
+    //! Ops single-threaded harness for tests that drive the loop
     //! directly (loop, network, and storage unit tests).
 
     use super::*;
@@ -914,12 +905,12 @@ pub(crate) mod testing {
 
         /// Number of tracked waiters (including parked results).
         pub(crate) fn tracked(&self) -> usize {
-            self.handle.with(|shared| shared.waiters.len())
+            self.handle.with(|ops| ops.waiters.len())
         }
 
         /// Number of waiters still progressing.
         pub(crate) fn pending(&self) -> usize {
-            self.handle.with(|shared| shared.waiters.pending())
+            self.handle.with(|ops| ops.waiters.pending())
         }
     }
 
@@ -1625,15 +1616,15 @@ mod tests {
         // (also true) waiter-capacity pressure.
         let driver_state = harness.handle.clone();
         let driver = harness.driver();
-        let fill = driver_state
-            .with(|shared| driver.inner.fill_submission_queue(shared, &mut driver.ring));
+        let fill =
+            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
         assert_eq!(fill, FillResult::AtSubmissionQueueCapacity);
 
         // After flushing, the second op stages and nothing remains queued, so
         // the full slab now reports waiter pressure.
         driver.inner.submit(&mut driver.ring).unwrap();
-        let fill = driver_state
-            .with(|shared| driver.inner.fill_submission_queue(shared, &mut driver.ring));
+        let fill =
+            driver_state.with(|ops| driver.inner.fill_submission_queue(ops, &mut driver.ring));
         assert_eq!(fill, FillResult::AtWaiterCapacity);
 
         drop(recv_a);

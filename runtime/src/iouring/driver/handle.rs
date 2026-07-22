@@ -86,8 +86,8 @@ impl<T> Affine<T> {
     }
 }
 
-/// Op state shared between futures and the event loop.
-pub(crate) struct Shared {
+/// The in-flight op table shared between futures and the event loop.
+pub(crate) struct Ops {
     /// Slot table tracking every admitted logical request. Slots own all
     /// operation resources (buffers, FDs) for the request lifetime.
     pub(super) waiters: Waiters,
@@ -112,7 +112,7 @@ pub(crate) struct Shared {
 /// All access goes through the affinity-checked [Affine] cell.
 #[derive(Clone)]
 pub(crate) struct Handle {
-    shared: Arc<Affine<RefCell<Shared>>>,
+    ops: Arc<Affine<RefCell<Ops>>>,
 }
 
 impl Handle {
@@ -122,7 +122,7 @@ impl Handle {
     /// The calling thread becomes the owning (runtime) thread.
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            shared: Arc::new(Affine::new(RefCell::new(Shared {
+            ops: Arc::new(Affine::new(RefCell::new(Ops {
                 waiters: Waiters::new(capacity),
                 staged: VecDeque::with_capacity(capacity),
                 pending_cancels: VecDeque::with_capacity(capacity),
@@ -137,22 +137,22 @@ impl Handle {
     ///
     /// The borrow is a leaf section: callers must not invoke wakers or user
     /// code inside `f`.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Shared) -> R) -> R {
-        self.shared.with(|cell| f(&mut cell.borrow_mut()))
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> R {
+        self.ops.with(|cell| f(&mut cell.borrow_mut()))
     }
 
     /// Access the shared op state if called on the runtime thread.
-    fn try_with<R>(&self, f: impl FnOnce(&mut Shared) -> R) -> Option<R> {
-        self.shared.try_with(|cell| f(&mut cell.borrow_mut()))
+    fn try_with<R>(&self, f: impl FnOnce(&mut Ops) -> R) -> Option<R> {
+        self.ops.try_with(|cell| f(&mut cell.borrow_mut()))
     }
 
     /// Close the op state: subsequent admissions fail with their
     /// kind-specific error. Returns the capacity waiters so the caller can wake them
     /// outside the borrow.
     pub(crate) fn close(&self) -> Vec<Waker> {
-        self.with(|shared| {
-            shared.closed = true;
-            std::mem::take(&mut shared.capacity)
+        self.with(|ops| {
+            ops.closed = true;
+            std::mem::take(&mut ops.capacity)
         })
     }
 
@@ -334,17 +334,17 @@ fn poll_admission(
     request: &mut Option<Request>,
     cx: &mut Context<'_>,
 ) -> Poll<Result<WaiterId, Output>> {
-    let outcome = handle.with(|shared| {
-        if shared.closed {
+    let outcome = handle.with(|ops| {
+        if ops.closed {
             return Admission::Closed;
         }
-        if shared.waiters.is_full() {
-            shared.capacity.push(cx.waker().clone());
+        if ops.waiters.is_full() {
+            ops.capacity.push(cx.waker().clone());
             return Admission::Full;
         }
         let request = request.take().expect("request consumed before admission");
-        let id = shared.waiters.insert(request, cx.waker().clone());
-        shared.staged.push_back(id);
+        let id = ops.waiters.insert(request, cx.waker().clone());
+        ops.staged.push_back(id);
         Admission::Admitted(id)
     });
     match outcome {
@@ -362,10 +362,10 @@ fn poll_admission(
 /// Taking a result frees a slot, so capacity waiters are released (outside
 /// the state borrow). A pending poll refreshes the stored task waker.
 fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<Output> {
-    let (output, wakers) = handle.with(|shared| {
-        let output = shared.waiters.poll_take(id, cx.waker());
+    let (output, wakers) = handle.with(|ops| {
+        let output = ops.waiters.poll_take(id, cx.waker());
         let wakers = if output.is_some() {
-            std::mem::take(&mut shared.capacity)
+            std::mem::take(&mut ops.capacity)
         } else {
             Vec::new()
         };
@@ -384,20 +384,20 @@ fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<
 /// only by moving an already-polled op future to a raw thread, which nothing
 /// in the workspace does.
 fn orphan(handle: &Handle, id: WaiterId) {
-    let wakers = handle.try_with(|shared| {
-        match shared.waiters.mark_orphaned(id) {
+    let wakers = handle.try_with(|ops| {
+        match ops.waiters.mark_orphaned(id) {
             // A parked result was dropped, freeing a slot.
-            DropOutcome::Freed => std::mem::take(&mut shared.capacity),
+            DropOutcome::Freed => std::mem::take(&mut ops.capacity),
             DropOutcome::Cancel {
                 needs_sqe,
                 target_tick,
             } => {
                 if needs_sqe {
-                    shared.pending_cancels.push_back(id);
+                    ops.pending_cancels.push_back(id);
                 }
                 // Release deadline accounting for the transition out of
                 // active timeout tracking.
-                shared.released_deadlines.extend(target_tick);
+                ops.released_deadlines.extend(target_tick);
                 Vec::new()
             }
             DropOutcome::Detached => Vec::new(),

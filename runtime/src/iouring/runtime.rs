@@ -286,7 +286,7 @@ impl Default for Config {
 }
 
 /// State shared by every worker thread of one runtime instance.
-struct Globals {
+struct Shared {
     /// Configuration template used to construct workers.
     cfg: Config,
     registry: Registry,
@@ -301,7 +301,7 @@ struct Globals {
 
 /// Runtime state shared by every [Context] on one worker thread.
 pub struct Executor {
-    globals: Arc<Globals>,
+    shared: Arc<Shared>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
 }
@@ -368,18 +368,18 @@ impl Worker {
     /// worker metrics aggregate into the runtime-wide families.
     ///
     /// Panics if the ring cannot be created.
-    fn new(globals: Arc<Globals>) -> Self {
-        let mut registry = globals.registry.clone();
+    fn new(shared: Arc<Shared>) -> Self {
+        let mut registry = shared.registry.clone();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
         // The worker thread creates the ring and is its only submitter, so
         // single issuer mode is always sound here.
-        let mut ring_cfg = globals.cfg.ring.clone();
+        let mut ring_cfg = shared.cfg.ring.clone();
         ring_cfg.single_issuer = true;
         ring_cfg.max_request_timeout = ring_cfg
             .max_request_timeout
-            .max(globals.cfg.network_cfg.read_write_timeout)
-            .max(globals.cfg.network_cfg.connect_timeout);
+            .max(shared.cfg.network_cfg.read_write_timeout)
+            .max(shared.cfg.network_cfg.connect_timeout);
         let (driver, handle) = Driver::new(ring_cfg, &mut runtime_registry.sub_registry("iouring"))
             .unwrap_or_else(|err| {
                 panic!(
@@ -391,17 +391,17 @@ impl Worker {
         // Initialize storage and network against this worker's driver.
         let storage = MeteredStorage::new(
             IoUringStorage::new(
-                globals.cfg.storage_directory.clone(),
+                shared.cfg.storage_directory.clone(),
                 handle.clone(),
-                globals.storage_buffer_pool.clone(),
+                shared.storage_buffer_pool.clone(),
             ),
             &mut runtime_registry,
         );
         let network = MeteredNetwork::new(
             IoUringNetwork::new(
-                globals.cfg.network_cfg.clone(),
+                shared.cfg.network_cfg.clone(),
                 handle,
-                globals.network_buffer_pool.clone(),
+                shared.network_buffer_pool.clone(),
             ),
             &mut runtime_registry,
         );
@@ -409,7 +409,7 @@ impl Worker {
         let executor = Arc::new(Executor {
             tasks: Arc::new(Tasks::new(driver.waker())),
             sleeping: Mutex::new(BinaryHeap::new()),
-            globals,
+            shared,
         });
         Self {
             executor,
@@ -427,8 +427,8 @@ impl Worker {
             executor: Arc::downgrade(&self.executor),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            network_buffer_pool: self.executor.globals.network_buffer_pool.clone(),
-            storage_buffer_pool: self.executor.globals.storage_buffer_pool.clone(),
+            network_buffer_pool: self.executor.shared.network_buffer_pool.clone(),
+            storage_buffer_pool: self.executor.shared.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
         }
@@ -619,7 +619,7 @@ impl crate::Runner for Runner {
 
         // Initialize the state shared by every worker and run the root task's
         // worker on this thread.
-        let globals = Arc::new(Globals {
+        let shared = Arc::new(Shared {
             cfg: self.cfg,
             registry,
             metrics,
@@ -629,7 +629,7 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             workers: Mutex::new(Vec::new()),
         });
-        let worker = Worker::new(Arc::clone(&globals));
+        let worker = Worker::new(Arc::clone(&shared));
 
         // Collect process metrics.
         //
@@ -646,8 +646,8 @@ impl crate::Runner for Runner {
 
         // Get metrics
         let label = Label::root();
-        globals.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = globals.metrics.tasks_running.get_or_create(&label).clone();
+        shared.metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = shared.metrics.tasks_running.get_or_create(&label).clone();
 
         // Build the root context and drive the root task on this worker.
         let root_tree = Tree::root();
@@ -661,7 +661,7 @@ impl crate::Runner for Runner {
         // has been joined.
         let mut worker_panic = None;
         loop {
-            let workers = take(&mut *globals.workers.lock());
+            let workers = take(&mut *shared.workers.lock());
             if workers.is_empty() {
                 break;
             }
@@ -999,7 +999,7 @@ impl Context {
 
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> Arc<Metrics> {
-        self.executor().globals.metrics.clone()
+        self.executor().shared.metrics.clone()
     }
 
     /// Run `f` as the root task of a worker on its own thread.
@@ -1029,9 +1029,9 @@ impl Context {
             tree,
             ..
         } = self;
-        let globals = {
+        let shared = {
             let executor = executor.upgrade().expect("executor already dropped");
-            Arc::clone(&executor.globals)
+            Arc::clone(&executor.shared)
         };
 
         let (sender, receiver) = oneshot::channel();
@@ -1042,15 +1042,15 @@ impl Context {
         }
 
         // Run the worker until the task completes or teardown aborts it.
-        let thread_globals = Arc::clone(&globals);
-        let worker = utils::thread::spawn(globals.cfg.thread_stack_size, move || {
-            let worker = Worker::new(Arc::clone(&thread_globals));
+        let thread_shared = Arc::clone(&shared);
+        let worker = utils::thread::spawn(shared.cfg.thread_stack_size, move || {
+            let worker = Worker::new(Arc::clone(&thread_shared));
             let context = worker.context(name, attributes, Arc::clone(&tree));
 
             // Wrap the future with panic catching, abort support, and
             // cleanup, mirroring the wrapper [Handle::init] builds for
             // executor tasks.
-            let panicker = thread_globals.panicker.clone();
+            let panicker = thread_shared.panicker.clone();
             let wrapped = async move {
                 let result = Abortable::new(
                     AssertUnwindSafe(f(context)).catch_unwind(),
@@ -1071,7 +1071,7 @@ impl Context {
             };
             worker.run(wrapped, tree);
         });
-        globals.workers.lock().push(worker);
+        shared.workers.lock().push(worker);
 
         handle
     }
@@ -1121,7 +1121,7 @@ impl crate::Spawner for Context {
         let (task, handle) = Handle::init(
             future,
             metric.clone(),
-            executor.globals.panicker.clone(),
+            executor.shared.panicker.clone(),
             Arc::clone(&parent),
         );
 
@@ -1141,7 +1141,7 @@ impl crate::Spawner for Context {
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
             let executor = self.executor();
-            let mut shutdown = executor.globals.shutdown.lock();
+            let mut shutdown = executor.shared.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -1160,7 +1160,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor().globals.shutdown.lock().stopped()
+        self.executor().shared.shutdown.lock().stopped()
     }
 }
 
@@ -1172,7 +1172,7 @@ impl crate::Spawner for Context {
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let stack_size = self.executor().globals.cfg.thread_stack_size;
+        let stack_size = self.executor().shared.cfg.thread_stack_size;
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
             .spawn_handler(move |thread| {
@@ -1229,7 +1229,7 @@ impl crate::Metrics for Context {
         let name = name.into();
         let help = help.into();
         let metric = Arc::new(metric);
-        self.executor().globals.registry.register(
+        self.executor().shared.registry.register(
             prefixed_name(&self.name, &name),
             help,
             self.attributes.clone(),
@@ -1238,7 +1238,7 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        self.executor().globals.registry.encode()
+        self.executor().shared.registry.encode()
     }
 }
 
@@ -1369,7 +1369,7 @@ impl crate::Resolver for Context {
         // DNS resolution.
         let host_port = format!("{host}:0");
         let (tx, rx) = oneshot::channel();
-        utils::thread::spawn(self.executor().globals.cfg.thread_stack_size, move || {
+        utils::thread::spawn(self.executor().shared.cfg.thread_stack_size, move || {
             let result = std::net::ToSocketAddrs::to_socket_addrs(host_port.as_str())
                 .map(|addrs| addrs.map(|addr| addr.ip()).collect::<Vec<_>>())
                 .map_err(|e| Error::ResolveFailed(e.to_string()));
