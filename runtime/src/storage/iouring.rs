@@ -37,7 +37,7 @@ use std::{
     sync::Arc,
 };
 
-/// Reads a blob's leading bytes and resolves its header (see [super::resolve_header]).
+/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
 fn resolve_header(
     file: &mut File,
     raw_len: u64,
@@ -49,7 +49,7 @@ fn resolve_header(
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::resolve_header(&raw, raw_len, versions, partition, name)
+    super::header::resolve(&raw, raw_len, versions, partition, name)
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -429,7 +429,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
-        storage::{BlobHeaderLayout, tests::run_storage_tests},
+        storage::{header::Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
         utils::thread,
     };
@@ -577,14 +577,11 @@ mod tests {
 
         // Verify raw file layout
         let raw_content = std::fs::read(&file_path).unwrap();
-        assert_eq!(
-            &raw_content[..Header::MAGIC_LENGTH],
-            &BlobHeaderLayout::V1.magic()
-        );
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V1.magic());
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[4..6],
-            &BlobHeaderLayout::V1.runtime_version().to_be_bytes()
+            &Layout::V1.runtime_version().to_be_bytes()
         );
         // Data should start at the data offset
         assert_eq!(&raw_content[data_offset as usize..], data);
@@ -702,7 +699,7 @@ mod tests {
                 Header::V1_DATA_OFFSET as usize,
                 "recovered blob should be header-only"
             );
-            assert_eq!(&raw[..Header::MAGIC_LENGTH], &BlobHeaderLayout::V1.magic());
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V1.magic());
             storage
                 .open("partition", name.as_bytes())
                 .await
@@ -1242,7 +1239,7 @@ mod tests {
         let region = std::fs::read(&path).unwrap();
 
         // Simulate a torn creation: a prefix of the canonical header region (the full
-        // state enumeration lives in the Header::interrupted_creation unit tables).
+        // state enumeration lives in the Header::interrupted_v1_creation unit tables).
         let states = [region[..10].to_vec()];
         for state in states {
             std::fs::write(&path, &state).unwrap();
@@ -1276,7 +1273,7 @@ mod tests {
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let path = partition_dir.join(hex(b"dirty_padding"));
-        let mut raw = crate::storage::tests::v1_blob_bytes(0, b"payload");
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, b"payload");
         raw[Header::PARSE_LEN] = 0xFF;
         std::fs::write(&path, raw).unwrap();
 

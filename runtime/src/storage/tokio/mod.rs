@@ -67,7 +67,7 @@ impl Storage {
         }
     }
 
-    /// Reads a blob's leading bytes and resolves its header (see [super::resolve_header]).
+    /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
     async fn resolve_header(
         file: &mut fs::File,
         len: u64,
@@ -79,7 +79,7 @@ impl Storage {
         file.read_exact(&mut raw)
             .await
             .map_err(|_| Error::ReadFailed)?;
-        super::resolve_header(&raw, len, versions, partition, name)
+        super::header::resolve(&raw, len, versions, partition, name)
     }
 }
 
@@ -265,7 +265,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{BlobHeaderLayout, tests::run_storage_tests},
+        storage::{header::Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
@@ -351,14 +351,11 @@ mod tests {
 
         // Verify raw file layout
         let raw_content = std::fs::read(&file_path).unwrap();
-        assert_eq!(
-            &raw_content[..Header::MAGIC_LENGTH],
-            &BlobHeaderLayout::V1.magic()
-        );
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V1.magic());
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[4..6],
-            &BlobHeaderLayout::V1.runtime_version().to_be_bytes()
+            &Layout::V1.runtime_version().to_be_bytes()
         );
         // Data should start at the data offset
         assert_eq!(&raw_content[data_offset as usize..], data);
@@ -496,7 +493,7 @@ mod tests {
         let region = std::fs::read(&path).unwrap();
 
         // Simulate torn creations (the full state enumeration lives in the
-        // Header::interrupted_creation unit tables): a file truncated mid-CRC and the same
+        // Header::interrupted_v1_creation unit tables): a file truncated mid-CRC and the same
         // prefix at a persisted full length.
         let mut torn_content = vec![0u8; region.len()];
         torn_content[..10].copy_from_slice(&region[..10]);
@@ -621,7 +618,7 @@ mod tests {
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let path = partition_dir.join(hex(b"dirty_padding"));
-        let mut raw = crate::storage::tests::v1_blob_bytes(0, b"payload");
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, b"payload");
         raw[Header::PARSE_LEN] = 0xFF;
         std::fs::write(&path, raw).unwrap();
 
@@ -651,7 +648,11 @@ mod tests {
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let file_path = partition_dir.join(hex(b"v0"));
-        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
+        std::fs::write(
+            &file_path,
+            crate::storage::header::tests::v0_blob_bytes(0, payload),
+        )
+        .unwrap();
 
         // The blob opens with its data intact and remains readable and writable in place.
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();
@@ -667,10 +668,7 @@ mod tests {
         // On disk the payload still sits immediately after the 8-byte V0 header.
         let raw_content = std::fs::read(&file_path).unwrap();
         assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + payload.len() + 1);
-        assert_eq!(
-            &raw_content[..Header::MAGIC_LENGTH],
-            &BlobHeaderLayout::V0.magic()
-        );
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V0.magic());
         assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
 
         let _ = std::fs::remove_dir_all(&storage_directory);
@@ -740,7 +738,7 @@ mod tests {
                 Header::V1_DATA_OFFSET as usize,
                 "recovered blob should be header-only"
             );
-            assert_eq!(&raw[..Header::MAGIC_LENGTH], &BlobHeaderLayout::V1.magic());
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V1.magic());
             storage
                 .open("partition", name.as_bytes())
                 .await

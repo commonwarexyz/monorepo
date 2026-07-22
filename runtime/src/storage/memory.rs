@@ -4,7 +4,7 @@ use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
-/// Resolves a blob's header from its full contents (see [super::resolve_header]).
+/// Resolves a blob's header from its full contents (see [super::header::resolve]).
 fn resolve_header(
     content: &[u8],
     versions: &RangeInclusive<u16>,
@@ -12,7 +12,7 @@ fn resolve_header(
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
     let raw = &content[..Header::resolve_len(content.len() as u64)];
-    super::resolve_header(raw, content.len() as u64, versions, partition, name)
+    super::header::resolve(raw, content.len() as u64, versions, partition, name)
 }
 
 /// In-memory storage implementation for the commonware runtime.
@@ -270,7 +270,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{BlobHeaderLayout, tests::run_storage_tests},
+        storage::{header::Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
 
@@ -317,10 +317,7 @@ mod tests {
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(raw_content.len(), data_offset + data.len());
-            assert_eq!(
-                &raw_content[..Header::MAGIC_LENGTH],
-                &BlobHeaderLayout::V1.magic()
-            );
+            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V1.magic());
             assert_eq!(&raw_content[data_offset..], data);
         }
 
@@ -333,7 +330,7 @@ mod tests {
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.get_mut("partition").unwrap();
-            let raw = crate::storage::tests::v0_blob_bytes(0, data);
+            let raw = crate::storage::header::tests::v0_blob_bytes(0, data);
             partition.insert(b"v0".to_vec(), raw);
         }
         let (blob, size, _) = storage
@@ -350,10 +347,7 @@ mod tests {
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"v0".to_vec()).unwrap();
             assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len() + 1);
-            assert_eq!(
-                &raw_content[..Header::MAGIC_LENGTH],
-                &BlobHeaderLayout::V0.magic()
-            );
+            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V0.magic());
             assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
         }
 
@@ -420,7 +414,7 @@ mod tests {
         let storage = Storage::new(test_pool());
 
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
-        // region (the full state enumeration lives in the Header::interrupted_creation
+        // region (the full state enumeration lives in the Header::interrupted_v1_creation
         // unit tables)
         let (region, _) = Header::create(&(0..=0));
         let states = [region[..10].to_vec()];
@@ -458,7 +452,7 @@ mod tests {
     async fn test_blob_v1_rejects_nonzero_header_padding() {
         let storage = Storage::new(test_pool());
 
-        let mut raw = crate::storage::tests::v1_blob_bytes(0, b"payload");
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, b"payload");
         raw[Header::PARSE_LEN] = 0xFF;
         {
             let mut partitions = storage.partitions.lock();
@@ -479,7 +473,7 @@ mod tests {
         // A synced V1 blob whose payload is all zeros, with the header's CRC bytes
         // rotted away: the file extends past the header region, so healing it would
         // erase the payload.
-        let mut raw = crate::storage::tests::v1_blob_bytes(0, &[0u8; 100]);
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, &[0u8; 100]);
         raw[8..12].fill(0);
         {
             let mut partitions = storage.partitions.lock();
