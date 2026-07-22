@@ -1,4 +1,6 @@
-use crate::{ITEM_SIZE, ITEMS_PER_BLOB, append_fixed_random_data, get_fixed_journal};
+use crate::{
+    ITEM_SIZE, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, append_fixed_random_data, get_fixed_journal,
+};
 use commonware_runtime::{
     Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
@@ -58,7 +60,9 @@ fn bench_fixed_replay(c: &mut Criterion) {
                     // Setup: populate journal (once, on first sample).
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
-                            let j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                            let j =
+                                get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
+                                    .await;
                             append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
                         });
                         initialized = true;
@@ -67,9 +71,13 @@ fn bench_fixed_replay(c: &mut Criterion) {
                     // Benchmark: measure replay time.
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let mut j =
-                            get_fixed_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
-                                .await;
+                        let mut j = get_fixed_journal(
+                            ctx.child("storage"),
+                            PARTITION,
+                            ITEMS_PER_BLOB,
+                            PAGE_CACHE_SIZE,
+                        )
+                        .await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
@@ -85,7 +93,13 @@ fn bench_fixed_replay(c: &mut Criterion) {
         // Cleanup: destroy journal.
         if initialized {
             Runner::new(cfg).start(|context| async move {
-                let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+                let j = get_fixed_journal::<ITEM_SIZE>(
+                    context,
+                    PARTITION,
+                    ITEMS_PER_BLOB,
+                    PAGE_CACHE_SIZE,
+                )
+                .await;
                 j.destroy().await.unwrap();
             });
         }

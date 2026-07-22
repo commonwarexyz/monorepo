@@ -1,4 +1,4 @@
-use crate::{append_fixed_random_data, get_fixed_journal};
+use crate::{PAGE_CACHE_SIZE, append_fixed_random_data, get_fixed_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -44,7 +44,13 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                 b.to_async(&runner).iter_custom(|iters| async move {
                     // Append random data to the journal
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let j = get_fixed_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                    let j = get_fixed_journal::<ITEM_SIZE>(
+                        ctx,
+                        PARTITION,
+                        ITEMS_PER_BLOB,
+                        PAGE_CACHE_SIZE,
+                    )
+                    .await;
                     let mut j = append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
                     let sz = j.size();
                     assert_eq!(sz, items);
