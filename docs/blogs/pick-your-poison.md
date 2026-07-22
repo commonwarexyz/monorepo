@@ -16,35 +16,11 @@ Encrypted mempools have emerged as the leading candidate for protecting the priv
 [Batched threshold encryption](https://eprint.iacr.org/2024/669) (BTE) was introduced to address this communication bottleneck. Instead of decrypting ciphertexts independently, the committee publishes a *succinct* key that can be used to decrypt the entire batch of ciphertexts. Since the original construction of [CGPP24](https://eprint.iacr.org/2024/669), a long line of work has pushed (silent) batched threshold encryption schemes closer to practicality. We summarize them below and then present two new constructions that make these tradeoffs tunable.
 
 ```{=html}
-<!-- Hide the animation sources before the module script runs; without
-     JavaScript or with reduced motion, show them as regular prose. -->
-<style>
-  .cw-magic-story-source,
-  .cw-magic-dream-source {
-    display: none;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .cw-magic-story-source,
-    .cw-magic-dream-source {
-      display: block;
-    }
-  }
-</style>
-<noscript>
-  <style>
-    .cw-magic-story-source,
-    .cw-magic-dream-source {
-      display: block;
-    }
-
-    .cw-magic-move,
-    .cw-magic-final {
-      display: none;
-    }
-  </style>
-</noscript>
-<div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region"></div>
+<div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
+  <noscript>
+    This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
+  </noscript>
+</div>
 <script type="module" src="pick-your-poison.magic-move.js"></script>
 ```
 
