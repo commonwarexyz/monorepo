@@ -122,12 +122,36 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2024/669">CGPP24</a>, a long line
         of work has pushed (silent) batched threshold encryption schemes
         closer to practicality. We summarize them below and then present
-        two new constructions.</p>
-        <div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
-          <noscript>
-            This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
-          </noscript>
-        </div>
+        two new constructions that make these tradeoffs tunable.</p>
+        <!-- Hide the animation sources before the module script runs; without
+             JavaScript or with reduced motion, show them as regular prose. -->
+        <style>
+          .cw-magic-story-source,
+          .cw-magic-dream-source {
+            display: none;
+          }
+
+          @media (prefers-reduced-motion: reduce) {
+            .cw-magic-story-source,
+            .cw-magic-dream-source {
+              display: block;
+            }
+          }
+        </style>
+        <noscript>
+          <style>
+            .cw-magic-story-source,
+            .cw-magic-dream-source {
+              display: block;
+            }
+
+            .cw-magic-move,
+            .cw-magic-final {
+              display: none;
+            }
+          </style>
+        </noscript>
+        <div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region"></div>
         <script type="module" src="pick-your-poison.magic-move.js"></script>
         <div id="pick-your-poison-story-source"
         class="cw-magic-story-source">
@@ -351,10 +375,10 @@ Vamsi Policharla</a></div>
         <div id="pick-your-poison-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
         <p>As of this writing, no efficient construction achieves <a
         href="#dream-goal">the dream goal</a>. System designers are
-        forced to make undesirable compromises. Indexed Simple BTE and
-        Labeled Multi-Key Batched IBE make these compromises tunable,
-        allowing deployments to choose the balance that best fits their
-        operating constraints.</p>
+        forced to make all-or-nothing compromises. Indexed Simple BTE
+        and Labeled Multi-Key Batched IBE make these compromises
+        tunable, allowing deployments to choose the balance that best
+        fits their operating constraints.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

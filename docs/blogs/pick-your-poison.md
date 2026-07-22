@@ -13,14 +13,38 @@ katex: true
 
 Encrypted mempools have emerged as the leading candidate for protecting the privacy of pending transactions. At a high level, users (threshold) encrypt transactions to the validator set, and once the chain finalizes an ordering, validators quickly decrypt transactions and execute them. If we instantiate this scheme using a standard threshold encryption scheme such as [ElGamal](https://link.springer.com/chapter/10.1007/3-540-39568-7_2), each of the $n$ committee members must broadcast a decryption share for each of the $B$ ciphertexts in the block, for a total of $O(nB)$ communication, which can be orders of magnitude larger than the block itself.
 
-[Batched threshold encryption](https://eprint.iacr.org/2024/669) (BTE) was introduced to address this communication bottleneck. Instead of decrypting ciphertexts independently, the committee publishes a *succinct* key that can be used to decrypt the entire batch of ciphertexts. Since the original construction of [CGPP24](https://eprint.iacr.org/2024/669), a long line of work has pushed (silent) batched threshold encryption schemes closer to practicality. We summarize them below and then present two new constructions.
+[Batched threshold encryption](https://eprint.iacr.org/2024/669) (BTE) was introduced to address this communication bottleneck. Instead of decrypting ciphertexts independently, the committee publishes a *succinct* key that can be used to decrypt the entire batch of ciphertexts. Since the original construction of [CGPP24](https://eprint.iacr.org/2024/669), a long line of work has pushed (silent) batched threshold encryption schemes closer to practicality. We summarize them below and then present two new constructions that make these tradeoffs tunable.
 
 ```{=html}
-<div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region">
-  <noscript>
-    This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
-  </noscript>
-</div>
+<!-- Hide the animation sources before the module script runs; without
+     JavaScript or with reduced motion, show them as regular prose. -->
+<style>
+  .cw-magic-story-source,
+  .cw-magic-dream-source {
+    display: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cw-magic-story-source,
+    .cw-magic-dream-source {
+      display: block;
+    }
+  }
+</style>
+<noscript>
+  <style>
+    .cw-magic-story-source,
+    .cw-magic-dream-source {
+      display: block;
+    }
+
+    .cw-magic-move,
+    .cw-magic-final {
+      display: none;
+    }
+  </style>
+</noscript>
+<div id="pick-your-poison-magic-move" class="cw-magic-move" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs." role="region"></div>
 <script type="module" src="pick-your-poison.magic-move.js"></script>
 ```
 
@@ -98,4 +122,4 @@ Naively, one can encrypt to multiple blocks, but this increases the ciphertext s
 <div id="pick-your-poison-new-constructions" class="cw-magic-final" role="region" aria-label="The batched threshold encryption landscape extended with the new Indexed Simple BTE and Labeled Multi-Key Batched IBE constructions."></div>
 ```
 
-As of this writing, no efficient construction achieves [the dream goal](#dream-goal). System designers are forced to make undesirable compromises. Indexed Simple BTE and Labeled Multi-Key Batched IBE make these compromises tunable, allowing deployments to choose the balance that best fits their operating constraints.
+As of this writing, no efficient construction achieves [the dream goal](#dream-goal). System designers are forced to make all-or-nothing compromises. Indexed Simple BTE and Labeled Multi-Key Batched IBE make these compromises tunable, allowing deployments to choose the balance that best fits their operating constraints.
