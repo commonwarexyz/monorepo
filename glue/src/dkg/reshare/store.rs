@@ -38,8 +38,11 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
-use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::{Faults, N3f1, NZU16, NZUsize};
+use commonware_storage::journal::{
+    self,
+    segmented::variable::{Config as JournalConfig, Journal},
+};
+use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind};
 use futures::StreamExt;
 use rand_core::CryptoRng;
 use std::{
@@ -289,22 +292,15 @@ where
         self.epochs.retain(|epoch, _| *epoch >= min);
         // Prune the recovery journal and the secret store concurrently; they are
         // independent backends.
-        let events = self
-            .events
-            .take()
-            .expect("events journal must be available");
         let secret = &mut self.secret_store;
-        let (events, _) = futures::join!(
+        futures::join!(
             async {
-                let (events, _) = events
-                    .prune(min.get())
+                rebind(&mut self.events, |events| events.prune(min.get()))
                     .await
                     .expect("failed to prune reshare events");
-                events
             },
             secret.prune(min),
         );
-        self.events = Some(events);
     }
 
     fn cache(&mut self, epoch: Epoch) -> &mut EpochCache<V, P> {
@@ -375,15 +371,16 @@ where
         // and private parts survived.
         let event = Event::Dealing(dealer.clone(), public.clone());
         let secret = &mut self.secret_store;
-        let events = self
-            .events
-            .take()
-            .expect("events journal must be available");
-        let (_, events) = futures::join!(
+        futures::join!(
             secret.put_dealing(epoch, dealer.clone(), private.clone()),
-            append_synced(events, epoch, &event),
+            async {
+                rebind(&mut self.events, |events| {
+                    append_synced(events, epoch, &event)
+                })
+                .await
+                .expect("failed to record reshare dealing");
+            },
         );
-        self.events = Some(events);
         self.cache(epoch).dealings.insert(dealer, (public, private));
         true
     }
@@ -397,11 +394,11 @@ where
             return false;
         }
         let event = Event::Ack(player.clone(), ack.clone());
-        let events = self
-            .events
-            .take()
-            .expect("events journal must be available");
-        self.events = Some(append_synced(events, epoch, &event).await);
+        rebind(&mut self.events, |events| {
+            append_synced(events, epoch, &event)
+        })
+        .await
+        .expect("failed to record reshare ack");
         self.cache(epoch).acks.insert(player, ack);
         true
     }
@@ -412,11 +409,11 @@ where
             return false;
         }
         let event = Event::Log(dealer.clone(), log.clone());
-        let events = self
-            .events
-            .take()
-            .expect("events journal must be available");
-        self.events = Some(append_synced(events, epoch, &event).await);
+        rebind(&mut self.events, |events| {
+            append_synced(events, epoch, &event)
+        })
+        .await
+        .expect("failed to record reshare log");
         self.cache(epoch).logs.insert(dealer, log);
         true
     }
@@ -537,21 +534,15 @@ async fn append_synced<E, V, P>(
     events: Journal<E, Event<V, P>>,
     epoch: Epoch,
     event: &Event<V, P>,
-) -> Journal<E, Event<V, P>>
+) -> Result<Journal<E, Event<V, P>>, journal::Error>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     V: Variant,
     P: PublicKey,
 {
     let section = epoch.get();
-    let (events, _, _) = events
-        .append(section, event)
-        .await
-        .expect("failed to append reshare event");
-    events
-        .sync(section)
-        .await
-        .expect("failed to sync reshare event")
+    let (events, _, _) = events.append(section, event).await?;
+    events.sync(section).await
 }
 
 /// Dealer state for one epoch.

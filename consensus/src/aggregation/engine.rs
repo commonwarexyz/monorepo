@@ -27,7 +27,11 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{N3f1, PrioritySet, futures::Pool as FuturesPool, ordered::Quorum};
+use commonware_utils::{
+    N3f1, PrioritySet,
+    futures::{Pool as FuturesPool, rebind},
+    ordered::Quorum,
+};
 use futures::{
     StreamExt,
     future::{self, Either},
@@ -805,12 +809,9 @@ impl<
 
         // Prune journal with buffer
         let section = self.get_journal_section(activity_threshold);
-        let journal = self.journal.take().expect("journal must be initialized");
-        let (journal, _) = journal
-            .prune(section)
+        rebind(&mut self.journal, |journal| journal.prune(section))
             .await
             .expect("unable to prune journal");
-        self.journal = Some(journal);
 
         // Update the tip
         self.tip = tip;
@@ -951,22 +952,20 @@ impl<
             Activity::Tip(h) => h,
         };
         let section = self.get_journal_section(height);
-        let (journal, _, _) = self
-            .journal
-            .take()
-            .expect("journal must be initialized")
-            .append(section, &activity)
-            .await
-            .expect("unable to append to journal");
-        self.journal = Some(journal);
+        rebind(&mut self.journal, |journal| {
+            journal.append(section, &activity)
+        })
+        .await
+        .expect("unable to append to journal");
         self
     }
 
     /// Syncs (ensures all data is written to disk).
     async fn sync(mut self, height: Height) -> Self {
         let section = self.get_journal_section(height);
-        let journal = self.journal.take().expect("journal must be initialized");
-        self.journal = Some(journal.sync(section).await.expect("unable to sync journal"));
+        rebind(&mut self.journal, |journal| journal.sync(section))
+            .await
+            .expect("unable to sync journal");
         self
     }
 }

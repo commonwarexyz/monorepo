@@ -36,7 +36,11 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
+use commonware_utils::{
+    channel::oneshot,
+    futures::{Pool as FuturesPool, rebind_entry},
+    ordered::Quorum,
+};
 use futures::{
     StreamExt,
     future::{self, Either},
@@ -1102,37 +1106,27 @@ impl<
     /// the journal must already be open and replayed.
     async fn journal_append(mut self, node: Node<C::PublicKey, P::Scheme, D>) -> Self {
         let section = self.get_journal_section(node.chunk.height);
-        let (sequencer, journal) = self
-            .journals
-            .remove_entry(&node.chunk.sequencer)
-            .expect("journal must be initialized");
-        let (journal, _, _) = journal
-            .append(section, &node)
-            .await
-            .expect("unable to append to journal");
-        self.journals.insert(sequencer, journal);
+        rebind_entry(&mut self.journals, &node.chunk.sequencer, |journal| {
+            journal.append(section, &node)
+        })
+        .await
+        .expect("unable to append to journal");
         self
     }
 
     /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
     async fn journal_sync(mut self, sequencer: &C::PublicKey, height: Height) -> Self {
         let section = self.get_journal_section(height);
-
-        // Get journal
-        let (sequencer, journal) = self
-            .journals
-            .remove_entry(sequencer)
-            .expect("journal must be initialized");
-
-        // Sync journal
-        let journal = journal.sync(section).await.expect("unable to sync journal");
-
-        // Prune journal
-        let (journal, _) = journal
-            .prune(section)
-            .await
-            .expect("unable to prune journal");
-        self.journals.insert(sequencer, journal);
+        rebind_entry(&mut self.journals, sequencer, |journal| {
+            journal.sync(section)
+        })
+        .await
+        .expect("unable to sync journal");
+        rebind_entry(&mut self.journals, sequencer, |journal| {
+            journal.prune(section)
+        })
+        .await
+        .expect("unable to prune journal");
         self
     }
 }

@@ -33,7 +33,10 @@ use commonware_runtime::{
     },
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{channel::oneshot, futures::AbortablePool};
+use commonware_utils::{
+    channel::oneshot,
+    futures::{AbortablePool, rebind},
+};
 use core::{future::Future, panic};
 use futures::{StreamExt, pin_mut};
 use rand_core::CryptoRng;
@@ -229,17 +232,17 @@ impl<
             );
         }
         let min_active = self.state.min_active();
-        if let Some(journal) = self.journal.take() {
-            let (journal, _) = journal
-                .prune(min_active.get())
-                .instrument(info_span!(
-                    "simplex.voter.journal.prune",
-                    epoch = self.state.epoch().traced(),
-                    min = min_active.traced()
-                ))
-                .await
-                .expect("unable to prune journal");
-            self.journal = Some(journal);
+        if self.journal.is_some() {
+            let span = info_span!(
+                "simplex.voter.journal.prune",
+                epoch = self.state.epoch().traced(),
+                min = min_active.traced()
+            );
+            rebind(&mut self.journal, |journal| {
+                journal.prune(min_active.get()).instrument(span)
+            })
+            .await
+            .expect("unable to prune journal");
         }
         self
     }
@@ -250,12 +253,12 @@ impl<
     /// iteration target the view being processed and are synced together by
     /// [Self::sync_journal].
     async fn append_journal(mut self, view: View, artifact: Artifact<S, D>) -> Self {
-        if let Some(journal) = self.journal.take() {
-            let (journal, _, _) = journal
-                .append(view.get(), &artifact)
-                .await
-                .expect("unable to append to journal");
-            self.journal = Some(journal);
+        if self.journal.is_some() {
+            rebind(&mut self.journal, |journal| {
+                journal.append(view.get(), &artifact)
+            })
+            .await
+            .expect("unable to append to journal");
             self.dirty = true;
         }
         self
@@ -274,22 +277,20 @@ impl<
         if !self.dirty {
             return self;
         }
-        let journal = self
-            .journal
-            .take()
-            .expect("pending journal appends without a journal");
+        assert!(
+            self.journal.is_some(),
+            "pending journal appends without a journal"
+        );
         let span = info_span!(
             "simplex.voter.journal.sync",
             epoch = self.state.epoch().traced(),
             view = view.traced()
         );
-        self.journal = Some(
-            journal
-                .sync(view.get())
-                .instrument(span)
-                .await
-                .expect("unable to sync journal"),
-        );
+        rebind(&mut self.journal, |journal| {
+            journal.sync(view.get()).instrument(span)
+        })
+        .await
+        .expect("unable to sync journal");
         self.dirty = false;
         self
     }

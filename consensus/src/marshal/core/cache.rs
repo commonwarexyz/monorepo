@@ -76,22 +76,20 @@ where
 {
     /// Prune view-indexed archives to the given view.
     async fn prune_by_view(mut self, min_view: View) -> Self {
-        match futures::try_join!(
+        (
+            self.verified_blocks,
+            self.notarized_blocks,
+            self.notarizations,
+            self.finalizations,
+        ) = futures::try_join!(
             self.verified_blocks.prune(min_view.get()),
             self.notarized_blocks.prune(min_view.get()),
             self.notarizations.prune(min_view.get()),
             self.finalizations.prune(min_view.get()),
-        ) {
-            Ok((verified_blocks, notarized_blocks, notarizations, finalizations)) => {
-                debug!(min_view = %min_view, "pruned archives");
-                self.verified_blocks = verified_blocks;
-                self.notarized_blocks = notarized_blocks;
-                self.notarizations = notarizations;
-                self.finalizations = finalizations;
-                self
-            }
-            Err(e) => panic!("failed to prune archives: {e}"),
-        }
+        )
+        .unwrap_or_else(|e| panic!("failed to prune archives: {e}"));
+        debug!(min_view = %min_view, "pruned archives");
+        self
     }
 
     /// Prune height-indexed archives to the given height.
@@ -701,9 +699,7 @@ where
 
     /// Prune height-indexed certified blocks below the given height.
     pub(crate) async fn prune_by_height(mut self, height: Height) -> Self {
-        let epochs: Vec<Epoch> = self.caches.keys().copied().collect();
-        for epoch in epochs {
-            let cache = self.caches.remove(&epoch).unwrap();
+        for (epoch, cache) in std::mem::take(&mut self.caches) {
             let cache = cache.prune_by_height(height).await;
             self.caches.insert(epoch, cache);
         }

@@ -49,6 +49,7 @@ use commonware_utils::{
     futures::{AbortablePool, Pool},
 };
 use futures::{
+    FutureExt as _, TryFutureExt as _,
     future::{join, join_all},
     try_join,
 };
@@ -1321,27 +1322,15 @@ where
             .take_pending_anchor()
             .expect("pending floor anchor missing");
         let round = finalization.round();
-        let finalized_blocks = self.finalized_blocks;
-        let finalizations_by_height = self.finalizations_by_height;
-        let (finalized_blocks, finalizations_by_height) = try_join!(
-            async {
-                let store = finalized_blocks
-                    .put(Arc::unwrap_or_clone(block).into())
-                    .await
-                    .map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            },
-            async {
-                let store = finalizations_by_height
-                    .put(height, digest, finalization)
-                    .await
-                    .map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            }
+        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
+            self.finalized_blocks
+                .put(Arc::unwrap_or_clone(block).into())
+                .map_err(BoxedError::from),
+            self.finalizations_by_height
+                .put(height, digest, finalization)
+                .map_err(BoxedError::from),
         )
         .expect("failed to store floor anchor");
-        self.finalized_blocks = finalized_blocks;
-        self.finalizations_by_height = finalizations_by_height;
         self = self.sync_finalized().await;
 
         if height > self.tip {
@@ -1880,24 +1869,13 @@ where
     /// arm requires the writes to already be durable.
     #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
     async fn sync_finalized(mut self: Box<Self>) -> Box<Self> {
-        let finalized_blocks = self.finalized_blocks;
-        let finalizations_by_height = self.finalizations_by_height;
-        match try_join!(
-            async {
-                let store = finalized_blocks.sync().await.map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            },
-            async {
-                let store = finalizations_by_height.sync().await.map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            },
-        ) {
-            Ok((finalized_blocks, finalizations_by_height)) => {
-                self.finalized_blocks = finalized_blocks;
-                self.finalizations_by_height = finalizations_by_height;
-            }
-            Err(e) => panic!("failed to sync finalization archives: {e}"),
-        }
+        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
+            self.finalized_blocks.sync().map_err(BoxedError::from),
+            self.finalizations_by_height
+                .sync()
+                .map_err(BoxedError::from),
+        )
+        .unwrap_or_else(|e| panic!("failed to sync finalization archives: {e}"));
 
         // Everything accepted before this sync is now durable, so nothing
         // remains to gate dispatch.
@@ -1932,28 +1910,17 @@ where
             return self;
         };
 
-        let finalized_blocks = self.finalized_blocks;
-        let finalizations_by_height = self.finalizations_by_height;
-        let (blocks, finalizations) = match try_join!(
-            async {
-                let (store, handle) = finalized_blocks.start_sync().await.map_err(Box::new)?;
-                Ok::<_, BoxedError>((store, handle))
-            },
-            async {
-                let (store, handle) = finalizations_by_height
-                    .start_sync()
-                    .await
-                    .map_err(Box::new)?;
-                Ok::<_, BoxedError>((store, handle))
-            },
-        ) {
-            Ok(((finalized_blocks, blocks), (finalizations_by_height, finalizations))) => {
-                self.finalized_blocks = finalized_blocks;
-                self.finalizations_by_height = finalizations_by_height;
-                (blocks, finalizations)
-            }
-            Err(e) => panic!("failed to start finalization archive sync: {e}"),
-        };
+        let (blocks, finalizations);
+        (
+            (self.finalized_blocks, blocks),
+            (self.finalizations_by_height, finalizations),
+        ) = try_join!(
+            self.finalized_blocks.start_sync().map_err(BoxedError::from),
+            self.finalizations_by_height
+                .start_sync()
+                .map_err(BoxedError::from),
+        )
+        .unwrap_or_else(|e| panic!("failed to start finalization archive sync: {e}"));
         syncs.push(async move {
             let (blocks, finalizations) = join(
                 blocks.durable(round, "finalized blocks"),
@@ -2066,33 +2033,24 @@ where
         let round = finalization.as_ref().map(|f| f.round());
 
         // In parallel, update the finalized blocks and finalizations archives
-        let finalized_blocks = self.finalized_blocks;
         let finalizations_by_height = self.finalizations_by_height;
-        match try_join!(
+        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             // Update the finalized blocks archive
-            async {
-                let store = finalized_blocks.put(stored).await.map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            },
+            self.finalized_blocks.put(stored).map_err(BoxedError::from),
             // Update the finalizations archive (if provided)
             async {
                 let store = if let Some(finalization) = finalization {
                     finalizations_by_height
                         .put(height, digest, finalization)
                         .await
-                        .map_err(Box::new)?
+                        .map_err(BoxedError::from)?
                 } else {
                     finalizations_by_height
                 };
                 Ok::<_, BoxedError>(store)
             }
-        ) {
-            Ok((finalized_blocks, finalizations_by_height)) => {
-                self.finalized_blocks = finalized_blocks;
-                self.finalizations_by_height = finalizations_by_height;
-            }
-            Err(e) => panic!("failed to finalize: {e}"),
-        }
+        )
+        .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.
@@ -2440,59 +2398,34 @@ where
     /// Prunes finalized blocks and certificates below the given height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
         // Prune the finalized block and finalization certificate archives in parallel.
-        let finalized_blocks = self.finalized_blocks;
-        let finalizations_by_height = self.finalizations_by_height;
-        match try_join!(
-            async {
-                let store = finalized_blocks.prune(height).await.map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            },
-            async {
-                let store = finalizations_by_height
-                    .prune(height)
-                    .await
-                    .map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            }
-        ) {
-            Ok((finalized_blocks, finalizations_by_height)) => {
-                self.finalized_blocks = finalized_blocks;
-                self.finalizations_by_height = finalizations_by_height;
-            }
-            Err(e) => panic!("failed to prune finalized archives: {e}"),
-        }
+        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
+            self.finalized_blocks
+                .prune(height)
+                .map_err(BoxedError::from),
+            self.finalizations_by_height
+                .prune(height)
+                .map_err(BoxedError::from),
+        )
+        .unwrap_or_else(|e| panic!("failed to prune finalized archives: {e}"));
         self
     }
 
     /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
     async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
-        let cache = self.cache;
-        let finalized_blocks = self.finalized_blocks;
-        let finalizations_by_height = self.finalizations_by_height;
-        match try_join!(
-            async {
-                let cache = cache.prune_by_height(height).await;
-                Ok::<_, BoxedError>(cache)
-            },
-            async {
-                let store = finalized_blocks.prune(height).await.map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            },
-            async {
-                let store = finalizations_by_height
-                    .prune(height)
-                    .await
-                    .map_err(Box::new)?;
-                Ok::<_, BoxedError>(store)
-            }
-        ) {
-            Ok((cache, finalized_blocks, finalizations_by_height)) => {
-                self.cache = cache;
-                self.finalized_blocks = finalized_blocks;
-                self.finalizations_by_height = finalizations_by_height;
-            }
-            Err(e) => panic!("failed to prune data below floor: {e}"),
-        }
+        (
+            self.cache,
+            self.finalized_blocks,
+            self.finalizations_by_height,
+        ) = try_join!(
+            self.cache.prune_by_height(height).map(Ok::<_, BoxedError>),
+            self.finalized_blocks
+                .prune(height)
+                .map_err(BoxedError::from),
+            self.finalizations_by_height
+                .prune(height)
+                .map_err(BoxedError::from),
+        )
+        .unwrap_or_else(|e| panic!("failed to prune data below floor: {e}"));
         self
     }
 }
