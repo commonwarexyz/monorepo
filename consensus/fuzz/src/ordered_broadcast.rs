@@ -330,9 +330,7 @@ pub fn fuzz(input: FuzzInput) {
 
 fn expected_chunk_digest(sequencer: &PublicKey, height: Height) -> Sha256Digest {
     let payload = format!("hello world, {sequencer} {height}");
-    let mut hasher = Sha256::default();
-    hasher.update(payload.as_bytes());
-    hasher.finalize()
+    Sha256::hash(&[payload.as_bytes()])
 }
 
 async fn check_no_conflicting_chunks<S>(

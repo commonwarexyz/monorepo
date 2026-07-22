@@ -17,7 +17,7 @@ use commonware_consensus::{
             Proposal, Vote,
         },
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Round, TermLength, View},
 };
 use commonware_cryptography::{Sha256, certificate::Scheme as _, sha256::Digest as Sha256Digest};
 use commonware_p2p::{Receiver as _, Recipients, Sender as _, simulated};
@@ -1505,6 +1505,7 @@ where
     let base = FuzzInput {
         raw_bytes: input.raw_bytes.clone(),
         required_containers: MAX_REQUIRED_CONTAINERS,
+        term_length: TermLength::ONE,
         degraded_network: false,
         configuration: N4F3C1,
         partition: Partition::Connected,
@@ -1526,7 +1527,7 @@ where
     let (fuzzer_schemes, honest_schemes) = schemes.split_at(BYZANTINE_COUNT);
     let honest_scheme = honest_schemes[0].clone();
 
-    let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+    let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::<Sha256Digest, _>::new());
     let byzantine_participants: Vec<_> =
         participants.iter().take(BYZANTINE_COUNT).cloned().collect();
 
@@ -1633,7 +1634,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
         );
         network.start();
 
-        let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+        let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::<Sha256Digest, _>::new());
         let honest = participants[HONEST_ID].clone();
         let mut registrations =
             crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;

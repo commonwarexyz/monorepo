@@ -13,7 +13,7 @@ use commonware_consensus::{
         scheme::Scheme,
         types::{Activity, Attributable, Proposal},
     },
-    types::{Round, View},
+    types::{Round, TermLength, View},
 };
 use commonware_cryptography::{
     certificate::{self, Signers},
@@ -33,7 +33,7 @@ use std::{
 /// dedicated audit targets, additionally run invariants requiring append-only
 /// activity and automaton history.
 pub trait SafetyObservations<P: Simplex> {
-    fn check_safety(self, n: u32);
+    fn check_safety(self, n: u32, term_length: TermLength);
 }
 
 /// Checks Simplex safety using the provided observations.
@@ -41,13 +41,17 @@ pub trait SafetyObservations<P: Simplex> {
 /// This remains the single entrypoint: the concrete observation type determines
 /// whether only the basic invariants or also the audit-history
 /// invariants are observable.
-pub fn check<P: Simplex>(n: u32, observations: impl SafetyObservations<P>) {
-    observations.check_safety(n);
+pub fn check<P: Simplex>(
+    n: u32,
+    term_length: TermLength,
+    observations: impl SafetyObservations<P>,
+) {
+    observations.check_safety(n, term_length);
 }
 
 impl<P: Simplex> SafetyObservations<P> for Vec<ReplicaState> {
-    fn check_safety(self, n: u32) {
-        check_basic_invariants::<P>(n, self);
+    fn check_safety(self, n: u32, term_length: TermLength) {
+        check_basic_invariants::<P>(n, term_length, self);
     }
 }
 
@@ -58,8 +62,8 @@ where
     P::Scheme: Scheme<Sha256Digest>,
     L: Elector<P::Scheme>,
 {
-    fn check_safety(self, n: u32) {
-        check_basic_invariants::<P>(n, extract(self, n as usize));
+    fn check_safety(self, n: u32, term_length: TermLength) {
+        check_basic_invariants::<P>(n, term_length, extract(self, n as usize));
     }
 }
 
@@ -72,13 +76,33 @@ where
     L: Elector<P::Scheme>,
     L::Elector: Clone,
 {
-    fn check_safety(self, n: u32) {
+    fn check_safety(self, n: u32, term_length: TermLength) {
         check_fuzz_invariants(self);
-        check_basic_invariants::<P>(n, extract(summaries(self), n as usize));
+        check_basic_invariants::<P>(n, term_length, extract(summaries(self), n as usize));
     }
 }
 
-fn check_basic_invariants<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
+// Intentionally restates View::covers with independent integer arithmetic:
+// the fuzz oracle must not delegate to the production term predicates
+// (same_term, term_start) or a bug in them could hide from the fuzzer.
+// View 0 (genesis) is its own term; for views >= 1, term boundaries are
+// [1, term_length], [term_length + 1, 2 * term_length], ...
+fn nullification_conflicts(
+    nullified_view: u64,
+    finalized_view: u64,
+    term_length: TermLength,
+) -> bool {
+    if nullified_view > finalized_view {
+        return false;
+    }
+    if nullified_view == 0 {
+        return finalized_view == 0;
+    }
+    let term_length = term_length.get();
+    (nullified_view - 1) / term_length == (finalized_view - 1) / term_length
+}
+
+fn check_basic_invariants<P: Simplex>(n: u32, term_length: TermLength, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
     let attributable = <P::Scheme as certificate::Scheme>::is_attributable();
 
@@ -175,11 +199,12 @@ fn check_basic_invariants<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // Invariant: no_finalized_view_nullified
     // A view cannot carry both a finalization and a nullification certificate,
     // regardless of which replicas recorded them.
-    for (&view, &(fin_idx, _)) in finalized_by_view.iter() {
-        if let Some(&null_idx) = nullified_by_view.get(&view) {
-            panic!(
-                "Invariant violation: view {view} finalized by replica {fin_idx} and nullified by replica {null_idx}"
-            );
+    for finalized_view in finalized_by_view.keys() {
+        for nullified_view in nullified_by_view.keys() {
+            assert!(
+                !nullification_conflicts(*nullified_view, *finalized_view, term_length),
+                "Invariant violation: view {nullified_view} is nullified but view {finalized_view} is finalized in the same term",
+            )
         }
     }
 
@@ -1995,7 +2020,7 @@ mod tests {
     use super::*;
     use crate::{
         id_mock,
-        simplex::{SimplexBls12381MinPk, SimplexId},
+        simplex::{SimplexBls12381MinPk, SimplexEd25519, SimplexId},
     };
     use commonware_consensus::{
         Reporter as _,
@@ -2015,7 +2040,7 @@ mod tests {
         bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{TestRng, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
     use std::panic;
 
     const N: u32 = 4;
@@ -2079,13 +2104,52 @@ mod tests {
     }
 
     #[test]
+    fn same_term_nullification_blocks_later_finalization() {
+        let payload = Sha256Digest::from([7u8; 32]);
+        let mut notarizations = HashMap::new();
+        notarizations.insert(
+            3,
+            Notarization {
+                payload,
+                parent: 2,
+                signature_count: Some(3),
+            },
+        );
+        let mut nullifications = HashMap::new();
+        nullifications.insert(
+            1,
+            Nullification {
+                signature_count: Some(3),
+            },
+        );
+        let mut finalizations = HashMap::new();
+        finalizations.insert(
+            3,
+            Finalization {
+                payload,
+                parent: 2,
+                signature_count: Some(3),
+            },
+        );
+
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(
+                4,
+                TermLength::new(NZU32!(5)),
+                vec![(notarizations, nullifications, finalizations)],
+            );
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn valid_consolidated_chain_passes() {
-        check::<SimplexId>(N, vec![chain_replica(), chain_replica()]);
+        check::<SimplexId>(N, TermLength::ONE, vec![chain_replica(), chain_replica()]);
     }
 
     #[test]
     fn identical_certificates_from_multiple_replicas_pass() {
-        check::<SimplexId>(N, vec![chain_replica(), chain_replica(), chain_replica()]);
+        check::<SimplexId>(N, TermLength::ONE, vec![chain_replica(), chain_replica(), chain_replica()]);
     }
 
     #[test]
@@ -2095,7 +2159,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2111,7 +2175,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r0, r1]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2127,7 +2191,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexId>(N, vec![r0, r1]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2143,7 +2207,7 @@ mod tests {
             views(vec![(1, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r0, r1]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2154,7 +2218,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2165,7 +2229,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xB))]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2176,7 +2240,7 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2192,7 +2256,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r0, r1]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r0, r1]);
     }
 
     #[test]
@@ -2203,7 +2267,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2214,7 +2278,7 @@ mod tests {
             views(vec![(1, nullification_with(Some(2)))]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2225,7 +2289,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization_with(0, 0xA, Some(2)))]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2236,7 +2300,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2247,7 +2311,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2257,7 +2321,7 @@ mod tests {
             views(vec![(2, nullification_with(None))]),
             views(vec![(1, finalization_with(0, 0xA, None))]),
         );
-        check::<SimplexBls12381MinPk>(N, vec![r]);
+        check::<SimplexBls12381MinPk>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2268,7 +2332,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexBls12381MinPk>(N, vec![r]);
+        check::<SimplexBls12381MinPk>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2279,7 +2343,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2290,7 +2354,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2301,7 +2365,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2312,7 +2376,7 @@ mod tests {
             views(vec![]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2322,7 +2386,7 @@ mod tests {
             views(vec![(2, nullification()), (3, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2333,7 +2397,7 @@ mod tests {
             views(vec![]),
             views(vec![(1, finalization(0, 0xA))]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2344,7 +2408,7 @@ mod tests {
             views(vec![]),
             views(vec![(2, finalization(1, 0xA))]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]
@@ -2361,7 +2425,7 @@ mod tests {
             views(vec![]),
         );
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            check::<SimplexId>(N, vec![r0, r1, r2]);
+            check::<SimplexId>(N, TermLength::ONE, vec![r0, r1, r2]);
         }));
         let payload = result.expect_err("conflicting notarizations must panic");
         let message = payload
@@ -2803,10 +2867,10 @@ mod tests {
     fn check_selects_invariants_from_the_reporter_type() {
         let (participants, schemes) = vote_fixture();
         let mock = vote_reporter(&participants, &schemes);
-        check::<SimplexId>(N, std::slice::from_ref(&mock));
+        check::<SimplexId>(N, TermLength::ONE, std::slice::from_ref(&mock));
 
         let fuzz = audit_reporter(0, &participants, &schemes);
-        check::<SimplexId>(N, std::slice::from_ref(&fuzz));
+        check::<SimplexId>(N, TermLength::ONE, std::slice::from_ref(&fuzz));
     }
 
     #[test]
@@ -3950,7 +4014,7 @@ mod tests {
             views(vec![(0, nullification())]),
             views(vec![]),
         );
-        check::<SimplexId>(N, vec![r]);
+        check::<SimplexId>(N, TermLength::ONE, vec![r]);
     }
 
     #[test]

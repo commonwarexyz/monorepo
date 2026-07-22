@@ -38,7 +38,7 @@ use crate::{
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::View,
+    types::{TermLength, View},
 };
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -557,7 +557,7 @@ async fn restart<P: Simplex>(
             participants,
             scheme,
             validator,
-            P::Elector::default(),
+            P::elector(TermLength::ONE),
             relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -757,7 +757,7 @@ fn run_inner<P: Simplex>(
         let config = input.configuration;
         let n = config.n as usize;
         let required_containers = input.required_containers;
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
 
         // Select the episode's adversary role ONCE, before the per-node loop. The
@@ -831,7 +831,7 @@ fn run_inner<P: Simplex>(
             // multiplexer is the single owner of those single-consumer mailboxes and
             // spawns the INITIAL profile's actor; nothing is pushed to `managed`. The
             // Equivocator shares the honest nodes' relay and leader schedule (built
-            // internally as `P::Elector::default()`, the same config the honest
+            // internally as `P::elector(TermLength::ONE)`, the same config the honest
             // validators build with); the other roles ignore both.
             if byz && i == BYZANTINE_IDX {
                 multiplexer = Some(multiplexer::RoleMultiplexer::new(
@@ -900,7 +900,7 @@ fn run_inner<P: Simplex>(
                     &participants,
                     scheme,
                     validator,
-                    P::Elector::default(),
+                    P::elector(TermLength::ONE),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -1525,7 +1525,7 @@ fn run_inner<P: Simplex>(
         observers.extend(managed.iter().map(|m| m.reporter()));
         invariants::check_vote_invariants_with_byzantine(&byzantine, &observers);
         let states = invariants::extract(reporters, n);
-        invariants::check::<P>(config.n, states);
+        invariants::check::<P>(config.n, TermLength::ONE, states);
     });
 }
 
@@ -1552,6 +1552,7 @@ mod tests {
         FuzzInput {
             raw_bytes,
             required_containers: 2,
+            term_length: TermLength::ONE,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

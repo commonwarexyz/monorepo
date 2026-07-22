@@ -629,16 +629,12 @@ pub fn fuzz(input: FuzzInput) {
 
 fn expected_item_digest(height: Height) -> Sha256Digest {
     let payload = format!("data for height {height}");
-    let mut hasher = Sha256::default();
-    hasher.update(payload.as_bytes());
-    hasher.finalize()
+    Sha256::hash(&[payload.as_bytes()])
 }
 
 fn bad_item_digest(height: Height) -> Sha256Digest {
     let payload = format!("bad data for height {height}");
-    let mut hasher = Sha256::default();
-    hasher.update(payload.as_bytes());
-    hasher.finalize()
+    Sha256::hash(&[payload.as_bytes()])
 }
 
 async fn check_no_conflicting_certs<S>(

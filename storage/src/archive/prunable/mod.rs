@@ -159,7 +159,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, Sha256::hash(b"data"), 10).await.unwrap();
+//!     archive.put(1, Sha256::hash(&[b"data"]), 10).await.unwrap();
 //!
 //!     // Sync the archive
 //!     archive.sync().await.unwrap();

@@ -1,8 +1,69 @@
+//! The resolver is responsible for ensuring that the voter has all the certificates it needs to
+//! make progress. The voter is voting in a view and has a "floor" view which is the latest
+//! certified (or finalized) view that it knows about. Thus, it either requires covering
+//! nullification evidence for intermediate views, or a higher floor. It will request the required
+//! nullifications from the resolver. Other nodes will either serve such nullifications, or higher floors.
+//!
+//! # Fetch Strategy
+//!
+//! A nullification covers the view it was created for and the rest of that view's term, and a
+//! request only accepts nullifications from its own term (see [`crate::types::View::covers`]).
+//! One request per term, at its lowest uncovered view (the term's "anchor"), is therefore
+//! sufficient: whatever answers it covers the rest of the term, and a higher floor moots it. The
+//! fetch scan requests each term's anchor and advances a cursor past everything it scanned:
+//!
+//! ```text
+//! term:      [1  2  3  4  5] [6 . . . 10] [11 . . . 15]    current = 14
+//! request:   [1]             [6]          [11]             cursor -> 16
+//!
+//! nullification@4 covers 4..=5:  only a request keyed in [4, 5] retrieves it
+//! nullification@4 for request 6: rejected (wrong term)
+//! ```
+//!
+//! Requests stay pending in the resolver until answered or retained out, so the cursor never
+//! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
+//! pending, which the resolver engine deduplicates).
+//!
+//! # Mid-Term Floor Raises
+//!
+//! A floor raise landing inside a term (a certified notarization or a finalization at a mid-term
+//! view) strands the term's tail: the anchor request is retained out with the floor, requests in
+//! later terms reject this term's nullifications, and the cursor is already past it. Nothing
+//! would ever re-request the tail, so a validator whose parent chain rests at the floor could
+//! never validate proposals that skip it:
+//!
+//! ```text
+//! floor raises to 3, mid-term of [1, 5]:
+//!
+//! term:      [1  2  3 |  4  5] [6 . . . 10] [11 . . . 15]
+//!                     ^floor
+//! request:    x          ??    [6]          [11]
+//!            (retained out)    (reject term-1 evidence)
+//! ```
+//!
+//! Pruning repairs this by pulling the cursor back to just above the floor, so a later scan
+//! re-requests the tail. Anchors whose requests are still pending are re-issued along the way
+//! and deduplicated by the engine, while anchors with a stored covering nullification are
+//! skipped:
+//!
+//! ```text
+//! pull-back: cursor = min(cursor, floor + 1) = 4
+//!
+//! next scan: fetch(4), then the later anchors: fetch(6), fetch(11)
+//!                                              (still pending: deduplicated)
+//!
+//! term:      [1  2  3 |  4  5] [6 . . . 10] [11 . . . 15]
+//! request:              [4]    [6]          [11]
+//! ```
+//!
+//! With single-view terms every view is its own anchor, a floor raise can never land mid-term,
+//! and the pull-back never fires.
+
 mod actor;
 mod ingress;
 mod state;
 
-use crate::types::Epoch;
+use crate::types::{Epoch, TermLength};
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
@@ -24,6 +85,7 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
+    pub term_length: TermLength,
 }
 
 /// Certificate builders shared by the resolver test modules.

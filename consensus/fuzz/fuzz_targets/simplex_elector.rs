@@ -3,10 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector, Random, RoundRobin},
+        elector::{self, Elector, Random, RoundRobin},
         scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
     },
-    types::{Round, View},
+    types::{Round, TermLength, View},
 };
 use commonware_cryptography::{
     Sha256, Signer,
@@ -17,12 +17,13 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random as _;
 use commonware_utils::{TestRng, TryCollect, ordered::Set};
 use libfuzzer_sys::fuzz_target;
+use std::time::Duration;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Arbitrary, Debug)]
 enum FuzzElector {
-    RoundRobin,
-    RoundRobinShuffled([u8; 32]),
+    RoundRobin(TermLength),
+    RoundRobinShuffled([u8; 32], TermLength),
     RandomMinPk(bls12381_threshold_vrf::Certificate<MinPk>),
     RandomMinSig(bls12381_threshold_vrf::Certificate<MinSig>),
 }
@@ -37,7 +38,7 @@ struct FuzzInput {
 fn fuzz<S, L>(input: &FuzzInput, elector_config: L, certificate: Option<&S::Certificate>)
 where
     S: Scheme<PublicKey = PublicKey>,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
 {
     let Ok(participants) = (1..=input.participants_count)
         .map(|i| {
@@ -68,11 +69,22 @@ where
 
 fuzz_target!(|input: FuzzInput| {
     match &input.elector {
-        FuzzElector::RoundRobin => {
-            fuzz::<ed25519::Scheme, _>(&input, RoundRobin::<Sha256>::default(), None);
+        FuzzElector::RoundRobin(term_length) => {
+            let elector = match term_length.get() {
+                1 => RoundRobin::<Sha256>::default(),
+                _ => {
+                    RoundRobin::<Sha256>::default().with_term(*term_length, Duration::from_secs(12))
+                }
+            };
+            fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
-        FuzzElector::RoundRobinShuffled(seed) => {
-            fuzz::<ed25519::Scheme, _>(&input, RoundRobin::<Sha256>::shuffled(seed), None);
+        FuzzElector::RoundRobinShuffled(seed, term_length) => {
+            let elector = match term_length.get() {
+                1 => RoundRobin::<Sha256>::shuffled(seed),
+                _ => RoundRobin::<Sha256>::shuffled(seed)
+                    .with_term(*term_length, Duration::from_secs(12)),
+            };
+            fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
         FuzzElector::RandomMinPk(certificate) => {
             fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(&input, Random, Some(certificate));

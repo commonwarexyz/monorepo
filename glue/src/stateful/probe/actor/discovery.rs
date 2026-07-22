@@ -1,5 +1,5 @@
 use super::service::Service;
-use crate::stateful::probe::{mailbox::Message, wire};
+use crate::stateful::probe::{mailbox::Message, sample::Sample, wire};
 use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Decode, Encode, Error as CodecError, ReadExt};
@@ -21,12 +21,11 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    Faults, N3f1, NonZeroDuration,
+    NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
-use std::collections::BTreeMap;
 use tracing::debug;
 
 /// The discovery phase of [`Probe`](super::Probe).
@@ -37,7 +36,7 @@ use tracing::debug;
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -49,16 +48,15 @@ where
     pub(super) provider: D,
     pub(super) strategy: T,
     pub(super) blocker: B,
-    pub(super) minimum_epoch: Epoch,
     pub(super) retry_timeout: NonZeroDuration,
-    pub(super) floor: Option<Finalization<S, V::Commitment>>,
+    pub(super) sample: Sample<S, V::Commitment>,
     pub(super) floor_subscribers: Vec<oneshot::Sender<Finalization<S, V::Commitment>>>,
 }
 
 impl<E, S, D, V, T, P, B> Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -73,7 +71,6 @@ where
         receiver: &mut impl Receiver<PublicKey = P>,
     ) {
         let mut deadline = self.context.current() + self.retry_timeout.get();
-        let mut finalizations = BTreeMap::new();
         let mut marshal = None;
 
         select_loop! {
@@ -90,7 +87,7 @@ where
                 }
 
                 // Arm the retry timer only while actively searching for a floor.
-                let retry = if self.floor.is_none() && !self.floor_subscribers.is_empty() {
+                let retry = if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() {
                     Either::Left(self.context.sleep_until(deadline))
                 } else {
                     Either::Right(future::pending())
@@ -104,15 +101,15 @@ where
                 debug!("mailbox closed, shutting down");
                 return;
             } => match message {
-                Message::Subscribe { response } => match self.floor {
-                    Some(ref floor) => {
+                Message::Subscribe { response } => match self.sample.floor() {
+                    Some(floor) => {
                         response.send_lossy(floor.clone());
                     }
                     None => {
                         let should_request = self.floor_subscribers.is_empty();
                         self.floor_subscribers.push(response);
                         if should_request {
-                            Self::request_latest(sender, &mut finalizations);
+                            self.request_latest(sender);
                             deadline = self.context.current() + self.retry_timeout.get();
                         }
                     }
@@ -125,14 +122,10 @@ where
                 debug!("network receiver closed, shutting down");
                 return;
             } => {
-                // Once a floor has been selected, ignore further finalizations.
-                if self.floor.is_some() {
-                    continue;
-                }
-
-                // A peer can only contribute once per request round. Skip duplicates before
-                // decoding or verifying to avoid useless certificate work.
-                if finalizations.contains_key(&peer) {
+                // Once a floor has been selected or a peer has contributed this request
+                // round, skip its replies before decoding or verifying to avoid useless
+                // certificate work.
+                if !self.sample.pending(&peer) {
                     continue;
                 }
 
@@ -155,15 +148,15 @@ where
                     continue;
                 };
                 if self.floor_subscribers.is_empty() {
-                    finalizations.clear();
+                    self.sample.reset();
                     continue;
                 }
-                finalizations.entry(peer).or_insert(finalization);
-                self.try_select_floor(&mut finalizations);
+                self.sample.record(peer, finalization);
+                self.try_select_floor();
             },
             _ = retry => {
                 debug!(reason = "deadline elapsed", "re-requesting finalizations");
-                Self::request_latest(sender, &mut finalizations);
+                self.request_latest(sender);
                 deadline = self.context.current() + self.retry_timeout.get();
             },
         }
@@ -175,7 +168,7 @@ where
             mailbox: self.mailbox,
             marshal: marshal.expect("transition requires an attached marshal"),
             blocker: self.blocker,
-            floor: self.floor,
+            floor: self.sample.floor().cloned(),
         }
         .run(sender, receiver)
         .await;
@@ -192,7 +185,7 @@ where
             return Ok(None);
         }
         let proposal = Proposal::<V::Commitment>::read(&mut message)?;
-        if proposal.epoch() < self.minimum_epoch {
+        if proposal.epoch() < self.sample.minimum_epoch() {
             return Ok(None);
         }
         let Some(certificate_codec_config) = self.certificate_codec_config(proposal.epoch()) else {
@@ -207,16 +200,24 @@ where
 
     /// Verifies a [`Finalization`] from `peer`.
     ///
-    /// Peers that send invalid finalizations are blocked. If no scheme is available for the
-    /// finalization's epoch, the payload is ignored without blocking because it cannot be judged.
+    /// Peers outside the solicited participant set or sending invalid finalizations are blocked.
+    /// If no scheme is available for the finalization's epoch, the payload is ignored without
+    /// blocking because it cannot be judged.
     fn verify_finalization(
         &mut self,
         peer: P,
         finalization: Finalization<S, V::Commitment>,
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
-        // Verify against the certificate scheme for the finalization's epoch. If no scheme is
+        let response_epoch = finalization.epoch();
+        let sample_scheme = self.provider.scheme(self.sample.minimum_epoch())?;
+        if sample_scheme.participants().position(&peer).is_none() {
+            commonware_p2p::block!(self.blocker, peer, "finalization sent by non-participant");
+            return None;
+        }
+
+        // Verify against the certificate scheme for the finalization's epoch. If no verifier is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scoped = self.provider.scoped(finalization.epoch())?;
+        let scoped = self.provider.scoped(response_epoch)?;
         if !finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;
@@ -225,53 +226,33 @@ where
     }
 
     /// Attempts to select the highest finalization from a sample of distinct peers.
-    fn try_select_floor(
-        &mut self,
-        finalizations: &mut BTreeMap<P, Finalization<S, V::Commitment>>,
-    ) {
-        if self.floor.is_some() {
-            return;
-        }
-
-        let (floor, replies) =
-            finalizations
-                .values()
-                .fold((None, 0), |(floor, replies), finalization| {
-                    if self.sample_size(finalization.epoch()).is_none() {
-                        return (floor, replies);
-                    }
-                    let floor = floor
-                        .is_none_or(|candidate: &Finalization<_, _>| {
-                            finalization.round() > candidate.round()
-                        })
-                        .then_some(finalization)
-                        .or(floor);
-                    (floor, replies + 1)
-                });
-        let Some(floor) = floor else {
+    fn try_select_floor(&mut self) {
+        let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
             return;
         };
-        let Some(sample_size) = self.sample_size(floor.epoch()) else {
+        let provider = &self.provider;
+        let Some(floor) = self
+            .sample
+            .select(scheme.participants().len(), |finalization| {
+                provider.scoped(finalization.epoch()).is_some()
+            })
+        else {
             return;
         };
-        if replies < sample_size {
-            return;
-        }
 
         self.floor_subscribers.drain(..).for_each(|subscriber| {
             subscriber.send_lossy(floor.clone());
         });
-        self.floor = Some(floor.clone());
     }
 
-    /// Clears any pending responses and re-requests peers' latest [`Finalization`].
-    fn request_latest(
-        sender: &mut impl Sender<PublicKey = P>,
-        finalizations: &mut BTreeMap<P, Finalization<S, V::Commitment>>,
-    ) {
-        finalizations.clear();
+    /// Clears any pending responses and requests the current committee's latest [`Finalization`].
+    fn request_latest(&mut self, sender: &mut impl Sender<PublicKey = P>) {
+        self.sample.reset();
+        let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
+            return;
+        };
         sender.send(
-            Recipients::All,
+            Recipients::Some(scheme.participants().iter().cloned().collect()),
             wire::Message::<S, V>::Request.encode(),
             false,
         );
@@ -285,12 +266,5 @@ where
         self.provider
             .scoped(epoch)
             .map(|scoped| scoped.certificate_codec_config())
-    }
-
-    /// Returns the number of distinct peer replies (`f + 1`) required for `epoch`.
-    fn sample_size(&self, epoch: Epoch) -> Option<usize> {
-        self.provider
-            .scheme(epoch)
-            .map(|scheme| N3f1::max_faults(scheme.participants().len()) as usize + 1)
     }
 }

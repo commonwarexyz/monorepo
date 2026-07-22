@@ -139,6 +139,23 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         index
     }
 
+    /// Visit every value held across all partitions (inline and spilled), in unspecified order.
+    #[commonware_macros::stability(ALPHA)]
+    fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        for (p, partition) in self.partitions.iter().enumerate() {
+            for v in partition.values_iter() {
+                f(v);
+            }
+            if let Some(inner) = self.spilled_partition(p) {
+                for vals in inner.values() {
+                    for v in vals {
+                        f(v);
+                    }
+                }
+            }
+        }
+    }
+
     /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
     fn maybe_spill(&mut self, i: usize) {
         if self.partitions[i].len() < self.threshold {
@@ -383,22 +400,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             self.spilled.insert(lo + local, inner);
         }
     }
-
-    /// Visits inline and spilled values.
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for (p, partition) in self.partitions.iter().enumerate() {
-            for v in partition.values_iter() {
-                f(v);
-            }
-            if let Some(inner) = self.spilled_partition(p) {
-                for vals in inner.values() {
-                    for v in vals {
-                        f(v);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
@@ -432,6 +433,10 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index
             .get_mut_or_insert_slot(i - self.offset, sub, value)
+    }
+
+    fn for_each_value(&self, f: impl FnMut(&V)) {
+        self.index.for_each_value(f);
     }
 }
 
@@ -1090,6 +1095,36 @@ mod tests {
             // Installing moves the structures without touching the already-live counts.
             full.install_range(worker);
             assert_eq!(full.pruned(), 2);
+        });
+    }
+
+    /// A worker's value walk must visit every value it holds exactly once, whichever
+    /// representation each partition uses (inline sorted arrays or the spilled side-table),
+    /// since the snapshot build derives the activity bitmap and active-key counts from it.
+    #[test_traced]
+    fn test_range_for_each_value_visits_all_values_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let full = new_index_spilling(context.child("full"));
+
+            // Two distinct keys spill partition 0x80 (threshold 2), then a translated-key
+            // collision appends a second value to a spilled run. Partition 0x81 holds one key
+            // and stays inline.
+            let mut worker = full.new_range(0x80, 2);
+            assert!(worker.get_mut_or_insert(&[0x80, 0x01], 1).is_none());
+            assert!(worker.get_mut_or_insert(&[0x80, 0x02, 0xAA], 2).is_none());
+            assert!(worker.get_mut_or_insert(&[0x80, 0x02, 0xBB], 3).is_some());
+            {
+                let mut cursor = worker.get_mut(&[0x80, 0x02, 0xBB]).unwrap();
+                cursor.next();
+                cursor.insert(3);
+            }
+            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 4).is_none());
+            assert_eq!(worker.index.spilled_count(), 1);
+
+            let mut seen = Vec::new();
+            worker.for_each_value(|v| seen.push(*v));
+            seen.sort_unstable();
+            assert_eq!(seen, vec![1, 2, 3, 4]);
         });
     }
 

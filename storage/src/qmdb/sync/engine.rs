@@ -29,11 +29,7 @@ use futures::{
     future::{Either, pending},
 };
 use mpsc::error::TryRecvError;
-use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    fmt::Debug,
-    num::NonZeroU64,
-};
+use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
 type Error<DB, R> =
@@ -169,16 +165,13 @@ where
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Historical roots from previous sync targets, keyed by tree size
-    /// (target.range.end()). Each tree size maps to a unique root because
-    /// the merkle tree is append-only and validate_update rejects unchanged
-    /// roots. When a retained request completes, proof.leaves identifies
-    /// which historical root to verify against.
-    retained_roots: HashMap<Location<DB::Family>, DB::Digest>,
-
-    /// Tree sizes of retained roots in insertion order (oldest first),
-    /// used for FIFO eviction when retained_roots exceeds capacity.
-    retained_roots_order: VecDeque<Location<DB::Family>>,
+    /// Historical roots from superseded sync targets, keyed by tree size
+    /// (target.range.end()). Keys strictly increase across target updates
+    /// (enforced by validate_update), so each tree size maps to a unique
+    /// root and the smallest key is the oldest. Eviction drops it first.
+    /// When a retained request completes, proof.leaves identifies which
+    /// historical root to verify against.
+    retained_roots: BTreeMap<Location<DB::Family>, DB::Digest>,
 
     /// Maximum number of historical roots to retain
     max_retained_roots: usize,
@@ -228,9 +221,6 @@ where
 
     /// Progress gauges updated after target updates and batch application.
     metrics: Metrics,
-
-    /// Whether explicit finish has been requested.
-    finish_requested: bool,
 
     /// Tracks whether the current target has already been reported as reached.
     reached_current_target_reported: bool,
@@ -292,8 +282,7 @@ where
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes,
-            retained_roots: HashMap::new(),
-            retained_roots_order: VecDeque::new(),
+            retained_roots: BTreeMap::new(),
             max_retained_roots: config.max_retained_roots,
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
@@ -307,7 +296,6 @@ where
             update_rx: config.update_rx,
             finish_rx: config.finish_rx,
             reached_target_tx: config.reached_target_tx,
-            finish_requested: false,
             reached_current_target_reported: false,
             metrics,
         };
@@ -417,18 +405,10 @@ where
         // Save the current root keyed by its tree size for verifying
         // retained requests that were issued against this target.
         if self.max_retained_roots > 0 {
-            let old_target_size = self.target.range.end();
-            assert!(
-                self.retained_roots
-                    .insert(old_target_size, self.target.root)
-                    .is_none(),
-                "duplicate retained root for tree size {old_target_size:?}"
-            );
-            self.retained_roots_order.push_back(old_target_size);
+            self.retained_roots
+                .insert(self.target.range.end(), self.target.root);
             while self.retained_roots.len() > self.max_retained_roots {
-                if let Some(oldest) = self.retained_roots_order.pop_front() {
-                    self.retained_roots.remove(&oldest);
-                }
+                self.retained_roots.pop_first();
             }
         }
 
@@ -439,16 +419,17 @@ where
 
     /// Drain a pending explicit-finish signal without blocking.
     ///
-    /// If a finish signal is present, the engine transitions into "finish requested"
-    /// mode via [`Self::accept_finish`]. If the finish channel is disconnected before
-    /// a finish request is observed, this returns [`EngineError::FinishChannelClosed`].
+    /// If a finish signal is present, the finish channel is dropped and the engine
+    /// may complete as soon as it is at a target. If the finish channel is
+    /// disconnected before a finish request is observed, this returns
+    /// [`EngineError::FinishChannelClosed`].
     fn drain_finish_requests(&mut self) -> Result<(), Error<DB, R>> {
         let Some(finish_rx) = self.finish_rx.as_mut() else {
             return Ok(());
         };
         match finish_rx.try_recv() {
             Ok(()) => {
-                self.accept_finish();
+                self.finish_rx = None;
                 Ok(())
             }
             Err(TryRecvError::Empty) => Ok(()),
@@ -456,15 +437,6 @@ where
                 Err(SyncError::Engine(EngineError::FinishChannelClosed))
             }
         }
-    }
-
-    /// Mark that explicit finish has been requested and stop listening for more signals.
-    ///
-    /// This is a one-way transition for the current engine instance. Once set, the
-    /// engine may complete as soon as it is at a target (or the next time it reaches one).
-    fn accept_finish(&mut self) {
-        self.finish_requested = true;
-        self.finish_rx = None;
     }
 
     /// Notify an observer that the current target has been reached. The notification is sent
@@ -708,7 +680,7 @@ where
                 Ok(NextStep::Continue(self))
             }
             Event::FinishRequested => {
-                self.accept_finish();
+                self.finish_rx = None;
                 Ok(NextStep::Continue(self))
             }
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
@@ -740,7 +712,7 @@ where
         if self.is_ready_to_complete()? {
             self.report_reached_target().await;
 
-            if self.finish_rx.is_some() && !self.finish_requested {
+            if self.finish_rx.is_some() {
                 let event = wait_for_event(
                     &mut self.update_rx,
                     &mut self.finish_rx,

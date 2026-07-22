@@ -191,7 +191,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             codec_config: cfg.codec_config,
         };
         let mut oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.child("oversized"), oversized_cfg).await?;
+            Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
 
         // Initialize keys and replay index journal (no values read!)
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();

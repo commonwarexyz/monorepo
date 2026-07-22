@@ -46,7 +46,7 @@ use commonware_consensus::{
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
-    types::{Delta, Epoch, View},
+    types::{Delta, Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     PublicKey as CryptoPublicKey, Sha256, certificate::Verifier, sha256::Digest as Sha256Digest,
@@ -64,7 +64,7 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZU16, NZUsize,
+    FuzzRng, NZU16, NZU32, NZUsize,
     channel::mpsc::{self, Receiver},
     sequence::U64,
     sync::Once,
@@ -108,7 +108,7 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 /// runtime. Increase only if a complementary timeout is added to the wait loop.
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
-pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
+pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 /// Bounded pre-GST fault phase: how long network faults stay active before a
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
@@ -386,6 +386,7 @@ fn print_node_fuzz_input(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
+    pub term_length: TermLength,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -441,6 +442,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -505,6 +507,7 @@ impl Arbitrary<'_> for FuzzInput {
             configuration,
             degraded_network,
             required_containers,
+            term_length,
             strategy,
             messaging_faults: Vec::new(),
             mailbox_size,
@@ -1006,8 +1009,7 @@ where
         .iter()
         .position(|participant| participant == &validator)
         .expect("validator must be in participants");
-    let app_cfg = application::Config {
-        hasher: Sha256::default(),
+    let app_cfg = application::Config::<Sha256, _> {
         relay,
         me: validator.clone(),
         propose_latency: (10.0, 5.0),
@@ -1041,8 +1043,8 @@ where
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
-        activity_timeout: Delta::new(10),
-        skip_timeout: Delta::new(5),
+        view_retention: Delta::new(10),
+        skip_timeout: Duration::from_secs(11),
         fetch_concurrent,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
@@ -1193,8 +1195,7 @@ where
         .iter()
         .position(|p| p == &validator)
         .expect("validator must be in participants");
-    let app_cfg = application::Config {
-        hasher: Sha256::default(),
+    let app_cfg = application::Config::<Sha256, _> {
         relay,
         me: validator.clone(),
         propose_latency: (10.0, 5.0),
@@ -1222,8 +1223,8 @@ where
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
-        activity_timeout: Delta::new(10),
-        skip_timeout: Delta::new(5),
+        view_retention: Delta::new(10),
+        skip_timeout: Duration::from_secs(11),
         fetch_concurrent,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
@@ -1256,6 +1257,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
+    term_length: TermLength,
     scheme: P::Scheme,
     validator: PublicKeyOf<P>,
     byzantine_router: crate::network::Router<PublicKeyOf<P>, deterministic::Context>,
@@ -1302,7 +1304,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         participants,
         scheme,
         validator,
-        P::Elector::default(),
+        P::elector(term_length),
         relay,
         leader_timeout,
         certification_timeout,
@@ -1747,9 +1749,10 @@ fn run_standard_once<P: simplex::Simplex>(
             .await;
         }
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+        let term_length = P::effective_term_length(input.term_length);
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
@@ -1818,7 +1821,7 @@ fn run_standard_once<P: simplex::Simplex>(
                     &participants,
                     schemes[i].clone(),
                     validator.clone(),
-                    P::Elector::default(),
+                    P::elector(term_length),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -1917,7 +1920,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 happens_before: hb_summary,
             });
             let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            invariants::check::<P>(config.n, term_length, states);
             audit
         } else {
             None
@@ -1958,9 +1961,10 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             .await;
         }
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+        let term_length = P::effective_term_length(input.term_length);
 
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
@@ -1982,7 +1986,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
                     &participants,
                     schemes[i].clone(),
                     validator,
-                    P::Elector::default(),
+                    P::elector(term_length),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -2012,7 +2016,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
                 &participants,
                 schemes[i].clone(),
                 validator.clone(),
-                P::Elector::default(),
+                P::elector(term_length),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -2085,7 +2089,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
         invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
         invariants::check_vote_invariants(config.faults as usize, &summary_reporters);
         invariants::check_certificate_seeds::<P, _, _>(&summary_reporters);
-        invariants::check::<P>(config.n, reporter_only.as_slice());
+        invariants::check::<P>(config.n, term_length, reporter_only.as_slice());
         (true, rejected_certification_observed)
     })
 }
@@ -2137,9 +2141,10 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+        let term_length = P::effective_term_length(input.term_length);
 
         // Per-view drop-rate cell shared with every router. We seed it
         // SYNCHRONOUSLY with the rate scheduled for view 1 (the initial
@@ -2182,6 +2187,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 ctx,
                 &oracle,
                 &participants,
+                term_length,
                 schemes[i].clone(),
                 validator.clone(),
                 byzantine_router.clone(),
@@ -2237,7 +2243,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
             invariants::check_certificate_seeds::<P, _, _>(&reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            invariants::check::<P>(config.n, term_length, states);
         }
     });
 }
@@ -2413,10 +2419,11 @@ fn run_twins<P: simplex::Simplex>(
             )
             .await;
 
-            let relay = Arc::new(relay::Relay::new());
+            let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
             let mut reporters: Vec<TwinsReporter<P>> = Vec::new();
             let mut twin_observers: Vec<TwinsReporter<P>> = Vec::new();
             let config = input.configuration;
+            let term_length = P::effective_term_length(input.term_length);
 
             // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
             // the scenario (per-round partitions and scripted leaders) and the
@@ -2448,8 +2455,8 @@ fn run_twins<P: simplex::Simplex>(
             let compromised: std::collections::HashSet<usize> =
                 case.compromised.iter().copied().collect();
 
-            // Twins-aware elector with scripted leaders for the first `rounds` views.
-            let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
+            // Twins-aware elector with scripted leaders for the first `rounds` terms.
+            let twin_elector = twins::Elector::new(P::elector(term_length), &scenario, n);
 
             // Spawn Byzantine twins (indices from `case.compromised`):
             // primary (legitimate engine) + secondary (Disrupter). Twin halves
@@ -2471,7 +2478,7 @@ fn run_twins<P: simplex::Simplex>(
                             return None;
                         };
                         let (primary, secondary) =
-                            scenario.partitions(msg.view(), participants.as_ref());
+                            scenario.partitions(msg.view(), term_length, participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -2490,7 +2497,7 @@ fn run_twins<P: simplex::Simplex>(
                             return None;
                         };
                         let (primary, secondary) =
-                            scenario.partitions(msg.view(), participants.as_ref());
+                            scenario.partitions(msg.view(), term_length, participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -2505,7 +2512,7 @@ fn run_twins<P: simplex::Simplex>(
                         else {
                             return SplitTarget::None;
                         };
-                        scenario.route(msg.view(), sender, participants.as_ref())
+                        scenario.route(msg.view(), term_length, sender, participants.as_ref())
                     }
                 };
                 let make_certificate_router = || {
@@ -2519,7 +2526,7 @@ fn run_twins<P: simplex::Simplex>(
                         ) else {
                             return SplitTarget::None;
                         };
-                        scenario.route(msg.view(), sender, participants.as_ref())
+                        scenario.route(msg.view(), term_length, sender, participants.as_ref())
                     }
                 };
                 let make_resolver_forwarder = || {
@@ -2528,7 +2535,8 @@ fn run_twins<P: simplex::Simplex>(
                     let scenario = scenario.clone();
                     move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
                         let view = twins_resolver_view::<P>(message, &codec)?;
-                        let (primary, secondary) = scenario.partitions(view, participants.as_ref());
+                        let (primary, secondary) =
+                            scenario.partitions(view, term_length, participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -2543,7 +2551,7 @@ fn run_twins<P: simplex::Simplex>(
                         let Some(view) = twins_resolver_view::<P>(message, &codec) else {
                             return SplitTarget::None;
                         };
-                        scenario.route(view, sender, participants.as_ref())
+                        scenario.route(view, term_length, sender, participants.as_ref())
                     }
                 };
                 let (vote_sender, vote_receiver) = vote_network;
@@ -2578,8 +2586,7 @@ fn run_twins<P: simplex::Simplex>(
                 let reporter =
                     reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
-                let app_cfg = application::Config {
-                    hasher: Sha256::default(),
+                let app_cfg = application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2607,8 +2614,8 @@ fn run_twins<P: simplex::Simplex>(
                     certification_timeout: Duration::from_millis(1_500),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout: Delta::new(10),
-                    skip_timeout: Delta::new(5),
+                    view_retention: Delta::new(10),
+                    skip_timeout: Duration::from_secs(11),
                     fetch_concurrent: input.fetch_concurrent,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2663,8 +2670,7 @@ fn run_twins<P: simplex::Simplex>(
                         );
                         reporters.push(TwinsReporter::Summary(secondary_reporter.clone()));
 
-                        let secondary_app_cfg = application::Config {
-                            hasher: Sha256::default(),
+                        let secondary_app_cfg = application::Config::<Sha256, _> {
                             relay: relay.clone(),
                             me: validator.clone(),
                             propose_latency: (10.0, 5.0),
@@ -2697,8 +2703,8 @@ fn run_twins<P: simplex::Simplex>(
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
-                            activity_timeout: Delta::new(10),
-                            skip_timeout: Delta::new(5),
+                            view_retention: Delta::new(10),
+                            skip_timeout: Duration::from_secs(11),
                             fetch_concurrent: input.fetch_concurrent,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
@@ -2840,7 +2846,7 @@ fn run_twins<P: simplex::Simplex>(
             // role: `Mutator` uses absolute view targets, `Campaign` counts
             // finalizations after the adversarial prefix.
             if config.is_valid() {
-                let prefix_end = View::new(scenario.rounds().len() as u64);
+                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let required = input.required_containers;
@@ -2934,10 +2940,10 @@ fn run_twins<P: simplex::Simplex>(
                         honest_reporters.len(),
                         "every correct Twins reporter must record in audit mode"
                     );
-                    invariants::check::<P>(config.n, recordings.as_slice());
+                    invariants::check::<P>(config.n, term_length, recordings.as_slice());
                 } else {
                     let states = invariants::extract(honest_summaries, config.n as usize);
-                    invariants::check::<P>(config.n, states);
+                    invariants::check::<P>(config.n, term_length, states);
                 }
             }
         });
@@ -3335,8 +3341,10 @@ pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
     // Rejected certification is sampled only for instantiations that expose a
     // statically known Byzantine-led view. General fuzz targets never receive
     // this override, so they cannot accidentally reject a correct proposer's
-    // certifiable-by-construction payload.
+    // certifiable-by-construction payload. The known Byzantine-led view assumes
+    // the rotating (term length one) leader schedule, so longer terms skip it.
     if input.certify == CertifyChoice::Always
+        && input.term_length == TermLength::ONE
         && input.raw_bytes.first().is_some_and(|byte| byte % 4 == 0)
         && let Some(view) = P::audit_rejection_view(input.configuration)
         && input.required_containers >= view.get()
@@ -3395,6 +3403,7 @@ mod tests {
         FuzzInput {
             raw_bytes: 0u64.to_be_bytes().to_vec(),
             required_containers: MIN_REQUIRED_CONTAINERS,
+            term_length: TermLength::ONE,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

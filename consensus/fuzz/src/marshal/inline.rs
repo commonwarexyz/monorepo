@@ -251,11 +251,13 @@ impl ConsensusApplication<deterministic::Context> for InlineApp {
     type SigningScheme = S;
     type Context = Context<D, K>;
     type Block = B;
+    type Input = ();
 
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
     ) -> Option<Self::Block> {
         let _ = ancestry.peek();
         let _ = ancestry.next().await;
@@ -330,7 +332,7 @@ fn context_for(kind: InlineContext, block: &B, me: &K) -> Context<D, K> {
             leader: me.clone(),
             parent: (
                 parent_view(block.height()),
-                Sha256::hash(&block.height().get().to_be_bytes()),
+                Sha256::hash(&[&block.height().get().to_be_bytes()]),
             ),
         },
     }

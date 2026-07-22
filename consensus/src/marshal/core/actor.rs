@@ -118,7 +118,7 @@ where
     // Epoch configuration
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
-    view_retention_timeout: ViewDelta,
+    view_retention: ViewDelta,
     // Maximum number of blocks to repair at once
     max_repair: NonZeroUsize,
     // Codec configuration for block type
@@ -240,7 +240,7 @@ where
                 mailbox,
                 provider: config.provider,
                 epocher: config.epocher,
-                view_retention_timeout: config.view_retention_timeout,
+                view_retention: config.view_retention,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
@@ -2340,7 +2340,7 @@ where
         // processed finalized block.
         let prune_round = Round::new(
             previous.epoch(),
-            previous.view().saturating_sub(self.view_retention_timeout),
+            previous.view().saturating_sub(self.view_retention),
         );
         self.cache.prune_by_view(prune_round).await;
 

@@ -143,16 +143,12 @@ fn participant_count(participants: u8) -> u32 {
 }
 
 fn proposal(input: &FuzzInput) -> Proposal<sha256::Digest> {
-    let payload = Sha256::hash(
-        [
-            input.epoch.to_be_bytes().as_slice(),
-            input.view.to_be_bytes().as_slice(),
-            input.parent.to_be_bytes().as_slice(),
-            input.payload.to_be_bytes().as_slice(),
-        ]
-        .concat()
-        .as_slice(),
-    );
+    let payload = Sha256::hash(&[
+        input.epoch.to_be_bytes().as_slice(),
+        input.view.to_be_bytes().as_slice(),
+        input.parent.to_be_bytes().as_slice(),
+        input.payload.to_be_bytes().as_slice(),
+    ]);
     Proposal::new(
         Round::new(Epoch::new(input.epoch), View::new(input.view)),
         View::new(input.parent),

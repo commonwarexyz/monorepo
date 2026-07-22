@@ -835,9 +835,9 @@ mod tests {
                 .unwrap();
             let db = Shared::new("test", db);
 
-            let key = |i: u64| Sha256::hash(&i.to_be_bytes());
-            let val = |i: u64| Sha256::hash(&(i + 10_000).to_be_bytes());
-            let metadata = Sha256::hash(b"metadata");
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
+            let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
             let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;

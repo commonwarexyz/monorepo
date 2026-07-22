@@ -7,18 +7,17 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter, Viewable,
-    marshal::Update,
+    marshal::{
+        Update,
+        ancestry::{Ancestry, BoxedAncestry},
+    },
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
-use futures::Stream;
 use rand_core::Rng;
-use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
-
-/// Type alias for an ancestor stream sent through the actor mailbox.
-pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Messages processed by the actor loop.
 pub(crate) enum Message<E, A>
@@ -30,7 +29,8 @@ where
     Propose {
         span: Span,
         context: (E, A::Context),
-        ancestry: ErasedAncestorStream<A::Block>,
+        ancestry: BoxedAncestry<A::Block>,
+        upstream: A::Input,
         response: oneshot::Sender<Option<A::Block>>,
     },
 
@@ -38,7 +38,7 @@ where
     Verify {
         span: Span,
         context: (E, A::Context),
-        ancestry: ErasedAncestorStream<A::Block>,
+        ancestry: BoxedAncestry<A::Block>,
         response: oneshot::Sender<bool>,
     },
 
@@ -202,11 +202,13 @@ where
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
+    type Input = A::Input;
 
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
+        ancestry: impl Ancestry<Self::Block>,
+        upstream: Self::Input,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -217,7 +219,8 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            ancestry: Box::pin(ancestry),
+            ancestry: BoxedAncestry::new(ancestry),
+            upstream,
             response,
         });
         receiver.await.ok().flatten()
@@ -226,7 +229,7 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Arc<Self::Block>> + Send + 'static,
+        ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.
@@ -239,7 +242,7 @@ where
         let _ = self.sender.enqueue(Message::Verify {
             span,
             context,
-            ancestry: Box::pin(ancestry),
+            ancestry: BoxedAncestry::new(ancestry),
             response,
         });
         receiver

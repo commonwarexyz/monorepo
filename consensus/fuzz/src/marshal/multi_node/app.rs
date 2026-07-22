@@ -49,11 +49,13 @@ where
     type SigningScheme = S;
     type Context = C;
     type Block = Block<Sha256Digest, C>;
+    type Input = ();
 
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
     ) -> Option<Self::Block> {
         let (_, consensus_context) = context;
         // The first ancestor is the parent (highest height); the wrapper seeds
