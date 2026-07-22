@@ -17,10 +17,11 @@
 //! # Storage-page alignment
 //!
 //! Physical page `p` begins at blob offset `p * physical_page_size`, and a newly created blob
-//! begins its data on a 4096-byte boundary. Choosing a logical page size
-//! such that the physical page size is a power of two (see [page_size]) therefore keeps
-//! every physical page from crossing a 4096-byte storage-page boundary (and starts every physical
-//! page of at least 4096 bytes exactly on one).
+//! begins its data on a 4096-byte boundary. Choosing a logical page size such that the physical
+//! page size is a power of two (see [page_size]) therefore makes every physical page either fit
+//! within a single 4096-byte storage page or start on a 4096-byte boundary and span whole
+//! storage pages. Blobs created before the aligned layout begin their data at offset 8 and never
+//! align, regardless of the page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
 //! physical pages that straddle storage-page boundaries amplify cold random reads, so
@@ -60,16 +61,20 @@ const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
+// The alignment reasoning above assumes newly created blobs place their data on a
+// storage-page boundary.
+const _: () = assert!(crate::storage::Header::V1_DATA_OFFSET.is_multiple_of(STORAGE_PAGE_SIZE));
+
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
 /// The logical page size whose physical page occupies exactly `physical_page_size` bytes on disk
 /// (see the module docs on storage-page alignment).
 ///
-/// This selects a page size for a store; it is not a migration path. A store that already holds
-/// data cannot be reopened under a different page size: the mismatched pages fail their integrity
-/// check, and reopening for writing silently truncates them. Changing page size is a destructive
-/// format migration.
+/// This selects a page size for a store. It is not a migration path: a store that already holds
+/// data cannot be reopened under a different page size, as the mismatched pages fail their
+/// integrity check and reopening for writing silently truncates them. Changing page size is a
+/// destructive format migration.
 ///
 /// # Panics
 ///

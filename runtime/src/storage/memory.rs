@@ -4,24 +4,15 @@ use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
-/// Parses an existing blob's header, returning `None` if the blob is new or its contents are
-/// those of a creation that was interrupted before its header became durable (the caller
-/// recreates the blob), and an error if the header is corrupt or unacceptable.
+/// Resolves a blob's header from its full contents (see [super::resolve_header]).
 fn resolve_header(
     content: &[u8],
     versions: &RangeInclusive<u16>,
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
-    let raw_len = content.len() as u64;
-    if Header::missing(raw_len) {
-        return Ok(None);
-    }
     let raw = &content[..content.len().min(Header::V1_DATA_OFFSET_USIZE)];
-    match Header::parse(raw, raw_len, versions) {
-        Ok(resolved) => Ok(Some(resolved)),
-        Err(err) => super::resolve_unparseable(err, content, partition, name),
-    }
+    super::resolve_header(raw, content.len() as u64, versions, partition, name)
 }
 
 /// In-memory storage implementation for the commonware runtime.

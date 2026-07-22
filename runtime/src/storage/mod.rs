@@ -195,7 +195,7 @@ stability_scope!(BETA {
 
     /// Fixed-size header prelude at the start of each [crate::Blob].
     ///
-    /// On-disk layout (big-endian). The prelude is 8 bytes; a V1 header extends it:
+    /// On-disk layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
     ///
     /// | bytes    | field                        | owner       | question it answers                              |
     /// |----------|------------------------------|-------------|--------------------------------------------------|
@@ -235,7 +235,7 @@ stability_scope!(BETA {
         pub(crate) const PARSE_LEN: usize = Self::PRELUDE_SIZE + Self::EXTENSION_SIZE;
 
         /// The data offset of every [BlobHeaderLayout::V1] blob: the header region occupies
-        /// exactly one 4096-byte page. Not stored on disk; the layout's magic implies it.
+        /// exactly one 4096-byte page. Not stored on disk (the layout's magic implies it).
         ///
         /// Frozen for the lifetime of the V1 layout: torn-creation recovery relies on every
         /// V1 creation producing this exact region, so a different offset requires a new
@@ -403,7 +403,7 @@ stability_scope!(BETA {
         /// Validates the magic bytes and runtime version, returning the layout the magic
         /// identifies.
         ///
-        /// The magic alone selects the layout; the runtime version must agree with it. Requiring
+        /// The magic alone selects the layout, and the runtime version must agree with it. Requiring
         /// agreement (rather than deriving the layout from the runtime version) means a header
         /// with any layout-identifying bytes zeroed by a torn write fails validation instead
         /// of parsing as a different layout.
@@ -452,25 +452,53 @@ stability_scope!(BETA {
         }
     }
 
-    /// Resolves a header that failed to parse: `Ok(None)` if the blob's raw contents are those
-    /// of a creation that was interrupted before its header became durable (the caller
-    /// recreates the blob), and the original parse error otherwise.
-    pub(crate) fn resolve_unparseable(
-        err: HeaderError,
+    /// Resolves a blob's header from its leading bytes.
+    ///
+    /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
+    /// `None` when the caller should (re)create the blob: the file is too short to hold a
+    /// header, or its contents are those of a [BlobHeaderLayout::V1] creation interrupted
+    /// before its header became durable. Anything else fails as corrupt or unacceptable.
+    ///
+    /// `raw` must hold the blob's first `min(raw_len, V1_DATA_OFFSET)` bytes, where
+    /// `raw_len` is the blob's raw on-disk length.
+    pub(crate) fn resolve_header(
         raw: &[u8],
+        raw_len: u64,
+        versions: &RangeInclusive<u16>,
         partition: &str,
         name: &[u8],
     ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
-        if err.may_be_torn_creation() && Header::interrupted_creation(raw) {
+        assert!(
+            raw.len() as u64 >= raw_len.min(Header::V1_DATA_OFFSET),
+            "caller must provide enough bytes to resolve the header region"
+        );
+
+        // Too short to hold any header: treat as new.
+        if Header::missing(raw_len) {
+            return Ok(None);
+        }
+
+        let err = match Header::parse(raw, raw_len, versions) {
+            Ok(resolved) => return Ok(Some(resolved)),
+            Err(err) => err,
+        };
+
+        // Heal a V1 creation interrupted before its header became durable: the failure
+        // must be one a torn write can produce, and the contents must match the canonical
+        // creation prefix. Files longer than the creation region hold data and never heal.
+        if raw_len <= Header::V1_DATA_OFFSET
+            && err.may_be_torn_creation()
+            && Header::interrupted_creation(raw)
+        {
             warn!(
                 partition,
                 name = %hex(name),
                 "recreating blob left torn by an interrupted creation"
             );
-            Ok(None)
-        } else {
-            Err(err.into_error(partition, name))
+            return Ok(None);
         }
+
+        Err(err.into_error(partition, name))
     }
 
     /// Validate that a partition name contains only allowed characters.
@@ -691,7 +719,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// Classification only triggers for parse failures a torn write can produce; a version
+    /// Classification only triggers for parse failures a torn write can produce. A version
     /// mismatch requires a validated CRC over a complete header region and stays loud.
     #[test]
     fn test_header_error_torn_creation_candidates() {

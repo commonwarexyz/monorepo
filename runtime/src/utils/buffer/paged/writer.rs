@@ -3312,6 +3312,7 @@ mod tests {
                     .iter()
                     .all(|byte| *byte == 0)
             );
+
             // Each assembled physical page must carry a valid CRC record.
             assert!(Checksum::validate_page(&coalesced.as_ref()[..physical_page_size]).is_some());
             assert!(

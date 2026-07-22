@@ -84,11 +84,11 @@ stability_scope!(BETA {
     /// contents: the application-owned blob version passed to [`Storage::open_versioned`] is a
     /// separate field and is unaffected by the layout.
     ///
-    /// New blobs are always created with the latest layout; reopening an existing blob honors
+    /// New blobs are always created with the latest layout. Reopening an existing blob honors
     /// the layout recorded in its header.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum BlobHeaderLayout {
-        /// An 8-byte header; data begins immediately after it.
+        /// An 8-byte header, with data beginning immediately after it.
         V0,
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
         V1,
@@ -679,7 +679,9 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists).
+        /// An Ok result indicates the blob is durably created (or already exists). On
+        /// platforms without directory sync (e.g. Windows), the durability of the blob's
+        /// name is best-effort.
         ///
         /// # Versions
         ///
@@ -688,17 +690,8 @@ stability_scope!(BETA {
         ///
         /// # Layout
         ///
-        /// New blobs are created with the latest header layout; reopening an existing blob
+        /// New blobs are created with the latest header layout. Reopening an existing blob
         /// honors the layout recorded in its header.
-        ///
-        /// # Recovery
-        ///
-        /// Files shorter than the 8-byte header prelude are treated as new. Otherwise, a
-        /// blob whose contents match the signature of a creation interrupted before its
-        /// header became durable (a crash can tear the header write at any point) is detected
-        /// on reopen and recreated as new: a V1 blob in that state holds no synced data, and
-        /// a legacy V0 blob rotted into the same signature holds at most all-zero payload
-        /// bytes. Contents that do not match fail with [Error::BlobCorrupt] instead.
         ///
         /// # Returns
         ///
