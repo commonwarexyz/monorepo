@@ -81,6 +81,10 @@ impl Hasher for Crc32 {
         hasher.finalize().1
     }
 
+    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        (Self::hash(left), Self::hash(right))
+    }
+
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.inner.update(message);
         self

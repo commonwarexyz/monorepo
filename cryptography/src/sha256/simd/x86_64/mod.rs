@@ -38,8 +38,8 @@ static FINAL_64_PAD: Align16<[u32; 4]> = Align16([0x80000000, 0, 0, 0]);
 static FINAL_64_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (BMT_NODE_LEN * 8) as u32]);
 
 /// Hash two MMR node-shaped messages (`position || left || right`, 72 bytes)
-/// with interleaved SHA-NI instructions: one full block plus a compile-time
-/// constant padding block each.
+/// with interleaved SHA-NI instructions: one full block plus a fixed-layout
+/// padding block each.
 ///
 /// Each message is given as its constituent parts (position, left digest,
 /// right digest) and loaded directly into vector registers, without first
@@ -61,7 +61,8 @@ pub unsafe fn hash_pair_72(
     let mut right_digest = [0u8; DIGEST_LENGTH];
     // SAFETY: The inputs and outputs are properly sized buffers, the caller
     // guarantees every instruction used here is available, and all registers
-    // written by the asm are listed as outputs.
+    // written by the asm are listed as outputs. The asm spills to the stack
+    // with aligned loads, so adding options(nostack) would be unsound.
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
@@ -112,7 +113,8 @@ pub unsafe fn hash_pair_64(
     let mut right_digest = [0u8; DIGEST_LENGTH];
     // SAFETY: The inputs and outputs are properly sized buffers, the caller
     // guarantees every instruction used here is available, and all registers
-    // written by the asm are listed as outputs.
+    // written by the asm are listed as outputs. The asm spills to the stack
+    // with aligned loads, so adding options(nostack) would be unsound.
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),

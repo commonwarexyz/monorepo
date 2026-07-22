@@ -1,16 +1,16 @@
 //! Pair-hashing SHA-256 kernels for merkle node messages.
 //!
-//! Modern SHA extensions (aarch64 SHA2, x86_64 SHA-NI) execute one round per
-//! instruction but with multi-cycle latency, so a single message leaves the
-//! SHA unit idle between dependent rounds. Interleaving two independent
-//! messages fills those latency slots, making progress on both digests at
-//! close to the unit's throughput limit.
+//! Modern SHA extensions (aarch64 SHA2, x86_64 SHA-NI) execute several
+//! rounds per instruction but with multi-cycle latency, so a single message
+//! leaves the SHA unit idle between dependent instructions. Interleaving two
+//! independent messages fills those latency slots, making progress on both
+//! digests at close to the unit's throughput limit.
 //!
 //! The kernels specialize the two merkle node shapes used across the
 //! Merkle-family primitives in this workspace: `position || left || right`
 //! (72 bytes, used by the MMR family) and `left || right` (64 bytes, used by
-//! the BMT). Both need one full block plus a compile-time constant padding
-//! block each. Callers passing one of these shapes as its exact constituent
+//! the BMT). Both need one full block plus a fixed-layout padding block
+//! each. Callers passing one of these shapes as its exact constituent
 //! parts (a position and two digests, or two digests) load directly from
 //! those parts into vector registers, with no intermediate buffer. Any other
 //! shape, or the same shape split into a different part decomposition, falls
@@ -54,8 +54,7 @@ const _: () = assert!(BMT_NODE_LEN == 64);
 /// parts.
 ///
 /// Inlined aggressively so the shape matching constant-folds at call sites
-/// with fixed-shape inputs (e.g. merkle nodes), leaving only the out-of-line
-/// kernel call.
+/// with fixed-shape inputs (e.g. merkle nodes).
 #[inline(always)]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
     match (left, right) {
@@ -81,7 +80,7 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
 /// the available kernel.
 ///
 /// `aarch64_kernel`/`x86_64_kernel` name the arch-specific kernel functions
-/// to invoke once the required CPU features are confirmed; `args` lists the
+/// to invoke once the required CPU features are confirmed. `args` lists the
 /// parts each kernel takes.
 macro_rules! define_dispatch {
     ($name:ident, $aarch64_kernel:ident, $x86_64_kernel:ident, ($($arg:ident: $ty:ty),+ $(,)?)) => {

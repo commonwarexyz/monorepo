@@ -16,10 +16,12 @@
     sha256h.4s q2, q3, v13
     sha256h2.4s q3, q15, v13
 
-    sha256su0.4s v4, v5
-    sha256su0.4s v8, v9
-    sha256su1.4s v4, v6, v7
-    sha256su1.4s v8, v10, v11
+    .if \i != 3
+        sha256su0.4s v4, v5
+        sha256su0.4s v8, v9
+        sha256su1.4s v4, v6, v7
+        sha256su1.4s v8, v10, v11
+    .endif
 
     ld1.4s {{v16}}, [{k}], #16
     add.4s v12, v5, v16
@@ -31,10 +33,12 @@
     sha256h.4s q2, q3, v13
     sha256h2.4s q3, q15, v13
 
-    sha256su0.4s v5, v6
-    sha256su0.4s v9, v10
-    sha256su1.4s v5, v7, v4
-    sha256su1.4s v9, v11, v8
+    .if \i != 3
+        sha256su0.4s v5, v6
+        sha256su0.4s v9, v10
+        sha256su1.4s v5, v7, v4
+        sha256su1.4s v9, v11, v8
+    .endif
 
     ld1.4s {{v16}}, [{k}], #16
     add.4s v12, v6, v16
@@ -46,10 +50,12 @@
     sha256h.4s q2, q3, v13
     sha256h2.4s q3, q15, v13
 
-    sha256su0.4s v6, v7
-    sha256su0.4s v10, v11
-    sha256su1.4s v6, v4, v5
-    sha256su1.4s v10, v8, v9
+    .if \i != 3
+        sha256su0.4s v6, v7
+        sha256su0.4s v10, v11
+        sha256su1.4s v6, v4, v5
+        sha256su1.4s v10, v8, v9
+    .endif
 
     ld1.4s {{v16}}, [{k}], #16
     add.4s v12, v7, v16

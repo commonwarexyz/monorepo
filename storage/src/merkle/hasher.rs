@@ -35,22 +35,11 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 
     /// Computes digests for two nodes at once.
     ///
-    /// Defaults to two [`node_digest`](Self::node_digest) calls, so it is always consistent with
-    /// it. Implementations whose underlying hasher can make progress on two messages concurrently
-    /// (see [`CHasher::hash_pair`]) should override this.
+    /// Must be equivalent to two [`node_digest`](Self::node_digest) calls.
     fn node_digest_pair(
         &self,
         nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
-    ) -> (Self::Digest, Self::Digest) {
-        let [
-            (left_pos, left_left, left_right),
-            (right_pos, right_left, right_right),
-        ] = nodes;
-        (
-            self.node_digest(left_pos, left_left, left_right),
-            self.node_digest(right_pos, right_left, right_right),
-        )
-    }
+    ) -> (Self::Digest, Self::Digest);
 
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {

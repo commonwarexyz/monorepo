@@ -58,6 +58,10 @@ impl Hasher for Blake3 {
         hasher.finalize().1
     }
 
+    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        (Self::hash(left), Self::hash(right))
+    }
+
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);

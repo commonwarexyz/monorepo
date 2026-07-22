@@ -20,8 +20,8 @@ static K: Align16<[u32; 64]> = Align16([
 ]);
 
 /// Hash two MMR node-shaped messages (`position || left || right`, 72 bytes)
-/// with interleaved SHA2 instructions: one full block plus a compile-time
-/// constant padding block each.
+/// with interleaved SHA2 instructions: one full block plus a fixed-layout
+/// padding block each.
 ///
 /// Each message is given as its constituent parts (position, left digest,
 /// right digest) and loaded directly into vector registers, without first

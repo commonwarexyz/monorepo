@@ -151,8 +151,6 @@ fn fuzz(input: FuzzInput) {
         5 => fuzz_default_clone(),
         6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
         7 => fuzz_zeroize(),
-        // The specialized one-shot and pair (assembly) paths, which the
-        // cases above never reach.
         8 => input.plan.run(),
         _ => unreachable!(),
     }

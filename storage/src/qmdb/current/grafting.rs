@@ -212,9 +212,10 @@ pub fn grafted_to_ops_pos<F: Graftable>(
 ///
 /// Both the grafted structure and ops structure use the same family `F`. The grafted
 /// structure's leaves correspond 1:1 with bitmap chunks. This adapter intercepts
-/// [`HasherTrait::node_digest`] to convert each grafted position to the corresponding
-/// ops-space position via [`Graftable::leftmost_leaf`] and [`Graftable::subtree_root_position`],
-/// ensuring hash pre-images use ops-space positions for domain separation.
+/// [`HasherTrait::node_digest`] and [`HasherTrait::node_digest_pair`] to convert each grafted
+/// position to the corresponding ops-space position via [`Graftable::leftmost_leaf`] and
+/// [`Graftable::subtree_root_position`], ensuring hash pre-images use ops-space positions for
+/// domain separation.
 #[derive(Clone)]
 pub(super) struct GraftedHasher<F: Graftable, H: HasherTrait<F>> {
     inner: H,
@@ -251,6 +252,28 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
     ) -> Self::Digest {
         let ops_pos = grafted_to_ops_pos::<F>(pos, self.grafting_height);
         self.inner.node_digest(ops_pos, left, right)
+    }
+
+    fn node_digest_pair(
+        &self,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
+    ) -> (Self::Digest, Self::Digest) {
+        let [
+            (left_pos, left_left, left_right),
+            (right_pos, right_left, right_right),
+        ] = nodes;
+        self.inner.node_digest_pair([
+            (
+                grafted_to_ops_pos::<F>(left_pos, self.grafting_height),
+                left_left,
+                left_right,
+            ),
+            (
+                grafted_to_ops_pos::<F>(right_pos, self.grafting_height),
+                right_left,
+                right_right,
+            ),
+        ])
     }
 }
 
@@ -375,6 +398,20 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                 }
             }
         }
+    }
+
+    fn node_digest_pair(
+        &self,
+        nodes: [(merkle::Position<F>, &H::Digest, &H::Digest); 2],
+    ) -> (H::Digest, H::Digest) {
+        let [
+            (left_pos, left_left, left_right),
+            (right_pos, right_left, right_right),
+        ] = nodes;
+        (
+            self.node_digest(left_pos, left_left, left_right),
+            self.node_digest(right_pos, right_left, right_right),
+        )
     }
 }
 
@@ -635,6 +672,28 @@ mod tests {
                 &right,
             );
         assert_ne!(got, got_graftable);
+    }
+
+    #[test]
+    fn test_grafted_hasher_node_digest_pair_matches_node_digest() {
+        const GH: u32 = 2;
+        let a = Sha256::fill(0x01);
+        let b = Sha256::fill(0x02);
+        let c = Sha256::fill(0x03);
+        let d = Sha256::fill(0x04);
+
+        let grafted = GraftedHasher::<mmr::Family, _>::new(qmdb::hasher::<Sha256>(), GH);
+        let left_pos = mmr::Family::subtree_root_position(Location::new(0), 1);
+        let right_pos = mmr::Family::subtree_root_position(Location::new(2), 1);
+
+        let paired = grafted.node_digest_pair([(left_pos, &a, &b), (right_pos, &c, &d)]);
+        assert_eq!(
+            paired,
+            (
+                grafted.node_digest(left_pos, &a, &b),
+                grafted.node_digest(right_pos, &c, &d),
+            )
+        );
     }
 
     /// Convert an ops-tree position at the grafting height back to its chunk index.

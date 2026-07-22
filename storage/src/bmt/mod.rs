@@ -145,8 +145,8 @@ impl<D: Digest> Tree<D> {
 
             // Process four nodes (two sibling pairs) at a time, duplicating an unpaired
             // trailing node. Hashing both pairs together lets the underlying hasher
-            // interleave independent messages (see `Hasher::hash_pair`); a level with no
-            // second pair falls back to a single hash.
+            // interleave independent messages (see `Hasher::hash_pair`). A trailing
+            // group with a single pair falls back to a single hash.
             for group in current_level.chunks(4) {
                 match group {
                     [a, b, c, d] => {

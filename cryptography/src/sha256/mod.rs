@@ -182,9 +182,9 @@ impl Hasher for Sha256 {
         hash_specialized(parts)
     }
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     #[inline]
     fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(pair) = simd::hash_pair(left, right) {
             return pair;
         }
@@ -322,7 +322,7 @@ mod tests {
     /// Exhaustively sweep every total length across the block-padding and
     /// `MAX_FIXED` boundaries, checking the one-shot path against the
     /// streaming implementation. Fuzzing only hits specific off-by-one
-    /// lengths probabilistically; this guarantees them all.
+    /// lengths probabilistically, while this sweep guarantees them all.
     #[test]
     fn test_sha256_hash_parts_boundaries() {
         for total in 0..=300usize {
