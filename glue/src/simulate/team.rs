@@ -176,6 +176,14 @@ impl<D: EngineDefinition> Team<D> {
         self.handles.keys().cloned().collect()
     }
 
+    /// Get a validator's inspectable state if it is currently active.
+    pub fn active_state(&self, pk: &D::PublicKey) -> Option<&D::State> {
+        if !self.handles.contains_key(pk) {
+            return None;
+        }
+        self.states.get(pk)
+    }
+
     /// All participants (including crashed ones).
     pub fn participants(&self) -> &[D::PublicKey] {
         &self.participants

@@ -1,7 +1,7 @@
 //! Immutable database types and helpers for the sync example.
 
 use crate::{Hasher, Key, Translator, Value};
-use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::BufferPooler;
 use commonware_storage::{
@@ -62,21 +62,11 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig,
 /// the live db's [`super::ExampleDatabase::current_floor`] so floors stay monotonic.
 pub fn create_test_operations(count: usize, seed: u64, starting_loc: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
-    let mut hasher = <Hasher as CryptoHasher>::new();
     let floor = Location::new(starting_loc);
 
     for i in 0..count {
-        let key = {
-            hasher.update(&i.to_be_bytes());
-            hasher.update(&seed.to_be_bytes());
-            hasher.finalize()
-        };
-
-        let value = {
-            hasher.update(&key);
-            hasher.update(b"value");
-            hasher.finalize()
-        };
+        let key = Hasher::hash(&[&i.to_be_bytes(), &seed.to_be_bytes()]);
+        let value = Hasher::hash(&[&key, b"value"]);
 
         operations.push(Operation::Set(key, value));
 

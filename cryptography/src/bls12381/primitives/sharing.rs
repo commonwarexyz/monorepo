@@ -215,7 +215,7 @@ impl Write for Mode {
 ///
 /// This allows upgrading to a new version of the library, including more modes,
 /// while using this version to determine which modes are supported at runtime.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModeVersion(u8);
 
 impl ModeVersion {
@@ -234,7 +234,8 @@ impl ModeVersion {
         Self(1)
     }
 
-    const fn supports(&self, mode: &Mode) -> bool {
+    /// Returns whether this version supports `mode`.
+    pub const fn supports(&self, mode: &Mode) -> bool {
         match mode {
             Mode::NonZeroCounter => true,
             #[cfg(not(any(

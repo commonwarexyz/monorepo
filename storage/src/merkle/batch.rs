@@ -388,7 +388,45 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         })
     }
 
+    /// Fetch the child digests of the node at `pos`.
+    fn child_digests(&self, base: &Mem<F, D>, pos: Position<F>, height: u32) -> (D, D) {
+        let (left, right) = F::children(pos, height);
+        let left = self.get_node(base, left).expect("left child missing");
+        let right = self.get_node(base, right).expect("right child missing");
+        (left, right)
+    }
+
+    /// Compute the digests of `positions` two at a time so the hasher can make progress on both
+    /// concurrently, appending `(position, digest)` results to `output`.
+    fn zip_nodes(
+        &self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        positions: &[Position<F>],
+        height: u32,
+        output: &mut Vec<(Position<F>, D)>,
+    ) {
+        let mut pairs = positions.chunks_exact(2);
+        for pair in &mut pairs {
+            let (left, right) = (pair[0], pair[1]);
+            let (ll, lr) = self.child_digests(base, left, height);
+            let (rl, rr) = self.child_digests(base, right, height);
+            let (left_digest, right_digest) =
+                hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
+            output.push((left, left_digest));
+            output.push((right, right_digest));
+        }
+        if let [pos] = pairs.remainder() {
+            let (left, right) = self.child_digests(base, *pos, height);
+            output.push((*pos, hasher.node_digest(*pos, &left, &right)));
+        }
+    }
+
     /// Compute digests for one height's dirty nodes via the configured strategy.
+    ///
+    /// Positions are split evenly across the strategy's workers so each worker can pair
+    /// adjacent nodes for [`Hasher::node_digest_pair`]. The chunk size is rounded up to
+    /// even so no pair straddles a chunk boundary.
     fn merkleize_bucket(
         &mut self,
         base: &Mem<F, D>,
@@ -396,19 +434,26 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
-        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
-            positions,
-            || hasher.clone(),
-            |hasher, &pos| {
-                let (left, right) = F::children(pos, height);
-                let left_d = self.get_node(base, left).expect("left child missing");
-                let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = hasher.node_digest(pos, &left_d, &right_d);
-                (pos, digest)
-            },
-        );
-        for (pos, digest) in computed {
-            self.store_node(pos, digest);
+        let chunk = positions
+            .len()
+            .div_ceil(self.parent.strategy.manual().parallelism())
+            .max(1)
+            .next_multiple_of(2);
+        let computed: Vec<Vec<(Position<F>, D)>> =
+            self.parent.strategy.map_init_collect_vec_with_multiplier(
+                positions.chunks(chunk),
+                chunk,
+                || hasher.clone(),
+                |hasher, positions| {
+                    let mut computed = Vec::with_capacity(positions.len());
+                    self.zip_nodes(base, &*hasher, positions, height, &mut computed);
+                    computed
+                },
+            );
+        for nodes in computed {
+            for (pos, digest) in nodes {
+                self.store_node(pos, digest);
+            }
         }
     }
 }

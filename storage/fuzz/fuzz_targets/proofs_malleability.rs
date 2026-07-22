@@ -261,7 +261,11 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
 }
 
 fn fuzz(input: FuzzInput) {
-    let digests: Vec<Digest> = input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
+    let digests: Vec<Digest> = input
+        .elements
+        .iter()
+        .map(|&v| Sha256::hash(&[&[v]]))
+        .collect();
 
     match input.proof {
         ProofType::Merkle => {
@@ -282,10 +286,9 @@ fn fuzz(input: FuzzInput) {
 
             for (idx, digest) in digests.iter().enumerate() {
                 let original_proof = tree.proof(idx as u32).unwrap();
-                let mut hasher = Sha256::default();
                 assert!(
                     original_proof
-                        .verify_element_inclusion(&mut hasher, digest, idx as u32, &root)
+                        .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
                         .is_ok()
                 );
 
@@ -295,7 +298,7 @@ fn fuzz(input: FuzzInput) {
                     if mutated_proof != original_proof {
                         assert!(
                             mutated_proof
-                                .verify_element_inclusion(&mut hasher, digest, idx as u32, &root)
+                                .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
                                 .is_err()
                         );
                     }
@@ -327,10 +330,9 @@ fn fuzz(input: FuzzInput) {
                 .map(|&p| (digests[p as usize], p))
                 .collect();
 
-            let mut hasher = Sha256::default();
             assert!(
                 original_proof
-                    .verify_multi_inclusion(&mut hasher, &elements, &root)
+                    .verify_multi_inclusion::<Sha256>(&elements, &root)
                     .is_ok()
             );
 
@@ -340,7 +342,7 @@ fn fuzz(input: FuzzInput) {
                 if mutated_proof != original_proof {
                     assert!(
                         mutated_proof
-                            .verify_multi_inclusion(&mut hasher, &elements, &root)
+                            .verify_multi_inclusion::<Sha256>(&elements, &root)
                             .is_err()
                     );
                 }

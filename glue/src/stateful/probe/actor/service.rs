@@ -1,11 +1,8 @@
-use crate::stateful::probe::{mailbox::Message, wire};
+use crate::stateful::probe::{mailbox::Message, sample, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Encode, ReadExt as _};
 use commonware_consensus::{
-    marshal::{
-        Identifier,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::{scheme::Scheme, types::Finalization},
 };
 use commonware_cryptography::PublicKey;
@@ -92,7 +89,7 @@ where
                 if tag != wire::Tag::Request {
                     continue;
                 }
-                let Some(finalization) = self.produce_latest().await else {
+                let Some(finalization) = sample::latest_finalization(&self.marshal).await else {
                     continue;
                 };
                 sender.send(
@@ -102,11 +99,5 @@ where
                 );
             },
         }
-    }
-
-    /// Fetches the latest [`Finalization`] from marshal, if available.
-    async fn produce_latest(&mut self) -> Option<Finalization<S, V::Commitment>> {
-        let (latest_height, _) = self.marshal.get_info(Identifier::Latest).await?;
-        self.marshal.get_finalization(latest_height).await
     }
 }

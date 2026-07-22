@@ -237,7 +237,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 "simplex.voter.mailbox.recovered",
                 epoch = certificate.epoch().traced(),
                 view = certificate.view().traced(),
-                certificate = certificate.kind()
+                certificate = %certificate.kind()
             ),
             certificate,
             from_resolver: false,
@@ -251,7 +251,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 "simplex.voter.mailbox.resolved",
                 epoch = certificate.epoch().traced(),
                 view = certificate.view().traced(),
-                certificate = certificate.kind()
+                certificate = %certificate.kind()
             ),
             certificate,
             from_resolver: true,
