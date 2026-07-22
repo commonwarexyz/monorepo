@@ -313,7 +313,7 @@ where
 
     /// Start the actor.
     pub fn start<R, Buf>(
-        mut self,
+        self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
@@ -326,7 +326,8 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        spawn_cell!(self.context, self.run(application, buffer, resolver))
+        let mut actor = Box::new(self);
+        spawn_cell!(actor.context, actor.run(application, buffer, resolver))
     }
 
     /// Start the actor without a broadcast buffer.
@@ -351,7 +352,7 @@ where
 
     /// Run the application actor.
     async fn run<R, Buf>(
-        mut self,
+        mut self: Box<Self>,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
@@ -515,12 +516,12 @@ where
     /// Handles one ready application acknowledgement and drains any queued acks
     /// that are already complete.
     async fn handle_ack<Buf, R>(
-        mut self,
+        mut self: Box<Self>,
         result: <A::Waiter as Future>::Output,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
         resolver: &mut R,
-    ) -> Self
+    ) -> Box<Self>
     where
         Buf: Buffer<V>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -567,14 +568,14 @@ where
 
     /// Handles a single mailbox message from local consensus/application callers.
     async fn handle_mailbox_message<Buf, R>(
-        mut self,
+        mut self: Box<Self>,
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
         syncs: &mut Pool<PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> Self
+    ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: TargetedResolver<
@@ -916,14 +917,14 @@ where
     /// Handles a batch of resolver messages, starting one pooled
     /// finalized-archive sync if any accepted delivery buffered a write.
     async fn handle_resolver_message<Buf, R>(
-        mut self,
+        mut self: Box<Self>,
         message: handler::Message<V::Commitment>,
         resolver_rx: &mut handler::Receiver<V::Commitment>,
         resolver: &mut R,
         syncs: &mut Pool<PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> Self
+    ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -1144,13 +1145,13 @@ where
 
     /// Verifies and installs a floor, fetching the anchor block if needed.
     async fn install_floor<Buf, R>(
-        mut self,
+        mut self: Box<Self>,
         finalization: Finalization<P::Scheme, V::Commitment>,
         skip_if_superseded: bool,
         resolver: &mut R,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> Self
+    ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -1217,14 +1218,14 @@ where
     /// is required by consensus to make progress). A duplicate delivery is also
     /// a no-op, with the handle still covering the original write's durability.
     async fn persist_verified<Buf: Buffer<V>>(
-        mut self,
+        mut self: Box<Self>,
         round: Round,
         block: Arc<V::Block>,
         ack: oneshot::Sender<Handle<()>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Self {
+    ) -> Box<Self> {
         (self, _) = self
             .ingest(Arc::clone(&block), buffer, application, resolver)
             .await;
@@ -1252,12 +1253,12 @@ where
     ///
     /// Returns true if the block was consumed as the floor anchor.
     async fn ingest<Buf: Buffer<V>>(
-        mut self,
+        mut self: Box<Self>,
         block: Arc<V::Block>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> (Self, bool) {
+    ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(Arc::clone(&block));
 
         if !self.floor.matches_pending_anchor(V::commitment(&block)) {
@@ -1276,12 +1277,12 @@ where
     ///
     /// Panics if no pending floor anchor is installed.
     async fn apply_pending_floor<Buf: Buffer<V>>(
-        mut self,
+        mut self: Box<Self>,
         block: Arc<V::Block>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Self {
+    ) -> Box<Self> {
         // Floor anchors can bypass the local proposal-verification path. Check
         // the parent relationship before using a non-genesis anchor for walkback.
         let height = block.height();
@@ -1392,13 +1393,13 @@ where
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
     async fn handle_deliver<Buf: Buffer<V>>(
-        mut self,
+        mut self: Box<Self>,
         message: ResolverDelivery<V>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Self {
+    ) -> Box<Self> {
         let ResolverDelivery {
             delivery,
             mut value,
@@ -1595,12 +1596,12 @@ where
     /// Batch verify pending certificates and process valid items.
     #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
-        mut self,
+        mut self: Box<Self>,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Self {
+    ) -> Box<Self> {
         delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
             return self;
@@ -1828,9 +1829,9 @@ where
     ///   stream.sync       ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
-        mut self,
+        mut self: Box<Self>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> Self {
+    ) -> Box<Self> {
         // Dispatch resumes after the floor anchor is durably stored.
         if self.floor.blocks_progress() {
             return self;
@@ -1884,7 +1885,7 @@ where
     /// Prefer [`Self::start_finalized_sync`] unless work later in the same
     /// arm requires the writes to already be durable.
     #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
-    async fn sync_finalized(mut self) -> Self {
+    async fn sync_finalized(mut self: Box<Self>) -> Box<Self> {
         let finalized_blocks = self.finalized_blocks;
         let finalizations_by_height = self.finalizations_by_height;
         match try_join!(
@@ -1926,7 +1927,11 @@ where
     /// `select_loop!` arm as the writes it covers, before yielding back to the
     /// loop. `round` only labels the sync in diagnostics.
     #[tracing::instrument(name = "marshal.actor.start_finalized_sync", level = "info", skip_all)]
-    async fn start_finalized_sync(mut self, round: Round, syncs: &mut Pool<PooledSync>) -> Self {
+    async fn start_finalized_sync(
+        mut self: Box<Self>,
+        round: Round,
+        syncs: &mut Pool<PooledSync>,
+    ) -> Box<Self> {
         // If no write needs syncing, every accepted write is already covered
         // by a blocking or in-flight sync.
         let Some(seq) = self.dispatch_gate.adopt() else {
@@ -2042,13 +2047,13 @@ where
     /// the ack handler advances the processed floor height. See
     /// [`Self::try_dispatch_blocks`] for the crash safety invariant.
     async fn store_finalization(
-        mut self,
+        mut self: Box<Self>,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> (Self, bool) {
+    ) -> (Box<Self>, bool) {
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
         // pruning boundary)
@@ -2220,11 +2225,11 @@ where
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
     #[tracing::instrument(name = "marshal.actor.try_repair_gaps", level = "info", skip_all)]
     async fn try_repair_gaps<Buf: Buffer<V>>(
-        mut self,
+        mut self: Box<Self>,
         buffer: &mut Buf,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> (Self, bool) {
+    ) -> (Box<Self>, bool) {
         // Gap repair needs a known processed floor. A floor transition may
         // jump the lower bound once its anchor block arrives.
         if self.floor.blocks_progress() {
@@ -2398,10 +2403,10 @@ where
 
     /// Buffers a processed round update in memory and prunes round-bound requests.
     async fn update_processed_round(
-        self,
+        self: Box<Self>,
         height: Height,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Self {
+    ) -> Box<Self> {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return self;
         };
@@ -2411,11 +2416,11 @@ where
 
     /// Buffers a processed round floor update in memory and prunes round-bound requests.
     async fn update_processed_round_floor(
-        mut self,
+        mut self: Box<Self>,
         height: Height,
         round: Round,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Self {
+    ) -> Box<Self> {
         if height > self.floor.processed_height() || round <= self.floor.processed_round() {
             return self;
         }
@@ -2439,7 +2444,10 @@ where
     }
 
     /// Prunes finalized blocks and certificates below the given height.
-    async fn prune_finalized_archives(mut self, height: Height) -> Result<Self, BoxedError> {
+    async fn prune_finalized_archives(
+        mut self: Box<Self>,
+        height: Height,
+    ) -> Result<Box<Self>, BoxedError> {
         // Prune the finalized block and finalization certificate archives in parallel.
         let finalized_blocks = self.finalized_blocks;
         let finalizations_by_height = self.finalizations_by_height;
@@ -2462,7 +2470,10 @@ where
     }
 
     /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
-    async fn prune_after_floor(mut self, height: Height) -> Result<Self, BoxedError> {
+    async fn prune_after_floor(
+        mut self: Box<Self>,
+        height: Height,
+    ) -> Result<Box<Self>, BoxedError> {
         let cache = self.cache;
         let finalized_blocks = self.finalized_blocks;
         let finalizations_by_height = self.finalizations_by_height;

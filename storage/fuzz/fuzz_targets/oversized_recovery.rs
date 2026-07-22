@@ -201,20 +201,17 @@ fn fuzz(input: FuzzInput) {
             for _ in 0..count {
                 let value: TestValue = [entry_id as u8; 16];
                 let entry = TestEntry::new(entry_id);
-                oversized = match oversized.append(section, entry, &value).await {
-                    Ok((oversized, _, _, _)) => oversized,
-                    Err(_) => return,
-                };
+                (oversized, _, _, _) = oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("setup append failed");
                 entry_id += 1;
             }
-            oversized = match oversized.sync(section).await {
-                Ok(oversized) => oversized,
-                Err(_) => return,
-            };
+            oversized = oversized.sync(section).await.expect("setup sync failed");
         }
 
         if input.sync_before_corrupt {
-            let _ = oversized.sync_all().await;
+            let _ = oversized.sync_all().await.expect("setup sync_all failed");
         } else {
             drop(oversized);
         }

@@ -499,7 +499,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Start syncing the given `sections` to storage.
     ///
     /// An error reported by the returned [Handle] is fatal to the journal: the caller
-    /// must stop using (or destroy) the returned journal and recover by re-initializing.
+    /// must stop using the returned journal and recover by re-initializing.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,

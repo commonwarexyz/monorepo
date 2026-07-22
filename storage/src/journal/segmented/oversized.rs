@@ -427,7 +427,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     ///
     /// Writes value to glob first, then writes index entry with the value location.
     ///
-    /// Returns `(position, offset, size)` where:
+    /// Returns `(self, position, offset, size)` where:
     /// - `position`: Position in the index journal
     /// - `offset`: Byte offset in glob
     /// - `size`: Size of value in glob (including checksum)
@@ -500,7 +500,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     ///
     /// The returned handle completes once both journals' syncs complete, failing with the first
     /// error encountered. An error reported by the handle is fatal to the journal: the caller
-    /// must stop using (or destroy) the returned journal and recover by re-initializing.
+    /// must stop using the returned journal and recover by re-initializing.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,
