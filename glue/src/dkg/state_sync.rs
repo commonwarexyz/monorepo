@@ -274,7 +274,7 @@ where
         let mut store = open_store::<E, S, D, V>(context, partition.clone(), codec_config).await;
         if let Some(provided) = provided {
             store.put(STATE_SYNC_KEY, provided);
-            store
+            store = store
                 .sync()
                 .await
                 .expect("failed to persist DKG state sync metadata");
@@ -331,7 +331,6 @@ where
             .sync()
             .await
             .expect("failed to delete stale DKG state sync metadata");
-        drop(store);
         *state = PlanState::Resolved(None);
         None
     }

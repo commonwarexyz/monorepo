@@ -1,7 +1,7 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::get_page_from_blob;
+use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
 use commonware_utils::{cache::Clock, sync::RwLock};
@@ -16,7 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tracing::{error, trace};
+use tracing::{error, trace, warn};
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -119,7 +119,8 @@ struct Cache {
     /// makes hint collisions (and their slower fallback lookups) common.
     hints: Vec<usize>,
 
-    /// Size of each page in bytes.
+    /// Logical size of each page in bytes (the payload stored per page, excluding the CRC
+    /// record appended on disk).
     page_size: usize,
 
     /// Pool the page buffers were allocated from.
@@ -135,12 +136,16 @@ struct Cache {
 /// thread-safe manner.
 #[derive(Clone)]
 pub struct CacheRef {
-    /// The size of each page in the underlying blobs managed by this page cache.
+    /// The logical size of each page in the underlying blobs managed by this page cache. A page
+    /// occupies `page_size + CHECKSUM_SIZE` bytes on disk (its physical size).
     ///
     /// # Warning
     ///
-    /// You cannot change the page size once data has been written without invalidating it. (Reads
-    /// on blobs that were written with a different page size will fail their integrity check.)
+    /// You cannot change the page size once data has been written without invalidating it. Reads on
+    /// blobs written with a different page size fail their integrity check, and reopening such a
+    /// blob for writing treats the mismatched pages as invalid trailing data and silently truncates
+    /// the blob (potentially to empty). Changing an existing store's page size is a destructive
+    /// format migration, not a configuration change.
     page_size: u64,
 
     /// The next id to assign to a blob that will be managed by this cache.
@@ -156,10 +161,27 @@ pub struct CacheRef {
 impl CacheRef {
     /// Create a shared page-cache handle backed by `pool`.
     ///
-    /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
+    /// The cache stores at most `capacity` pages, each exactly `page_size` bytes (see
+    /// [Self::page_size] for how this relates to a page's physical size on disk).
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
+    ///
+    /// Any `page_size` is accepted, but one whose physical pages do not align with storage
+    /// pages (see the module docs) logs a warning: behavior stays correct, at the cost of
+    /// amplified cold random reads. Use [super::page_size] to pick an aligned value.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64 = page_size.get() as u64;
+        let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
+        if !physical_page_size.is_multiple_of(STORAGE_PAGE_SIZE)
+            && !STORAGE_PAGE_SIZE.is_multiple_of(physical_page_size)
+        {
+            warn!(
+                page_size = page_size.get(),
+                physical_page_size,
+                "page size produces physical pages that do not align with storage pages; pick a \
+                 page size via paged::page_size to avoid amplifying cold random reads (changing \
+                 an existing store's page size is a destructive format migration)"
+            );
+        }
 
         Self {
             page_size: page_size_u64,
@@ -179,7 +201,8 @@ impl CacheRef {
         Self::new(pooler.storage_buffer_pool().clone(), page_size, capacity)
     }
 
-    /// The page size used by this page cache.
+    /// The page size used by this page cache: the logical payload bytes stored per page. Each
+    /// page occupies `page_size() + CHECKSUM_SIZE` bytes on disk (its physical size).
     #[inline]
     pub const fn page_size(&self) -> u64 {
         self.page_size
@@ -470,7 +493,8 @@ impl Cache {
         }
     }
 
-    /// Convert an offset into the number of the page it belongs to and the offset within that page.
+    /// Convert a logical offset into the number of the page it belongs to and the offset within
+    /// that page.
     const fn offset_to_page(page_size: u64, offset: u64) -> (u64, u64) {
         (offset / page_size, offset % page_size)
     }

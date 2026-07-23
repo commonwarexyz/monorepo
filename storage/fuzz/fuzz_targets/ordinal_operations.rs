@@ -93,17 +93,19 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations.iter() {
             match op {
                 OrdinalOperation::Put { index, value } => {
-                    if let Some(ordinal) = store.as_mut() {
+                    if let Some(ordinal) = store.take() {
                         let mut fixed_value = [0u8; 32];
                         let len = value.len().min(32);
                         fixed_value[..len].copy_from_slice(&value[..len]);
                         let value = FixedBytes::new(fixed_value);
 
-                        if ordinal.put(*index, value.clone()).await.is_ok() {
-                            expected_data.insert(*index, value);
-                        } else {
-                            panic!("failed to put value into store");
-                        }
+                        store = Some(
+                            ordinal
+                                .put(*index, value.clone())
+                                .await
+                                .expect("failed to put value into store"),
+                        );
+                        expected_data.insert(*index, value);
                     }
                 }
 
@@ -173,23 +175,20 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 OrdinalOperation::Sync => {
-                    if let Some(ordinal) = store.as_mut()
-                        && ordinal.sync().await.is_ok() {
-                            // After sync, all expected data should be persisted
-                            synced_data = expected_data.clone();
-                        }
+                    if let Some(ordinal) = store.take() {
+                        store = Some(ordinal.sync().await.expect("failed to sync store"));
+                        // After sync, all expected data should be persisted
+                        synced_data = expected_data.clone();
+                    }
                 }
 
                 OrdinalOperation::Prune { min } => {
-                    if let Some(ordinal) = store.as_mut() {
+                    if let Some(ordinal) = store.take() {
                         let min_blob = *min / items_per_blob.get();
-                        if ordinal.prune(*min).await.is_ok() {
-                            // Remove all data in pruned blobs from expected state
-                            expected_data
-                                .retain(|&index, _| index / items_per_blob.get() >= min_blob);
-                            synced_data
-                                .retain(|&index, _| index / items_per_blob.get() >= min_blob);
-                        }
+                        store = Some(ordinal.prune(*min).await.expect("failed to prune store"));
+                        // Remove all data in pruned blobs from expected state
+                        expected_data.retain(|&index, _| index / items_per_blob.get() >= min_blob);
+                        synced_data.retain(|&index, _| index / items_per_blob.get() >= min_blob);
                     }
                 }
 
@@ -202,27 +201,31 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 OrdinalOperation::PutSparse { indices } => {
-                    if let Some(ordinal) = store.as_mut() {
+                    if let Some(mut ordinal) = store.take() {
                         // Put values at sparse indices to test gap handling
                         for (i, &index) in indices.iter().enumerate() {
                             let mut value = [0u8; 32];
                             value[0] = i as u8;
                             let value = FixedBytes::new(value);
 
-                            if ordinal.put(index, value.clone()).await.is_ok() {
-                                expected_data.insert(index, value);
-                            }
+                            ordinal = ordinal
+                                .put(index, value.clone())
+                                .await
+                                .expect("failed to put value into store");
+                            expected_data.insert(index, value);
                         }
 
                         // Sync after batch operation to test persistence
-                        if !indices.is_empty() && ordinal.sync().await.is_ok() {
+                        if !indices.is_empty() {
+                            ordinal = ordinal.sync().await.expect("failed to sync store");
                             synced_data = expected_data.clone();
                         }
+                        store = Some(ordinal);
                     }
                 }
 
                 OrdinalOperation::PutLargeBatch { start, count } => {
-                    if let Some(ordinal) = store.as_mut() {
+                    if let Some(mut ordinal) = store.take() {
                         // Put many consecutive values to test blob handling
                         let count = (*count) as u32;
                         let start = *start;
@@ -233,23 +236,26 @@ fn fuzz(input: FuzzInput) {
                             value[0] = i as u8;
                             let value = FixedBytes::new(value);
 
-                            if ordinal.put(index, value.clone()).await.is_ok() {
-                                expected_data.insert(index, value);
-                            }
+                            ordinal = ordinal
+                                .put(index, value.clone())
+                                .await
+                                .expect("failed to put value into store");
+                            expected_data.insert(index, value);
                         }
 
                         // Sync after large batch to test buffer flushing
-                        if count > 0 && ordinal.sync().await.is_ok() {
+                        if count > 0 {
+                            ordinal = ordinal.sync().await.expect("failed to sync store");
                             synced_data = expected_data.clone();
                         }
+                        store = Some(ordinal);
                     }
                 }
 
                 OrdinalOperation::ReopenAfterOperations => {
-                    if let Some(mut o) = store.take() {
+                    if let Some(o) = store.take() {
                         // Sync and drop the current ordinal
                         o.sync().await.expect("failed to sync store before reopen failed");
-                        drop(o);
 
                         // Update synced_data
                         synced_data = expected_data.clone();

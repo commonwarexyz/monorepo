@@ -25,10 +25,10 @@ use commonware_consensus::{
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::{channel::oneshot, sync::AsyncMutex};
+use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -217,14 +217,17 @@ where
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = Arc::new(AsyncMutex::new(self.plan.into_sync_metadata()));
+        let sync_metadata = self
+            .plan
+            .into_sync_metadata()
+            .begin_sync(floor.clone())
+            .await;
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            sync_metadata: sync_metadata.clone(),
             finalization: floor,
             marshal: self.marshal.clone(),
             sync_complete,

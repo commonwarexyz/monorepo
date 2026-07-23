@@ -73,8 +73,8 @@ struct State<B: Blob, K: Span> {
     pending: Option<SyncCompletion>,
 }
 
-/// Implementation of [Metadata] storage.
-pub struct Metadata<E: Context, K: Span, V: Codec> {
+/// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
+struct Inner<E: Context, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
@@ -86,9 +86,9 @@ pub struct Metadata<E: Context, K: Span, V: Codec> {
     keys: Gauge,
 }
 
-impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
-    /// Initialize a new [Metadata] instance.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
+    /// See [Metadata::init].
+    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
         let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
@@ -221,13 +221,13 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Ok((data, Wrapper::new(blob, version, lengths, buf)))
     }
 
-    /// Get a value from [Metadata] (if it exists).
-    pub fn get(&self, key: &K) -> Option<&V> {
+    /// See [Metadata::get].
+    fn get(&self, key: &K) -> Option<&V> {
         self.map.get(key)
     }
 
-    /// Get a mutable reference to a value from [Metadata] (if it exists).
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+    /// See [Metadata::get_mut].
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         // Get value
         let value = self.map.get_mut(key)?;
 
@@ -241,9 +241,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Some(value)
     }
 
-    /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
-    /// called.
-    pub fn clear(&mut self) {
+    /// See [Metadata::clear].
+    fn clear(&mut self) {
         // Clear map
         self.map.clear();
 
@@ -252,12 +251,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         self.keys.set(0);
     }
 
-    /// Put a value into [Metadata].
-    ///
-    /// If the key already exists, the value will be overwritten and the previous
-    /// value is returned. The value stored will not be persisted until [Self::sync]
-    /// is called.
-    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+    /// See [Metadata::put].
+    fn put(&mut self, key: K, value: V) -> Option<V> {
         // Insert value, getting previous value if it existed
         let previous = self.map.insert(key.clone(), value);
 
@@ -275,17 +270,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         previous
     }
 
-    /// Perform a [Self::put] and [Self::sync] in a single operation.
-    ///
-    /// Like calling [Self::sync] directly, this commits all pending metadata
-    /// changes, not just the provided key.
-    pub async fn put_sync(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.put(key, value);
-        self.sync().await
-    }
-
-    /// Update (or insert) a value in [Metadata] using a closure.
-    pub fn upsert(&mut self, key: K, f: impl FnOnce(&mut V))
+    /// See [Metadata::upsert].
+    fn upsert(&mut self, key: K, f: impl FnOnce(&mut V))
     where
         V: Default,
     {
@@ -300,17 +286,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
     }
 
-    /// Update (or insert) a value in [Metadata] using a closure and sync immediately.
-    pub async fn upsert_sync(&mut self, key: K, f: impl FnOnce(&mut V)) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.upsert(key, f);
-        self.sync().await
-    }
-
-    /// Remove a value from [Metadata] (if it exists).
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    /// See [Metadata::remove].
+    fn remove(&mut self, key: &K) -> Option<V> {
         // Get value
         let past = self.map.remove(key);
 
@@ -323,13 +300,13 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         past
     }
 
-    /// Iterate over all keys in metadata.
-    pub fn keys(&self) -> impl Iterator<Item = &K> {
+    /// See [Metadata::keys].
+    fn keys(&self) -> impl Iterator<Item = &K> {
         self.map.keys()
     }
 
-    /// Retain only the keys that satisfy the predicate.
-    pub fn retain(&mut self, mut f: impl FnMut(&K, &V) -> bool) {
+    /// See [Metadata::retain].
+    fn retain(&mut self, mut f: impl FnMut(&K, &V) -> bool) {
         // Retain only keys that satisfy the predicate
         let old_len = self.map.len();
         self.map.retain(|k, v| f(k, v));
@@ -342,7 +319,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
     }
 
-    /// Wait for an in-flight sync started by [Self::start_sync], surfacing its failure.
+    /// Wait for an in-flight sync started by [Metadata::start_sync], surfacing its failure.
     async fn wait_for_pending(&mut self) -> Result<(), Error> {
         let Some(pending) = &self.state.pending else {
             return Ok(());
@@ -354,20 +331,14 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Ok(())
     }
 
-    /// Atomically commit the current state of [Metadata].
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    /// See [Metadata::sync].
+    async fn sync(&mut self) -> Result<(), Error> {
         self.sync_inner(false).await?;
         Ok(())
     }
 
-    /// Atomically begin committing the current state of [Metadata], returning a completion handle.
-    ///
-    /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. At most one
-    /// sync is in flight: a second call first waits for the first, surfacing its failure. The
-    /// handle is a detached observer — dropping it neither cancels the sync nor loses a failure,
-    /// which resurfaces on every later sync (a failed sync leaves the store unusable, matching
-    /// [Self::sync]).
-    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+    /// See [Metadata::start_sync].
+    async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
         self.sync_inner(true).await
     }
 
@@ -561,8 +532,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         handle
     }
 
-    /// Remove the underlying blobs for this [Metadata].
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// See [Metadata::destroy].
+    async fn destroy(self) -> Result<(), Error> {
         // Everything is being removed, so a retained sync failure no longer matters; awaiting
         // only keeps the removal from racing an in-flight fsync.
         if let Some(pending) = &self.state.pending {
@@ -584,5 +555,116 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
+    }
+}
+
+/// Implementation of [Metadata] storage.
+///
+/// Storage-mutating functions consume the store and return it only on success: an error (or a
+/// dropped future) destroys the handle.
+pub struct Metadata<E: Context, K: Span, V: Codec>(Box<Inner<E, K, V>>);
+
+impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Metadata")
+            .field("keys", &self.0.map.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
+    /// Initialize a new [Metadata] instance.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Get a value from [Metadata] (if it exists).
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.0.get(key)
+    }
+
+    /// Get a mutable reference to a value from [Metadata] (if it exists).
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.0.get_mut(key)
+    }
+
+    /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
+    /// called.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Put a value into [Metadata].
+    ///
+    /// If the key already exists, the value will be overwritten and the previous
+    /// value is returned. The value stored will not be persisted until [Self::sync]
+    /// is called.
+    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+        self.0.put(key, value)
+    }
+
+    /// Perform a [Self::put] and [Self::sync] in a single operation.
+    ///
+    /// Like calling [Self::sync] directly, this commits all pending metadata
+    /// changes, not just the provided key.
+    pub async fn put_sync(mut self, key: K, value: V) -> Result<Self, Error> {
+        self.0.put(key, value);
+        self.0.sync().await?;
+        Ok(self)
+    }
+
+    /// Update (or insert) a value in [Metadata] using a closure.
+    pub fn upsert(&mut self, key: K, f: impl FnOnce(&mut V))
+    where
+        V: Default,
+    {
+        self.0.upsert(key, f);
+    }
+
+    /// Update (or insert) a value in [Metadata] using a closure and sync immediately.
+    pub async fn upsert_sync(mut self, key: K, f: impl FnOnce(&mut V)) -> Result<Self, Error>
+    where
+        V: Default,
+    {
+        self.0.upsert(key, f);
+        self.0.sync().await?;
+        Ok(self)
+    }
+
+    /// Remove a value from [Metadata] (if it exists).
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.0.remove(key)
+    }
+
+    /// Iterate over all keys in metadata.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.0.keys()
+    }
+
+    /// Retain only the keys that satisfy the predicate.
+    pub fn retain(&mut self, f: impl FnMut(&K, &V) -> bool) {
+        self.0.retain(f);
+    }
+
+    /// Atomically commit the current state of [Metadata].
+    pub async fn sync(mut self) -> Result<Self, Error> {
+        self.0.sync().await?;
+        Ok(self)
+    }
+
+    /// Atomically begin committing the current state of [Metadata], returning a completion handle.
+    ///
+    /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. At most one
+    /// sync is in flight: a second call first waits for the first, surfacing its failure. The
+    /// handle is a detached observer — dropping it neither cancels the sync nor loses a failure,
+    /// which resurfaces on every later sync (a failed sync leaves the store unusable, matching
+    /// [Self::sync]).
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        self.0.start_sync().await
+    }
+
+    /// Remove the underlying blobs for this [Metadata].
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.0.destroy().await
     }
 }

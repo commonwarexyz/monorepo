@@ -79,8 +79,8 @@ where
     }
 }
 
-/// Implementation of [Ordinal].
-pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
+/// The store's state, boxed so the public [Ordinal] handle stays pointer-sized.
+struct Inner<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -104,17 +104,9 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
-    /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
-    /// records should be considered available).
-    ///
-    /// If a section is not provided in the [BTreeMap], all records in that section are considered
-    /// unavailable. If a [BitMap] is provided for a section, all records in that section are
-    /// considered available if and only if the [BitMap] is set for the record. If a section is provided
-    /// but no [BitMap] is populated, all records in that section are considered available.
-    ///
-    /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
-    pub async fn init(
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
+    /// See [Ordinal::init].
+    async fn init(
         context: E,
         config: Config,
         bits: Option<BTreeMap<u64, &Option<BitMap>>>,
@@ -288,8 +280,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         })
     }
 
-    /// Add a value at the specified index (pending until sync).
-    pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
+    /// See [Ordinal::put].
+    async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
 
         // Check if blob exists
@@ -321,8 +313,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Get the value for a given index.
-    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
+    /// See [Ordinal::get].
+    async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk
@@ -343,51 +335,45 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(Some(value))
     }
 
-    /// Check if an index exists.
-    pub fn has(&self, index: u64) -> bool {
+    /// See [Ordinal::has].
+    fn has(&self, index: u64) -> bool {
         self.has.inc();
 
         self.intervals.get(&index).is_some()
     }
 
-    /// Get the next gap information for backfill operations.
-    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+    /// See [Ordinal::next_gap].
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
     }
 
-    /// Get an iterator over all ranges in the [Ordinal].
-    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+    /// See [Ordinal::ranges].
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
-    /// Get an iterator over ranges that overlap or follow `from`.
-    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+    /// See [Ordinal::ranges_from].
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
     }
 
-    /// Retrieve the first index in the [Ordinal].
-    pub fn first_index(&self) -> Option<u64> {
+    /// See [Ordinal::first_index].
+    fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()
     }
 
-    /// Retrieve the last index in the [Ordinal].
-    pub fn last_index(&self) -> Option<u64> {
+    /// See [Ordinal::last_index].
+    fn last_index(&self) -> Option<u64> {
         self.intervals.last_index()
     }
 
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+    /// See [Ordinal::missing_items].
+    fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         self.intervals.missing_items(start, max)
     }
 
-    /// Prune indices older than `min` by removing entire blobs.
-    ///
-    /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
-    /// all possible indices in that blob are less than `min`.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    /// See [Ordinal::prune].
+    async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Collect sections to remove
         let items_per_blob = self.config.items_per_blob.get();
         let min_section = min / items_per_blob;
@@ -423,8 +409,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Write all pending entries and sync all modified [Blob]s.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    /// See [Ordinal::sync].
+    async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
         if self.pending.is_empty() {
@@ -445,8 +431,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Destroy [Ordinal] and remove all data.
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// See [Ordinal::destroy].
+    async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             drop(blob);
             self.context
@@ -462,6 +448,109 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
+    }
+}
+
+/// Implementation of [Ordinal].
+///
+/// Mutating functions consume the store and return it only on success: an error (or a dropped
+/// future) destroys the handle.
+pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>>(Box<Inner<E, V>>);
+
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> std::fmt::Debug for Ordinal<E, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ordinal")
+            .field("first_index", &self.0.intervals.first_index())
+            .field("last_index", &self.0.intervals.last_index())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+    /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
+    /// records should be considered available).
+    ///
+    /// If a section is not provided in the [BTreeMap], all records in that section are considered
+    /// unavailable. If a [BitMap] is provided for a section, all records in that section are
+    /// considered available if and only if the [BitMap] is set for the record. If a section is provided
+    /// but no [BitMap] is populated, all records in that section are considered available.
+    ///
+    /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
+    pub async fn init(
+        context: E,
+        config: Config,
+        bits: Option<BTreeMap<u64, &Option<BitMap>>>,
+    ) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, config, bits).await?)))
+    }
+
+    /// Add a value at the specified index (pending until sync).
+    pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
+        self.0.put(index, value).await?;
+        Ok(self)
+    }
+
+    /// Get the value for a given index.
+    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
+        self.0.get(index).await
+    }
+
+    /// Check if an index exists.
+    pub fn has(&self, index: u64) -> bool {
+        self.0.has(index)
+    }
+
+    /// Get the next gap information for backfill operations.
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.0.next_gap(index)
+    }
+
+    /// Get an iterator over all ranges in the [Ordinal].
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.0.ranges()
+    }
+
+    /// Get an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.0.ranges_from(from)
+    }
+
+    /// Retrieve the first index in the [Ordinal].
+    pub fn first_index(&self) -> Option<u64> {
+        self.0.first_index()
+    }
+
+    /// Retrieve the last index in the [Ordinal].
+    pub fn last_index(&self) -> Option<u64> {
+        self.0.last_index()
+    }
+
+    /// Returns up to `max` missing items starting from `start`.
+    ///
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `max` items are found or there are no more gaps to fill.
+    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        self.0.missing_items(start, max)
+    }
+
+    /// Prune indices older than `min` by removing entire blobs.
+    ///
+    /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
+    /// all possible indices in that blob are less than `min`.
+    pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
+        self.0.prune(min).await?;
+        Ok(self)
+    }
+
+    /// Write all pending entries and sync all modified [Blob]s.
+    pub async fn sync(mut self) -> Result<Self, Error> {
+        self.0.sync().await?;
+        Ok(self)
+    }
+
+    /// Destroy [Ordinal] and remove all data.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.0.destroy().await
     }
 }
 
@@ -485,7 +574,7 @@ mod tests {
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_ordinal_futures_are_send(ordinal: &mut TestOrdinal, key: u64) {
+    fn assert_ordinal_futures_are_send(ordinal: TestOrdinal, key: u64) {
         is_send(ordinal.get(key));
         is_send(ordinal.put(key, 0u64));
     }

@@ -203,11 +203,10 @@ mod tests {
             assert_eq!(plan.sync_height(), None);
             drop(plan);
 
-            let mut metadata =
+            let metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
             metadata.set_complete(Height::new(7)).await;
-            drop(metadata);
 
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
@@ -224,10 +223,10 @@ mod tests {
         deterministic::Runner::default().start(|mut context| async move {
             let partition_prefix = "completed_sync_cannot_be_marked_in_progress";
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let mut metadata =
+            let metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
-            metadata.set_complete(Height::new(7)).await;
+            let metadata = metadata.set_complete(Height::new(7)).await;
             metadata
                 .begin_sync(finalization(&fixture.schemes, 8, 8))
                 .await;
@@ -239,10 +238,10 @@ mod tests {
     fn complete_height_cannot_move_backward() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "complete_height_cannot_move_backward";
-            let mut metadata =
+            let metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
-            metadata.set_complete(Height::new(7)).await;
+            let metadata = metadata.set_complete(Height::new(7)).await;
             metadata.set_complete(Height::new(6)).await;
         });
     }
@@ -253,19 +252,18 @@ mod tests {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
             let stored = finalization(&fixture.schemes, 7, 7);
-            let mut metadata =
+            let metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
             metadata.begin_sync(stored.clone()).await;
-            drop(metadata);
 
-            let mut plan =
+            let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
             assert!(plan.should_state_sync(false));
-            plan.sync_metadata.begin_sync(stored).await;
-            plan.sync_metadata
+            let metadata = plan.sync_metadata.begin_sync(stored).await;
+            metadata
                 .begin_sync(finalization(&fixture.schemes, 9, 9))
                 .await;
         });
@@ -278,11 +276,10 @@ mod tests {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
             let stored = finalization(&fixture.schemes, 7, 7);
 
-            let mut metadata =
+            let metadata =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, partition_prefix)
                     .await;
             metadata.begin_sync(stored.clone()).await;
-            drop(metadata);
 
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
@@ -339,12 +336,12 @@ mod tests {
     fn in_progress_sync_panics_for_backward_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                 &context,
                 "in_progress_sync_panics_for_backward_floor",
             )
             .await;
-            metadata
+            let metadata = metadata
                 .begin_sync(finalization(&fixture.schemes, 7, 7))
                 .await;
             metadata
@@ -360,12 +357,12 @@ mod tests {
     fn in_progress_sync_panics_for_conflicting_round() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
-            let mut metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                 &context,
                 "in_progress_sync_panics_for_conflicting_round",
             )
             .await;
-            metadata
+            let metadata = metadata
                 .begin_sync(finalization(&fixture.schemes, 7, 7))
                 .await;
             metadata

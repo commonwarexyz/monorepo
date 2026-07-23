@@ -174,10 +174,9 @@ impl<B: Blob> Sealed<B> {
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
     /// is not async.
     pub fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
-        let logical_page_size = self.inner.cache_ref.page_size();
-        let logical_page_size_nz =
-            NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
-        let physical_page_size = logical_page_size
+        let page_size = self.inner.cache_ref.page_size();
+        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
+        let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
         let prefetch_pages = (buffer_size.get() / physical_page_size as usize).max(1);
@@ -187,7 +186,7 @@ impl<B: Blob> Sealed<B> {
             .partial_page
             .as_ref()
             .map_or(0, |p| p.len() as u64);
-        let full_pages = (self.inner.size - partial_len) / logical_page_size;
+        let full_pages = (self.inner.size - partial_len) / page_size;
         let pages = full_pages + u64::from(partial_len > 0);
         let physical_blob_size = physical_page_size
             .checked_mul(pages)
@@ -199,7 +198,7 @@ impl<B: Blob> Sealed<B> {
             physical_blob_size,
             logical_blob_size,
             prefetch_pages,
-            logical_page_size_nz,
+            page_size_nz,
         );
         Ok(Replay::new(reader))
     }
