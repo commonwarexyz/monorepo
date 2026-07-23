@@ -263,6 +263,7 @@ where
                         .finalize(self.context.as_present(), block.as_ref())
                         .await
                         .expect("sync handoff block cannot be a duplicate");
+
                     // The processing loop's flush pool does not exist yet, so
                     // observe the deferred flush inline. Acknowledging and
                     // pruning only once durable preserves the startup rewind
