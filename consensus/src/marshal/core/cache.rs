@@ -522,7 +522,6 @@ where
         }
     }
 
-
     /// Get a notarization from the prunable archive by round.
     pub(crate) async fn get_notarization(
         &self,
