@@ -130,11 +130,11 @@ pub(super) enum ParentCheck<B> {
 ///
 /// Returns `None` when work should stop early (receiver dropped or parent unavailable).
 #[inline]
-pub(super) async fn await_and_validate_parent<B>(
+pub(super) async fn await_and_validate_parent<B, T>(
     parent_commitment: B::Digest,
     block: &B,
     parent_request: oneshot::Receiver<Arc<B>>,
-    tx: &mut oneshot::Sender<bool>,
+    tx: &mut oneshot::Sender<T>,
 ) -> Option<ParentCheck<Arc<B>>>
 where
     B: Block,
@@ -184,14 +184,14 @@ where
 /// can run it concurrently with this verification (durability is independent of validity).
 #[inline]
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_app_verify<E, S, A, B>(
+pub(super) async fn run_app_verify<E, S, A, B, T>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
     block: Arc<B>,
     parent: Arc<B>,
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
-    tx: &mut oneshot::Sender<bool>,
+    tx: &mut oneshot::Sender<T>,
     ancestor_fetch_duration: Timed,
 ) -> Option<bool>
 where

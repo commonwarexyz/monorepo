@@ -7,7 +7,7 @@ use futures::{
     stream::{FuturesUnordered, SelectNextSome},
 };
 use pin_project::pin_project;
-use std::{future::Future, pin::Pin, task::Poll};
+use std::{collections::BTreeMap, future::Future, pin::Pin, task::Poll};
 
 /// A future type that can be used in `Pool`.
 type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -191,6 +191,90 @@ impl<F: Future> Future for OptionFuture<F> {
             .as_pin_mut()
             .map_or_else(|| Poll::Pending, |fut| fut.poll(cx))
     }
+}
+
+/// A consuming mutation's return value: the threaded value first, then any extra outputs.
+pub trait Threaded<T> {
+    /// The outputs beyond the threaded value.
+    type Rest;
+
+    /// Splits into the threaded value and the extra outputs.
+    fn split(self) -> (T, Self::Rest);
+}
+
+impl<T> Threaded<T> for T {
+    type Rest = ();
+
+    fn split(self) -> (T, ()) {
+        (self, ())
+    }
+}
+
+impl<T, A> Threaded<T> for (T, A) {
+    type Rest = A;
+
+    fn split(self) -> (T, A) {
+        self
+    }
+}
+
+impl<T, A, B> Threaded<T> for (T, A, B) {
+    type Rest = (A, B);
+
+    fn split(self) -> (T, (A, B)) {
+        let (value, a, b) = self;
+        (value, (a, b))
+    }
+}
+
+/// Threads the value in `slot` through a consuming mutation, restoring the returned
+/// value and yielding the mutation's extra outputs.
+///
+/// On error the value stays absent, matching the contract of consuming mutators: the
+/// handle is destroyed.
+///
+/// # Panics
+///
+/// Panics when `slot` is empty.
+pub async fn rebind<T, Out, Fut, E>(
+    slot: &mut Option<T>,
+    op: impl FnOnce(T) -> Fut,
+) -> Result<Out::Rest, E>
+where
+    Out: Threaded<T>,
+    Fut: Future<Output = Result<Out, E>>,
+{
+    let value = slot.take().expect("cannot rebind an empty slot");
+    let (value, rest) = op(value).await?.split();
+    *slot = Some(value);
+    Ok(rest)
+}
+
+/// Threads the value at `key` in `map` through a consuming mutation, restoring the
+/// returned value and yielding the mutation's extra outputs.
+///
+/// On error the entry stays absent, matching the contract of consuming mutators: the
+/// handle is destroyed.
+///
+/// # Panics
+///
+/// Panics when `key` is absent from `map`.
+pub async fn rebind_entry<K, V, Out, Fut, E>(
+    map: &mut BTreeMap<K, V>,
+    key: &K,
+    op: impl FnOnce(V) -> Fut,
+) -> Result<Out::Rest, E>
+where
+    K: Ord,
+    Out: Threaded<V>,
+    Fut: Future<Output = Result<Out, E>>,
+{
+    let (key, value) = map
+        .remove_entry(key)
+        .expect("cannot rebind a missing entry");
+    let (value, rest) = op(value).await?.split();
+    map.insert(key, value);
+    Ok(rest)
 }
 
 #[cfg(test)]
@@ -480,6 +564,75 @@ mod tests {
             assert!(pool.is_empty());
 
             let _ = sender.send(());
+        });
+    }
+
+    #[test]
+    fn test_rebind_restores_value_and_yields_rest() {
+        block_on(async {
+            let mut slot = Some(1u32);
+            let rest: Result<(&str, bool), &str> = rebind(&mut slot, |value| {
+                future::ready(Ok((value + 1, "rest", true)))
+            })
+            .await;
+            assert_eq!(rest, Ok(("rest", true)));
+            assert_eq!(slot, Some(2));
+
+            let rest: Result<(), &str> =
+                rebind(&mut slot, |value| future::ready(Ok(value + 1))).await;
+            assert_eq!(rest, Ok(()));
+            assert_eq!(slot, Some(3));
+        });
+    }
+
+    #[test]
+    fn test_rebind_error_destroys_value() {
+        block_on(async {
+            let mut slot = Some(1u32);
+            let rest: Result<(), &str> =
+                rebind(&mut slot, |_| future::ready(Err::<u32, _>("failed"))).await;
+            assert_eq!(rest, Err("failed"));
+            assert_eq!(slot, None);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot rebind an empty slot")]
+    fn test_rebind_empty_slot_panics() {
+        block_on(async {
+            let mut slot: Option<u32> = None;
+            let _: Result<(), &str> = rebind(&mut slot, |v| future::ready(Ok(v))).await;
+        });
+    }
+
+    #[test]
+    fn test_rebind_entry_restores_value_and_yields_rest() {
+        block_on(async {
+            let mut map = BTreeMap::from([("a", 1u32), ("b", 10)]);
+            let rest: Result<bool, &str> =
+                rebind_entry(&mut map, &"a", |value| future::ready(Ok((value + 1, true)))).await;
+            assert_eq!(rest, Ok(true));
+            assert_eq!(map, BTreeMap::from([("a", 2), ("b", 10)]));
+        });
+    }
+
+    #[test]
+    fn test_rebind_entry_error_destroys_value() {
+        block_on(async {
+            let mut map = BTreeMap::from([("a", 1u32)]);
+            let rest: Result<(), &str> =
+                rebind_entry(&mut map, &"a", |_| future::ready(Err::<u32, _>("failed"))).await;
+            assert_eq!(rest, Err("failed"));
+            assert!(map.is_empty());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot rebind a missing entry")]
+    fn test_rebind_entry_missing_entry_panics() {
+        block_on(async {
+            let mut map: BTreeMap<&str, u32> = BTreeMap::new();
+            let _: Result<(), &str> = rebind_entry(&mut map, &"a", |v| future::ready(Ok(v))).await;
         });
     }
 

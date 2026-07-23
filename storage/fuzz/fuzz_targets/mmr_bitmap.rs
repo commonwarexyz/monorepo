@@ -252,11 +252,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::WritePruned => {
-                    let mut bitmap = match bitmap {
+                    let bitmap = match bitmap {
                         Bitmap::Merkleized(bitmap) => bitmap,
                         Bitmap::Unmerkleized(bitmap) => bitmap.merkleize(&hasher).unwrap(),
                     };
-                    let _ = bitmap.write_pruned().await;
+                    let bitmap = bitmap.write_pruned().await.unwrap();
                     Bitmap::Merkleized(bitmap)
                 }
             }

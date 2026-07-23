@@ -153,13 +153,19 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations {
             match op {
                 Operation::Put { index, value } => {
-                    if let Some(ref mut cache) = cache_opt {
-                        let result = cache.put(index, value).await;
-                        if result.is_ok() {
+                    if let Some(cache) = cache_opt.take() {
+                        // A put below the prune floor is satisfied without storing, so the
+                        // model only records puts at or above the floor.
+                        let cache = cache.put(index, value).await.expect("Put should not error");
+                        let section =
+                            (index / input.config.items_per_blob) * input.config.items_per_blob;
+                        let not_pruned = pruned_min.is_none_or(|min| section >= min);
+                        if not_pruned {
                             // Cache put only inserts if index doesn't already exist
                             // Only update expected_data if this is a new index
                             expected_data.entry(index).or_insert(value);
                         }
+                        cache_opt = Some(cache);
                     }
                 }
 
@@ -237,14 +243,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    if let Some(ref mut cache) = cache_opt {
-                        cache.sync().await.expect("Sync should not error");
+                    if let Some(cache) = cache_opt.take() {
+                        cache_opt = Some(cache.sync().await.expect("Sync should not error"));
                     }
                 }
 
                 Operation::Prune { min } => {
-                    if let Some(ref mut cache) = cache_opt {
-                        cache.prune(min).await.expect("Prune should not error");
+                    if let Some(cache) = cache_opt.take() {
+                        cache_opt = Some(cache.prune(min).await.expect("Prune should not error"));
 
                         let section_min =
                             (min / input.config.items_per_blob) * input.config.items_per_blob;
@@ -260,11 +266,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Reinit => {
-                    if cache_opt.is_none() {
+                    if let Some(cache) = cache_opt.take() {
+                        // Make pending writes durable so the model stays exact across
+                        // the restart, then replay from storage. The prune floor
+                        // resets at init.
+                        let cache = cache.sync().await.expect("Sync should not error");
+                        drop(cache);
                         let cache = Cache::<_, u32>::init(context.child("storage"), cfg.clone())
                             .await
                             .expect("Failed to reinitialize cache");
-
                         pruned_min = None;
                         cache_opt = Some(cache);
                     }
@@ -272,7 +282,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        if let Some(mut cache) = cache_opt {
+        if let Some(cache) = cache_opt {
             cache.sync().await.ok();
         }
     });

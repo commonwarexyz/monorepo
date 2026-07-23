@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, deterministic};
+use commonware_runtime::{Buf, BufMut};
 use std::convert::Infallible;
 
 pub(crate) type TestDatabases = Shared<TestDb>;
@@ -168,7 +168,15 @@ impl CertifiableBlock for TestBlock {
 #[derive(Clone)]
 pub(crate) struct TestApp;
 
-impl Application<deterministic::Context> for TestApp {
+impl<
+    E: rand_core::Rng
+        + commonware_runtime::Spawner
+        + commonware_runtime::Metrics
+        + commonware_runtime::Clock
+        + Send
+        + Sync,
+> Application<E> for TestApp
+{
     type SigningScheme = TestScheme;
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
@@ -176,9 +184,7 @@ impl Application<deterministic::Context> for TestApp {
     type Provider = ();
     type Input = ();
 
-    fn sync_targets(
-        block: &Self::Block,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         block.height().get()
     }
 
@@ -188,29 +194,29 @@ impl Application<deterministic::Context> for TestApp {
 
     async fn propose(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
+    ) -> Option<Proposed<Self, E>> {
         None
     }
 
     async fn verify(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         None
     }
 
     async fn apply(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         TestMerkleized
     }
 }

@@ -51,9 +51,10 @@ impl StorageWorkload for ArchivePrunableWorkload {
             context.fill(&mut key_bytes);
             let key = FixedBytes::<64>::decode(key_bytes.as_ref()).expect("key should decode");
             let value: i32 = context.random();
-            archive.put(i as u64, key, value).await?;
+            archive = archive.put(i as u64, key, value).await?;
         }
-        archive.sync().await
+        archive.sync().await?;
+        Ok(())
     }
 }
 
@@ -95,9 +96,10 @@ impl StorageWorkload for ArchiveImmutableWorkload {
             context.fill(&mut key_bytes);
             let key = FixedBytes::<64>::decode(key_bytes.as_ref()).expect("key should decode");
             let value: i32 = context.random();
-            archive.put(i as u64, key, value).await?;
+            archive = archive.put(i as u64, key, value).await?;
         }
-        archive.sync().await
+        archive.sync().await?;
+        Ok(())
     }
 }
 

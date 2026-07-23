@@ -493,18 +493,27 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_proposal_none_context_skips_context_digest_check() {
+    fn test_validate_proposal_reproposal_exception_not_valid_in_later_context() {
         let fixture = baseline_fixture();
-        let wrong_context = Round::new(Epoch::new(0), View::new(8));
-        let payload_with_wrong_context = commitment_for(
-            fixture.block.digest(),
-            wrong_context,
-            fixture.config,
-            b"block_root",
-        );
+        let later_context = Round::new(Epoch::new(0), View::new(8));
+
+        // Re-proposals deliberately skip the context-digest check because the
+        // commitment retains the original proposal context.
         assert_eq!(
-            validate_proposal::<Sha256, Round>(payload_with_wrong_context, fixture.config, None),
+            validate_proposal::<Sha256, Round>(fixture.commitment, fixture.config, None),
             Ok(())
+        );
+
+        // The same commitment cannot also be accepted as a normal proposal in
+        // a later context. This prevents the re-proposal exception from
+        // aliasing a distinct context-dependent certification outcome.
+        assert_eq!(
+            validate_proposal::<Sha256, _>(
+                fixture.commitment,
+                fixture.config,
+                Some(&later_context)
+            ),
+            Err(ProposalError::ContextDigest)
         );
     }
 
