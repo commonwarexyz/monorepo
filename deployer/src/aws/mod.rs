@@ -473,6 +473,8 @@ cfg_if::cfg_if! {
         pub enum Error {
             #[error("AWS EC2 error: {0}")]
             AwsEc2(#[from] aws_sdk_ec2::Error),
+            #[error("AWS STS error: {0}")]
+            AwsSts(#[from] Box<aws_sdk_sts::Error>),
             #[error("AWS security group ingress error: {0}")]
             AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
             #[error("AWS describe instances error: {0}")]

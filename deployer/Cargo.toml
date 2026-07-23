@@ -19,6 +19,7 @@ aws = [
 	"aws-config",
 	"aws-sdk-ec2",
 	"aws-sdk-s3",
+	"aws-sdk-sts",
 	"chrono",
 	"clap",
 	"commonware-cryptography",
@@ -36,6 +37,7 @@ aws = [
 aws-config = { workspace = true, optional = true }
 aws-sdk-ec2 = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
+aws-sdk-sts = { workspace = true, optional = true }
 cfg-if.workspace = true
 chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }

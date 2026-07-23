@@ -43,17 +43,62 @@ pub async fn create_client(region: Region) -> Ec2Client {
     Ec2Client::new(&config)
 }
 
+/// Resolves an identifier for the AWS principal running the deployment, used to
+/// stamp an `owner` tag on every created resource. Derived from STS
+/// `GetCallerIdentity`: for an assumed role (e.g. AWS SSO) this is the role
+/// session name, and for an IAM user it is the user name. Falls back to the
+/// caller's unique id when the ARN cannot be parsed.
+pub async fn get_owner() -> Result<String, super::Error> {
+    let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
+        .region(Region::new(super::MONITORING_REGION))
+        .load()
+        .await;
+    let client = aws_sdk_sts::Client::new(&config);
+    let identity = client
+        .get_caller_identity()
+        .send()
+        .await
+        .map_err(|e| Box::new(aws_sdk_sts::Error::from(e)))?;
+    let owner = identity
+        .arn()
+        .and_then(|arn| arn.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .or_else(|| identity.user_id())
+        .unwrap_or("unknown")
+        .to_string();
+    Ok(owner)
+}
+
+/// Standard tags applied to every resource the deployer creates: the deployment
+/// `tag` and the `owner` (see [`get_owner`]). The `owner` tag enables per-user
+/// attribution and tag-based IAM policies that prevent deleting other users'
+/// deployments.
+fn deployer_tags(tag: &str, owner: &str) -> Vec<Tag> {
+    vec![
+        Tag::builder().key("deployer").value(tag).build(),
+        Tag::builder().key("owner").value(owner).build(),
+    ]
+}
+
 /// Imports an SSH public key into the specified region
 pub async fn import_key_pair(
     client: &Ec2Client,
     key_name: &str,
     public_key: &str,
+    tag: &str,
+    owner: &str,
 ) -> Result<(), Ec2Error> {
     let blob = Blob::new(public_key.as_bytes());
     client
         .import_key_pair()
         .key_name(key_name)
         .public_key_material(blob)
+        .tag_specifications(
+            TagSpecification::builder()
+                .resource_type(ResourceType::KeyPair)
+                .set_tags(Some(deployer_tags(tag, owner)))
+                .build(),
+        )
         .send()
         .await?;
     Ok(())
@@ -170,6 +215,7 @@ pub async fn create_vpc(
     client: &Ec2Client,
     cidr_block: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<String, Ec2Error> {
     let resp = client
         .create_vpc()
@@ -177,7 +223,7 @@ pub async fn create_vpc(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Vpc)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()
@@ -190,13 +236,14 @@ pub async fn create_and_attach_igw(
     client: &Ec2Client,
     vpc_id: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<String, Ec2Error> {
     let igw_resp = client
         .create_internet_gateway()
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::InternetGateway)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()
@@ -221,6 +268,7 @@ pub async fn create_route_table(
     vpc_id: &str,
     igw_id: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<String, Ec2Error> {
     let rt_resp = client
         .create_route_table()
@@ -228,7 +276,7 @@ pub async fn create_route_table(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::RouteTable)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()
@@ -252,6 +300,7 @@ pub async fn create_subnet(
     subnet_cidr: &str,
     availability_zone: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<String, Ec2Error> {
     let subnet_resp = client
         .create_subnet()
@@ -261,7 +310,7 @@ pub async fn create_subnet(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Subnet)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()
@@ -282,6 +331,7 @@ pub async fn create_security_group_monitoring(
     vpc_id: &str,
     deployer_ip: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
         .create_security_group()
@@ -291,7 +341,7 @@ pub async fn create_security_group_monitoring(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::SecurityGroup)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()
@@ -320,6 +370,7 @@ pub async fn create_security_group_binary(
     vpc_id: &str,
     deployer_ip: &str,
     tag: &str,
+    owner: &str,
     ports: &[PortConfig],
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
@@ -330,7 +381,7 @@ pub async fn create_security_group_binary(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::SecurityGroup)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()
@@ -506,6 +557,7 @@ async fn try_launch_instances(
     count: i32,
     name: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<Vec<String>, Ec2Error> {
     // Build the root EBS mapping with optional provisioned performance settings.
     let mut ebs = EbsBlockDevice::builder()
@@ -537,10 +589,11 @@ async fn try_launch_instances(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Instance)
-                .set_tags(Some(vec![
-                    Tag::builder().key("deployer").value(tag).build(),
-                    Tag::builder().key("name").value(name).build(),
-                ]))
+                .set_tags(Some({
+                    let mut tags = deployer_tags(tag, owner);
+                    tags.push(Tag::builder().key("name").value(name).build());
+                    tags
+                }))
                 .build(),
         )
         .block_device_mappings(
@@ -600,6 +653,7 @@ pub async fn launch_instances(
     count: i32,
     name: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<(Vec<String>, String), super::Error> {
     validate_storage_options(
         name,
@@ -645,6 +699,7 @@ pub async fn launch_instances(
                 count,
                 name,
                 tag,
+                owner,
             )
             .await
             {
@@ -800,6 +855,7 @@ pub async fn create_vpc_peering_connection(
     peer_vpc_id: &str,
     peer_region: &str,
     tag: &str,
+    owner: &str,
 ) -> Result<String, Ec2Error> {
     let resp = client
         .create_vpc_peering_connection()
@@ -809,7 +865,7 @@ pub async fn create_vpc_peering_connection(
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::VpcPeeringConnection)
-                .tags(Tag::builder().key("deployer").value(tag).build())
+                .set_tags(Some(deployer_tags(tag, owner)))
                 .build(),
         )
         .send()

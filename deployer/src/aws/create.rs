@@ -96,7 +96,15 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         serde_yaml::from_reader(config_file)?
     };
     let tag = &config.tag;
-    info!(tag = tag.as_str(), "loaded configuration");
+
+    // Resolve the AWS principal running this deploy so every created resource is
+    // tagged with an `owner`, enabling attribution and tag-based IAM guardrails.
+    let owner = ec2::get_owner().await?;
+    info!(
+        tag = tag.as_str(),
+        owner = owner.as_str(),
+        "loaded configuration"
+    );
 
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
@@ -360,6 +368,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .map(|(idx, region)| {
             let region = region.clone();
             let tag = tag.clone();
+            let owner = owner.clone();
             let deployer_ip = deployer_ip.clone();
             let key_name = key_name.clone();
             let public_key = public_key.clone();
@@ -379,13 +388,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
                 // Create VPC, IGW, route table
                 let vpc_cidr = format!("10.{idx}.0.0/16");
-                let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag).await?;
+                let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag, &owner).await?;
                 info!(
                     vpc = vpc_id.as_str(),
                     region = region.as_str(),
                     "created VPC"
                 );
-                let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
+                let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag, &owner).await?;
                 info!(
                     igw = igw_id.as_str(),
                     vpc = vpc_id.as_str(),
@@ -393,7 +402,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     "created and attached IGW"
                 );
                 let route_table_id =
-                    create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
+                    create_route_table(&ec2_client, &vpc_id, &igw_id, &tag, &owner).await?;
                 info!(
                     route_table = route_table_id.as_str(),
                     vpc = vpc_id.as_str(),
@@ -410,6 +419,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                         let vpc_id = vpc_id.clone();
                         let route_table_id = route_table_id.clone();
                         let tag = tag.clone();
+                        let owner = owner.clone();
                         let az = az.clone();
                         let region = region.clone();
                         async move {
@@ -421,6 +431,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                                 &subnet_cidr,
                                 &az,
                                 &tag,
+                                &owner,
                             )
                             .await?;
                             info!(
@@ -437,9 +448,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
                 // Create monitoring security group in monitoring region
                 let monitoring_sg_id = if region == MONITORING_REGION {
-                    let sg_id =
-                        create_security_group_monitoring(&ec2_client, &vpc_id, &deployer_ip, &tag)
-                            .await?;
+                    let sg_id = create_security_group_monitoring(
+                        &ec2_client,
+                        &vpc_id,
+                        &deployer_ip,
+                        &tag,
+                        &owner,
+                    )
+                    .await?;
                     info!(
                         sg = sg_id.as_str(),
                         vpc = vpc_id.as_str(),
@@ -452,7 +468,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 };
 
                 // Import key pair
-                import_key_pair(&ec2_client, &key_name, &public_key).await?;
+                import_key_pair(&ec2_client, &key_name, &public_key, &tag, &owner).await?;
                 info!(
                     key = key_name.as_str(),
                     region = region.as_str(),
@@ -504,11 +520,18 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let vpc_id = resources.vpc_id.clone();
             let deployer_ip = deployer_ip.clone();
             let tag = tag.clone();
+            let owner = owner.clone();
             let ports = config.ports.clone();
             async move {
-                let binary_sg_id =
-                    create_security_group_binary(&ec2_client, &vpc_id, &deployer_ip, &tag, &ports)
-                        .await?;
+                let binary_sg_id = create_security_group_binary(
+                    &ec2_client,
+                    &vpc_id,
+                    &deployer_ip,
+                    &tag,
+                    &owner,
+                    &ports,
+                )
+                .await?;
                 info!(
                     sg = binary_sg_id.as_str(),
                     vpc = vpc_id.as_str(),
@@ -548,6 +571,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let binary_cidr = binary_resources.vpc_cidr.clone();
             let binary_route_table_id = binary_resources.route_table_id.clone();
             let tag = tag.clone();
+            let owner = owner.clone();
             async move {
                 let peer_id = create_vpc_peering_connection(
                     &monitoring_ec2_client,
@@ -555,6 +579,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     &binary_vpc_id,
                     &region,
                     &tag,
+                    &owner,
                 )
                 .await?;
                 info!(
@@ -659,6 +684,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let monitoring_launch_future = {
         let key_name = key_name.clone();
         let tag = tag.clone();
+        let owner = owner.clone();
         let sg_id = monitoring_sg_id.clone();
         async move {
             let (mut ids, az) = launch_instances(
@@ -677,6 +703,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 1,
                 MONITORING_NAME,
                 &tag,
+                &owner,
             )
             .await?;
             let instance_id = ids.remove(0);
@@ -699,6 +726,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
             let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
             let tag = tag.clone();
+            let owner = owner.clone();
             let instance_name = instance.name.clone();
             let region = instance.region.clone();
             let subnets = grouped_subnets(instance, resources, &availability_zone_groups);
@@ -721,6 +749,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     1,
                     &instance.name,
                     &tag,
+                    &owner,
                 )
                 .await?;
                 let instance_id = ids.remove(0);
