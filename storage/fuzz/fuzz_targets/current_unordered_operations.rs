@@ -1,13 +1,20 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{Sha256, sha256::Digest};
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy as _};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+    qmdb::{
+        any::unordered::{Update as UnorderedUpdate, fixed::Operation as UnorderedOperation},
+        current::{
+            FixedConfig as Config, proof::verify_proof_and_extract_digests,
+            unordered::fixed::Db as CurrentDb,
+        },
+        verify_proof, verify_proof_and_pinned_nodes,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -39,6 +46,19 @@ enum CurrentOperation {
     Prune,
     OpCount,
     Root,
+    GetMetadata,
+    OpsRootWitness {
+        other_ops_root: RawValue,
+    },
+    OpsHistoricalProof {
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    },
+    PinnedProof {
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    },
+    Sync,
     RangeProof {
         start_loc: u64,
         max_ops: NonZeroU64,
@@ -53,6 +73,10 @@ enum CurrentOperation {
         bad_partial_digest: Option<[u8; 32]>,
         max_ops: NonZeroU64,
         chunk_xor: [u8; 32],
+    },
+    Rewind,
+    Strategy {
+        values: [u8; 4],
     },
 }
 
@@ -70,7 +94,9 @@ struct FuzzInput {
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let initial_writes = u.int_in_range(0..=MAX_INITIAL_WRITES)?;
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let operations = (0..num_ops)
@@ -79,7 +105,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         Ok(FuzzInput {
             initial_writes,
             operations,
-            raw_bytes: u.bytes(u.len())?.to_vec(),
+            raw_bytes,
         })
     }
 }
@@ -127,11 +153,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let initial_writes = data.initial_writes;
     let operations = data.operations.clone();
     runner.start(|context| async move {
-        let page_cache = CacheRef::from_pooler(
-            &context,
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        );
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("fuzz-current-{suffix}-merkle-journal"),
@@ -198,7 +220,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
                     // Check if key exists in committed state or pending writes.
-                    let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some()
+                    let key_existed = db
+                        .get(&k)
+                        .await
+                        .expect("Get before delete should not fail")
+                        .is_some()
                         || pending_expected.get(key).is_some_and(|v| v.is_some());
                     if key_existed {
                         pending_writes.push((k, None));
@@ -217,11 +243,20 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         Some(Some(expected_value)) => {
                             assert!(result.is_some(), "Expected value for key {key:?}");
                             let actual_value = result.expect("Should have value");
-                            let actual_bytes: &[u8; 32] = actual_value.as_ref().try_into().expect("Value should be 32 bytes");
-                            assert_eq!(actual_bytes, expected_value, "Value mismatch for key {key:?}");
+                            let actual_bytes: &[u8; 32] = actual_value
+                                .as_ref()
+                                .try_into()
+                                .expect("Value should be 32 bytes");
+                            assert_eq!(
+                                actual_bytes, expected_value,
+                                "Value mismatch for key {key:?}"
+                            );
                         }
                         Some(None) => {
-                            assert!(result.is_none(), "Expected no value for deleted key {key:?}");
+                            assert!(
+                                result.is_none(),
+                                "Expected no value for deleted key {key:?}"
+                            );
                         }
                         None => {
                             assert!(result.is_none(), "Expected no value for unset key {key:?}");
@@ -242,22 +277,202 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 }
 
                 CurrentOperation::Commit => {
-                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
                     committed_op_count = db.bounds().end;
                     db
                 }
 
                 CurrentOperation::Prune => {
-                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
                     committed_op_count = db.bounds().end;
                     let boundary = db.sync_boundary();
                     db.prune(boundary).await.expect("Prune should not fail")
                 }
 
                 CurrentOperation::Root => {
-                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
                     committed_op_count = db.bounds().end;
-                    let _root = db.root();
+                    assert_eq!(
+                        db.root(),
+                        db.to_batch().root(),
+                        "database and snapshot roots should match",
+                    );
+                    db
+                }
+
+                CurrentOperation::GetMetadata => {
+                    assert!(
+                        db.get_metadata()
+                            .await
+                            .expect("metadata read should not fail")
+                            .is_none(),
+                        "commits without metadata should not produce metadata"
+                    );
+                    db
+                }
+
+                CurrentOperation::OpsRootWitness { other_ops_root } => {
+                    let witness = db
+                        .ops_root_witness()
+                        .await
+                        .expect("ops root witness should not fail");
+                    let ops_root = db.ops_root();
+                    let root = db.root();
+                    assert_eq!(
+                        witness.root::<Sha256>(&ops_root),
+                        root,
+                        "ops root witness should reconstruct the canonical root"
+                    );
+                    assert!(
+                        witness.verify::<Sha256>(&ops_root, &root),
+                        "ops root witness should authenticate the ops root"
+                    );
+                    let other_ops_root = Digest::from(*other_ops_root);
+                    if other_ops_root != ops_root {
+                        assert!(
+                            !witness.verify::<Sha256>(&other_ops_root, &root),
+                            "ops root witness should reject a different ops root",
+                        );
+                    }
+                    db
+                }
+
+                CurrentOperation::OpsHistoricalProof { start_loc, max_ops } => {
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
+                    committed_op_count = db.bounds().end;
+                    let bounds = db.bounds();
+                    let retained = *bounds.end - *bounds.start;
+                    if retained == 0 {
+                        db
+                    } else {
+                        let start = Location::<F>::new(*bounds.start + start_loc % retained);
+                        let (proof, ops) = db
+                            .ops_historical_proof(bounds.end, start, *max_ops)
+                            .await
+                            .expect("ops historical proof should not fail");
+                        assert!(
+                            verify_proof::<Sha256, _, _>(&proof, start, &ops, &db.ops_root()),
+                            "ops historical proof should verify against the ops root"
+                        );
+                        db
+                    }
+                }
+
+                CurrentOperation::PinnedProof { start_loc, max_ops } => {
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
+                    committed_op_count = db.bounds().end;
+                    let bounds = db.bounds();
+                    let lower = db.sync_boundary().max(bounds.start);
+                    let retained = *bounds.end - *lower;
+                    if retained == 0 {
+                        db
+                    } else {
+                        let start = Location::<F>::new(*lower + start_loc % retained);
+                        let (proof, ops) = db
+                            .ops_historical_proof(bounds.end, start, *max_ops)
+                            .await
+                            .expect("ops historical proof should not fail");
+                        let pinned = db
+                            .pinned_nodes_at(start)
+                            .await
+                            .expect("pinned node lookup should not fail");
+                        assert!(
+                            verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                                &proof,
+                                start,
+                                &ops,
+                                &pinned,
+                                &db.ops_root(),
+                            ),
+                            "proof and pinned nodes should verify against the ops root"
+                        );
+                        db
+                    }
+                }
+
+                CurrentOperation::Sync => {
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
+                    committed_op_count = db.bounds().end;
+                    let root = db.root();
+                    let ops_root = db.ops_root();
+                    let bounds = db.bounds();
+                    let metadata = db
+                        .get_metadata()
+                        .await
+                        .expect("metadata read should not fail");
+                    let db = db.sync().await.expect("sync should not fail");
+                    assert_eq!(db.root(), root, "sync should preserve the canonical root");
+                    assert_eq!(db.ops_root(), ops_root, "sync should preserve the ops root");
+                    assert_eq!(db.bounds(), bounds, "sync should preserve retained bounds");
+                    assert_eq!(
+                        db.get_metadata()
+                            .await
+                            .expect("metadata read should not fail"),
+                        metadata,
+                        "sync should preserve metadata"
+                    );
+                    db
+                }
+
+                CurrentOperation::Rewind => {
+                    let root = db.root();
+                    let ops_root = db.ops_root();
+                    let bounds = db.bounds();
+                    let db = db
+                        .rewind(bounds.end)
+                        .await
+                        .expect("rewinding to the current tip should not fail");
+                    assert_eq!(db.root(), root);
+                    assert_eq!(db.ops_root(), ops_root);
+                    assert_eq!(db.bounds(), bounds);
+                    db
+                }
+
+                CurrentOperation::Strategy { values } => {
+                    let expected = values.iter().map(|value| u64::from(*value)).sum::<u64>();
+                    let actual = db.strategy().fold(
+                        values,
+                        || 0u64,
+                        |sum, value| sum + u64::from(*value),
+                        |left, right| left + right,
+                    );
+                    assert_eq!(actual, expected, "database strategy produced a wrong fold");
                     db
                 }
 
@@ -267,7 +482,13 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         continue;
                     }
 
-                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
                     committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
@@ -286,10 +507,25 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                                 start_loc,
                                 &ops,
                                 &chunks,
-                                &current_root
-                                ),
-                                "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
-                            );
+                                &current_root,
+                            ),
+                            "database range proof verification should succeed",
+                        );
+                        assert!(
+                            proof.verify::<Sha256, _, 32>(start_loc, &ops, &chunks, &current_root,),
+                            "range proof should verify against the canonical root",
+                        );
+                        assert!(
+                            verify_proof_and_extract_digests::<F, _, Sha256, _, 32>(
+                                &proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &current_root,
+                            )
+                            .is_ok(),
+                            "verified range proof should yield positioned digests"
+                        );
                     }
                     db
                 }
@@ -306,76 +542,97 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     if current_op_count == 0 {
                         continue;
                     }
-                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
                     committed_op_count = db.bounds().end;
 
                     let current_op_count = db.bounds().end;
                     let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
                     let root = db.root();
 
-                    if let Ok((range_proof, ops, chunks)) = db
-                        .range_proof(start_loc, *max_ops)
-                        .await {
+                    if let Ok((range_proof, ops, chunks)) =
+                        db.range_proof(start_loc, *max_ops).await
+                    {
                         // Try to verify the proof when providing bad proof digests.
                         let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_digest_proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &root
-                            ), "proof with bad digests should not verify");
+                            assert!(
+                                !Db::<F>::verify_range_proof(
+                                    &bad_digest_proof,
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &root
+                                ),
+                                "proof with bad digests should not verify"
+                            );
                         }
 
                         let bad_pending_digest = (*bad_pending_digest).map(Digest::from);
-                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest)
+                        if let Ok(bad_pending) =
+                            <F::PendingChunk<Digest>>::try_from(bad_pending_digest)
                             && range_proof.pending_chunk_digest != bad_pending
                         {
                             let mut bad_pending_proof = range_proof.clone();
                             bad_pending_proof.pending_chunk_digest = bad_pending;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_pending_proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &root
-                            ), "proof with bad pending chunk digest should not verify");
+                            assert!(
+                                !Db::<F>::verify_range_proof(
+                                    &bad_pending_proof,
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &root
+                                ),
+                                "proof with bad pending chunk digest should not verify"
+                            );
                         }
 
                         let bad_partial_digest = (*bad_partial_digest).map(Digest::from);
                         if range_proof.partial_chunk_digest != bad_partial_digest {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_partial_proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &root
-                            ), "proof with bad partial chunk digest should not verify");
+                            assert!(
+                                !Db::<F>::verify_range_proof(
+                                    &bad_partial_proof,
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &root
+                                ),
+                                "proof with bad partial chunk digest should not verify"
+                            );
                         }
 
                         // Try to verify the proof when providing bad input chunks.
-                        let bad_chunks: Vec<[u8; 32]> = chunks.iter().map(|c| {
-                            let mut corrupted = *c;
-                            for (b, x) in corrupted.iter_mut().zip(chunk_xor.iter()) {
-                                *b ^= *x;
-                            }
-                            corrupted
-                        }).collect();
+                        let bad_chunks: Vec<[u8; 32]> = chunks
+                            .iter()
+                            .map(|c| {
+                                let mut corrupted = *c;
+                                for (b, x) in corrupted.iter_mut().zip(chunk_xor.iter()) {
+                                    *b ^= *x;
+                                }
+                                corrupted
+                            })
+                            .collect();
                         if chunks != bad_chunks {
-                            assert!(!Db::<F>::verify_range_proof(
-                                &range_proof,
-                                start_loc,
-                                &ops,
-                                &bad_chunks,
-                                &root
-                            ), "proof with bad chunks should not verify");
+                            assert!(
+                                !Db::<F>::verify_range_proof(
+                                    &range_proof,
+                                    start_loc,
+                                    &ops,
+                                    &bad_chunks,
+                                    &root
+                                ),
+                                "proof with bad chunks should not verify"
+                            );
                         }
-
                     }
                     db
                 }
@@ -383,20 +640,53 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
 
-                    let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                    let db = commit_pending(
+                        db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_expected,
+                    )
+                    .await;
                     committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
                     match db.key_value_proof(k.clone()).await {
                         Ok(proof) => {
-                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
-                            let verification_result = Db::<F>::verify_key_value_proof(
-                                k,
-                                value,
-                                &proof,
-                                &current_root,
+                            let value = db
+                                .get(&k)
+                                .await
+                                .expect("get should not fail")
+                                .expect("key should exist");
+                            let operation: UnorderedOperation<F, Key, Value> =
+                                UnorderedOperation::Update(UnorderedUpdate(
+                                    k.clone(),
+                                    value.clone(),
+                                ));
+                            assert!(
+                                proof.verify::<Sha256, _>(operation, &current_root),
+                                "operation proof should verify against the canonical root",
                             );
-                            assert!(verification_result, "Key value proof verification failed for key {key:?}");
+                            assert!(
+                                Db::<F>::verify_key_value_proof(
+                                    k.clone(),
+                                    value.clone(),
+                                    &proof,
+                                    &current_root,
+                                ),
+                                "Key value proof verification failed for key {key:?}"
+                            );
+                            let other_value = Value::new(*key);
+                            if other_value != value {
+                                assert!(
+                                    !Db::<F>::verify_key_value_proof(
+                                        k,
+                                        other_value,
+                                        &proof,
+                                        &current_root,
+                                    ),
+                                    "key value proof should reject a different value",
+                                );
+                            }
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
                             let expected_value = committed_state.get(key);
@@ -415,9 +705,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
 
         // Final commit to ensure all pending operations are persisted.
         if !pending_writes.is_empty() {
-            db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+            db = commit_pending(
+                db,
+                &mut pending_writes,
+                &mut committed_state,
+                &mut pending_expected,
+            )
+            .await;
         }
-
 
         for key in &all_keys {
             let k = Key::new(*key);
@@ -427,11 +722,20 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 Some(Some(expected_value)) => {
                     assert!(result.is_some(), "Lost value for key {key:?} at end");
                     let actual_value = result.expect("Should have value");
-                    let actual_bytes: &[u8; 32] = actual_value.as_ref().try_into().expect("Value should be 32 bytes");
-                    assert_eq!(actual_bytes, expected_value, "Final value mismatch for key {key:?}");
+                    let actual_bytes: &[u8; 32] = actual_value
+                        .as_ref()
+                        .try_into()
+                        .expect("Value should be 32 bytes");
+                    assert_eq!(
+                        actual_bytes, expected_value,
+                        "Final value mismatch for key {key:?}"
+                    );
                 }
                 Some(None) => {
-                    assert!(result.is_none(), "Deleted key {key:?} should remain deleted");
+                    assert!(
+                        result.is_none(),
+                        "Deleted key {key:?} should remain deleted"
+                    );
                 }
                 None => {
                     assert!(result.is_none(), "Unset key {key:?} should not exist");

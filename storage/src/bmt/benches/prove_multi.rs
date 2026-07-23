@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256, sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
@@ -34,12 +34,11 @@ fn bench_prove_multi(c: &mut Criterion) {
                         (samples, proof)
                     },
                     |(samples, proof)| {
-                        let mut hasher = Sha256::new();
                         let elements: Vec<_> =
                             samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
                         assert!(
                             proof
-                                .verify_multi_inclusion(&mut hasher, &elements, &root)
+                                .verify_multi_inclusion::<Sha256>(&elements, &root)
                                 .is_ok()
                         );
                     },

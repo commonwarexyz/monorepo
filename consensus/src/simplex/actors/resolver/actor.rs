@@ -94,7 +94,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
-                state: State::new(cfg.fetch_concurrent),
+                state: State::new(cfg.fetch_concurrent, cfg.term_length),
 
                 held: BTreeMap::new(),
 
@@ -222,9 +222,11 @@ impl<
                     cause,
                     reason,
                 } => self.fetch(resolver, view, cause, reason),
-                Effect::Remove(view) => {
-                    let key = U64::from(view);
-                    let _ = resolver.retain(move |candidate, _| *candidate != key);
+                Effect::RetainOutside { start, end } => {
+                    let start = U64::from(start);
+                    let end = U64::from(end);
+                    let _ =
+                        resolver.retain(move |candidate, _| *candidate < start || *candidate > end);
                 }
                 Effect::RetainAbove(floor) => {
                     // A certification at or below the floor may be aborted
@@ -325,8 +327,9 @@ impl<
                 Some(Certificate::Finalization(finalization))
             }
             Certificate::Nullification(nullification) => {
-                if nullification.view() != view {
-                    debug!(%view, received = %nullification.view(), "nullification view mismatch");
+                let nullified_view = nullification.view();
+                if !nullified_view.covers(view, self.state.term_length()) {
+                    debug!(%view, received = %nullified_view, "nullification view mismatch");
                     return None;
                 }
                 if nullification.epoch() != self.epoch {
@@ -440,7 +443,7 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::{super::test_helpers::*, *};
-    use crate::simplex::scheme::ed25519;
+    use crate::{simplex::scheme::ed25519, types::TermLength};
     use commonware_actor::Feedback;
     use commonware_cryptography::{
         certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
@@ -448,7 +451,7 @@ mod tests {
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor, deterministic};
-    use commonware_utils::{NZUsize, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
@@ -520,6 +523,7 @@ mod tests {
                 mailbox_size: NZUsize!(8),
                 fetch_concurrent: NZUsize!(4),
                 fetch_timeout: Duration::from_secs(1),
+                term_length: TermLength::new(NZU32!(5)),
             },
         );
         actor
@@ -535,33 +539,56 @@ mod tests {
             let mut actor = build_actor(context, verifier.clone());
             let mut resolver = RecordingResolver::default();
 
-            // The first certificate opens the fetch window below it.
-            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(5));
+            // The first certificate opens the fetch window at the term anchors.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
             let effects = actor
                 .state
                 .handle(Certificate::Nullification(nullification));
             actor.apply_effects(&mut resolver, effects);
-            assert_eq!(resolver.outstanding(), vec![1, 2, 3, 4]);
+            assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);
 
-            // A nullification removes exactly its own request.
+            // A covering nullification retains out only its own term's requests
+            // (here, the request at its own view): views below its start and
+            // above its term end stay pending.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
+
+            // A mid-term floor raise drops the requests below it and re-scans
+            // the stranded term tail (view 5).
+            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(4));
+            let effects = actor.state.handle(Certificate::Finalization(finalization));
+            actor.apply_effects(&mut resolver, effects);
+            assert_eq!(resolver.outstanding(), vec![5, 11, 16]);
+
+            // A below-floor nullification covering the floor's term retains
+            // out the request at its term end (view 5), not just the request
+            // at its own view.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
             let effects = actor
                 .state
                 .handle(Certificate::Nullification(nullification));
             actor.apply_effects(&mut resolver, effects);
-            assert_eq!(resolver.outstanding(), vec![1, 3, 4]);
+            assert_eq!(resolver.outstanding(), vec![11, 16]);
 
-            // A floor raise drops the requests at and below it.
-            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
+            // A floor raise drops the request at the floor view itself and
+            // re-scans the stranded term tail (view 12).
+            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(11));
             let effects = actor.state.handle(Certificate::Finalization(finalization));
             actor.apply_effects(&mut resolver, effects);
-            assert_eq!(resolver.outstanding(), vec![4]);
+            assert_eq!(resolver.outstanding(), vec![12, 16]);
 
-            // The request at the floor view itself must not survive.
-            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(4));
-            let effects = actor.state.handle(Certificate::Finalization(finalization));
+            // A nullification at the floor covering the floor's term retains
+            // out mid-term requests strictly inside its range.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
             actor.apply_effects(&mut resolver, effects);
-            assert!(resolver.outstanding().is_empty());
+            assert_eq!(resolver.outstanding(), vec![16]);
         });
     }
 
@@ -669,6 +696,108 @@ mod tests {
             actor.apply_effects(&mut resolver, effects);
             assert!(actor.held.is_empty());
             assert!(receiver.await.unwrap());
+        });
+    }
+
+    #[test_async]
+    async fn validate_accepts_nullification_covering_requested_view_in_term() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            assert!(View::new(6).same_term(View::new(10), TermLength::new(NZU32!(5))));
+            let mut actor = build_actor(context, verifier);
+
+            let validated = actor.validate(
+                View::new(10),
+                Certificate::<TestScheme, Sha256Digest>::Nullification(nullification.clone())
+                    .encode(),
+            );
+
+            assert!(matches!(
+                validated,
+                Some(Certificate::Nullification(parsed)) if parsed.view() == nullification.view()
+            ));
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_nullification_from_different_term() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(10));
+
+            let validated = actor.validate(
+                View::new(11),
+                Certificate::<TestScheme, Sha256Digest>::Nullification(nullification).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_nullification_above_requested_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(9));
+
+            let validated = actor.validate(
+                View::new(8),
+                Certificate::<TestScheme, Sha256Digest>::Nullification(nullification).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_notarization_for_failed_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(7));
+            actor.state.handle_certified(View::new(7), false);
+
+            let validated = actor.validate(
+                View::new(7),
+                Certificate::Notarization(notarization).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_finalization_from_different_epoch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let finalization =
+                build_finalization(&schemes, &verifier, Epoch::new(10), View::new(7));
+
+            let validated = actor.validate(
+                View::new(7),
+                Certificate::Finalization(finalization).encode(),
+            );
+
+            assert!(validated.is_none());
         });
     }
 }

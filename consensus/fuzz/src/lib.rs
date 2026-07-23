@@ -20,6 +20,7 @@ pub mod ordered_broadcast;
 #[cfg(feature = "mocks")]
 pub mod ordered_broadcast_certificate_mock;
 pub mod simplex;
+pub(crate) mod simplex_audit;
 #[cfg(feature = "mocks")]
 pub mod simplex_certificate_mock;
 pub mod simplex_node;
@@ -30,6 +31,7 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     network::ByzantineFirstReceiver,
+    simplex_audit::{RecordingAutomaton, RecordingReporter, summaries},
     simplex_node::NodeFuzzInput,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy, StrategyChoice},
     utils::{Action, Partition, SetPartition, apply_partition, link_peers, register},
@@ -45,7 +47,7 @@ use commonware_consensus::{
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
-    types::{Delta, Epoch, View},
+    types::{Delta, Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     PublicKey as CryptoPublicKey, Sha256, certificate::Verifier, sha256::Digest as Sha256Digest,
@@ -63,7 +65,7 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZU16, NZUsize,
+    FuzzRng, NZU16, NZU32, NZUsize,
     channel::mpsc::{self, Receiver},
     sequence::U64,
     sync::Once,
@@ -107,7 +109,7 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 /// runtime. Increase only if a complementary timeout is added to the wait loop.
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
-pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
+pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 /// Bounded pre-GST fault phase: how long network faults stay active before a
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
@@ -207,14 +209,18 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
 
 /// Per-iteration choice of `Application::certify` behavior.
 ///
-/// `SingleCancel` and `SinglePending` apply their non-default certifier only
-/// to the validator at `target_idx` so quorum certification is still reachable
-/// when the selected validator already overlaps another modeled adversary.
+/// `SingleCancel` and `SinglePending` apply their non-default certifier only to
+/// `target_idx`. `RejectView` applies the same deterministic rejection rule to
+/// every correct validator and is valid only when that view's proposer is
+/// Byzantine. Dedicated audit targets enforce that precondition before using
+/// it, preserving both certification consistency and the correct proposer's
+/// certifiable-by-construction obligation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertifyChoice {
     Always,
     SingleCancel { target_idx: u8 },
     SinglePending { target_idx: u8 },
+    RejectView { view: View },
 }
 
 impl CertifyChoice {
@@ -234,6 +240,9 @@ impl CertifyChoice {
                 } else {
                     application::Certifier::Always
                 }
+            }
+            CertifyChoice::RejectView { view } => {
+                application::Certifier::Custom(Box::new(move |round, _| round.view() != view))
             }
         }
     }
@@ -325,6 +334,7 @@ impl fmt::Debug for FuzzInputDebug<'_> {
         f.debug_struct("FuzzInput")
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("required_containers", &input.required_containers)
+            .field("term_length", &input.term_length)
             .field("degraded_network", &input.degraded_network)
             .field("configuration", &input.configuration)
             .field("partition", &input.partition)
@@ -347,6 +357,7 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
         f.debug_struct("NodeFuzzInput")
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("events", &input.events)
+            .field("term_length", &input.term_length)
             .field("mailbox_size", &input.mailbox_size)
             .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
@@ -356,19 +367,21 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
     }
 }
 
-fn print_fuzz_input(mode: Mode, input: &FuzzInput) {
+fn print_fuzz_input<P: simplex::Simplex>(mode: Mode, input: &FuzzInput) {
     if std::env::var_os(FUZZ_LOG_ENV).is_some() {
         eprintln!(
-            "consensus fuzz configuration: mode={mode:?} input={:?}",
+            "consensus fuzz configuration: mode={mode:?} effective_term_length={:?} input={:?}",
+            P::effective_term_length(input.term_length),
             FuzzInputDebug(input)
         );
     }
 }
 
-fn print_node_fuzz_input(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
+fn print_node_fuzz_input<P: simplex::Simplex>(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
     if std::env::var_os(FUZZ_LOG_ENV).is_some() {
         eprintln!(
-            "consensus node fuzz configuration: mode={mode:?} input={:?}",
+            "consensus node fuzz configuration: mode={mode:?} effective_term_length={:?} input={:?}",
+            P::effective_term_length(input.term_length),
             NodeFuzzInputDebug(input)
         );
     }
@@ -378,6 +391,7 @@ fn print_node_fuzz_input(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
+    pub term_length: TermLength,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -433,6 +447,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -463,13 +478,13 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        // Single-target certify variants stall N4F1C3: its three honest
-        // certifiers are exactly the finalize quorum, so disabling one halts
-        // finalization for the rest of the run. Sample them only when every
-        // validator is honest and the quorum keeps one certifier of slack.
+        // Single-target cancel/pending variants require N4F0C4, where disabling
+        // one certifier still leaves a finalize quorum. Rejected certification
+        // is enabled separately by dedicated audit targets only when their
+        // statically known leader schedule selects the Byzantine participant.
         let certify = if configuration == N4F0C4 {
             let target_idx = u.int_in_range(0..=configuration.n as u8 - 1)?;
-            match u.int_in_range(0..=3)? {
+            match u.int_in_range(0..=4)? {
                 0 => CertifyChoice::SingleCancel { target_idx },
                 1 => CertifyChoice::SinglePending { target_idx },
                 _ => CertifyChoice::Always,
@@ -497,6 +512,7 @@ impl Arbitrary<'_> for FuzzInput {
             configuration,
             degraded_network,
             required_containers,
+            term_length,
             strategy,
             messaging_faults: Vec::new(),
             mailbox_size,
@@ -540,15 +556,6 @@ pub(crate) fn sniff_sink<P: simplex::Simplex>(
         ambiguous: ambiguous.clone(),
     })
 }
-
-type ReporterOf<P> = reporter::Reporter<
-    deterministic::Context,
-    <P as simplex::Simplex>::Scheme,
-    <P as simplex::Simplex>::Elector,
-    Sha256Digest,
->;
-
-type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunAudit {
@@ -945,6 +952,120 @@ where
     .reporter
 }
 
+/// Spawn an honest validator instrumented with the fuzz-only append-only
+/// reporter and automaton history.
+///
+/// This is intentionally separate from [`spawn_honest_validator`]. Non-audit
+/// fuzz targets continue to instantiate the consensus mock reporter and mock
+/// application automaton directly; only dedicated audit targets call this
+/// constructor.
+#[allow(clippy::too_many_arguments)]
+fn spawn_audited_validator<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    fetch_concurrent: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let reporter_cfg = reporter::Config {
+        participants: participants.try_into().expect("public keys are unique"),
+        scheme: scheme.clone(),
+        elector: elector.clone(),
+    };
+    let reporter = RecordingReporter::new(
+        context.child("reporter"),
+        validator.clone(),
+        0,
+        reporter_cfg,
+    );
+
+    let validator_idx = participants
+        .iter()
+        .position(|participant| participant == &validator)
+        .expect("validator must be in participants");
+    let app_cfg = application::Config::<Sha256, _> {
+        relay,
+        me: validator.clone(),
+        propose_latency: (10.0, 5.0),
+        verify_latency: (10.0, 5.0),
+        certify_latency: (10.0, 5.0),
+        should_certify: certify.into_certifier(validator_idx),
+    };
+    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
+    actor.start();
+    let automaton = RecordingAutomaton::new(
+        context.child("automaton_recorder"),
+        application.clone(),
+        reporter.audit(),
+    );
+
+    let (vote_sender, vote_receiver) = pending;
+    let (certificate_sender, certificate_receiver) = recovered;
+    let (resolver_sender, resolver_receiver) = resolver;
+    let engine_cfg = config::Config {
+        blocker: oracle.control(validator.clone()),
+        scheme,
+        elector,
+        automaton,
+        relay: application,
+        reporter: wiring.wire(reporter.clone()),
+        partition: validator.to_string(),
+        mailbox_size,
+        epoch: Epoch::new(EPOCH),
+        floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
+        leader_timeout,
+        certification_timeout,
+        timeout_retry: Duration::from_secs(10),
+        fetch_timeout: Duration::from_secs(1),
+        view_retention: Delta::new(10),
+        skip_timeout: Duration::from_secs(11),
+        fetch_concurrent,
+        replay_buffer: NZUsize!(1024 * 1024),
+        write_buffer: NZUsize!(1024 * 1024),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        strategy: Sequential,
+        forwarding,
+    };
+    Engine::new(context.child("engine"), engine_cfg).start(
+        (vote_sender, vote_receiver),
+        (certificate_sender, certificate_receiver),
+        (resolver_sender, resolver_receiver),
+    );
+
+    reporter
+}
+
 /// Build an honest validator (application, reporter, engine) and RETAIN its task
 /// handles in a [`ManagedValidator`], instead of dropping them like
 /// [`spawn_honest_validator`]. The storage partition is `validator.to_string()`,
@@ -1079,8 +1200,7 @@ where
         .iter()
         .position(|p| p == &validator)
         .expect("validator must be in participants");
-    let app_cfg = application::Config {
-        hasher: Sha256::default(),
+    let app_cfg = application::Config::<Sha256, _> {
         relay,
         me: validator.clone(),
         propose_latency: (10.0, 5.0),
@@ -1108,8 +1228,8 @@ where
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
-        activity_timeout: Delta::new(10),
-        skip_timeout: Delta::new(5),
+        view_retention: Delta::new(10),
+        skip_timeout: Duration::from_secs(11),
         fetch_concurrent,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
@@ -1142,6 +1262,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
+    term_length: TermLength,
     scheme: P::Scheme,
     validator: PublicKeyOf<P>,
     byzantine_router: crate::network::Router<PublicKeyOf<P>, deterministic::Context>,
@@ -1188,7 +1309,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         participants,
         scheme,
         validator,
-        P::Elector::default(),
+        P::elector(term_length),
         relay,
         leader_timeout,
         certification_timeout,
@@ -1230,10 +1351,13 @@ fn initial_network_partition(partition: &Partition) -> Option<SetPartition> {
         .and_then(|schedule| scheduled_partition(schedule, 1))
 }
 
-async fn reporter_view_stream<P: simplex::Simplex>(
+async fn reporter_view_stream<K, R>(
     context: &deterministic::Context,
-    reporters: &mut [ReporterEntry<P>],
-) -> Option<(u64, mpsc::UnboundedReceiver<u64>)> {
+    reporters: &mut [(K, R)],
+) -> Option<(u64, mpsc::UnboundedReceiver<u64>)>
+where
+    R: Monitor<Index = View>,
+{
     if reporters.is_empty() {
         return None;
     }
@@ -1258,23 +1382,25 @@ async fn reporter_view_stream<P: simplex::Simplex>(
     Some((max_finalized_view, rx))
 }
 
-async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
+async fn spawn_network_fault_scheduler<P, R>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
-    reporters: &mut [ReporterEntry<P>],
+    reporters: &mut [(PublicKeyOf<P>, R)],
     partition: Partition,
     required_containers: u64,
     initial_partition: Option<SetPartition>,
-) {
+) where
+    P: simplex::Simplex,
+    R: Monitor<Index = View>,
+{
     let Some(schedule) = partition.schedule() else {
         return;
     };
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let Some((mut finalized_view, mut view_rx)) =
-        reporter_view_stream::<P>(context, reporters).await
+    let Some((mut finalized_view, mut view_rx)) = reporter_view_stream(context, reporters).await
     else {
         return;
     };
@@ -1331,19 +1457,21 @@ fn initial_drop_rate(schedule: &[(View, u8)]) -> u8 {
 /// "fault view v while consensus is executing view v" the lookup uses
 /// `executing_view = finalized_view + 1`. The initial pre-recv lookup with
 /// `finalized_view = 0` therefore covers view 1.
-async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
+async fn spawn_messaging_fault_scheduler<P, R>(
     context: &deterministic::Context,
-    reporters: &mut [ReporterEntry<P>],
+    reporters: &mut [(PublicKeyOf<P>, R)],
     schedule: Vec<(View, u8)>,
     required_containers: u64,
     drop_rate: network::DropRateCell,
     initial_rate: u8,
-) {
+) where
+    P: simplex::Simplex,
+    R: Monitor<Index = View>,
+{
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let Some((mut finalized_view, mut view_rx)) =
-        reporter_view_stream::<P>(context, reporters).await
+    let Some((mut finalized_view, mut view_rx)) = reporter_view_stream(context, reporters).await
     else {
         return;
     };
@@ -1626,9 +1754,10 @@ fn run_standard_once<P: simplex::Simplex>(
             .await;
         }
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+        let term_length = P::effective_term_length(input.term_length);
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
@@ -1697,7 +1826,7 @@ fn run_standard_once<P: simplex::Simplex>(
                     &participants,
                     schemes[i].clone(),
                     validator.clone(),
-                    P::Elector::default(),
+                    P::elector(term_length),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -1730,7 +1859,7 @@ fn run_standard_once<P: simplex::Simplex>(
             reporters.push((validator, reporter));
         }
 
-        spawn_network_fault_scheduler::<P>(
+        spawn_network_fault_scheduler::<P, _>(
             &context,
             &oracle,
             &participants,
@@ -1777,7 +1906,13 @@ fn run_standard_once<P: simplex::Simplex>(
             }
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
+            invariants::check_vote_invariants(
+                config.faults as usize,
+                P::elector(term_length),
+                Epoch::new(EPOCH),
+                term_length,
+                &reporter_only,
+            );
             let reporter_states = (state_coverage || collect_audit)
                 .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
             if state_coverage {
@@ -1794,12 +1929,183 @@ fn run_standard_once<P: simplex::Simplex>(
                 reporter_states: reporter_states.unwrap_or_default(),
                 happens_before: hb_summary,
             });
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            let states = invariants::extract(reporter_only);
+            invariants::check::<P>(term_length, states);
             audit
         } else {
             None
         }
+    })
+}
+
+/// Run the Standard harness with append-only Simplex activity and automaton
+/// recording enabled.
+///
+/// This path exists only for the dedicated Standard audit fuzz targets. The
+/// shared [`run_standard_once`] path continues to use the consensus mock
+/// reporter and application automaton directly.
+fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool, bool) {
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    executor.start(move |mut context| async move {
+        if matches!(input.partition, Partition::Adaptive(_)) {
+            input.partition = Partition::Adaptive(network_faults(
+                input.strategy,
+                input.required_containers,
+                &mut context,
+            ));
+        }
+
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
+        let initial_partition = initial_network_partition(&input.partition);
+        if initial_partition.is_some() {
+            apply_partition(
+                &oracle,
+                &participants,
+                initial_partition.as_ref(),
+                &default_link(),
+            )
+            .await;
+        }
+
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
+        let mut reporters = Vec::new();
+        let config = input.configuration;
+        let term_length = P::effective_term_length(input.term_length);
+
+        for i in 0..config.faults as usize {
+            let validator = participants[i].clone();
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context
+                .child("validator")
+                .with_attribute("public_key", &validator);
+            if matches!(input.certify, CertifyChoice::RejectView { .. }) {
+                // A Byzantine participant may behave correctly. For the audit
+                // rejection campaign, run its normal engine so the designated
+                // Byzantine-led view reliably has a well-formed proposal. Its
+                // application always certifies its own proposal, while all
+                // correct applications consistently reject it. Its raw reporter
+                // is intentionally excluded from the correct audit set below.
+                let (pending, recovered, resolver) = channels;
+                let _ = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator,
+                    P::elector(term_length),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    CertifyChoice::Always,
+                    ReporterWiring::Solo,
+                );
+            } else {
+                spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            }
+        }
+
+        for i in (config.faults as usize)..(config.n as usize) {
+            let validator = participants[i].clone();
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+            let ctx = context
+                .child("validator")
+                .with_attribute("public_key", &validator);
+            let reporter = spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                ctx,
+                &oracle,
+                &participants,
+                schemes[i].clone(),
+                validator.clone(),
+                P::elector(term_length),
+                relay.clone(),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                input.mailbox_size,
+                input.fetch_concurrent,
+                input.forwarding,
+                pending,
+                recovered,
+                resolver,
+                input.certify,
+                input.reporting,
+            );
+            reporters.push((validator, reporter));
+        }
+
+        spawn_network_fault_scheduler::<P, _>(
+            &context,
+            &oracle,
+            &participants,
+            &mut reporters,
+            input.partition.clone(),
+            input.required_containers,
+            initial_partition,
+        )
+        .await;
+
+        if input.partition.is_connected() && config.is_valid() {
+            let mut finalizers = Vec::new();
+            for (validator, reporter) in reporters.iter_mut() {
+                let required_containers = input.required_containers;
+                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                finalizers.push(
+                    context
+                        .child("finalizer")
+                        .with_attribute("public_key", validator)
+                        .spawn(move |_| async move {
+                            while latest.get() < required_containers {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        }),
+                );
+            }
+            join_all(finalizers).await;
+        } else {
+            context.sleep(MAX_SLEEP_DURATION).await;
+        }
+
+        if !config.is_valid() {
+            return (false, false);
+        }
+
+        let reporter_only: Vec<_> = reporters
+            .into_iter()
+            .map(|(_, reporter)| reporter)
+            .collect();
+        let summary_reporters = summaries(&reporter_only);
+        let rejected_certification_observed = reporter_only.iter().any(|reporter| {
+            reporter.audit().events().iter().any(|recorded| {
+                matches!(
+                    &recorded.event,
+                    simplex_audit::Event::Automaton(
+                        simplex_audit::AutomatonEvent::CertifyCompleted {
+                            outcome: simplex_audit::Completion::Returned(false),
+                            ..
+                        }
+                    )
+                )
+            })
+        });
+        invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
+        invariants::check_vote_invariants(
+            config.faults as usize,
+            P::elector(term_length),
+            Epoch::new(EPOCH),
+            term_length,
+            &summary_reporters,
+        );
+        invariants::check::<P>(term_length, reporter_only.as_slice());
+        (true, rejected_certification_observed)
     })
 }
 
@@ -1850,9 +2156,10 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+        let term_length = P::effective_term_length(input.term_length);
 
         // Per-view drop-rate cell shared with every router. We seed it
         // SYNCHRONOUSLY with the rate scheduled for view 1 (the initial
@@ -1895,6 +2202,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 ctx,
                 &oracle,
                 &participants,
+                term_length,
                 schemes[i].clone(),
                 validator.clone(),
                 byzantine_router.clone(),
@@ -1913,7 +2221,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
 
         // Spawn a per-view messaging-fault scheduler that updates the shared
         // drop-rate cell as the reference reporter advances.
-        spawn_messaging_fault_scheduler::<P>(
+        spawn_messaging_fault_scheduler::<P, _>(
             &context,
             &mut reporters,
             input.messaging_faults.clone(),
@@ -1947,9 +2255,15 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(config.faults as usize, &reporter_only);
-            let states = invariants::extract(reporter_only, config.n as usize);
-            invariants::check::<P>(config.n, states);
+            invariants::check_vote_invariants(
+                config.faults as usize,
+                P::elector(term_length),
+                Epoch::new(EPOCH),
+                term_length,
+                &reporter_only,
+            );
+            let states = invariants::extract(reporter_only);
+            invariants::check::<P>(term_length, states);
         }
     });
 }
@@ -1966,12 +2280,74 @@ enum TwinsRole {
     Campaign,
 }
 
+type TwinsElector<P> = twins::Elector<<P as simplex::Simplex>::Elector>;
+
+/// Observation retained for one Twins engine. Existing Twins targets use the
+/// summary variant; dedicated audit targets use the recording variant only for
+/// correct engines.
+enum TwinsReporter<P>
+where
+    P: simplex::Simplex,
+{
+    Summary(reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
+    Recording(RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
+}
+
+impl<P> Clone for TwinsReporter<P>
+where
+    P: simplex::Simplex,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Summary(reporter) => Self::Summary(reporter.clone()),
+            Self::Recording(reporter) => Self::Recording(reporter.clone()),
+        }
+    }
+}
+
+impl<P> TwinsReporter<P>
+where
+    P: simplex::Simplex,
+{
+    fn summary(
+        &self,
+    ) -> reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
+        match self {
+            Self::Summary(reporter) => reporter.clone(),
+            Self::Recording(reporter) => reporter.inner().clone(),
+        }
+    }
+
+    fn recording(
+        &self,
+    ) -> Option<RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>>
+    {
+        match self {
+            Self::Summary(_) => None,
+            Self::Recording(reporter) => Some(reporter.clone()),
+        }
+    }
+
+    async fn subscribe(&mut self) -> (View, Receiver<View>) {
+        match self {
+            Self::Summary(reporter) => reporter.subscribe().await,
+            Self::Recording(reporter) => reporter.subscribe().await,
+        }
+    }
+}
+
 fn run_with_twins_mutator<P: simplex::Simplex>(
     input: FuzzInput,
     state_coverage: bool,
     happens_before: bool,
 ) {
-    let _ = run_twins::<P>(input, TwinsRole::Mutator, state_coverage, happens_before);
+    let _ = run_twins::<P>(
+        input,
+        TwinsRole::Mutator,
+        state_coverage,
+        happens_before,
+        false,
+    );
 }
 
 fn run_with_twins_campaign<P: simplex::Simplex>(
@@ -1979,7 +2355,13 @@ fn run_with_twins_campaign<P: simplex::Simplex>(
     state_coverage: bool,
     happens_before: bool,
 ) {
-    let _ = run_twins::<P>(input, TwinsRole::Campaign, state_coverage, happens_before);
+    let _ = run_twins::<P>(
+        input,
+        TwinsRole::Campaign,
+        state_coverage,
+        happens_before,
+        false,
+    );
 }
 
 fn twins_resolver_view<P: simplex::Simplex>(
@@ -2004,17 +2386,22 @@ fn twins_resolver_view<P: simplex::Simplex>(
 /// primary engine, the honest validators, and the byzantine-aware invariants.
 /// Only the secondary half (Disrupter vs full engine) and the liveness wait
 /// shape (absolute view vs prefix-trailing count) differ; both are keyed on
-/// `role`. Invariants and liveness always run over honest reporters only.
+/// `role`. Liveness and state extraction run over honest reporters only;
+/// signer-filtered vote/fault checks also observe twin reporters (Campaign
+/// halves and the retained Mutator primary).
 ///
 /// Happens-before capture covers honest validators only: twin halves share
 /// one identity across two engines, so neither tracing attribution nor
 /// sender-resolved merges are sound for them; honest receives from a twin
-/// resolve to no sender. Returns the summary when capture is enabled.
+/// resolve to no sender. When `record_audit` is true, only correct engines use
+/// the append-only reporter and automaton wrappers. Returns the summary when
+/// capture is enabled.
 fn run_twins<P: simplex::Simplex>(
     mut input: FuzzInput,
     role: TwinsRole,
     state_coverage: bool,
     happens_before: bool,
+    record_audit: bool,
 ) -> Option<happens_before::Summary> {
     if state_coverage || happens_before {
         state_cov::reset();
@@ -2052,9 +2439,11 @@ fn run_twins<P: simplex::Simplex>(
             )
             .await;
 
-            let relay = Arc::new(relay::Relay::new());
-            let mut reporters = Vec::new();
+            let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
+            let mut reporters: Vec<TwinsReporter<P>> = Vec::new();
+            let mut twin_observers: Vec<TwinsReporter<P>> = Vec::new();
             let config = input.configuration;
+            let term_length = P::effective_term_length(input.term_length);
 
             // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
             // the scenario (per-round partitions and scripted leaders) and the
@@ -2086,8 +2475,8 @@ fn run_twins<P: simplex::Simplex>(
             let compromised: std::collections::HashSet<usize> =
                 case.compromised.iter().copied().collect();
 
-            // Twins-aware elector with scripted leaders for the first `rounds` views.
-            let twin_elector = twins::Elector::new(P::Elector::default(), &scenario, n);
+            // Twins-aware elector with scripted leaders for the first `rounds` terms.
+            let twin_elector = twins::Elector::new(P::elector(term_length), &scenario, n);
 
             // Spawn Byzantine twins (indices from `case.compromised`):
             // primary (legitimate engine) + secondary (Disrupter). Twin halves
@@ -2109,7 +2498,7 @@ fn run_twins<P: simplex::Simplex>(
                             return None;
                         };
                         let (primary, secondary) =
-                            scenario.partitions(msg.view(), participants.as_ref());
+                            scenario.partitions(msg.view(), term_length, participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -2128,7 +2517,7 @@ fn run_twins<P: simplex::Simplex>(
                             return None;
                         };
                         let (primary, secondary) =
-                            scenario.partitions(msg.view(), participants.as_ref());
+                            scenario.partitions(msg.view(), term_length, participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -2143,7 +2532,7 @@ fn run_twins<P: simplex::Simplex>(
                         else {
                             return SplitTarget::None;
                         };
-                        scenario.route(msg.view(), sender, participants.as_ref())
+                        scenario.route(msg.view(), term_length, sender, participants.as_ref())
                     }
                 };
                 let make_certificate_router = || {
@@ -2157,7 +2546,7 @@ fn run_twins<P: simplex::Simplex>(
                         ) else {
                             return SplitTarget::None;
                         };
-                        scenario.route(msg.view(), sender, participants.as_ref())
+                        scenario.route(msg.view(), term_length, sender, participants.as_ref())
                     }
                 };
                 let make_resolver_forwarder = || {
@@ -2166,7 +2555,8 @@ fn run_twins<P: simplex::Simplex>(
                     let scenario = scenario.clone();
                     move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
                         let view = twins_resolver_view::<P>(message, &codec)?;
-                        let (primary, secondary) = scenario.partitions(view, participants.as_ref());
+                        let (primary, secondary) =
+                            scenario.partitions(view, term_length, participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Some(Recipients::Some(primary)),
                             SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -2181,7 +2571,7 @@ fn run_twins<P: simplex::Simplex>(
                         let Some(view) = twins_resolver_view::<P>(message, &codec) else {
                             return SplitTarget::None;
                         };
-                        scenario.route(view, sender, participants.as_ref())
+                        scenario.route(view, term_length, sender, participants.as_ref())
                     }
                 };
                 let (vote_sender, vote_receiver) = vote_network;
@@ -2216,8 +2606,7 @@ fn run_twins<P: simplex::Simplex>(
                 let reporter =
                     reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
-                let app_cfg = application::Config {
-                    hasher: Sha256::default(),
+                let app_cfg = application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
@@ -2245,8 +2634,8 @@ fn run_twins<P: simplex::Simplex>(
                     certification_timeout: Duration::from_millis(1_500),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout: Delta::new(10),
-                    skip_timeout: Delta::new(5),
+                    view_retention: Delta::new(10),
+                    skip_timeout: Duration::from_secs(11),
                     fetch_concurrent: input.fetch_concurrent,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2260,11 +2649,14 @@ fn run_twins<P: simplex::Simplex>(
                     (certificate_sender_primary, certificate_receiver_primary),
                     (resolver_sender_primary, resolver_receiver_primary),
                 );
-                // Push the primary reporter only in `Campaign`; `Mutator` keeps
-                // its existing semantics where invariants run only on honest
-                // reporters and twin primary is excluded by construction.
-                if matches!(role, TwinsRole::Campaign) {
-                    reporters.push(reporter.clone());
+                // `Campaign` pushes the primary into `reporters` (liveness and
+                // extraction boundary); `Mutator` retains it as a vote/fault
+                // observer only.
+                match role {
+                    TwinsRole::Campaign => reporters.push(TwinsReporter::Summary(reporter.clone())),
+                    TwinsRole::Mutator => {
+                        twin_observers.push(TwinsReporter::Summary(reporter.clone()))
+                    }
                 }
 
                 // Secondary: depends on role.
@@ -2296,10 +2688,9 @@ fn run_twins<P: simplex::Simplex>(
                             secondary_context.child("reporter"),
                             secondary_reporter_cfg,
                         );
-                        reporters.push(secondary_reporter.clone());
+                        reporters.push(TwinsReporter::Summary(secondary_reporter.clone()));
 
-                        let secondary_app_cfg = application::Config {
-                            hasher: Sha256::default(),
+                        let secondary_app_cfg = application::Config::<Sha256, _> {
                             relay: relay.clone(),
                             me: validator.clone(),
                             propose_latency: (10.0, 5.0),
@@ -2332,8 +2723,8 @@ fn run_twins<P: simplex::Simplex>(
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
-                            activity_timeout: Delta::new(10),
-                            skip_timeout: Delta::new(5),
+                            view_retention: Delta::new(10),
+                            skip_timeout: Duration::from_secs(11),
                             fetch_concurrent: input.fetch_concurrent,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
@@ -2414,25 +2805,47 @@ fn run_twins<P: simplex::Simplex>(
                     )
                 };
                 let spawn = || {
-                    spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                        ctx,
-                        &oracle,
-                        participants.as_ref(),
-                        schemes[idx].clone(),
-                        validator.clone(),
-                        twin_elector.clone(),
-                        relay.clone(),
-                        Duration::from_secs(1),
-                        Duration::from_millis(1_500),
-                        input.mailbox_size,
-                        input.fetch_concurrent,
-                        input.forwarding,
-                        pending,
-                        recovered,
-                        resolver,
-                        input.certify,
-                        input.reporting,
-                    )
+                    if record_audit {
+                        TwinsReporter::Recording(spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                            ctx,
+                            &oracle,
+                            participants.as_ref(),
+                            schemes[idx].clone(),
+                            validator.clone(),
+                            twin_elector.clone(),
+                            relay.clone(),
+                            Duration::from_secs(1),
+                            Duration::from_millis(1_500),
+                            input.mailbox_size,
+                            input.fetch_concurrent,
+                            input.forwarding,
+                            pending,
+                            recovered,
+                            resolver,
+                            input.certify,
+                            input.reporting,
+                        ))
+                    } else {
+                        TwinsReporter::Summary(spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                            ctx,
+                            &oracle,
+                            participants.as_ref(),
+                            schemes[idx].clone(),
+                            validator.clone(),
+                            twin_elector.clone(),
+                            relay.clone(),
+                            Duration::from_secs(1),
+                            Duration::from_millis(1_500),
+                            input.mailbox_size,
+                            input.fetch_concurrent,
+                            input.forwarding,
+                            pending,
+                            recovered,
+                            resolver,
+                            input.certify,
+                            input.reporting,
+                        ))
+                    }
                 };
                 let reporter = match &hb_log {
                     Some(log) => {
@@ -2453,7 +2866,7 @@ fn run_twins<P: simplex::Simplex>(
             // role: `Mutator` uses absolute view targets, `Campaign` counts
             // finalizations after the adversarial prefix.
             if config.is_valid() {
-                let prefix_end = View::new(scenario.rounds().len() as u64);
+                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let required = input.required_containers;
@@ -2494,10 +2907,10 @@ fn run_twins<P: simplex::Simplex>(
                 context.sleep(MAX_SLEEP_DURATION).await;
             }
 
-            // Invariants on honest reporters only. Twin halves (when present) are
-            // expected to disagree internally per the scenario; checking them in
-            // global-agreement / equivocation invariants would reject valid Twins
-            // configurations.
+            // State extraction (agreement invariants) uses honest reporters
+            // only: twin halves are expected to disagree internally per the
+            // scenario. Signer-filtered vote/fault checks instead observe ALL
+            // reporters, with the compromised identities excluded by signer.
             if config.is_valid() {
                 // Observe the happens-before interleaving BEFORE the invariant checks,
                 // so a run that panics in an invariant still credits the interleaving
@@ -2513,18 +2926,47 @@ fn run_twins<P: simplex::Simplex>(
                     state_cov::observe_tokens(tokens);
                 }
                 let honest_reporters = &reporters[honest_start..];
-                invariants::check_vote_invariants_with_byzantine(&compromised, honest_reporters);
+                let honest_summaries: Vec<_> = honest_reporters
+                    .iter()
+                    .map(TwinsReporter::summary)
+                    .collect();
+                // Vote/fault checks run over ALL reporters (twin halves and the
+                // Mutator primary included): a twin reporter can be the sole
+                // observer of evidence against a correct signer, and the
+                // compromised filter already excludes the twin identities.
+                let observers: Vec<_> = twin_observers
+                    .iter()
+                    .chain(reporters.iter())
+                    .map(TwinsReporter::summary)
+                    .collect();
+                invariants::check_vote_invariants_with_byzantine(
+                    &compromised,
+                    twin_elector.clone(),
+                    Epoch::new(EPOCH),
+                    term_length,
+                    &observers,
+                );
                 if state_coverage {
                     let reporter_states =
-                        state_cov::encode_reporter_states(honest_reporters, config.n as usize);
+                        state_cov::encode_reporter_states(&honest_summaries, config.n as usize);
                     let metrics = context.encode();
                     state_cov::observe_with_metrics(&reporter_states, &metrics);
                 }
-                let states = invariants::extract(
-                    reporters.into_iter().skip(honest_start).collect(),
-                    config.n as usize,
-                );
-                invariants::check::<P>(config.n, states);
+                if record_audit {
+                    let recordings: Vec<_> = honest_reporters
+                        .iter()
+                        .filter_map(TwinsReporter::recording)
+                        .collect();
+                    assert_eq!(
+                        recordings.len(),
+                        honest_reporters.len(),
+                        "every correct Twins reporter must record in audit mode"
+                    );
+                    invariants::check::<P>(term_length, recordings.as_slice());
+                } else {
+                    let states = invariants::extract(honest_summaries);
+                    invariants::check::<P>(term_length, states);
+                }
             }
         });
     };
@@ -2561,6 +3003,7 @@ where
     let forwarding = input.forwarding;
     let certify = input.certify;
     let reporting = input.reporting;
+    let term_length = P::effective_term_length(input.term_length);
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -2577,6 +3020,7 @@ where
                 checkpoint,
                 participants,
                 schemes,
+                term_length,
                 mailbox_size,
                 fetch_concurrent,
                 forwarding,
@@ -2911,7 +3355,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             // chosen strategy.
             input.partition = Partition::Adaptive(Vec::new());
         }
-        print_fuzz_input(M::MODE, &input);
+        print_fuzz_input::<P>(M::MODE, &input);
     }
 
     let raw_bytes = input.raw_bytes.clone();
@@ -2968,8 +3412,61 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
     }
 }
 
+/// Fuzz the Standard Simplex harness with the append-only recording reporter
+/// and recording automaton.
+///
+/// Unlike [`fuzz`], this is an explicit opt-in used only by dedicated audit
+/// targets. It runs the same basic and vote invariants as Standard mode, then
+/// dispatches the additional audit invariants through [`invariants::check`].
+pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
+    // Rejected certification is sampled only for instantiations that expose a
+    // statically known Byzantine-led view. General fuzz targets never receive
+    // this override, so they cannot accidentally reject a correct proposer's
+    // certifiable-by-construction payload. The known Byzantine-led view assumes
+    // the rotating (term length one) leader schedule, so longer terms skip it.
+    if input.certify == CertifyChoice::Always
+        && input.term_length == TermLength::ONE
+        && input.raw_bytes.first().is_some_and(|byte| byte % 4 == 0)
+        && let Some(view) = P::audit_rejection_view(input.configuration)
+        && input.required_containers >= view.get()
+    {
+        input.certify = CertifyChoice::RejectView { view };
+    }
+    print_fuzz_input::<P>(Mode::Standard, &input);
+
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        run_audited_standard_once::<P>(input)
+    }));
+    if let Err(payload) = run_result {
+        println!("Panicked with raw_bytes: {:?}", raw_bytes);
+        panic::resume_unwind(payload);
+    }
+}
+
+/// Fuzz a Twins harness while recording append-only activity and automaton
+/// history for correct engines. Compromised twin halves retain the ordinary
+/// summary Reporter and participate only in signer-filtered vote checks.
+pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
+    let role = match M::MODE {
+        Mode::TwinsMutator => TwinsRole::Mutator,
+        Mode::TwinsCampaign => TwinsRole::Campaign,
+        mode => panic!("fuzz_twins_audit requires a Twins mode, got {mode:?}"),
+    };
+    print_fuzz_input::<P>(M::MODE, &input);
+
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let _ = run_twins::<P>(input, role, false, false, true);
+    }));
+    if let Err(payload) = run_result {
+        println!("Panicked with raw_bytes: {:?}", raw_bytes);
+        panic::resume_unwind(payload);
+    }
+}
+
 pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
-    print_node_fuzz_input(M::MODE, &input);
+    print_node_fuzz_input::<P>(M::MODE, &input);
 
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));
@@ -2987,6 +3484,7 @@ mod tests {
         FuzzInput {
             raw_bytes: 0u64.to_be_bytes().to_vec(),
             required_containers: MIN_REQUIRED_CONTAINERS,
+            term_length: TermLength::ONE,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,
@@ -3016,12 +3514,39 @@ mod tests {
         assert_eq!(unwrapped.reporter_states, wrapped.reporter_states);
     }
 
+    #[cfg(feature = "mocks")]
     #[test]
-    fn single_target_certify_preserves_liveness_with_full_honesty() {
+    fn audited_standard_checks_simplex_id_and_certificate_mock() {
+        assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
+        assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()).0);
+    }
+
+    #[test]
+    fn audited_twins_checks_campaign_and_mutator() {
+        for role in [TwinsRole::Campaign, TwinsRole::Mutator] {
+            let _ = run_twins::<simplex::SimplexId>(audit_input(), role, false, false, true);
+        }
+    }
+
+    #[test]
+    fn audited_standard_observes_rejected_certification() {
+        let mut input = audit_input();
+        input.configuration = N4F1C3;
+        input.required_containers = 4;
+        // With epoch 333 and four round-robin participants, view 3 is led by
+        // the compromised participant at index 0. Rejecting that proposal does
+        // not violate any correct proposer's certifiable-by-construction duty.
+        input.certify = CertifyChoice::RejectView { view: View::new(3) };
+        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
+        assert!(valid, "audit run was not checked");
+        assert!(rejected, "audit run did not reach false certification");
+    }
+
+    #[test]
+    fn certify_variants_preserve_liveness_with_full_honesty() {
         // With four honest validators, disabling one certifier leaves exactly
-        // the finalize quorum: the run must still finalize (the liveness wait
-        // completes) and pass invariants. This is the configuration under
-        // which `FuzzInput::arbitrary` samples certify variants.
+        // the finalize quorum. Both incomplete-result paths must retain
+        // liveness.
         for certify in [
             CertifyChoice::SingleCancel { target_idx: 0 },
             CertifyChoice::SinglePending { target_idx: 0 },
@@ -3034,12 +3559,23 @@ mod tests {
     }
 
     #[test]
+    fn rejected_byzantine_leader_view_preserves_liveness() {
+        let mut input = audit_input();
+        input.configuration = N4F1C3;
+        input.required_containers = 4;
+        input.certify = CertifyChoice::RejectView { view: View::new(3) };
+        let (valid, rejected) = run_audited_standard_once::<simplex::SimplexId>(input);
+        assert!(valid, "rejecting one Byzantine-led view prevented recovery");
+        assert!(rejected, "the Byzantine-led view was not rejected");
+    }
+
+    #[test]
     fn twins_happens_before_traces_honest_validators_only() {
         // N4F1C3 twins compromise one identity (two engines, one key): the
         // three honest validators are captured, twin halves contribute no
         // attributed events, and receives from the twin merge nothing.
         let summary =
-            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true)
+            run_twins::<simplex::SimplexId>(audit_input(), TwinsRole::Campaign, false, true, false)
                 .expect("happens-before summary");
         assert_eq!(summary.node_count(), 3, "only honest validators tracked");
         assert!(!summary.tokens().is_empty());

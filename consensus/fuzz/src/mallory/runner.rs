@@ -38,7 +38,7 @@ use crate::{
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::View,
+    types::{Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -557,7 +557,7 @@ async fn restart<P: Simplex>(
             participants,
             scheme,
             validator,
-            P::Elector::default(),
+            P::elector(TermLength::ONE),
             relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -752,12 +752,12 @@ fn run_inner<P: Simplex>(
         // oracle and rebuilds an engine over the participant set.
         let (mut oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
-        crate::print_fuzz_input(crate::Mode::MalloryContainer, &input);
+        crate::print_fuzz_input::<P>(crate::Mode::MalloryContainer, &input);
 
         let config = input.configuration;
         let n = config.n as usize;
         let required_containers = input.required_containers;
-        let relay = Arc::new(relay::Relay::new());
+        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
 
         // Select the episode's adversary role ONCE, before the per-node loop. The
@@ -831,7 +831,7 @@ fn run_inner<P: Simplex>(
             // multiplexer is the single owner of those single-consumer mailboxes and
             // spawns the INITIAL profile's actor; nothing is pushed to `managed`. The
             // Equivocator shares the honest nodes' relay and leader schedule (built
-            // internally as `P::Elector::default()`, the same config the honest
+            // internally as `P::elector(TermLength::ONE)`, the same config the honest
             // validators build with); the other roles ignore both.
             if byz && i == BYZANTINE_IDX {
                 multiplexer = Some(multiplexer::RoleMultiplexer::new(
@@ -900,7 +900,7 @@ fn run_inner<P: Simplex>(
                     &participants,
                     scheme,
                     validator,
-                    P::Elector::default(),
+                    P::elector(TermLength::ONE),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -1514,9 +1514,24 @@ fn run_inner<P: Simplex>(
         } else {
             HashSet::new()
         };
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
-        let states = invariants::extract(reporters, n);
-        invariants::check::<P>(config.n, states);
+        // Vote/fault observers also include the current post-restart reporter
+        // instances: an amnesia restart swaps BYZANTINE_IDX's reporter after
+        // `reporters` was captured, and the fresh instance may be the sole
+        // observer of evidence against correct signers (re-checking a shared
+        // instance twice is harmless). State extraction keeps the original
+        // capture only: the fresh incarnation belongs to a Byzantine node and
+        // must not feed the honest-reporter invariants.
+        let mut observers = reporters.clone();
+        observers.extend(managed.iter().map(|m| m.reporter()));
+        invariants::check_vote_invariants_with_byzantine(
+            &byzantine,
+            P::elector(TermLength::ONE),
+            Epoch::new(crate::EPOCH),
+            TermLength::ONE,
+            &observers,
+        );
+        let states = invariants::extract(reporters);
+        invariants::check::<P>(TermLength::ONE, states);
     });
 }
 
@@ -1543,6 +1558,7 @@ mod tests {
         FuzzInput {
             raw_bytes,
             required_containers: 2,
+            term_length: TermLength::ONE,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

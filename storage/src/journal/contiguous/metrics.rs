@@ -49,6 +49,8 @@ pub(super) struct Metrics<E: Clock> {
     pub cache_misses: Counter,
     /// Items returned by read, read_many, try_read_sync, and try_read_many_sync.
     pub items_read: Counter,
+    /// Commits begun via `start_commit`, excluding those issued by `commit` and `sync`.
+    pub start_commit_calls: Counter,
     /// Durable commit calls that do not fully sync all indexes.
     pub commit_calls: Counter,
     /// Duration of commit calls that do not fully sync all indexes.
@@ -112,6 +114,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "items_read",
                 "Number of items returned by point reads, batch reads, and sync probes",
             ),
+            start_commit_calls: context
+                .counter("start_commit_calls", "Number of start_commit calls"),
             commit_calls: context.counter("commit_calls", "Number of commit calls"),
             commit_duration: Timed::register(
                 &context,

@@ -5,6 +5,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     Hasher,
     crc32::{Crc32 as OurCrc32, Digest},
+    fuzz::Plan,
 };
 use commonware_math::algebra::Random;
 use commonware_utils::TestRng;
@@ -30,18 +31,18 @@ enum Operation {
     DigestU32Roundtrip(Vec<u8>),
     /// Determinism and Debug/Display formatting.
     Determinism(Vec<Vec<u8>>),
-    /// Hasher `Clone` behavior.
-    CloneHasher(Vec<Vec<u8>>),
     /// `Digest::arbitrary`, `From<[u8; 4]>`, `Deref`, and `Random`.
     ArbitraryAndConvert {
         data: Vec<u8>,
         bytes: [u8; 4],
         seed: u64,
     },
+    /// One-shot and pair entrypoints match streaming.
+    HasherPlan(Plan<OurCrc32>),
 }
 
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
-    let mut our_hasher = OurCrc32::new();
+    let mut our_hasher = OurCrc32::default();
     let mut ref_digest = CRC32C_REF.digest();
 
     for chunk in chunks {
@@ -49,13 +50,17 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
         ref_digest.update(chunk);
     }
 
-    let our_result = our_hasher.finalize();
+    let (_, our_result) = our_hasher.finalize();
     let ref_result = ref_digest.finalize();
     assert_eq!(our_result.as_u32(), ref_result);
+
+    // The one-shot API should agree with streaming.
+    let parts: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
+    assert_eq!(OurCrc32::hash(&parts), our_result);
 }
 
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
-    let mut our_hasher = OurCrc32::new();
+    let mut our_hasher = OurCrc32::default();
     let mut ref_digest = CRC32C_REF.digest();
 
     // First round
@@ -63,12 +68,12 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
         our_hasher.update(chunk);
         ref_digest.update(chunk);
     }
-    let our_result = our_hasher.finalize();
+    let (our_hasher, our_result) = our_hasher.finalize();
     let ref_result = ref_digest.finalize();
     assert_eq!(our_result.as_u32(), ref_result);
 
-    // Reset and second round
-    our_hasher.reset();
+    // Reuse the reset hasher for the second round
+    let mut our_hasher = our_hasher;
     let mut ref_digest = CRC32C_REF.digest();
 
     for chunk in chunks {
@@ -76,14 +81,14 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
         ref_digest.update(chunk);
     }
 
-    let our_result_after_reset = our_hasher.finalize();
+    let (_, our_result_after_reset) = our_hasher.finalize();
     let ref_result_after_reset = ref_digest.finalize();
     assert_eq!(our_result, our_result_after_reset);
     assert_eq!(our_result_after_reset.as_u32(), ref_result_after_reset);
 }
 
 fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
-    let mut our_hasher = OurCrc32::new();
+    let mut our_hasher = OurCrc32::default();
     let mut all_data = Vec::new();
 
     for chunk in chunks {
@@ -91,15 +96,15 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
         our_hasher.update(chunk);
     }
 
-    let our_final = our_hasher.finalize();
+    let (_, our_final) = our_hasher.finalize();
     let ref_final = CRC32C_REF.checksum(&all_data);
     assert_eq!(our_final.as_u32(), ref_final);
 }
 
 fn fuzz_encode_decode(data: &[u8]) {
-    let mut hasher = OurCrc32::new();
+    let mut hasher = OurCrc32::default();
     hasher.update(data);
-    let digest = hasher.finalize();
+    let (_, digest) = hasher.finalize();
 
     let encoded = digest.encode();
     assert_eq!(encoded.len(), 4);
@@ -120,7 +125,7 @@ fn fuzz_digest_u32_roundtrip(data: &[u8]) {
 }
 
 fn fuzz_diff_hash(data: &[u8]) {
-    let our_hash_result = OurCrc32::hash(data);
+    let our_hash_result = OurCrc32::hash(&[data]);
     let ref_result = CRC32C_REF.checksum(data);
     assert_eq!(our_hash_result.as_u32(), ref_result);
 }
@@ -132,30 +137,14 @@ fn fuzz_determinism(chunks: &[Vec<u8>]) {
         hasher1.update(chunk);
         hasher2.update(chunk);
     }
-    let digest1 = hasher1.finalize();
-    let digest2 = hasher2.finalize();
+    let (_, digest1) = hasher1.finalize();
+    let (_, digest2) = hasher2.finalize();
     assert_eq!(digest1, digest2);
 
     let debug_str = format!("{digest1:?}");
     let display_str = format!("{digest1}");
     assert_eq!(debug_str, display_str);
     assert_eq!(debug_str.len(), 8); // 4 bytes * 2 hex chars
-}
-
-fn fuzz_clone_hasher(chunks: &[Vec<u8>]) {
-    let mut hasher = OurCrc32::new();
-    for chunk in chunks {
-        hasher.update(chunk);
-    }
-    // `Clone` returns a fresh hasher; hashing the same data through the clone
-    // must match the reference checksum.
-    let mut cloned = hasher.clone();
-    let mut all = Vec::new();
-    for chunk in chunks {
-        all.extend_from_slice(chunk);
-        cloned.update(chunk);
-    }
-    assert_eq!(cloned.finalize().as_u32(), CRC32C_REF.checksum(&all));
 }
 
 fn fuzz_arbitrary_and_convert(data: &[u8], bytes: [u8; 4], seed: u64) {
@@ -185,9 +174,9 @@ fuzz_target!(|op: Operation| {
         Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
         Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
         Operation::Determinism(chunks) => fuzz_determinism(&chunks),
-        Operation::CloneHasher(chunks) => fuzz_clone_hasher(&chunks),
         Operation::ArbitraryAndConvert { data, bytes, seed } => {
             fuzz_arbitrary_and_convert(&data, bytes, seed)
         }
+        Operation::HasherPlan(plan) => plan.run(),
     }
 });

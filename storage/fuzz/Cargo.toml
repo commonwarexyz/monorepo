@@ -286,3 +286,59 @@ path = "fuzz_targets/qmdb_keyless_compact.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "qmgb_gen_any_ordered_variable"
+path = "fuzz_targets/qmgb_gen_any_ordered_variable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_current_ordered_variable"
+path = "fuzz_targets/qmgb_gen_current_ordered_variable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_immutable_fixed"
+path = "fuzz_targets/qmgb_gen_immutable_fixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_immutable_compact"
+path = "fuzz_targets/qmgb_gen_immutable_compact.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_keyless_fixed"
+path = "fuzz_targets/qmgb_gen_keyless_fixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_keyless_compact_fixed"
+path = "fuzz_targets/qmgb_gen_keyless_compact_fixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_partitioned"
+path = "fuzz_targets/qmgb_gen_partitioned.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmgb_gen_stream_sync"
+path = "fuzz_targets/qmgb_gen_stream_sync.rs"
+test = false
+doc = false
+bench = false

@@ -54,9 +54,6 @@ pub(crate) trait Partitioned: Unordered {
     /// Move a populated `range`'s contents into self at the global slot range it was created
     /// with, which must be empty.
     fn install_range(&mut self, range: Self::Range);
-
-    /// Visit every value held across all partitions, in unspecified order.
-    fn for_each_value(&self, f: impl FnMut(&Self::Value));
 }
 
 /// One [Partitioned] worker's restricted view of its partition range: only the cursor
@@ -80,6 +77,9 @@ pub(crate) trait PartitionRange: Sized {
     /// return `None` (see [Unordered::get_mut_or_insert]). The key's partition must fall within
     /// this range.
     fn get_mut_or_insert(&mut self, key: &[u8], value: Self::Value) -> Option<Self::Cursor<'_>>;
+
+    /// Visit every value held across the range, in unspecified order.
+    fn for_each_value(&self, f: impl FnMut(&Self::Value));
 }
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing

@@ -374,11 +374,10 @@ pub(crate) fn spawn_adversary<P: Simplex>(
             drop(resolver_network);
             let actor = equivocator::Equivocator::new(
                 context.child("adversary_equivocator"),
-                equivocator::Config {
+                equivocator::Config::<_, _, Sha256> {
                     scheme,
                     epoch: Epoch::new(crate::EPOCH),
                     relay,
-                    hasher: Sha256::default(),
                     elector,
                 },
             );

@@ -1,0 +1,440 @@
+#![no_main]
+
+use arbitrary::Arbitrary;
+use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_parallel::Sequential;
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_storage::{
+    journal::contiguous::variable::Config as VConfig,
+    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    qmdb::current::{VariableConfig as Config, ordered::variable::Db as CurrentDb},
+    translator::TwoCap,
+};
+use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use libfuzzer_sys::fuzz_target;
+use std::{
+    collections::{HashMap, HashSet},
+    num::{NonZeroU16, NonZeroU64},
+};
+
+type Key = FixedBytes<32>;
+type Value = FixedBytes<32>;
+type RawKey = [u8; 32];
+type RawValue = [u8; 32];
+type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
+
+#[derive(Arbitrary, Debug, Clone)]
+enum CurrentOperation {
+    Update {
+        key: RawKey,
+        value: RawValue,
+    },
+    Delete {
+        key: RawKey,
+    },
+    Get {
+        key: RawKey,
+    },
+    Commit,
+    Prune,
+    OpCount,
+    Root,
+    RangeProof {
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    },
+    KeyValueProof {
+        key: RawKey,
+    },
+    ArbitraryProof {
+        start_loc: u64,
+        bad_digests: Vec<[u8; 32]>,
+        bad_pending_digest: Option<[u8; 32]>,
+        bad_partial_digest: Option<[u8; 32]>,
+        max_ops: NonZeroU64,
+        chunk_xor: [u8; 32],
+    },
+    GetSpan {
+        key: RawKey,
+    },
+    ExclusionProof {
+        key: RawKey,
+    },
+}
+
+const MAX_OPERATIONS: usize = 100;
+
+#[derive(Debug)]
+struct FuzzInput {
+    operations: Vec<CurrentOperation>,
+    raw_bytes: Vec<u8>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let operations = (0..num_ops)
+            .map(|_| CurrentOperation::arbitrary(u))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FuzzInput {
+            operations,
+            raw_bytes,
+        })
+    }
+}
+
+const PAGE_SIZE: NonZeroU16 = NZU16!(91);
+const PAGE_CACHE_SIZE: usize = 8;
+const MERKLE_ITEMS_PER_BLOB: u64 = 11;
+const LOG_ITEMS_PER_BLOB: u64 = 7;
+const WRITE_BUFFER_SIZE: usize = 1024;
+
+async fn commit_pending<F: Graftable>(
+    db: Db<F>,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut HashMap<RawKey, RawValue>,
+    pending_inserts: &mut HashMap<RawKey, RawValue>,
+    pending_deletes: &mut HashSet<RawKey>,
+) -> Db<F> {
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let start = db.bounds().end;
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, range) = db
+        .apply_batch(merkleized)
+        .await
+        .expect("commit should not fail");
+    assert_eq!(range.start, start);
+    assert_eq!(range.end, db.bounds().end);
+    let db = db.commit().await.expect("commit fsync should not fail");
+    for key in pending_deletes.drain() {
+        committed_state.remove(&key);
+    }
+    committed_state.extend(pending_inserts.drain());
+    db
+}
+
+fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(data.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
+
+    let suffix = suffix.to_string();
+    let operations = data.operations.clone();
+    runner.start(|context| async move {
+        let page_cache = CacheRef::from_pooler(
+            &context,
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
+        let cfg = Config {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("fuzz-current-ord-var-{suffix}-merkle-journal"),
+                metadata_partition: format!("fuzz-current-ord-var-{suffix}-merkle-metadata"),
+                items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: VConfig {
+                partition: format!("fuzz-current-ord-var-{suffix}-log-journal"),
+                items_per_section: NZU64!(LOG_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                compression: None,
+                codec_config: ((), ()),
+                page_cache,
+            },
+            grafted_metadata_partition: format!("fuzz-current-ord-var-{suffix}-grafted-merkle-metadata"),
+            translator: TwoCap,
+            init_cache_size: Some(NZUsize!(3)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
+        };
+
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+            .await
+            .expect("Failed to initialize Current database");
+
+        // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
+        // track uncommitted mutations.
+        let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_deletes: HashSet<RawKey> = HashSet::new();
+        let mut all_keys = HashSet::new();
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
+        let mut committed_op_count = db.bounds().end;
+
+        for op in &operations {
+            db = match op {
+                CurrentOperation::Update { key, value } => {
+                    let k = Key::new(*key);
+                    let v = Value::new(*value);
+
+                    pending_writes.push((k, Some(v)));
+                    pending_deletes.remove(key);
+                    pending_inserts.insert(*key, *value);
+                    all_keys.insert(*key);
+                    db
+                }
+
+                CurrentOperation::Delete { key } => {
+                    let k = Key::new(*key);
+                    pending_writes.push((k, None));
+                    pending_inserts.remove(key);
+                    pending_deletes.insert(*key);
+                    db
+                }
+
+                CurrentOperation::Get { key } => {
+                    let k = Key::new(*key);
+                    let result = db.get(&k).await.expect("get should not fail");
+
+                    // Verify against committed state only.
+                    match committed_state.get(key) {
+                        Some(expected_value) => {
+                            let v = result.expect("get should not fail");
+                            let v_bytes: &[u8; 32] = v.as_ref().try_into().expect("bytes");
+                            assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
+                        }
+                        None => {
+                            assert!(
+                                result.is_none(),
+                                "Found unexpected value for key {key:?} that was never touched",
+                            );
+                        }
+                    }
+
+                    all_keys.insert(*key);
+                    db
+                }
+
+                CurrentOperation::GetSpan { key } => {
+                    let k = Key::new(*key);
+                    let result = db.get_span(&k).await.expect("get should not fail");
+                    assert_eq!(result.is_some(), !db.is_empty(), "span should be empty only if db is empty");
+                    db
+                }
+
+                CurrentOperation::OpCount => {
+                    let actual = db.bounds().end;
+                    assert_eq!(
+                        actual, committed_op_count,
+                        "Op count mismatch: expected {committed_op_count}, got {actual}"
+                    );
+                    db
+                }
+
+                CurrentOperation::Commit => {
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().end;
+                    db
+                }
+
+                CurrentOperation::Prune => {
+                    let boundary = db.sync_boundary();
+                    db.prune(boundary).await.expect("Prune should not fail")
+                }
+
+                CurrentOperation::Root => {
+                    assert_eq!(db.root(), db.to_batch().root());
+                    db
+                }
+
+                CurrentOperation::RangeProof { start_loc, max_ops } => {
+                    let current_op_count = db.bounds().end;
+                    if current_op_count == 0 {
+                        continue;
+                    }
+
+                    let current_root = db.root();
+
+                    let current_op_count = db.bounds().end;
+                    let start_loc = Location::<F>::new(start_loc % *current_op_count);
+
+                    let oldest_loc = db.sync_boundary();
+                    if start_loc >= oldest_loc {
+                        let (proof, ops, chunks) = db
+                            .range_proof(start_loc, *max_ops)
+                            .await
+                            .expect("Range proof should not fail");
+
+                        assert!(
+                            Db::<F>::verify_range_proof(
+                                &proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &current_root
+                            ),
+                            "Range proof verification failed for start_loc={start_loc}, max_ops={max_ops}"
+                        );
+                    }
+                    db
+                }
+
+                CurrentOperation::ArbitraryProof {
+                    start_loc,
+                    bad_digests,
+                    bad_pending_digest,
+                    bad_partial_digest,
+                    max_ops,
+                    chunk_xor,
+                } => {
+                    let current_op_count = db.bounds().end;
+                    if current_op_count == 0 {
+                        continue;
+                    }
+                    let current_op_count = db.bounds().end;
+                    let start_loc = Location::<F>::new(start_loc % current_op_count.as_u64());
+                    let root = db.root();
+
+                    if let Ok((range_proof, ops, chunks)) = db
+                        .range_proof(start_loc, *max_ops)
+                        .await {
+                        // Try to verify the proof when providing bad proof digests.
+                        let bad_digests = bad_digests.iter().map(|d| Digest::from(*d)).collect();
+                        if range_proof.proof.digests != bad_digests {
+                            let mut bad_digest_proof = range_proof.clone();
+                            bad_digest_proof.proof.digests = bad_digests;
+                            assert!(!Db::<F>::verify_range_proof(
+                                &bad_digest_proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &root
+                            ), "proof with bad digests should not verify");
+                        }
+
+                        let bad_pending_digest = (*bad_pending_digest).map(Digest::from);
+                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest)
+                            && range_proof.pending_chunk_digest != bad_pending
+                        {
+                            let mut bad_pending_proof = range_proof.clone();
+                            bad_pending_proof.pending_chunk_digest = bad_pending;
+                            assert!(!Db::<F>::verify_range_proof(
+                                &bad_pending_proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &root
+                            ), "proof with bad pending chunk digest should not verify");
+                        }
+
+                        let bad_partial_digest = (*bad_partial_digest).map(Digest::from);
+                        if range_proof.partial_chunk_digest != bad_partial_digest {
+                            let mut bad_partial_proof = range_proof.clone();
+                            bad_partial_proof.partial_chunk_digest = bad_partial_digest;
+                            assert!(!Db::<F>::verify_range_proof(
+                                &bad_partial_proof,
+                                start_loc,
+                                &ops,
+                                &chunks,
+                                &root
+                            ), "proof with bad partial chunk digest should not verify");
+                        }
+
+                        // Try to verify the proof when providing bad input chunks.
+                        let bad_chunks: Vec<[u8; 32]> = chunks.iter().map(|c| {
+                            let mut corrupted = *c;
+                            for (b, x) in corrupted.iter_mut().zip(chunk_xor.iter()) {
+                                *b ^= *x;
+                            }
+                            corrupted
+                        }).collect();
+                        if chunks != bad_chunks {
+                            assert!(!Db::<F>::verify_range_proof(
+                                &range_proof,
+                                start_loc,
+                                &ops,
+                                &bad_chunks,
+                                &root
+                            ), "proof with bad chunks should not verify");
+                        }
+
+                    }
+                    db
+                }
+
+                CurrentOperation::KeyValueProof { key } => {
+                    let k = Key::new(*key);
+
+                    let current_root = db.root();
+
+                    match db.key_value_proof(k.clone()).await {
+                        Ok(proof) => {
+                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                            let verification_result = Db::<F>::verify_key_value_proof(
+                                k,
+                                value,
+                                &proof,
+                                &current_root,
+                            );
+                            assert!(verification_result, "Key value proof verification failed for key {key:?}");
+                        }
+                        Err(commonware_storage::qmdb::Error::KeyNotFound) => {
+                            assert!(!committed_state.contains_key(key), "Proof generation failed for existing key {key:?}");
+                        }
+                        Err(e) => {
+                            panic!("Unexpected error during key value proof generation: {e:?}");
+                        }
+                    }
+                    db
+                }
+
+                CurrentOperation::ExclusionProof { key } => {
+                    let k = Key::new(*key);
+
+                    let current_root = db.root();
+
+                    match db.exclusion_proof(&k).await {
+                        Ok(proof) => {
+                            let verification_result = Db::<F>::verify_exclusion_proof(
+                                &k,
+                                &proof,
+                                &current_root,
+                            );
+                            assert!(verification_result, "Exclusion proof verification failed for key {key:?}");
+                        }
+                        Err(commonware_storage::qmdb::Error::KeyExists) => {
+                            assert!(committed_state.contains_key(key), "Proof generation should not fail for non-existent key {key:?}");
+                        }
+                        Err(e) => {
+                            panic!("Unexpected error during exclusion proof generation: {e:?}");
+                        }
+                    }
+                    db
+                }
+            };
+        }
+
+        for key in &all_keys {
+            let k = Key::new(*key);
+            let result = db.get(&k).await.expect("Final get should not fail");
+
+            match committed_state.get(key) {
+                Some(expected_value) => {
+                    assert!(result.is_some(), "Lost value for key {key:?} at end");
+                    let actual_value = result.expect("Should have value");
+                    let actual_bytes: &[u8; 32] = actual_value.as_ref().try_into().expect("Value should be 32 bytes");
+                    assert_eq!(actual_bytes, expected_value, "Final value mismatch for key {key:?}");
+                }
+                None => {
+                    assert!(result.is_none(), "Unset key {key:?} should not exist");
+                }
+            }
+        }
+
+        db.destroy().await.expect("Destroy should not fail");
+    });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz_family::<mmr::Family>(&input, "mmr");
+    fuzz_family::<mmb::Family>(&input, "mmb");
+});

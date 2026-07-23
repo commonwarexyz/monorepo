@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -11,6 +11,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use futures::{StreamExt as _, pin_mut};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -60,6 +61,9 @@ enum CurrentOperation {
     ExclusionProof {
         key: RawKey,
     },
+    StreamRange {
+        start: RawKey,
+    },
 }
 
 const MAX_OPERATIONS: usize = 100;
@@ -76,7 +80,9 @@ struct FuzzInput {
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let initial_writes = u.int_in_range(0..=MAX_INITIAL_WRITES)?;
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let operations = (0..num_ops)
@@ -85,7 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         Ok(FuzzInput {
             initial_writes,
             operations,
-            raw_bytes: u.bytes(u.len())?.to_vec(),
+            raw_bytes,
         })
     }
 }
@@ -280,7 +286,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         &mut pending_inserts, &mut pending_deletes,
                     ).await;
                     committed_op_count = db.bounds().end;
-                    let _root = db.root();
+                    assert_eq!(
+                        db.root(),
+                        db.to_batch().root(),
+                        "database and snapshot roots should match",
+                    );
                     db
                 }
 
@@ -467,6 +477,38 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             panic!("Unexpected error during exclusion proof generation: {e:?}");
                         }
                     }
+                    db
+                }
+
+                CurrentOperation::StreamRange { start } => {
+                    let db = commit_pending(
+                        db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    committed_op_count = db.bounds().end;
+                    let mut expected = committed_state
+                        .iter()
+                        .filter(|(key, _)| *key >= start)
+                        .map(|(key, value)| (*key, *value))
+                        .collect::<Vec<_>>();
+                    expected.sort_unstable_by_key(|(key, _)| *key);
+
+                    let actual = {
+                        let stream = db
+                            .stream_range(Key::new(*start))
+                            .await
+                            .expect("range stream should not fail");
+                        pin_mut!(stream);
+                        let mut actual = Vec::new();
+                        while let Some(item) = stream.next().await {
+                            let (key, value) = item.expect("range stream item should not fail");
+                            let key: &[u8; 32] = key.as_ref().try_into().expect("key length");
+                            let value: &[u8; 32] = value.as_ref().try_into().expect("value length");
+                            actual.push((*key, *value));
+                        }
+                        actual
+                    };
+                    assert_eq!(actual, expected, "range stream should match the ordered model");
                     db
                 }
             };

@@ -253,7 +253,7 @@ pub(crate) mod test {
                 .unwrap();
             let mut batch = db.new_batch();
             for i in 0u64..500 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = vec![(i % 251) as u8; (i % 40 + 1) as usize];
                 batch = batch.write(k, Some(v));
             }
@@ -264,11 +264,11 @@ pub(crate) mod test {
             // Commit 2: update a third and delete a seventh so the replay carries churn.
             let mut batch = db.new_batch();
             for i in (0u64..500).step_by(3) {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 batch = batch.write(k, Some(vec![0xAB; (i % 17 + 1) as usize]));
             }
             for i in (1u64..500).step_by(7) {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -294,7 +294,7 @@ pub(crate) mod test {
                     "root mismatch at concurrency={concurrency}"
                 );
                 for i in 0u64..500 {
-                    let k = Sha256::hash(&i.to_be_bytes());
+                    let k = Sha256::hash(&[&i.to_be_bytes()]);
                     assert_eq!(
                         db.get(&k).await.unwrap(),
                         expected_value(i),

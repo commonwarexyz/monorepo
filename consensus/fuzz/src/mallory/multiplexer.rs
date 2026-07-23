@@ -33,7 +33,7 @@
 
 use super::adversary::{AdversaryRole, spawn_adversary};
 use crate::{NetworkChannels, PublicKeyOf, simplex::Simplex};
-use commonware_consensus::simplex::mocks::relay;
+use commonware_consensus::{simplex::mocks::relay, types::TermLength};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{Handle, Supervisor as _, deterministic};
@@ -96,7 +96,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             scheme.clone(),
             required_containers,
             relay.clone(),
-            P::Elector::default(),
+            P::elector(TermLength::ONE),
             channels,
         );
         Self {
@@ -153,7 +153,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             self.scheme.clone(),
             self.required_containers,
             self.relay.clone(),
-            P::Elector::default(),
+            P::elector(TermLength::ONE),
             channels,
         ));
         self.role = new_role;

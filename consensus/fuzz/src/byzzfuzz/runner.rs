@@ -28,7 +28,7 @@ use commonware_codec::Encode;
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::{Epoch, View},
+    types::{Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     Hasher, Sha256, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -71,9 +71,7 @@ struct EngineSetup<P: Simplex> {
 }
 
 fn genesis_payload() -> Sha256Digest {
-    let mut hasher = Sha256::default();
-    hasher.update(&(Bytes::from_static(b"genesis"), Epoch::new(EPOCH)).encode());
-    hasher.finalize()
+    Sha256::hash(&[&(Bytes::from_static(b"genesis"), Epoch::new(EPOCH)).encode()])
 }
 
 /// Sample `(c, d, r)` from `context` and build the per-validator
@@ -171,7 +169,7 @@ where
     // replay the genesis payload and parent view before any proposal is seen.
     let pool = ObservedState::new_with_genesis(genesis_payload());
 
-    let relay = Arc::new(relay::Relay::new());
+    let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
     let mut reporters = Vec::new();
     let config = input.configuration;
     let mut byzantine_view = None;
@@ -300,7 +298,7 @@ where
                 &participants,
                 schemes[i].clone(),
                 validator,
-                P::Elector::default(),
+                P::elector(TermLength::ONE),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -485,7 +483,7 @@ where
         let gate = FaultGate::new();
         let setup =
             setup_engines::<P>(&mut context, &mut input, gate.clone(), "byzzfuzz", None).await;
-        crate::print_fuzz_input(crate::Mode::Byzzfuzz, &input);
+        crate::print_fuzz_input::<P>(crate::Mode::Byzzfuzz, &input);
         let mut reporters = setup.reporters;
         let byzantine_view = setup.byzantine_view;
         let proc_schedule = setup.proc_schedule;
@@ -546,19 +544,25 @@ where
         }
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
-        invariants::check_vote_invariants_with_byzantine(&byzantine, &reporters);
+        invariants::check_vote_invariants_with_byzantine(
+            &byzantine,
+            P::elector(TermLength::ONE),
+            Epoch::new(EPOCH),
+            TermLength::ONE,
+            &reporters,
+        );
 
         // State-extraction invariants assume each reporter is honest;
         // include only correct reporters here. Quorum thresholds still
         // derive from the full validator set, so `config.n` is unchanged.
-        let correct_reporters = reporters
+        let correct_reporters: Vec<_> = reporters
             .into_iter()
             .enumerate()
             .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
             .collect();
 
-        let states = invariants::extract(correct_reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        let states = invariants::extract(correct_reporters);
+        invariants::check::<P>(TermLength::ONE, states);
     });
 }
 
@@ -578,6 +582,7 @@ mod tests {
         FuzzInput {
             raw_bytes,
             required_containers: 2,
+            term_length: TermLength::ONE,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

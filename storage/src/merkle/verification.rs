@@ -412,7 +412,7 @@ mod tests {
     use commonware_runtime::{Runner, deterministic};
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        Sha256::hash(&[&[v]])
     }
 
     #[test_traced]

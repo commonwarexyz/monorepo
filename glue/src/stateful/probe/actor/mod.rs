@@ -1,4 +1,7 @@
-use super::mailbox::{Mailbox, Message};
+use super::{
+    mailbox::{Mailbox, Message},
+    sample::Sample,
+};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::Epoch};
 use commonware_cryptography::{PublicKey, certificate::Provider};
@@ -30,9 +33,10 @@ where
     pub strategy: T,
     /// The mailbox capacity.
     pub capacity: NonZeroUsize,
-    /// Blocker used to block peers that send invalid finalizations.
+    /// Blocker used to block malicious peers.
     pub blocker: B,
-    /// Finalizations below this epoch are ignored when discovering a floor.
+    /// Finalizations below this epoch are ignored when discovering a floor. Discovery requests are
+    /// sent to this epoch's participants.
     pub minimum_epoch: Epoch,
     /// How long to wait for enough finalization replies before clearing the pending
     /// responses and re-requesting.
@@ -49,7 +53,7 @@ where
 pub struct Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -68,7 +72,7 @@ where
 impl<E, S, D, V, T, P, B> Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -112,9 +116,8 @@ where
             provider: self.provider,
             strategy: self.strategy,
             blocker: self.blocker,
-            minimum_epoch: self.minimum_epoch,
             retry_timeout: self.retry_timeout,
-            floor: None,
+            sample: Sample::new(self.minimum_epoch),
             floor_subscribers: Vec::new(),
         }
         .run(&mut sender, &mut receiver)

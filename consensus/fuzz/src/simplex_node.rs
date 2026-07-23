@@ -10,16 +10,16 @@ use commonware_consensus::{
     Monitor, Viewable,
     simplex::{
         ForwardingPolicy,
-        elector::{Config as ElectorConfig, Elector, RoundRobin, RoundRobinElector},
+        elector::{Config as ElectorConfig, Elector, RoundRobinElector},
         scheme::Scheme as SimplexScheme,
         types::{
             Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
             Proposal, Vote,
         },
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Round, TermLength, View},
 };
-use commonware_cryptography::{Sha256, certificate::Scheme as _, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
 use commonware_p2p::{Receiver as _, Recipients, Sender as _, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
@@ -36,6 +36,11 @@ const MIN_EVENTS: usize = 10;
 const MAX_EVENTS: usize = 100;
 const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
 const PROPOSAL_CACHE_LIMIT: usize = 64;
+/// Driver polling cadence after an unclean-shutdown restart.
+const RECOVERY_TICK: Duration = Duration::from_millis(50);
+/// Post-restart horizon; must exceed the engine's certification timeout (two
+/// seconds) so its timeout ladder fires while the driver is still polled.
+const RECOVERY_HORIZON: Duration = Duration::from_secs(5);
 
 /// Number of Byzantine nodes in the N4F3C1 configuration.
 pub(crate) const BYZANTINE_COUNT: usize = 3;
@@ -66,6 +71,11 @@ pub struct NodeEvent {
 pub struct NodeFuzzInput {
     pub raw_bytes: Vec<u8>,
     pub events: Vec<NodeEvent>,
+    /// Leader term length for the honest engine and the driver's leader
+    /// gating. `Arbitrary` pins this to one view (the ordinary node targets
+    /// fuzz rotation); the dedicated stable-term recovery target overrides it
+    /// with lengths 2-5.
+    pub term_length: TermLength,
     pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: NonZeroUsize,
     pub forwarding: ForwardingPolicy,
@@ -107,6 +117,7 @@ impl Arbitrary<'_> for NodeFuzzInput {
         Ok(Self {
             raw_bytes,
             events,
+            term_length: TermLength::ONE,
             mailbox_size,
             fetch_concurrent,
             forwarding,
@@ -1505,6 +1516,7 @@ where
     let base = FuzzInput {
         raw_bytes: input.raw_bytes.clone(),
         required_containers: MAX_REQUIRED_CONTAINERS,
+        term_length: input.term_length,
         degraded_network: false,
         configuration: N4F3C1,
         partition: Partition::Connected,
@@ -1526,7 +1538,10 @@ where
     let (fuzzer_schemes, honest_schemes) = schemes.split_at(BYZANTINE_COUNT);
     let honest_scheme = honest_schemes[0].clone();
 
-    let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+    let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::<
+        Sha256Digest,
+        _,
+    >::new());
     let byzantine_participants: Vec<_> =
         participants.iter().take(BYZANTINE_COUNT).cloned().collect();
 
@@ -1559,13 +1574,14 @@ where
         .remove(&honest)
         .expect("honest participant must exist");
     let (pending, recovered, resolver) = honest_channels;
+    let term_length = P::effective_term_length(input.term_length);
     let mut reporter = crate::spawn_honest_validator::<P, _, _, _, _, _, _, _>(
         context.child("honest_validator"),
         &oracle,
         &participants,
         honest_scheme,
         honest.clone(),
-        <P::Elector as Default>::default(),
+        P::elector(term_length),
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -1579,7 +1595,9 @@ where
         base.reporting,
     );
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-    let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
+    // The driver's leader-gating heuristic follows the same term structure as
+    // the honest engine so leader-path branches fire at term-consistent views.
+    let elector = simplex::round_robin(term_length).build(fuzzer_schemes[0].participants());
 
     let mut driver = NodeDriver::<P::Scheme>::new(
         context.child("simplex_node_driver"),
@@ -1614,6 +1632,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
     checkpoint: deterministic::Checkpoint,
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<P::Scheme>,
+    term_length: TermLength,
     mailbox_size: NonZeroUsize,
     fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
@@ -1633,10 +1652,48 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
         );
         network.start();
 
-        let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
+        let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::<
+            Sha256Digest,
+            _,
+        >::new());
         let honest = participants[HONEST_ID].clone();
-        let mut registrations =
-            crate::utils::register(&mut oracle, std::slice::from_ref(&honest)).await;
+        let byzantine_participants: Vec<_> =
+            participants.iter().take(BYZANTINE_COUNT).cloned().collect();
+        let mut registrations = crate::utils::register(&mut oracle, &participants).await;
+        crate::utils::link_peers(
+            &mut oracle,
+            &participants,
+            crate::utils::Action::Link(simulated::Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            }),
+            None,
+        )
+        .await;
+
+        let mut vote_senders = Vec::new();
+        let mut certificate_senders = Vec::new();
+        let mut resolver_senders = Vec::new();
+        let mut vote_receivers = Vec::new();
+        let mut certificate_receivers = Vec::new();
+        let mut resolver_receivers = Vec::new();
+        for byz in participants.iter().take(BYZANTINE_COUNT) {
+            let (
+                (vote_sender, vote_receiver),
+                (cert_sender, cert_receiver),
+                (resolver_sender, resolver_receiver),
+            ) = registrations
+                .remove(byz)
+                .expect("byzantine participant must exist in recovery");
+            vote_senders.push(vote_sender);
+            certificate_senders.push(cert_sender);
+            resolver_senders.push(resolver_sender);
+            vote_receivers.push(vote_receiver);
+            certificate_receivers.push(cert_receiver);
+            resolver_receivers.push(resolver_receiver);
+        }
+
         let honest_channels = registrations
             .remove(&honest)
             .expect("honest participant must exist in recovery");
@@ -1646,9 +1703,9 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             &oracle,
             &participants,
             schemes[HONEST_ID].clone(),
-            honest,
-            <P::Elector as Default>::default(),
-            relay,
+            honest.clone(),
+            P::elector(term_length),
+            relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
             mailbox_size,
@@ -1660,9 +1717,39 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             certify,
             wiring,
         );
+        let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
 
-        let _ = reporter.subscribe().await;
-        context.sleep(std::time::Duration::from_millis(50)).await;
+        // Continue driving the recovered engine with byzantine traffic so
+        // replayed state (including mid-term floors under stable terms) is
+        // exercised against live votes, certificates, and resolver requests,
+        // not just a bare restart.
+        let (fuzzer_schemes, _) = schemes.split_at(BYZANTINE_COUNT);
+        let elector = simplex::round_robin(term_length).build(fuzzer_schemes[0].participants());
+        let mut driver = NodeDriver::<P::Scheme>::new(
+            context.child("simplex_node_recovery_driver"),
+            honest,
+            relay,
+            byzantine_participants,
+            fuzzer_schemes.to_vec(),
+            vote_senders,
+            certificate_senders,
+            resolver_senders,
+            vote_receivers,
+            certificate_receivers,
+            resolver_receivers,
+            elector,
+        );
+        // Poll the driver across the whole horizon, including past the
+        // certification timeout: timeout-generated nullify traffic must be
+        // consumed and resolver retries answered by live byzantine peers, not
+        // expire against an idle driver.
+        let rounds = (RECOVERY_HORIZON.as_millis() / RECOVERY_TICK.as_millis()) as usize;
+        for _ in 0..rounds {
+            driver.check_finalization(&mut latest, &mut monitor);
+            driver.handle_receivers().await;
+            driver.drive_progress().await;
+            context.sleep(RECOVERY_TICK).await;
+        }
     });
 }
 
@@ -1671,12 +1758,14 @@ mod tests {
     use super::*;
     use crate::fuzz_node;
     use commonware_macros::test_group;
+    use commonware_utils::NZU32;
 
     #[test_group("slow")]
     #[test]
     fn test_simplex_node_smoke() {
         let input = NodeFuzzInput {
             raw_bytes: vec![1, 2, 3, 4, 5],
+            term_length: TermLength::ONE,
             events: vec![
                 NodeEvent {
                     from_node_idx: 0,
@@ -1705,6 +1794,7 @@ mod tests {
     fn test_simplex_node_recovery_smoke() {
         let input = NodeFuzzInput {
             raw_bytes: vec![9, 8, 7, 6, 5],
+            term_length: TermLength::ONE,
             events: vec![
                 NodeEvent {
                     from_node_idx: 0,
@@ -1726,5 +1816,34 @@ mod tests {
             reporting: crate::ReporterWiring::Solo,
         };
         fuzz_node::<simplex::SimplexEd25519, WithRecovery>(input);
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn test_simplex_node_recovery_stable_term_smoke() {
+        let input = NodeFuzzInput {
+            raw_bytes: vec![9, 8, 7, 6, 5],
+            term_length: TermLength::new(NZU32!(3)),
+            events: vec![
+                NodeEvent {
+                    from_node_idx: 0,
+                    event: Event::OnProposalBroadcastThenNotarize,
+                },
+                NodeEvent {
+                    from_node_idx: 1,
+                    event: Event::OnNotarization,
+                },
+                NodeEvent {
+                    from_node_idx: 2,
+                    event: Event::OnNullification,
+                },
+            ],
+            mailbox_size: NZUsize!(1024),
+            fetch_concurrent: NZUsize!(1),
+            forwarding: ForwardingPolicy::Disabled,
+            certify: crate::CertifyChoice::Always,
+            reporting: crate::ReporterWiring::Solo,
+        };
+        fuzz_node::<simplex::SimplexId, WithRecovery>(input);
     }
 }

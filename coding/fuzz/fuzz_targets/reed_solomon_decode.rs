@@ -57,11 +57,7 @@ fn decode_codeword(config: &Config, codeword: &[Vec<u8>], indexes: &[u16]) {
     let mut builder = Builder::<Sha256>::new(codeword.len());
     let digests = codeword
         .iter()
-        .map(|shard| {
-            let mut hasher = Sha256::new();
-            hasher.update(shard);
-            hasher.finalize()
-        })
+        .map(|shard| Sha256::hash(&[shard.as_slice()]))
         .collect::<Vec<_>>();
     for digest in &digests {
         builder.add(digest);

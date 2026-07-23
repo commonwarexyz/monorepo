@@ -66,7 +66,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut set = Self::with_capacity(len);
+        let mut set = Self::with_capacity(len.min(buf.remaining()));
 
         // Read items in ascending order
         read_ordered_set(buf, len, cfg, |item| set.insert(item), HASHSET_TYPE)?;
@@ -307,6 +307,19 @@ mod tests {
             + Bytes::from_static(b"banana").encode_size()
             + Bytes::from_static(b"cherry").encode_size();
         assert_eq!(set3.encode_size(), expected_size);
+    }
+
+    #[test]
+    fn test_hashset_malicious_allocation() {
+        // A length prefix advertising the maximum wire-encodable length (u32::MAX) with a
+        // single-element payload must fail with [Error::EndOfBuffer] without attempting the
+        // advertised allocation.
+        let mut malicious_buf = BytesMut::new();
+        (u32::MAX as usize).write(&mut malicious_buf);
+        1u32.write(&mut malicious_buf);
+
+        let result = HashSet::<u32>::decode_cfg(malicious_buf.freeze(), &((..).into(), ()));
+        assert!(matches!(result, Err(Error::EndOfBuffer)));
     }
 
     #[cfg(feature = "arbitrary")]

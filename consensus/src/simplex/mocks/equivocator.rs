@@ -4,7 +4,7 @@ use super::relay::Relay;
 use crate::{
     Viewable,
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
+        elector::{self, Elector as _},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
@@ -18,18 +18,17 @@ use commonware_utils::ordered::Quorum;
 use rand::{Rng, RngExt as _, seq::IteratorRandom};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
+pub struct Config<S: certificate::Scheme, L: elector::Config<S>, H: Hasher> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
-    pub hasher: H,
 }
 
 pub struct Equivocator<
     E: Clock + Rng + Spawner,
     S: Scheme<H::Digest>,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     H: Hasher,
 > {
     context: ContextCell<E>,
@@ -37,15 +36,13 @@ pub struct Equivocator<
     elector: L::Elector,
     epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
-    hasher: H,
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
+impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: Hasher>
     Equivocator<E, S, L, H>
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
-        // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());
 
         Self {
@@ -53,7 +50,6 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             relay: cfg.relay,
-            hasher: cfg.hasher,
             elector,
             sent: HashSet::new(),
         }
@@ -129,10 +125,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             let payload_b = (next_round, parent, self.context.random::<u64>()).encode();
 
             // Compute digests
-            self.hasher.update(&payload_a);
-            let digest_a = self.hasher.finalize();
-            self.hasher.update(&payload_b);
-            let digest_b = self.hasher.finalize();
+            let digest_a = H::hash(&[&payload_a]);
+            let digest_b = H::hash(&[&payload_b]);
 
             let proposal_a = Proposal::new(next_round, view, digest_a);
             let proposal_b = Proposal::new(next_round, view, digest_b);

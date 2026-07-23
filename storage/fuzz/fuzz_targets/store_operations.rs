@@ -31,18 +31,19 @@ enum Operation {
     Prune,
     OpCount,
     InactivityFloorLoc,
+    IsEmpty,
     SimulateFailure,
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 10 {
+        match choice % 11 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
-                let value_bytes = u.bytes(actual_len)?.to_vec();
+                let value_bytes = u.bytes(actual_len.min(u.len()))?.to_vec();
                 Ok(Operation::Update { key, value_bytes })
             }
             1 => {
@@ -54,7 +55,7 @@ impl<'a> Arbitrary<'a> for Operation {
                 let metadata_bytes = if has_metadata {
                     let metadata_len: u16 = u.arbitrary()?;
                     let actual_len = ((metadata_len as usize) % 1000) + 1;
-                    Some(u.bytes(actual_len)?.to_vec())
+                    Some(u.bytes(actual_len.min(u.len()))?.to_vec())
                 } else {
                     None
                 };
@@ -69,7 +70,8 @@ impl<'a> Arbitrary<'a> for Operation {
             6 => Ok(Operation::Prune),
             7 => Ok(Operation::OpCount),
             8 => Ok(Operation::InactivityFloorLoc),
-            9 => Ok(Operation::SimulateFailure),
+            9 => Ok(Operation::IsEmpty),
+            10 => Ok(Operation::SimulateFailure),
             _ => unreachable!(),
         }
     }
@@ -83,11 +85,12 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        let raw_bytes = u.bytes(u.len())?.to_vec();
         Ok(FuzzInput { ops, raw_bytes })
     }
 }
@@ -115,7 +118,8 @@ fn test_config(
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
     let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
@@ -125,6 +129,9 @@ fn fuzz(input: FuzzInput) {
             .expect("Failed to init db");
         let mut restarts = 0usize;
         let mut pending: BTreeMap<Digest, Option<Vec<u8>>> = BTreeMap::new();
+        let mut committed: BTreeMap<Digest, Vec<u8>> = BTreeMap::new();
+        let mut committed_metadata = None;
+        let mut expected_size = db.size();
 
         for op in &input.ops {
             db = match op {
@@ -140,32 +147,71 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Commit { metadata_bytes } => {
                     let mut batch = db.new_batch();
-                    for (key, value) in std::mem::take(&mut pending) {
+                    let changes = std::mem::take(&mut pending);
+                    for (key, value) in &changes {
                         batch = match value {
-                            Some(v) => batch.update(key, v),
-                            None => batch.delete(key),
+                            Some(v) => batch.update(*key, v.clone()),
+                            None => batch.delete(*key),
                         };
                     }
                     let changeset = batch.finalize(metadata_bytes.clone());
-                    let (db, _) = db
+                    let (db, applied) = db
                         .apply_batch(changeset)
                         .await
                         .expect("Apply batch should not fail");
-                    db.commit().await.expect("Commit should not fail")
+                    assert_eq!(applied.start, expected_size);
+                    expected_size = applied.end;
+                    let db = db.commit().await.expect("Commit should not fail");
+                    for (key, value) in changes {
+                        match value {
+                            Some(value) => {
+                                committed.insert(key, value);
+                            }
+                            None => {
+                                committed.remove(&key);
+                            }
+                        }
+                    }
+                    committed_metadata = metadata_bytes.clone();
+                    db
                 }
 
                 Operation::Get { key } => {
                     let digest = Digest(*key);
-                    if let Some(value) = pending.get(&digest) {
-                        let _ = value.clone();
-                    } else {
-                        let _ = db.get(&digest).await;
+                    let committed_value = db.get(&digest).await.expect("Get should not fail");
+                    assert_eq!(
+                        committed_value,
+                        committed.get(&digest).cloned(),
+                        "Store get disagreed with committed model",
+                    );
+
+                    let mut batch = db.new_batch();
+                    for (key, value) in &pending {
+                        batch = match value {
+                            Some(value) => batch.update(*key, value.clone()),
+                            None => batch.delete(*key),
+                        };
                     }
+                    let expected = match pending.get(&digest) {
+                        Some(value) => value.clone(),
+                        None => committed.get(&digest).cloned(),
+                    };
+                    assert_eq!(
+                        batch.get(&digest).await.expect("Batch get should not fail"),
+                        expected,
+                        "Batch get disagreed with pending model",
+                    );
                     db
                 }
 
                 Operation::GetMetadata => {
-                    let _ = db.get_metadata().await;
+                    assert_eq!(
+                        db.get_metadata()
+                            .await
+                            .expect("Get metadata should not fail"),
+                        committed_metadata,
+                        "Store metadata disagreed with committed model",
+                    );
                     db
                 }
 
@@ -177,12 +223,33 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    assert_eq!(
+                        db.bounds().end,
+                        expected_size,
+                        "Store bounds disagreed with the modeled operation log"
+                    );
+                    assert_eq!(
+                        db.size(),
+                        expected_size,
+                        "Store size disagreed with the model"
+                    );
                     db
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.inactivity_floor_loc();
+                    assert!(
+                        db.inactivity_floor_loc() <= db.size(),
+                        "Inactivity floor exceeded store size",
+                    );
+                    db
+                }
+
+                Operation::IsEmpty => {
+                    assert_eq!(
+                        db.is_empty(),
+                        committed.is_empty(),
+                        "Store emptiness disagreed with committed model",
+                    );
                     db
                 }
 
@@ -197,6 +264,7 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     .expect("Failed to init db");
+                    expected_size = db.size();
                     restarts += 1;
                     db
                 }

@@ -14,19 +14,16 @@ pub enum Message {
 
 pub struct Notarization {
     pub payload: Sha256Digest,
-    /// None for threshold schemes where count is not exposed.
-    pub signature_count: Option<usize>,
+    /// Parent view of the certified proposal.
+    pub parent: u64,
 }
 
-pub struct Nullification {
-    /// None for threshold schemes where count is not exposed.
-    pub signature_count: Option<usize>,
-}
+pub struct Nullification;
 
 pub struct Finalization {
     pub payload: Sha256Digest,
-    /// None for threshold schemes where count is not exposed.
-    pub signature_count: Option<usize>,
+    /// Parent view of the certified proposal.
+    pub parent: u64,
 }
 
 /// Per-replica state: (notarizations, nullifications, finalizations) keyed by view.

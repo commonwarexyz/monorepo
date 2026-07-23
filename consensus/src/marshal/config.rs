@@ -71,7 +71,7 @@ where
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
     /// Useful for keeping around information that peers may desire to have.
-    pub view_retention_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
 
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
