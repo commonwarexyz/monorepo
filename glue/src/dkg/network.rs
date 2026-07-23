@@ -7,8 +7,8 @@
 //! epoch embeds the next epoch's directory, so the same certificate-backed
 //! artifact that names the committee also says how to reach it.
 //!
-//! Activation never consults application state. A node entering an epoch
-//! through state sync holds only a certified [`EpochInfo`] (from
+//! Activation never consults application state. A node beginning state sync
+//! initially holds only a certified [`EpochInfo`] (from
 //! [`probe`](crate::dkg::probe) or the persisted
 //! [`state_sync::Plan`](crate::dkg::state_sync::Plan)) and no synced state to
 //! resolve addresses from, so [`Manager::track`] consumes only the peer set
@@ -38,9 +38,9 @@ use thiserror::Error;
 /// A directory is consensus data: the proposer of an epoch's final block embeds
 /// the next epoch's directory in the epoch artifact and every verifier rebuilds
 /// and compares it, so all honest nodes agree on one directory per epoch. It is
-/// also the only reachability source available during recovery: restart and
-/// state-sync entry activate peers from the artifact alone, before any
-/// application state exists.
+/// also the only reachability source used during recovery: restart and
+/// state-sync entry activate peers from the artifact alone, without consulting
+/// application state.
 ///
 /// A directory MUST contain exactly the peers of its epoch (dealers, players,
 /// and next players).
@@ -99,6 +99,11 @@ impl<P: PublicKey> EncodeSize for Addresses<P> {
 }
 
 impl<P: PublicKey> Read for Addresses<P> {
+    /// Number of address entries accepted by the decoder.
+    ///
+    /// When decoding an [`EpochInfo`](crate::dkg::types::EpochInfo), this bound
+    /// must accept the union of its dealers, players, and next players and
+    /// reject larger directories.
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {

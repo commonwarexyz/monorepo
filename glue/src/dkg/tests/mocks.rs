@@ -82,7 +82,7 @@ impl<P: CryptoPublicKey> TestDirectory<P> for () {
 
 impl<P: CryptoPublicKey> TestDirectory<P> for Addresses<P> {
     fn codec_config(max_participants: NonZeroU32) -> Self::Cfg {
-        RangeCfg::new(0..=max_participants.get() as usize)
+        RangeCfg::new(0..=(max_participants.get() as usize).saturating_mul(3))
     }
 }
 

@@ -49,9 +49,9 @@
 //! state (e.g., a staking contract). The chain can announce future players first,
 //! giving those nodes an epoch to state sync and enter the next ceremony normally.
 //!
-//! A state-syncing node has no application state, so it can never resolve
-//! participant reachability from a state-backed registry. Everything required
-//! to connect to the active committee therefore rides in
+//! A node beginning state sync has no application state from which to resolve
+//! participant reachability. Everything required to connect to the active
+//! committee therefore rides in
 //! [`types::EpochInfo`] itself: the key-only participant sets and the
 //! transport [`network::Directory`] for those participants. The provider hooks
 //! are consulted only while building or verifying an epoch's final block,
@@ -173,6 +173,12 @@ pub trait ReshareBlock: Block {
     type Signer: Signer;
 
     /// Transport directory type carried by this block's epoch artifacts.
+    ///
+    /// Block decoders typically use the same per-set `max_participants` bound
+    /// for dealers, players, and next players. A collection bound in the
+    /// directory's codec configuration must accept their union, which may
+    /// contain up to three times as many distinct peers, and reject larger
+    /// directories.
     type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
 
     /// Retrieves the [`Payload`](types::Payload) carried by this block, if any.
@@ -293,13 +299,13 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// a deterministic provider contract failure.
     ///
     /// In continuous reshare, this hook is consulted while building or
-    /// verifying an epoch's final block. That final block carries the
-    /// [`types::EpochInfo`] for the next epoch, and this set is embedded
-    /// verbatim as that epoch info's `next_players`.
+    /// verifying the final block two epochs before `epoch`. That block carries
+    /// the [`types::EpochInfo`] for the following epoch, with this set embedded
+    /// verbatim as `next_players`.
     ///
     /// Therefore the result for `epoch` must be locked in before honest nodes
-    /// propose or verify the final block that announces `epoch` as
-    /// `next_players`. The proposer and every verifier independently rebuild
+    /// propose or verify the final block that announces it as `next_players`.
+    /// The proposer and every verifier independently rebuild
     /// and compare the value for equality. Because [`Set`] is order sensitive
     /// (both its equality and its encoding depend on element order), any
     /// divergence in membership or ordering between proposer and verifier
@@ -320,9 +326,10 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// This is consulted while building or verifying the final block of
     /// `epoch - 1`, under the same determinism and lock-in contract as
     /// [`participants`](Self::participants): for a given `epoch` and `peers`,
-    /// every honest node MUST return an identical value, and repeated calls
-    /// MUST return the same value. An update submitted during an epoch takes
-    /// effect in a later epoch's directory, never retroactively.
+    /// every honest node MUST return an identical value, including the same
+    /// reachability data for each peer, and repeated calls MUST return the same
+    /// value. An update submitted during an epoch takes effect in a later
+    /// epoch's directory, never retroactively.
     fn directory(
         &mut self,
         epoch: Epoch,

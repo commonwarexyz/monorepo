@@ -546,6 +546,10 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for EpochInfo<V, P, D
 impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
     /// Maximum entries accepted in each participant set, maximum supported
     /// sharing mode version, and directory codec configuration.
+    ///
+    /// The first value bounds each set independently. A collection bound in
+    /// the directory configuration must accept their union, which may contain
+    /// up to three times as many distinct peers, and reject larger directories.
     type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
 
     fn read_cfg(
@@ -670,6 +674,10 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
     /// Maximum entries accepted in each participant set, maximum supported
     /// sharing mode version, and directory codec configuration.
+    ///
+    /// The first value bounds each set independently. A collection bound in
+    /// the directory configuration must accept their union, which may contain
+    /// up to three times as many distinct peers, and reject larger directories.
     type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {

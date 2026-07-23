@@ -65,7 +65,7 @@ pub type Database<E> = Shared<Qmdb<E>>;
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
 /// Number of blocks in each epoch.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
-/// Maximum participant count accepted when decoding DKG payloads.
+/// Maximum entries accepted in each DKG participant set.
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
 /// Share derivation mode used by DKG and reshare ceremonies.
 pub const SHARING_MODE: Mode = Mode::NonZeroCounter;

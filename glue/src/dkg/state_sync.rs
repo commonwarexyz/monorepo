@@ -38,7 +38,7 @@ pub struct Config<C = ()> {
     /// Stable node-wide partition prefix.
     pub partition_prefix: String,
 
-    /// Maximum participants accepted in persisted epoch information.
+    /// Maximum entries accepted in each persisted participant set.
     pub max_participants: NonZeroU32,
 
     /// Maximum sharing mode version accepted in persisted epoch information.
@@ -46,9 +46,10 @@ pub struct Config<C = ()> {
 
     /// Codec configuration for persisted transport directories.
     ///
-    /// Collection limits MUST accommodate the union of dealers, players, and
-    /// next players, which may contain up to three times
-    /// [`Self::max_participants`] distinct entries.
+    /// Collection limits MUST accept the union of dealers, players, and next
+    /// players, which may contain up to three times
+    /// [`Self::max_participants`] distinct entries, and reject larger
+    /// directories.
     pub directory_codec_config: C,
 }
 

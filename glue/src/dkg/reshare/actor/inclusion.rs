@@ -470,9 +470,10 @@ where
     /// Build the final epoch artifact from finalized state plus pending logs.
     ///
     /// The resulting [`EpochInfo`] is a lookahead for `epoch + 1`: its output is
-    /// the outcome of this epoch's reshare, its players are this epoch's
-    /// next players, and its next players and transport directory are fetched
-    /// for the following epoch.
+    /// the outcome of this epoch's reshare, its players are this epoch's next
+    /// players, and its next players are fetched for the following epoch. Its
+    /// transport directory covers the complete participant union of the epoch
+    /// described by the artifact.
     ///
     /// Artifact construction never mutates metrics or durable state. A
     /// speculative result is cached only for the exact effective dealer-log map
