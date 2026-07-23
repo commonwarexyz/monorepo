@@ -15,6 +15,19 @@
 //! Data written to `Journal` may not be immediately persisted to `Storage`. Use the
 //! `sync` method to force pending data to be written.
 //!
+//! # Recovery
+//!
+//! [Journal::init] opens existing section blobs but does not fully validate their pages or item
+//! boundaries. Recovery is performed by [Journal::replay] as it reads each section. Replay treats
+//! the first invalid page or incomplete item in a section as that section's new end, truncates to
+//! the last complete item, and makes the repair durable.
+//!
+//! A reopened journal must therefore be replayed before it is read or mutated. Start recovery at
+//! section and position `0` unless a separately validated durable checkpoint proves that an
+//! earlier prefix can be skipped. Drain [Replay::next] until it returns `None`, then call
+//! [Replay::finish] to obtain the recovered journal. Dropping a replay early, ignoring an error,
+//! or starting after unverified data does not complete recovery.
+//!
 //! # Pruning
 //!
 //! All data must be assigned to a `section`. This allows pruning entire sections
@@ -71,26 +84,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 page_cache_ref: cfg.page_cache,
             },
         };
-        let mut manager = Manager::init(context, manager_cfg).await?;
-
-        // Repair any blobs with trailing bytes (incomplete items from crash)
-        let sections: Vec<_> = manager.sections().collect();
-        for section in sections {
-            let size = manager.size(section)?;
-            if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-                let valid_size = size - (size % Self::CHUNK_SIZE_U64);
-                warn!(
-                    section,
-                    invalid_size = size,
-                    new_size = valid_size,
-                    "trailing bytes detected: truncating"
-                );
-                manager.rewind_section(section, valid_size).await?;
-                // Startup repair is exceptional; make it durable immediately so callers do not
-                // need to track repaired sections separately.
-                manager.sync(section).await?;
-            }
-        }
+        let manager = Manager::init(context, manager_cfg).await?;
 
         Ok(Self {
             manager,
@@ -297,8 +291,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// init by checking each blob's size.
+/// underlying [Blob] will be truncated to the last valid item).
+///
+/// [Journal::init] only opens the backing blobs. It does not verify every page or ensure that
+/// each blob ends on an item boundary. That work is performed by [Journal::replay], so callers
+/// reopening a journal must fully drain replay and call [Replay::finish] before using the
+/// returned journal. Recovery should begin at `(0, 0)` unless an independently durable
+/// checkpoint validates the skipped prefix.
+///
+/// Replay repairs page checksum failures and incomplete trailing fixed-size items. Other runtime
+/// and codec errors are returned and make [Replay::finish] fail. Without a durable watermark,
+/// replay cannot distinguish a crash-torn unacknowledged tail from later external corruption; it
+/// applies the documented first-invalid-item-is-the-end policy in either case.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. [Journal::replay] consumes the journal into an owned [Replay]
@@ -322,8 +326,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Initialize a new `Journal` instance.
     ///
-    /// All backing blobs are opened but not read during initialization. Use `replay`
-    /// to iterate over all items.
+    /// All backing blobs are opened but not fully read or validated during initialization.
+    ///
+    /// # Recovery
+    ///
+    /// After reopening an existing journal, call [Journal::replay] from section and position
+    /// `0`, drain it until [Replay::next] returns `None`, and call [Replay::finish] before using
+    /// the journal. A non-zero replay start is suitable for recovery only when a separately
+    /// validated durable checkpoint covers the skipped prefix.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
@@ -382,6 +392,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Consumes the journal and returns an owned [Replay] reader over all items starting
     /// from `start_position` in `start_section`.
+    ///
+    /// Replay is also the journal's recovery pass: invalid pages and incomplete trailing items
+    /// are truncated to the last complete item in their section. To complete recovery, keep
+    /// calling [Replay::next] until it returns `None`, then call [Replay::finish]. Dropping the
+    /// replay or observing an error prevents the journal from being recovered.
+    ///
+    /// When recovering without a separately validated durable checkpoint, both
+    /// `start_section` and `start_position` must be `0`; data before the requested start is not
+    /// read, validated, or repaired.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
     /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
@@ -521,9 +540,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
 /// Owned replay reader over a [Journal]'s items.
 ///
-/// Yields `(section, position, item)` in order. Dropping the reader before it is exhausted
-/// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an
-/// exhausted reader to get the journal back.
+/// Yields `(section, position, item)` in order and repairs invalid data as it is encountered.
+/// A repair truncates the affected section to its last complete item and is synced before replay
+/// continues.
+///
+/// Recovery completes only after [Replay::next] returns `None` and [Replay::finish] succeeds.
+/// Dropping the reader before exhaustion drops the journal and may leave later sections
+/// unrepaired; recovery then requires re-initialization.
 pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     journal: Journal<E, A>,
     sections: VecDeque<SectionReplay<E::Blob>>,
@@ -537,7 +560,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section.
+    /// next section. The exception is [Error::ReplayInterrupted], which ends the
+    /// replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
         // A dropped future can interrupt a repair, leaving the section's writer with
         // in-memory state that no longer matches the blob. Fail the replay rather than
@@ -552,11 +576,29 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             match current.reader.ensure(Inner::<E, A>::CHUNK_SIZE).await {
                 Ok(true) => {}
                 Ok(false) => {
+                    if current.reader.remaining() != 0 {
+                        // A checksum-valid partial item at the end of the blob. Truncate to
+                        // the last complete item before returning the journal.
+                        let section = current.section;
+                        let valid_offset = current.position * Inner::<E, A>::CHUNK_SIZE_U64;
+                        warn!(
+                            blob = section,
+                            new_size = valid_offset,
+                            "incomplete item at end: truncating"
+                        );
+                        self.repairing = true;
+                        let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
+                        self.repairing = false;
+                        if let Err(err) = repaired {
+                            self.sections.pop_front();
+                            return self.fail(err);
+                        }
+                    }
                     // Reader exhausted, move to the next section
                     self.sections.pop_front();
                     continue;
                 }
-                Err(err) if matches!(err, commonware_runtime::Error::InvalidChecksum) => {
+                Err(commonware_runtime::Error::InvalidChecksum) => {
                     // A torn page in the unsynced tail. A synced page cannot tear, so this is
                     // unacknowledged data past the last durable sync; truncate to the last
                     // well-formed item (fixed-size, so `position` items = `position * CHUNK_SIZE`
@@ -609,8 +651,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 
     /// Returns the journal.
     ///
-    /// Fails when the reader was not fully drained or yielded an error: the journal is
-    /// destroyed and recovery is re-initialization.
+    /// This is the only successful completion of replay recovery. It fails when
+    /// [Replay::next] has not yet returned `None` or yielded an error. In that case the journal
+    /// is dropped and recovery requires re-initialization.
     pub fn finish(self) -> Result<Journal<E, A>, Error> {
         if self.errored || !self.finished {
             return Err(Error::ReplayFailed);
@@ -1577,13 +1620,24 @@ mod tests {
             blob.sync().await.expect("failed to sync");
             drop(blob);
 
-            // Reopen journal - should recover by truncating last page due to failed checksum, and
-            // end up with a correct blob size due to partial-item trimming.
+            // Reopen and replay. The paged writer removes the torn physical page, then replay
+            // trims the checksum-valid bytes left after the last complete item.
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("failed to replay");
+            let mut recovered = Vec::new();
+            while let Some(result) = replay.next().await {
+                let (_, _, item) = result.expect("replay failed");
+                recovered.push(item);
+            }
+            let journal = replay.finish().expect("failed to finish replay");
 
-            // Verify section now has only 2 items
+            // Verify replay recovered and retained exactly the two complete items.
+            assert_eq!(recovered, vec![test_digest(0), test_digest(1)]);
             assert_eq!(journal.section_len(1).unwrap(), 2);
 
             // Verify size is the expected multiple of ITEM_SIZE (this would fail if we didn't trim
@@ -1624,37 +1678,48 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Fill one section with enough items to span many physical pages.
+            // Commit a page-aligned prefix, then flush a multi-page tail without syncing it.
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
+            let synced_count: u64 = 64;
             let count: u64 = 500;
-            for i in 0..count {
+            for i in 0..synced_count {
                 (journal, _) = journal
                     .append(1, &test_digest(i))
                     .await
                     .expect("failed to append");
             }
             journal = journal.sync_all().await.expect("failed to sync");
+            for i in synced_count..count {
+                (journal, _) = journal
+                    .append(1, &test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            let replay = journal
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("failed to flush unsynced tail");
+            drop(replay);
             let (_, section_size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("failed to open section");
-            drop(journal);
 
             assert!(
                 section_size > 4 * 1024,
                 "test needs several pages, got {section_size}"
             );
 
-            // Corrupt an interior page, leaving later pages intact so init's backward scan
-            // still sizes the section past the hole. 1024 + 100 lands inside the second
-            // physical page regardless of the checksum-record size.
+            // Corrupt an interior page in the unsynced tail, leaving later pages intact so
+            // init's backward scan still sizes the section past the hole. 3 * 1024 + 100
+            // lands inside the fourth physical page despite the checksum records.
             let (blob, _) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("failed to open section");
-            blob.write_at_sync(1024 + 100, vec![0xFFu8; 16])
+            blob.write_at_sync(3 * 1024 + 100, vec![0xFFu8; 16])
                 .await
                 .expect("failed to corrupt interior page");
             drop(blob);
@@ -1666,7 +1731,9 @@ mod tests {
             let mut items = Vec::<Digest>::new();
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    // Prefetch the whole section so the invalid page shares a batch with
+                    // valid pages preceding it.
+                    .replay(0, 0, NZUsize!(1024 * 1024))
                     .await
                     .expect("unable to setup replay");
                 while let Some(result) = replay.next().await {
@@ -1676,9 +1743,13 @@ mod tests {
                 journal = replay.finish().expect("failed to finish replay");
             }
 
-            // Recovered a non-empty contiguous prefix, strictly shorter than everything
-            // appended (the torn page and the valid island past it are dropped).
-            assert!(!items.is_empty(), "expected a recovered prefix");
+            // The acknowledged prefix survives intact, while the torn page and the valid
+            // island past it are dropped.
+            assert!(
+                items.len() as u64 >= synced_count,
+                "lost acknowledged items: recovered {} of {synced_count}",
+                items.len()
+            );
             assert!(
                 (items.len() as u64) < count,
                 "torn tail must be dropped, recovered {} of {count}",
