@@ -550,7 +550,7 @@ async fn restart<P: Simplex>(
     ));
     let oracle_ref: &Oracle<PublicKeyOf<P>, deterministic::Context> = oracle;
     let rebuilt = dispatcher::with_default(&dispatch, || {
-        build_validator_with_reporter::<P, P::Elector, _, _, _, _, _, _>(
+        build_validator_with_reporter::<P, P::Elector, _, _, _, _, _, _, _>(
             existing,
             ctx,
             oracle_ref,

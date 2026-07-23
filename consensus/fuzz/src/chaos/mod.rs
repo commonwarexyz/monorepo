@@ -10,7 +10,9 @@
 //! - multiple concurrently broken nodes (a killed node beside a disconnected
 //!   one), composed by the schedule's per-node conditions;
 //! - the `crate::invariants` suite asserted at EVERY step boundary (not just
-//!   at episode end), plus a step-level finalized-payload-uniqueness oracle
+//!   at episode end): the audit-history invariants over the recording
+//!   reporters' lossless, generation-stamped event logs (each restart stamps a
+//!   new incarnation), plus a step-level finalized-payload-uniqueness oracle
 //!   over the reporters' append-only finalize-vote maps (loss-free across
 //!   polls).
 //!

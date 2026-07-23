@@ -5,8 +5,10 @@
 //! RNG-drawn jitter (so faults are not phase-locked to finalization
 //! boundaries), enacts it, then waits for a finalization past the step baseline
 //! or a deterministic timeout (pure pacing; a timeout is a normal outcome). The
-//! `crate::invariants` safety suite plus the finalized-payload-uniqueness check
-//! run at every step boundary with an EMPTY Byzantine set. When the input's
+//! `crate::invariants` suite, the audit-history invariants over the recording
+//! reporters' lossless event logs plus the summary-map checks and the
+//! finalized-payload-uniqueness check, runs at every step boundary with zero
+//! Byzantine nodes. When the input's
 //! finalization budget or the step cap is reached, the loop stops drawing
 //! faults and a finishing phase drains every pending heal through the same
 //! paced, safety-checked path, so a recovery the last drawn fault scheduled
@@ -28,13 +30,14 @@ use super::{
     watch::Checker,
 };
 use crate::{
-    CertifyChoice, ManagedValidator, N4F0C4, PublicKeyOf, bounds, build_validator,
-    build_validator_with_reporter, invariants,
+    CertifyChoice, ManagedValidator, N4F0C4, PublicKeyOf, bounds, build_validator_with_reporter,
+    invariants,
     mallory::{
         lifecycle,
         runner::{FinalizationClock, StepBoundary, wait_for_step_boundary},
     },
     simplex::Simplex,
+    simplex_audit::{RecordingReporter, summaries},
     utils::Partition,
 };
 use commonware_consensus::{
@@ -75,9 +78,21 @@ const CHAOS_JITTER_MS: u64 = 2_000;
 /// never a liveness assertion.
 const CHAOS_FINISH_SETTLE: Duration = CHAOS_STEP_TIMEOUT;
 
-/// The reporter type the runner snapshots for the safety checker.
-type ChaosReporter<P> =
+/// The recording reporter the runner snapshots for the safety checker.
+type ChaosReporter<P> = RecordingReporter<
+    deterministic::Context,
+    <P as Simplex>::Scheme,
+    <P as Simplex>::Elector,
+    Sha256Digest,
+>;
+
+/// The inner mock summary view the summary-map invariant calls read.
+type ChaosSummary<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+
+/// The managed-validator instantiation chaos drives: the shared harness with
+/// the recording reporter in place of the mock.
+type ChaosValidator<P> = ManagedValidator<P, ChaosReporter<P>>;
 
 /// Surgical connectivity controller: touches only the edges adjacent to the
 /// node whose state changes. A full-topology reset (`apply_partition`) would
@@ -182,7 +197,7 @@ impl<P: PublicKey> Connectivity<P> {
 /// pump/sniffer/dispatch re-wrap chaos does not install.
 #[allow(clippy::too_many_arguments)]
 async fn restart_durable<P: Simplex>(
-    mv: &mut ManagedValidator<P>,
+    mv: &mut ChaosValidator<P>,
     context: &deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -208,7 +223,7 @@ async fn restart_durable<P: Simplex>(
         .child("validator")
         .with_attribute("public_key", &validator);
     let scheme = mv.scheme().clone();
-    let rebuilt = build_validator_with_reporter::<P, P::Elector, _, _, _, _, _, _>(
+    let rebuilt = build_validator_with_reporter::<P, P::Elector, _, _, _, _, _, _, _>(
         Some(mv.reporter()),
         ctx,
         oracle,
@@ -230,12 +245,15 @@ async fn restart_durable<P: Simplex>(
         input.reporting,
     );
     mv.adopt(rebuilt);
+    // Stamp the retained audit log so post-restart events carry the new
+    // incarnation.
+    mv.reporter().set_generation(mv.generation());
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn enact<P: Simplex>(
     action: Action,
-    managed: &mut [ManagedValidator<P>],
+    managed: &mut [ChaosValidator<P>],
     net: &mut Connectivity<PublicKeyOf<P>>,
     context: &deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -280,7 +298,7 @@ async fn enact<P: Simplex>(
 
 /// Every finalize-voted `(view, payload)` from the reporters' append-only
 /// `finalizes` maps (so a conflict landing between two polls is never lost).
-fn finalize_votes<P: Simplex>(reporters: &[ChaosReporter<P>]) -> Vec<(u64, Sha256Digest)> {
+fn finalize_votes<P: Simplex>(reporters: &[ChaosSummary<P>]) -> Vec<(u64, Sha256Digest)> {
     let mut votes = Vec::new();
     for reporter in reporters {
         for (view, by_payload) in reporter.finalizes.lock().iter() {
@@ -300,26 +318,32 @@ fn check_safety<P: Simplex>(
     reporters: &[ChaosReporter<P>],
     term_length: TermLength,
 ) {
+    // Audit-history invariants plus the basic replica-state suite over the
+    // lossless per-node event logs. The logs live in the retained reporters,
+    // so they hold at every step boundary, including while a node is down.
+    invariants::check::<P>(term_length, reporters);
+
+    // Summary-map checks over the inner mock reporters. `summaries` also
+    // asserts each log's append order and generation monotonicity.
+    let summaries = summaries(reporters);
     // The finalize-vote uniqueness check reads the append-only `finalizes` map.
     // The harness reports individual finalize votes to the reporter directly
     // (no `AttributableReporter` wrapper), so this map is populated for every
     // scheme, attributable or not, and a conflict landing between polls is not
     // lost. On a healthy committee a view holds one payload, so this never
     // false-positives.
-    checker.observe(&finalize_votes::<P>(reporters));
-    for reporter in reporters {
+    checker.observe(&finalize_votes::<P>(&summaries));
+    for reporter in &summaries {
         reporter.assert_no_faults();
     }
-    invariants::check_no_invalid_reports(reporters);
+    invariants::check_no_invalid_reports(&summaries);
     invariants::check_vote_invariants(
         0,
         P::elector(term_length),
         Epoch::new(crate::EPOCH),
         term_length,
-        reporters,
+        &summaries,
     );
-    let states = invariants::extract(reporters);
-    invariants::check::<P>(term_length, states);
 }
 
 /// Enact one action, then wait a bounded observation window (a finalization
@@ -331,7 +355,7 @@ fn check_safety<P: Simplex>(
 #[allow(clippy::too_many_arguments)]
 async fn paced_enact<P: Simplex>(
     action: Action,
-    managed: &mut [ManagedValidator<P>],
+    managed: &mut [ChaosValidator<P>],
     net: &mut Connectivity<PublicKeyOf<P>>,
     context: &mut deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -429,14 +453,16 @@ where
         let term_length = P::effective_term_length(input.term_length);
         let relay = Arc::new(relay::Relay::new());
 
-        let mut managed: Vec<ManagedValidator<P>> = Vec::with_capacity(n);
+        let mut managed: Vec<ChaosValidator<P>> = Vec::with_capacity(n);
         for i in 0..n {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            managed.push(build_validator::<P, _, _, _, _, _, _, _>(
+            let partition = validator.to_string();
+            managed.push(build_validator_with_reporter::<P, _, _, _, _, _, _, _, _>(
+                None,
                 ctx,
                 &oracle,
                 &participants,
@@ -449,6 +475,7 @@ where
                 input.mailbox_size,
                 input.fetch_concurrent,
                 input.forwarding,
+                partition,
                 pending,
                 recovered,
                 resolver,
