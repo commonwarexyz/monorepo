@@ -18,7 +18,10 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt, futures::Pool};
-use futures::future::{Either, ready};
+use futures::{
+    future::{Either, ready},
+    poll,
+};
 use rand_core::Rng;
 use std::sync::mpsc::TryRecvError;
 use tracing::{Instrument as _, debug, info_span};
@@ -76,6 +79,12 @@ where
         select_loop! {
             self.context,
             on_start => {
+                // Observe every already-completed flush (releasing its marshal
+                // acknowledgement) before taking the next unit of work, so
+                // acknowledgements keep flowing even while the mailbox is
+                // never idle.
+                while poll!(syncs.next_completed()).is_ready() {}
+
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
                 // If a message is ready, it is always processed immediately.
