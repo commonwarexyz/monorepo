@@ -42,6 +42,10 @@ pub enum Error {
     UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("replay interrupted during repair")]
+    ReplayInterrupted,
+    #[error("replay failed")]
+    ReplayFailed,
     #[error("size overflow")]
     SizeOverflow,
     #[error("unexpected size: expected={0} actual={1}")]

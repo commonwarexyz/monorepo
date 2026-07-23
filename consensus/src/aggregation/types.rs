@@ -28,9 +28,6 @@ pub enum Error {
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(Epoch, String),
-    /// The local node is not a signer in the scheme for the specified epoch.
-    #[error("Not a signer at epoch {0}")]
-    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -492,7 +489,7 @@ mod tests {
         let schemes = &fixture.schemes;
         let item = Item {
             height: Height::new(100),
-            digest: Sha256::hash(b"test_item"),
+            digest: Sha256::hash(&[b"test_item"]),
         };
 
         // Test Item codec

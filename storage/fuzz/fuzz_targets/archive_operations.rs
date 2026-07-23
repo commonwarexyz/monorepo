@@ -82,18 +82,17 @@ fn fuzz(data: FuzzInput) {
                     key_data,
                     value_data,
                 } => {
-                    // Skip if we've pruned this index
-                    if let Some(already_pruned) = oldest_allowed
-                        && *index < already_pruned {
-                            continue;
-                        }
                     let key = Key::new(*key_data);
                     let value = Value::new(*value_data);
 
-                    // Put the item into the archive
-                    archive.put(*index, key, value).await.expect("put failed");
+                    // Put the item into the archive. A put below the prune floor is
+                    // satisfied without storing, so the model only records puts at or
+                    // above the floor.
+                    archive = archive.put(*index, key, value).await.expect("put failed");
+                    let below_floor = oldest_allowed.is_some_and(|min| *index < min);
+
                     // Only add if not already written (Archive doesn't allow overwrites)
-                    if !written_indices.contains(index) {
+                    if !below_floor && !written_indices.contains(index) {
                         items.push((*index, *key_data, *value_data));
                         written_indices.insert(*index);
                     }
@@ -195,7 +194,7 @@ fn fuzz(data: FuzzInput) {
 
                 ArchiveOperation::Prune(min) => {
                     let min = min - min % cfg.items_per_section.get();
-                    archive.prune(min).await.expect("prune failed");
+                    archive = archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
                             oldest_allowed = Some(min);
@@ -213,7 +212,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Sync => {
-                    archive.sync().await.expect("sync failed");
+                    archive = archive.sync().await.expect("sync failed");
                 }
 
                 ArchiveOperation::NextGap { start } => {
@@ -238,7 +237,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        archive.sync().await.expect("final sync failed");
+        archive = archive.sync().await.expect("final sync failed");
 
         let total_items = items.len();
         let total_written = written_indices.len();

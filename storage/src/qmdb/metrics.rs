@@ -44,6 +44,8 @@ pub(crate) struct Metrics<E: Clock> {
     pub commit_calls: Counter,
     /// Duration of commit calls.
     commit_duration: Timed,
+    /// Pipelined commits begun via `start_commit`.
+    pub start_commit_calls: Counter,
     /// Full sync calls.
     pub sync_calls: Counter,
     /// Duration of sync calls.
@@ -97,6 +99,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "commit_duration",
                 "Duration of commit calls",
             ),
+            start_commit_calls: context
+                .counter("start_commit_calls", "Number of start_commit calls"),
             sync_calls: context.counter("sync_calls", "Number of sync calls"),
             sync_duration: Timed::register(&context, "sync_duration", "Duration of sync calls"),
             prune_calls: context.counter("prune_calls", "Number of prune calls"),

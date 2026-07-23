@@ -192,7 +192,6 @@ where
 /// A mailbox for sending messages to the [`Engine`].
 ///
 /// [`Engine`]: super::Engine
-#[derive(Clone)]
 pub struct Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -201,6 +200,20 @@ where
     P: PublicKey,
 {
     pub(super) sender: Sender<Message<B, C, H, P>>,
+}
+
+impl<B, C, H, P> Clone for Mailbox<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 impl<B, C, H, P> Mailbox<B, C, H, P>

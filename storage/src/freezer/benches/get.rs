@@ -64,8 +64,8 @@ fn bench_get(c: &mut Criterion) {
     let cfg = Config::default();
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let (keys, checkpoint) = builder.start(|ctx| async move {
-        let mut store = init(ctx, None).await;
-        let keys = append_random(&mut store, ITEMS).await;
+        let store = init(ctx, None).await;
+        let (store, keys) = append_random(store, ITEMS).await;
         let checkpoint = store.close().await.unwrap();
         (keys, checkpoint)
     });

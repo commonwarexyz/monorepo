@@ -629,12 +629,19 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists).
+        /// An Ok result indicates the blob is durably created (or already exists). On
+        /// platforms without directory sync (e.g. Windows), the durability of the blob's
+        /// name is best-effort.
         ///
         /// # Versions
         ///
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
         /// [Error::BlobVersionMismatch].
+        ///
+        /// # Layout
+        ///
+        /// New blobs are created with the latest header layout. Reopening an existing blob
+        /// honors the layout recorded in its header.
         ///
         /// # Returns
         ///

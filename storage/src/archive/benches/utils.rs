@@ -1,7 +1,6 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
-use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{Archive as ArchiveTrait, Identifier, immutable, prunable},
@@ -51,7 +50,6 @@ impl Variant {
 }
 
 /// Concrete archive types
-#[allow(clippy::large_enum_variant)]
 pub enum Archive {
     Immutable(immutable::Archive<Context, Key, Val>),
     Prunable(prunable::Archive<TwoCap, Context, Key, Val>),
@@ -59,7 +57,6 @@ pub enum Archive {
 
 impl Archive {
     /// Initialize a new archive based on variant
-    #[boxed]
     pub async fn init(ctx: Context, variant: Variant, compression: Option<u8>) -> Self {
         match variant {
             Variant::Immutable => {
@@ -109,14 +106,14 @@ impl ArchiveTrait for Archive {
     type Value = Val;
 
     async fn put(
-        &mut self,
+        self,
         index: u64,
         key: Key,
         value: Val,
-    ) -> Result<(), commonware_storage::archive::Error> {
+    ) -> Result<Self, commonware_storage::archive::Error> {
         match self {
-            Self::Immutable(a) => a.put(index, key, value).await,
-            Self::Prunable(a) => a.put(index, key, value).await,
+            Self::Immutable(a) => a.put(index, key, value).await.map(Self::Immutable),
+            Self::Prunable(a) => a.put(index, key, value).await.map(Self::Prunable),
         }
     }
 
@@ -182,10 +179,10 @@ impl ArchiveTrait for Archive {
         }
     }
 
-    async fn sync(&mut self) -> Result<(), commonware_storage::archive::Error> {
+    async fn sync(self) -> Result<Self, commonware_storage::archive::Error> {
         match self {
-            Self::Immutable(a) => a.sync().await,
-            Self::Prunable(a) => a.sync().await,
+            Self::Immutable(a) => a.sync().await.map(Self::Immutable),
+            Self::Prunable(a) => a.sync().await.map(Self::Prunable),
         }
     }
 
@@ -198,7 +195,7 @@ impl ArchiveTrait for Archive {
 }
 
 /// Append `count` random (index,key,value) triples and sync once.
-pub async fn append_random(archive: &mut Archive, count: u64) -> Vec<Key> {
+pub async fn append_random(mut archive: Archive, count: u64) -> (Archive, Vec<Key>) {
     let mut rng = test_rng();
     let mut key_buf = [0u8; 64];
 
@@ -210,8 +207,8 @@ pub async fn append_random(archive: &mut Archive, count: u64) -> Vec<Key> {
 
         let mut val_buf = vec![0u8; VALUE_SIZE];
         rng.fill_bytes(&mut val_buf);
-        archive.put(i, key, val_buf).await.unwrap();
+        archive = archive.put(i, key, val_buf).await.unwrap();
     }
-    archive.sync().await.unwrap();
-    keys
+    archive = archive.sync().await.unwrap();
+    (archive, keys)
 }

@@ -6,6 +6,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
+use commonware_runtime::Handle;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
@@ -84,6 +85,12 @@ pub trait DbAny<F: Family>:
         key: &'a Self::Key,
     ) -> impl Future<Output = Result<Option<Self::Value>, Error<F>>> + Send + use<'a, F, Self>;
 
+    /// Get the values of multiple keys, returned in the same order as the input keys.
+    fn get_many<'a>(
+        &'a self,
+        keys: &'a [&'a Self::Key],
+    ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
@@ -103,6 +110,13 @@ pub trait DbAny<F: Family>:
 
     /// Prune historical operations prior to `loc`.
     fn prune(self, loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
+
+    /// Begin durably persisting the database.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
+    /// for the state applied before the call. Use [Self::sync] to also eliminate recovery on
+    /// startup.
+    fn start_commit(self) -> impl Future<Output = Result<(Self, Handle<()>), Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     ///
@@ -189,6 +203,10 @@ macro_rules! impl_db_any {
                 <$ty>::get(self, key).await
             }
 
+            async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
+                <$ty>::get_many(self, keys).await
+            }
+
             fn root(&self) -> $dig {
                 <$ty>::root(self)
             }
@@ -208,6 +226,15 @@ macro_rules! impl_db_any {
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
+            }
+
+            async fn start_commit(
+                self,
+            ) -> ::core::result::Result<
+                (Self, ::commonware_runtime::Handle<()>),
+                $crate::qmdb::Error<$fam>,
+            > {
+                <$ty>::start_commit(self).await
             }
 
             async fn commit(self) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {

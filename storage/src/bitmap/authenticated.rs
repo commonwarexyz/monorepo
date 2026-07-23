@@ -45,7 +45,7 @@ pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
     let next_bit = next_bit.to_be_bytes();
-    hasher.hash([
+    hasher.hash(&[
         mmr_root.as_ref(),
         next_bit.as_slice(),
         last_chunk_digest.as_ref(),
@@ -383,7 +383,10 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     /// Write the information necessary to restore the bitmap in its fully pruned state at its last
     /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
     /// retained elements.
-    pub async fn write_pruned(&mut self) -> Result<(), Error> {
+    ///
+    /// Consumes the bitmap and returns it only on success: an error (or a dropped future)
+    /// destroys the handle.
+    pub async fn write_pruned(mut self) -> Result<Self, Error> {
         self.metadata.clear();
 
         // Write the number of pruned chunks.
@@ -403,7 +406,8 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(Error::Metadata)
+        self.metadata = self.metadata.sync().await.map_err(Error::Metadata)?;
+        Ok(self)
     }
 
     /// Destroy the bitmap metadata from disk.
@@ -679,7 +683,7 @@ mod tests {
         assert_eq!(N % 32, 0);
         let mut vec: Vec<u8> = Vec::new();
         for _ in 0..N / 32 {
-            vec.extend(Sha256::hash(s).iter());
+            vec.extend(Sha256::hash(&[s]).iter());
         }
 
         vec.try_into().unwrap()

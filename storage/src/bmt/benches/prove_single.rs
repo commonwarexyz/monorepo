@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256, sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
@@ -33,12 +33,11 @@ fn bench_prove_single(c: &mut Criterion) {
                             .collect::<Vec<_>>()
                     },
                     |samples| {
-                        let mut hasher = Sha256::new();
                         for (pos, element) in samples {
                             let proof = tree.proof(pos).unwrap();
                             assert!(
                                 proof
-                                    .verify_element_inclusion(&mut hasher, &element, pos, &root)
+                                    .verify_element_inclusion::<Sha256>(&element, pos, &root)
                                     .is_ok()
                             );
                         }

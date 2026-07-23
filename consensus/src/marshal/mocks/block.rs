@@ -32,12 +32,12 @@ impl<D: Digest, C: Codec> Block<D, C> {
         height: Height,
         timestamp: u64,
     ) -> D {
-        let mut hasher = H::new();
-        hasher.update(parent);
-        hasher.update(&height.get().to_be_bytes());
-        hasher.update(&context.encode());
-        hasher.update(&timestamp.to_be_bytes());
-        hasher.finalize()
+        H::hash(&[
+            parent.as_ref(),
+            &height.get().to_be_bytes(),
+            &context.encode(),
+            &timestamp.to_be_bytes(),
+        ])
     }
 
     pub fn new<H: Hasher<Digest = D>>(

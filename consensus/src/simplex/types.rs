@@ -422,14 +422,35 @@ pub enum Certificate<S: Scheme, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
+/// The discriminant of a [Certificate], naming its kind without its contents.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Notarization,
+    Nullification,
+    Finalization,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for Kind {
+    /// Writes the stable trace field value for this certificate type.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Notarization => "notarization",
+            Self::Nullification => "nullification",
+            Self::Finalization => "finalization",
+        })
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    /// Returns the stable trace field value for this certificate's type.
-    pub(crate) const fn kind(&self) -> &'static str {
+    /// Returns this certificate's type.
+    pub(crate) const fn kind(&self) -> Kind {
         match self {
-            Self::Notarization(_) => "notarization",
-            Self::Nullification(_) => "nullification",
-            Self::Finalization(_) => "finalization",
+            Self::Notarization(_) => Kind::Notarization,
+            Self::Nullification(_) => Kind::Nullification,
+            Self::Finalization(_) => Kind::Finalization,
         }
     }
 }

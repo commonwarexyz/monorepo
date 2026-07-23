@@ -76,7 +76,8 @@ impl<E: Context> Stream<E> {
         self.metadata.put(LATEST_KEY, height);
     }
 
-    pub(super) async fn sync(&mut self) -> Result<(), metadata::Error> {
-        self.metadata.sync().await
+    pub(super) async fn sync(mut self) -> Result<Self, metadata::Error> {
+        self.metadata = self.metadata.sync().await?;
+        Ok(self)
     }
 }

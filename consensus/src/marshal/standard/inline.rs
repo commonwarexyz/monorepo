@@ -46,7 +46,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
     marshal::{
         Update,
-        application::gates::{self, Gates},
+        application::gates::{GateOutcome, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             Standard, relay,
@@ -174,7 +174,13 @@ impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -218,7 +224,13 @@ impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -349,6 +361,7 @@ where
                             consensus_context.clone(),
                         ),
                         ancestor_stream,
+                        (),
                     )
                     .instrument(info_span!(
                         "marshal.inline.application.propose",
@@ -413,9 +426,13 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // Register the certification gate synchronously so `certify` always finds it, even
-        // while the block subscription / durable sync is still in flight. A `true` result means
-        // the block is durably persisted; a `false` result is a live local verdict; a dropped
-        // sender means verification did not complete and certification should use recovery fetch.
+        // while the block subscription / durable sync is still in flight. Inline verification
+        // verdicts are scoped to the proposal context, while certification receives only a
+        // notarized `(round, digest)`, so this gate records durability rather than validity.
+        // Unlike deferred, inline blocks do not embed their context, so no local check can
+        // rule out an honest notarization forming under a different header for this key. A
+        // notarization also implies f+1 honest validators already ran application
+        // verification, so durability is the only local fact certification still needs.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
@@ -477,10 +494,19 @@ where
                 };
                 let block = match decision {
                     Decision::Complete(valid) => {
-                        // Re-proposal: precheck already persisted the block (durable) when
-                        // valid; epoch-reject when invalid. Hand the verdict to certify.
+                        // Re-proposal: a valid precheck already persisted the block
+                        // (durable), an invalid one is an epoch rejection. The re-proposal
+                        // reading is an artifact of this header's declared parent: a
+                        // conflicting header naming the block's real parent lets honest
+                        // validators verify the same block as a normal proposal and
+                        // notarize `(round, digest)`, so certification must recover
+                        // rather than adopt the rejection.
                         tx.send_lossy(valid);
-                        durable_tx.send_lossy(valid);
+                        durable_tx.send_lossy(if valid {
+                            GateOutcome::Ready(true)
+                        } else {
+                            GateOutcome::Recover
+                        });
                         return;
                     }
                     Decision::Continue(block) => block,
@@ -495,18 +521,20 @@ where
                 // parent fetch (which may hit the network) nor the verdict below.
                 // Storing before validation is intentional: these caches provide
                 // candidate availability/recovery, not a validity decision. The
-                // notarize vote follows the app verdict, while certify awaits the
-                // registered gate that resolves true only after both app
-                // verification succeeds and the store is durable.
+                // notarize vote follows the app verdict, while certify independently
+                // awaits the registered durability gate.
                 //
                 // The verify future below aborts when consensus drops its receiver
                 // (the view exited via nullification or finalization), even though
                 // certification can still fire for a nullified view. That is
-                // deliberate: inline's certify fallback does not need the app
+                // deliberate: inline certification does not need the local app
                 // verdict (a notarization implies f+1 honest validators already
-                // verified), and the store still completes through the join, so
-                // the fallback rides the verified write instead of re-persisting.
-                let store = marshal.verified(round, Arc::clone(&block));
+                // verified), and the store still completes through the join.
+                let store = async {
+                    if marshal.verified(round, Arc::clone(&block)).await {
+                        durable_tx.send_lossy(GateOutcome::Ready(true));
+                    }
+                };
                 let verify_then_vote = async {
                     // Non-reproposal path: validate the parent we already started
                     // fetching.
@@ -541,10 +569,7 @@ where
                     }
                     valid
                 };
-                let (verdict, durable) = futures::join!(verify_then_vote, store);
-                if let Some(valid) = gates::resolve(verdict, durable) {
-                    durable_tx.send_lossy(valid);
-                }
+                futures::join!(verify_then_vote, store);
             }
             .instrument(span)
         });
@@ -553,12 +578,19 @@ where
 }
 
 /// Inline certification consumes a registered certification gate when present, and
-/// falls back to a round-bound fetch/persist path after restart.
+/// falls back to a round-bound fetch/persist path when the gate is missing (after
+/// an unclean restart) or cannot speak for the notarized proposal.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -590,8 +622,8 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             async move {
-                // Preserve a live local verdict. Missing local state after an unclean restart
-                // has no task and falls through to the round-bound fetch path below.
+                // A ready gate proves the notarized block is durable. A gate that
+                // cannot speak for the notarized proposal falls through to recovery.
                 if let Some(task) = task {
                     let result = select! {
                         _ = tx.closed() => {
@@ -603,9 +635,12 @@ where
                         },
                         result = task => result,
                     };
-                    if let Ok(verdict) = result {
-                        tx.send_lossy(verdict);
-                        return;
+                    match result {
+                        Ok(GateOutcome::Ready(verdict)) => {
+                            tx.send_lossy(verdict);
+                            return;
+                        }
+                        Ok(GateOutcome::Recover) | Err(_) => {}
                     }
                 }
 
@@ -707,7 +742,13 @@ mod tests {
     where
         E: Rng + Spawner + Metrics + Clock,
         S: Scheme,
-        A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+        A: Application<
+                E,
+                Block = B,
+                SigningScheme = S,
+                Context = Context<B::Digest, S::PublicKey>,
+                Input = (),
+            >,
         B: Block + Clone,
         ES: crate::types::Epocher,
     {
@@ -746,7 +787,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -827,7 +868,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -899,7 +940,7 @@ mod tests {
             let marshal = setup.mailbox;
             let marshal_actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(context.child("inline"),
                 mock_app,
@@ -956,6 +997,92 @@ mod tests {
         });
     }
 
+    /// A header can only read as a re-proposal under its declared parent, so an
+    /// invalid-precheck rejection (non-boundary block) is scoped to that header,
+    /// not to the notarized `(round, digest)`. Certification must route through
+    /// recovery instead of adopting the rejection as its verdict.
+    #[test_traced("WARN")]
+    fn test_certify_recovers_from_invalid_reproposal_precheck() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mut inline = Inline::new(
+                context.child("inline"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // A non-boundary block notarized at view 2 and available locally.
+            let block_round = Round::new(Epoch::zero(), View::new(2));
+            let block = B::new::<Sha256>(
+                Ctx {
+                    round: block_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(2),
+                200,
+            );
+            let digest = block.digest();
+            assert!(marshal.verified(block_round, block).await);
+
+            // The view-3 header names the block as its own parent, so the
+            // precheck reads it as a re-proposal and rejects it (not at the
+            // epoch boundary).
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let reproposal_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(2), digest),
+            };
+            let verify_rx = inline.verify(reproposal_context, digest).await;
+            assert!(
+                !verify_rx.await.expect("verify result missing"),
+                "a non-boundary re-proposal must be rejected"
+            );
+
+            // The header-scoped rejection must not become the certification
+            // verdict for the notarized digest.
+            let certify_rx = inline.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify must recover instead of adopting the precheck rejection"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
+        });
+    }
+
     /// Regression: `certify` resolving true drives the finalize vote in inline
     /// mode, so it must imply the block is durably persisted even when the
     /// certify path subscribed before `verify()` finished.
@@ -998,7 +1125,7 @@ mod tests {
             let buffer = setup.extra;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -1097,7 +1224,7 @@ mod tests {
             let marshal = setup.mailbox;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Seed the parent at its round so `propose` can fetch it locally.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
@@ -1200,7 +1327,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -1276,7 +1403,7 @@ mod tests {
             let marshal = setup.mailbox;
             let buffer = setup.extra;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new();
             let mut inline = Inline::new(
@@ -1374,7 +1501,7 @@ mod tests {
 
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let ctx = Ctx {
                 round,
                 leader: me.clone(),
@@ -1435,6 +1562,123 @@ mod tests {
                 digest_rx.await.is_err(),
                 "propose must drop the receiver so the voter nullifies the round via timeout"
             );
+        });
+    }
+
+    /// Inline analog of the deferred equivocation test. A proposal that names
+    /// the certified view-1 parent for a block built on the view-2 block
+    /// fails structural parent validation and is rejected for voting. The
+    /// candidate is nevertheless stored durably, and certification of the
+    /// honest notarization for the same `(round, digest)` must use that
+    /// durability result rather than the context-scoped verification verdict.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
+            let mut inline = Inline::new(
+                context.child("inline"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let leader = participants[1].clone();
+
+            // The view-1 block: the parent this validator last certified.
+            let certified_round = Round::new(Epoch::zero(), View::new(1));
+            let certified_ctx = Ctx {
+                round: certified_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let certified = B::new::<Sha256>(certified_ctx, genesis.digest(), Height::new(1), 100);
+            let certified_digest = certified.digest();
+            assert!(marshal.verified(certified_round, certified).await);
+
+            // The view-2 block: notarized by the network but only nullified
+            // here, so this validator never certified it.
+            let notarized_round = Round::new(Epoch::zero(), View::new(2));
+            let notarized_ctx = Ctx {
+                round: notarized_round,
+                leader: leader.clone(),
+                parent: (View::new(1), certified_digest),
+            };
+            let notarized = B::new::<Sha256>(notarized_ctx, certified_digest, Height::new(2), 200);
+            let notarized_digest = notarized.digest();
+            assert!(marshal.verified(notarized_round, notarized).await);
+
+            // The view-3 block builds on the view-2 block. The leader's
+            // broadcast delivered it into the local buffer without a local
+            // verification.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let block_ctx = Ctx {
+                round,
+                leader: leader.clone(),
+                parent: (View::new(2), notarized_digest),
+            };
+            let block = B::new::<Sha256>(block_ctx, notarized_digest, Height::new(3), 300);
+            let digest = block.digest();
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), block)
+                    .accepted(),
+                "buffer broadcast for the candidate should be accepted"
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The equivocating proposal names the certified view-1 block as
+            // parent, which this validator's parent selection accepts
+            // (view 1 certified, view 2 nullified). Refusing to notarize it
+            // is correct.
+            let equivocating_ctx = Ctx {
+                round,
+                leader,
+                parent: (View::new(1), certified_digest),
+            };
+            let verify_rx = inline.verify(equivocating_ctx, digest).await;
+            assert!(
+                !verify_rx.await.expect("verify result missing"),
+                "the equivocating proposal must not be notarized"
+            );
+
+            // The honest notarization for the same `(round, digest)` arrives.
+            let certify_rx = inline.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized digest must not adopt the verdict computed under the equivocating context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
         });
     }
 }

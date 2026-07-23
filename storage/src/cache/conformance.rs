@@ -36,12 +36,12 @@ impl StorageWorkload for CacheWorkload {
             let index = i as u64 * 2 + (seed % 2);
             let mut value = vec![0; context.random_range(0..256)];
             context.fill(value.as_mut_slice());
-            cache.put(index, value).await?;
+            cache = cache.put(index, value).await?;
         }
-        cache.sync().await?;
+        cache = cache.sync().await?;
 
         if items > 32 {
-            cache.prune(32).await?;
+            cache = cache.prune(32).await?;
             cache.sync().await?;
         }
 

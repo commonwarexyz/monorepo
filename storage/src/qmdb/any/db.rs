@@ -20,7 +20,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -849,6 +849,31 @@ where
         self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
         Ok(self)
+    }
+
+    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
+    /// the Merkle state is not durably persisted, so recovery may be required on startup in the
+    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
+    /// the prior commit's sync before starting. Failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    #[tracing::instrument(
+        name = "qmdb.any.db.start_commit",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
+    #[boxed]
+    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
+        self.metrics.start_commit_calls.inc();
+        let (log, handle) = self.log.start_commit().await?;
+        self.log = log;
+        Ok((self, handle))
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]

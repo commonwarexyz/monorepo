@@ -87,7 +87,7 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
-    pub activity_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
@@ -102,7 +102,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     scheme: S,
     elector: L,
     epoch: Epoch,
-    activity_timeout: ViewDelta,
+    view_retention: ViewDelta,
     leader_timeout: Duration,
     certification_timeout: Duration,
     timeout_retry: Duration,
@@ -147,7 +147,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             scheme: cfg.scheme,
             elector: cfg.elector,
             epoch: cfg.epoch,
-            activity_timeout: cfg.activity_timeout,
+            view_retention: cfg.view_retention,
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
@@ -219,7 +219,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         Viewport {
             finalized: self.last_finalized,
             current: self.view,
-            activity_timeout: self.activity_timeout,
+            view_retention: self.view_retention,
             term_length: self.term_length(),
         }
     }
@@ -1090,7 +1090,7 @@ mod tests {
                     scheme: verifier.clone(),
                     elector: round_robin(&verifier),
                     epoch,
-                    activity_timeout: ViewDelta::new(10),
+                    view_retention: ViewDelta::new(10),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -1135,7 +1135,7 @@ mod tests {
         context: &mut deterministic::Context,
         validators: usize,
         epoch: u64,
-        activity_timeout: u64,
+        view_retention: u64,
         term_length: u32,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
         let namespace = b"ns".to_vec();
@@ -1158,7 +1158,7 @@ mod tests {
                 scheme: fixture.verifier.clone(),
                 elector,
                 epoch: Epoch::new(epoch),
-                activity_timeout: ViewDelta::new(activity_timeout),
+                view_retention: ViewDelta::new(view_retention),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1183,7 +1183,7 @@ mod tests {
                     scheme: verifier.clone(),
                     elector: round_robin(&verifier),
                     epoch: Epoch::new(11),
-                    activity_timeout: ViewDelta::new(6),
+                    view_retention: ViewDelta::new(6),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -1242,7 +1242,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(4),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
@@ -1318,7 +1318,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(30),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
@@ -1374,7 +1374,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(31),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1424,7 +1424,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(32),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1486,7 +1486,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(33),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1582,7 +1582,7 @@ mod tests {
                     Duration::from_secs(12),
                 ),
                 epoch: Epoch::new(34),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(3),
@@ -1627,7 +1627,7 @@ mod tests {
                     same_term_timeout,
                 ),
                 epoch: Epoch::new(35),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_millis(10),
                 certification_timeout: Duration::from_millis(20),
                 timeout_retry: retry,
@@ -1688,7 +1688,7 @@ mod tests {
                     same_term_timeout,
                 ),
                 epoch: Epoch::new(36),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1744,7 +1744,7 @@ mod tests {
                     stall_timeout,
                 ),
                 epoch: Epoch::new(7),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1788,7 +1788,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(33),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1824,7 +1824,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(9),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -1855,7 +1855,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(12),
-                activity_timeout: ViewDelta::new(3),
+                view_retention: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -1901,7 +1901,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(13),
-                activity_timeout: ViewDelta::new(3),
+                view_retention: ViewDelta::new(3),
                 leader_timeout,
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
@@ -1967,7 +1967,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(12),
-                activity_timeout: ViewDelta::new(3),
+                view_retention: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -2027,7 +2027,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(4),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -2081,7 +2081,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(7),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -2132,7 +2132,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(4),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -2198,7 +2198,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(7),
-                activity_timeout: ViewDelta::new(3),
+                view_retention: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -2632,7 +2632,7 @@ mod tests {
                         Duration::from_secs(4),
                     ),
                     epoch,
-                    activity_timeout: ViewDelta::new(20),
+                    view_retention: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
@@ -2683,7 +2683,7 @@ mod tests {
                     scheme: verifier.clone(),
                     elector: round_robin(&verifier),
                     epoch,
-                    activity_timeout: ViewDelta::new(5),
+                    view_retention: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
@@ -2733,7 +2733,7 @@ mod tests {
                     scheme: verifier.clone(),
                     elector: round_robin(&verifier),
                     epoch,
-                    activity_timeout: ViewDelta::new(5),
+                    view_retention: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
@@ -2787,7 +2787,7 @@ mod tests {
                     scheme: schemes[0].clone(),
                     elector: round_robin(&schemes[0]),
                     epoch,
-                    activity_timeout: ViewDelta::new(5),
+                    view_retention: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -2849,7 +2849,7 @@ mod tests {
                     scheme: schemes[0].clone(),
                     elector: round_robin(&schemes[0]),
                     epoch,
-                    activity_timeout: ViewDelta::new(5),
+                    view_retention: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -2889,7 +2889,7 @@ mod tests {
                     scheme: local_scheme.clone(),
                     elector: round_robin(&local_scheme),
                     epoch: Epoch::new(1),
-                    activity_timeout: ViewDelta::new(5),
+                    view_retention: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -2920,7 +2920,7 @@ mod tests {
                     scheme: local_scheme.clone(),
                     elector: round_robin(&local_scheme),
                     epoch: Epoch::new(1),
-                    activity_timeout: ViewDelta::new(5),
+                    view_retention: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -2948,7 +2948,7 @@ mod tests {
                 scheme: verifier.clone(),
                 elector: round_robin(&verifier),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3062,7 +3062,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3189,6 +3189,112 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_parent_headers_share_payload_but_certify_notarized_proposal() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            // The state signs its own view-3 nullify below, so it needs a
+            // signing scheme rather than setup_state's verifier.
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: round_robin(&verifier),
+                    epoch: Epoch::new(1),
+                    view_retention: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Certify view 1 so it remains an eligible parent.
+            let certified_view = View::new(1);
+            let certified_payload = Sha256Digest::from([31u8; 32]);
+            let certified_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), certified_view),
+                GENESIS_VIEW,
+                certified_payload,
+            );
+            let certified_notarization =
+                build_notarization(&verifier, &schemes, &certified_proposal);
+            assert!(state.add_notarization(certified_notarization).0);
+            assert!(state.certified(certified_view, true).is_some());
+
+            // Start certification for view 2, then nullify it before completion.
+            let nullified_view = View::new(2);
+            let nullified_payload = Sha256Digest::from([32u8; 32]);
+            let nullified_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), nullified_view),
+                certified_view,
+                nullified_payload,
+            );
+            let nullified_notarization =
+                build_notarization(&verifier, &schemes, &nullified_proposal);
+            assert!(state.add_notarization(nullified_notarization).0);
+            assert_eq!(state.certify_candidates(), vec![nullified_proposal]);
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(nullified_view, handle);
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), nullified_view));
+            assert!(state.add_nullification(nullification));
+
+            // The view-3 leader signs a header that reuses the honest block's
+            // payload but declares the older certified parent.
+            let view = View::new(3);
+            assert_eq!(state.current_view(), view);
+            assert_eq!(state.leader_index(view), Some(Participant::new(0)));
+            let payload = Sha256Digest::from([33u8; 32]);
+            let bad_proposal =
+                Proposal::new(Rnd::new(Epoch::new(1), view), certified_view, payload);
+            let good_proposal =
+                Proposal::new(Rnd::new(Epoch::new(1), view), nullified_view, payload);
+            assert_ne!(bad_proposal, good_proposal);
+            assert_eq!(bad_proposal.payload, good_proposal.payload);
+            assert!(Notarize::sign(&schemes[0], bad_proposal.clone()).is_some());
+
+            assert!(state.set_proposal(view, bad_proposal.clone()));
+            let (verify_context, verify_proposal) = state
+                .try_verify()
+                .expect("bad header should reach verification");
+            assert_eq!(verify_proposal, bad_proposal);
+            assert_eq!(verify_context.parent, (certified_view, certified_payload));
+
+            // The rejected header times out the view, so this validator
+            // nullifies view 3 before the honest notarization arrives.
+            state.trigger_timeout(view, TimeoutReason::InvalidProposal);
+            let (retry, _) = state
+                .construct_nullify(view, TimeoutReason::InvalidProposal)
+                .expect("nullify");
+            assert!(!retry);
+
+            // The Byzantine leader and the other two honest validators form a
+            // notarization for the header naming view 2, without this
+            // validator's vote. A local nullify must not suppress the
+            // certification dispatch.
+            let good_votes: Vec<_> = [0usize, 2, 3]
+                .into_iter()
+                .map(|index| {
+                    Notarize::sign(&schemes[index], good_proposal.clone()).expect("notarize")
+                })
+                .collect();
+            let good_notarization =
+                Notarization::from_notarizes(&verifier, good_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, equivocator) = state.add_notarization(good_notarization);
+            assert!(added);
+            assert!(equivocator.is_some());
+            assert_eq!(state.certify_candidates(), vec![good_proposal]);
+        });
+    }
+
+    #[test]
     fn nullification_then_late_certification_allows_child_to_build_on_parent() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -3202,7 +3308,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3258,7 +3364,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3326,7 +3432,7 @@ mod tests {
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
-                    activity_timeout: ViewDelta::new(10),
+                    view_retention: ViewDelta::new(10),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -3375,7 +3481,7 @@ mod tests {
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
-                    activity_timeout: ViewDelta::new(20),
+                    view_retention: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -3426,7 +3532,7 @@ mod tests {
                 scheme: local_scheme.clone(),
                 elector: round_robin(&local_scheme),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
@@ -3492,7 +3598,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(5),
+                view_retention: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3540,7 +3646,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3579,7 +3685,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3630,7 +3736,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3668,7 +3774,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3747,7 +3853,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3806,7 +3912,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3846,7 +3952,7 @@ mod tests {
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
-                    activity_timeout: ViewDelta::new(20),
+                    view_retention: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -3882,7 +3988,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(2),
+                view_retention: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -3950,7 +4056,7 @@ mod tests {
                         Duration::from_secs(4),
                     ),
                     epoch: Epoch::new(1),
-                    activity_timeout: ViewDelta::new(2),
+                    view_retention: ViewDelta::new(2),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
@@ -3986,7 +4092,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
@@ -4046,7 +4152,7 @@ mod tests {
                     Duration::from_secs(4),
                 ),
                 epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
+                view_retention: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),

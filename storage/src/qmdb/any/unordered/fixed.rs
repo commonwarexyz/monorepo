@@ -156,9 +156,12 @@ pub(crate) mod test {
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        reschedule,
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
     use core::num::NonZeroUsize;
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
@@ -199,6 +202,227 @@ pub(crate) mod test {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
         AnyTest::init(context, cfg).await.unwrap()
+    }
+
+    /// A [Db] over a delayed-sync storage backend.
+    type DelayedTest = Db<
+        mmr::Family,
+        DelayedSyncContext<deterministic::Context>,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+
+    /// Open a [DelayedTest] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the recovered database, so while syncs park the returned future
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
+    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
+    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    fn open_delayed_db(
+        context: &Context,
+        label: &'static str,
+        suffix: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
+        let mut cfg = fixed_db_config::<TwoCap>(suffix, context);
+        cfg.journal_config.items_per_blob = NZU64!(1000);
+        cfg.journal_config.page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        DelayedTest::init(
+            DelayedSyncContext {
+                inner: context.child(label),
+                pending: pending.clone(),
+            },
+            cfg,
+        )
+    }
+
+    /// Apply a single-key batch writing `key -> value`.
+    async fn apply_write(db: DelayedTest, key: Digest, value: Digest) -> DelayedTest {
+        let merkleized = db
+            .new_batch()
+            .write(key, Some(value))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db
+    }
+
+    /// A commit handle must not block database use while the backend sync is pending.
+    #[test_traced]
+    fn test_start_commit_overlaps_work() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&context, "delayed", "start_commit_overlap", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
+            db = apply_write(db, key0, value0).await;
+
+            let starts_before = pending.starts();
+            let entered_before = pending.entered();
+            let completions_before = pending.completions();
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before + 1,
+                "start_commit began exactly one blob sync"
+            );
+            assert_eq!(pending.completions(), completions_before);
+
+            // Observe the sync while the database keeps working.
+            let waiter = context
+                .child("await_sync")
+                .spawn(|_| async move { handle.await.unwrap() });
+            while pending.entered() == entered_before {
+                reschedule().await;
+            }
+
+            // Reads and applies complete before the sync does.
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+            let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let value1 = Sha256::hash(&[&200u64.to_be_bytes()]);
+            db = apply_write(db, key1, value1).await;
+            assert_eq!(
+                pending.completions(),
+                completions_before,
+                "the database made progress while the sync was still in flight"
+            );
+
+            pending.unblock();
+            waiter.await.unwrap();
+
+            // The mid-sync batch is durable after the next commit.
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            let size = db.bounds().end;
+            drop(db);
+
+            let db = open_delayed_db(&context, "reopen", "start_commit_overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A commit whose in-flight sync fails surfaces the error through both the returned handle
+    /// and the next durability operation.
+    #[test_traced]
+    fn test_start_commit_failure_propagates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Pass syncs through so opening the database doesn't park.
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&context, "delayed", "start_commit_fail", &pending)
+                .await
+                .unwrap();
+            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
+            db = apply_write(db, key0, value0).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the commit handle surfaces the failure"
+            );
+            let starts_before = pending.starts();
+            // A failed mutable method consumes the database per the failures-are-fatal contract.
+            assert!(
+                matches!(
+                    db.commit().await,
+                    Err(crate::qmdb::Error::Journal(crate::journal::Error::Runtime(
+                        _
+                    )))
+                ),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the surfaced error is the retained failure, not a fresh sync's"
+            );
+        });
+    }
+
+    /// Pruning drains the in-flight commit before mutating storage.
+    #[test_traced]
+    fn test_start_commit_prune_waits() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&context, "delayed", "start_commit_prune", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
+            db = apply_write(db, key0, value0).await;
+
+            let starts_before = pending.starts();
+            let handle;
+            (db, handle) = db.start_commit().await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before + 1,
+                "start_commit began exactly one blob sync"
+            );
+
+            // A non-trivial prune: the floor advanced past the seed commit.
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
+            let db = {
+                let mut prune = std::pin::pin!(db.prune(floor));
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the commit sync was pending"
+                );
+                assert_eq!(
+                    pending.starts(),
+                    starts_before + 2,
+                    "prune started the merkle journal sync before blocking"
+                );
+
+                // Release only the merkle sync (parked last): prune must still wait on the
+                // in-flight commit's sync before mutating the log.
+                {
+                    let mut parked = pending.lock();
+                    assert_eq!(
+                        parked.len(),
+                        2,
+                        "expected the commit and merkle syncs parked"
+                    );
+                    let merkle_sync = parked.pop().unwrap();
+                    merkle_sync.release.send(Ok(())).unwrap();
+                }
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the commit sync was pending"
+                );
+                assert_eq!(
+                    pending.lock().len(),
+                    1,
+                    "prune is blocked on the commit sync, not a new sync of its own"
+                );
+
+                pending.unblock();
+                prune.await.unwrap()
+            };
+            handle.await.unwrap();
+            db.destroy().await.unwrap();
+        });
     }
 
     /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
@@ -411,11 +635,11 @@ pub(crate) mod test {
     }
 
     fn key(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
+        Sha256::hash(&[&i.to_be_bytes()])
     }
 
     fn val(i: u64) -> Digest {
-        Sha256::hash(&(i + 10000).to_be_bytes())
+        Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
     /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
@@ -472,13 +696,13 @@ pub(crate) mod test {
         /// absent. Updated keys hold the commit-2 value. The rest hold their commit-1 value.
         fn expected_value(i: u64) -> Option<Digest> {
             if i % 21 == 1 {
-                Some(Sha256::hash(&(i * 13).to_be_bytes()))
+                Some(Sha256::hash(&[&(i * 13).to_be_bytes()]))
             } else if i % 7 == 1 {
                 None
             } else if i.is_multiple_of(3) {
-                Some(Sha256::hash(&((i + 1) * 11).to_be_bytes()))
+                Some(Sha256::hash(&[&((i + 1) * 11).to_be_bytes()]))
             } else {
-                Some(Sha256::hash(&(i * 7).to_be_bytes()))
+                Some(Sha256::hash(&[&(i * 7).to_be_bytes()]))
             }
         }
 
@@ -489,7 +713,7 @@ pub(crate) mod test {
             db: &PartDb<P, S>,
         ) {
             for i in 0u64..4000 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 assert_eq!(
                     db.get(&k).await.unwrap(),
                     expected_value(i),
@@ -506,8 +730,8 @@ pub(crate) mod test {
         // Commit 1: insert every key.
         let mut batch = db.new_batch();
         for i in 0u64..4000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&(i * 7).to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -517,12 +741,12 @@ pub(crate) mod test {
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
         let mut batch = db.new_batch();
         for i in (0u64..4000).step_by(3) {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&((i + 1) * 11).to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&((i + 1) * 11).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
         for i in (1u64..4000).step_by(7) {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -533,8 +757,8 @@ pub(crate) mod test {
         // delete-then-reinsert sequences for the parallel build to resolve.
         let mut batch = db.new_batch();
         for i in (1u64..4000).step_by(21) {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = Sha256::hash(&(i * 13).to_be_bytes());
+            let k = Sha256::hash(&[&i.to_be_bytes()]);
+            let v = Sha256::hash(&[&(i * 13).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -630,8 +854,8 @@ pub(crate) mod test {
                 .unwrap();
             let mut batch = db.new_batch();
             for i in 0u64..100 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&(i * 7).to_be_bytes());
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -752,8 +976,8 @@ pub(crate) mod test {
                 .unwrap();
             let merkleized = db
                 .new_batch()
-                .write(colliding_digest(0x10, 1), Some(Sha256::hash(b"v1")))
-                .write(colliding_digest(0x10, 2), Some(Sha256::hash(b"v2")))
+                .write(colliding_digest(0x10, 1), Some(Sha256::hash(&[b"v1"])))
+                .write(colliding_digest(0x10, 2), Some(Sha256::hash(&[b"v2"])))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
@@ -859,6 +1083,8 @@ pub(crate) mod test {
             assert_eq!(db.get(&k).await.unwrap(), Some(v));
             assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
             let db = db.commit().await.unwrap();
+            let (db, handle) = db.start_commit().await.unwrap();
+            handle.await.unwrap();
             let db = db.sync().await.unwrap();
             let _db = db.prune(Location::new(0)).await.unwrap();
 
@@ -875,6 +1101,7 @@ pub(crate) mod test {
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 3",
                 "db_commit_calls_total 1",
+                "db_start_commit_calls_total 1",
                 "db_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",
@@ -1218,10 +1445,10 @@ pub(crate) mod test {
 
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
-        let k = Sha256::hash(&UPDATES.to_be_bytes());
+        let k = Sha256::hash(&[&UPDATES.to_be_bytes()]);
         let mut batch = db.new_batch();
         for i in 0u64..UPDATES {
-            let v = Sha256::hash(&(i * 1000).to_be_bytes());
+            let v = Sha256::hash(&[&(i * 1000).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
