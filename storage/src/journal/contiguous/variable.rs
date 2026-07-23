@@ -1586,13 +1586,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::start_sync].
-    pub(crate) async fn start_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
+    pub(crate) async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
         let data = self.blobs.start_sync().await;
         let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
         let size = self.barrier.size();
-        let (offsets_journal, watermark_handle) = offsets_journal.start_watermark_sync(size).await;
+        let (offsets_journal, watermark_handle) =
+            offsets_journal.start_watermark_sync(size).await?;
         self.offsets = offsets_journal;
 
         let journal_handle: SyncCompletion =
@@ -1604,7 +1605,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             journal_handle.await?;
             watermark_handle.await
         });
-        (self, handle)
+        Ok((self, handle))
     }
 
     /// See [Journal::commit].
@@ -2337,10 +2338,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// pending when this call returns. Reads always proceed while the returned handle is
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
-    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
-        let (inner, handle) = self.0.start_sync().await;
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
-        (self, handle)
+        Ok((self, handle))
     }
 
     /// Persist data blobs and all metadata for both the data and offsets journals.
@@ -2448,7 +2449,7 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
-        Ok(Self::start_sync(self).await)
+        Self::start_sync(self).await
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -2608,7 +2609,7 @@ mod tests {
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
-            let (journal, handle) = journal.start_sync().await;
+            let (journal, handle) = journal.start_sync().await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
@@ -2643,7 +2644,7 @@ mod tests {
 
             // Nothing proven while the first sync is parked: the anchor must not move.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await;
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 0);
 
             release_pending_syncs(&pending);
@@ -2652,7 +2653,7 @@ mod tests {
             // The first sync is jointly proven (data and offsets), so the next call advances
             // the offsets watermark to its size, one interval behind the tip.
             journal.append(&4).await.unwrap();
-            let (journal, h2) = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 3);
             drive_pending_syncs(&pending, h2).await.unwrap();
 
@@ -2698,7 +2699,7 @@ mod tests {
             // Fail the data sync but let the offsets sync land: offsets durability alone must
             // not advance the anchor, which would point recovery past the surviving data.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await.unwrap();
             let data = next_pending_sync(&pending);
             release_pending_syncs(&pending);
             data.release
@@ -2708,7 +2709,7 @@ mod tests {
                 .unwrap();
             assert!(h1.await.is_err());
 
-            let (journal, h2) = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 0);
             assert!(h2.await.is_err());
         });
@@ -2750,7 +2751,7 @@ mod tests {
                 .await
                 .unwrap();
             journal.append(&9).await.unwrap();
-            let (journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await.unwrap();
             let data = next_pending_sync(&pending);
             release_pending_syncs(&pending);
             data.release
@@ -2760,7 +2761,7 @@ mod tests {
                 .unwrap();
             assert!(h1.await.is_err());
 
-            let (journal, h2) = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 2);
             assert!(h2.await.is_err());
         });
@@ -2792,13 +2793,13 @@ mod tests {
             );
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
             // Only the advance's offsets-checkpoint fsync is in flight: its failure surfaces
             // on the journal handle even though the data is durable.
-            let (mut journal, h2) = journal.start_sync().await;
+            let (mut journal, h2) = journal.start_sync().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(h2.await.is_err());
 
@@ -2840,7 +2841,7 @@ mod tests {
                 write_rate: Some(1.0),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await;
+            let (mut journal, handle) = journal.start_sync().await.unwrap();
             drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
@@ -7694,7 +7695,7 @@ mod tests {
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
-            (journal, handle) = journal.start_sync().await;
+            (journal, handle) = journal.start_sync().await.unwrap();
             handle.await.unwrap();
             (journal, _) = journal.prune(2).await.unwrap();
             journal = journal.rewind(4).await.unwrap();

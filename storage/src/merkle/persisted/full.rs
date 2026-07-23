@@ -635,7 +635,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // `journal_dirty` is deliberately not cleared: the started sync covers only nodes
         // flushed so far, and sync() remains the durability authority.
         self = self.flush_internal().await?;
-        let (journal, handle) = self.journal.start_sync().await;
+        let (journal, handle) = self.journal.start_sync().await?;
         self.journal = journal;
         Ok((self, handle))
     }

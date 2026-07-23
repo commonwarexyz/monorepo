@@ -93,8 +93,9 @@
 //! A durable value is safe to write at any time, so the watermark write needs no ordering
 //! against the in-flight data sync.
 //!
-//! A failed advance fails the returned handle. The checkpoint store retains the failure, so
-//! every later checkpoint write fails too.
+//! An advance that fails to start fails the call, destroying the journal. A started advance's
+//! failure surfaces on the returned handle, and the next checkpoint write observes it and
+//! fails before writing.
 //!
 //! The invariants:
 //!
@@ -846,24 +847,24 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(super) async fn start_watermark_sync(
         mut self: Box<Self>,
         size: u64,
-    ) -> (Box<Self>, Handle<()>) {
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
         let size = size.min(self.barrier.size());
-        let (checkpoint, handle) = self.checkpoint.start_watermark_sync(size).await;
+        let (checkpoint, handle) = self.checkpoint.start_watermark_sync(size).await?;
         self.checkpoint = checkpoint;
-        (self, handle)
+        Ok((self, handle))
     }
 
     /// See [Journal::start_sync].
-    pub(crate) async fn start_sync(self: Box<Self>) -> (Box<Self>, Handle<()>) {
+    pub(crate) async fn start_sync(self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
         let (mut journal, data) = self.start_data_sync().await;
         let size = journal.barrier.size();
-        let (journal, watermark) = journal.start_watermark_sync(size).await;
+        let (journal, watermark) = journal.start_watermark_sync(size).await?;
         let handle = Handle::from_future(async move {
             data.await?;
             watermark.await
         });
-        (journal, handle)
+        Ok((journal, handle))
     }
 
     /// See [Journal::commit].
@@ -1258,10 +1259,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// pending when this call returns. Reads always proceed while the returned handle is
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
-    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
-        let (inner, handle) = self.0.start_sync().await;
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
-        (self, handle)
+        Ok((self, handle))
     }
 
     /// Durably persist the current state of the structure, ensuring no recovery is required in the
@@ -1711,7 +1712,7 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
-        Ok(Self::start_sync(self).await)
+        Self::start_sync(self).await
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -1793,7 +1794,7 @@ mod tests {
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
-            let (journal, handle) = journal.start_sync().await;
+            let (journal, handle) = journal.start_sync().await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
@@ -1821,7 +1822,7 @@ mod tests {
 
             // Nothing proven while the first sync is parked: the watermark must not move.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await;
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 0);
 
             release_pending_syncs(&pending);
@@ -1830,12 +1831,14 @@ mod tests {
             // The first sync is proven, so the next call advances the watermark to its size,
             // one interval behind the tip.
             journal.append(&4).await.unwrap();
-            let (journal, h2) = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
             drive_pending_syncs(&pending, h2).await.unwrap();
 
             // A third call catches the watermark up to the second sync's size.
-            let (journal, h3) = drive_pending_syncs(&pending, journal.start_sync()).await;
+            let (journal, h3) = drive_pending_syncs(&pending, journal.start_sync())
+                .await
+                .unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
             drive_pending_syncs(&pending, h3).await.unwrap();
 
@@ -1868,13 +1871,13 @@ mod tests {
             );
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(h1.await.is_err());
 
             // The failed sync proves nothing: the watermark must not advance, and the retained
             // failure resurfaces on the next call's handle.
-            let (journal, h2) = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 0);
             assert!(h2.await.is_err());
         });
@@ -1898,13 +1901,13 @@ mod tests {
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await;
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
             // This parks the metadata sync advancing the watermark to 3.
             journal.append(&4).await.unwrap();
-            let (journal, h2) = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
 
             // Rewind below the in-flight advance: the lowered value must win on reopen.
@@ -1944,27 +1947,23 @@ mod tests {
             // Prove three items durable (watermark 3), then one more so the next call has an
             // advance to start.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await;
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
             h1.await.unwrap();
             journal.append(&4).await.unwrap();
             let journal = journal.commit().await.unwrap();
 
-            // The advance's inline metadata writes fail: the failure surfaces on the
-            // journal handle even though the data is durable.
+            // The advance's inline metadata writes fail: the call fails, consuming the
+            // journal, even though the data is durable.
             faults.arm();
-            let (mut journal, h2) = journal.start_sync().await;
-            assert!(h2.await.is_err());
+            assert!(journal.start_sync().await.is_err());
             faults.disarm();
 
-            // The checkpoint store retained the failure: commit (which does not write the
-            // checkpoint) still succeeds, and the next operation that does fails.
-            journal.append(&5).await.unwrap();
-            let journal = journal.commit().await.unwrap();
-            assert!(journal.sync().await.is_err());
-
-            // The failed advance and sync never compromised the data: a reopen recovers it all.
-            let journal = make(faults).await.unwrap();
-            assert_eq!(journal.bounds(), 0..5);
+            // The failed advance never compromised the data: a reopen recovers it all and a
+            // fresh sync succeeds.
+            let journal = Box::new(make(faults).await.unwrap());
+            assert_eq!(journal.bounds(), 0..4);
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
             journal.destroy().await.unwrap();
         });
     }
@@ -1988,24 +1987,25 @@ mod tests {
             );
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
             // Only the advance's metadata fsync is in flight: its failure surfaces on the
             // journal handle even though the data is durable.
-            let (mut journal, h2) = journal.start_sync().await;
+            let (mut journal, h2) = journal.start_sync().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(h2.await.is_err());
 
             // An advance at or below the staged value is skipped, so the next handle succeeds:
-            // the retained failure resurfaces only on the next checkpoint write.
+            // the failure is observed only by the next checkpoint write.
             journal.append(&4).await.unwrap();
-            let (journal, h3) = journal.start_sync().await;
+            let (journal, h3) = journal.start_sync().await.unwrap();
             drive_pending_syncs(&pending, h3).await.unwrap();
 
-            // The checkpoint store retained the failure: commit (which does not write the
-            // checkpoint) still succeeds, and the next operation that does fails.
+            // The failed advance's completion stays pending until observed: commit (which
+            // does not write the checkpoint) still succeeds, and the next checkpoint write
+            // observes the failure and fails.
             let journal = drive_pending_syncs(&pending, journal.commit())
                 .await
                 .unwrap();
@@ -2077,7 +2077,7 @@ mod tests {
                 .await
                 .unwrap();
             journal.append(&9).await.unwrap();
-            let (journal, handle) = journal.start_sync().await;
+            let (journal, handle) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 2);
 
             pending.unblock();
@@ -2107,7 +2107,7 @@ mod tests {
                 write_rate: Some(1.0),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await;
+            let (mut journal, handle) = journal.start_sync().await.unwrap();
             drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
@@ -5711,7 +5711,7 @@ mod tests {
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
-            (journal, handle) = journal.start_sync().await;
+            (journal, handle) = journal.start_sync().await.unwrap();
             handle.await.unwrap();
             let (journal, reader) = journal.snapshot().await.unwrap();
             reader.read(0).await.unwrap();

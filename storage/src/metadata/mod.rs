@@ -119,9 +119,9 @@ mod tests {
             // the copy it left as last-known-durable.
             let key = U64::new(1);
             metadata.put(key.clone(), vec![3]);
-            let (mut metadata, h1) = metadata.start_sync().await;
+            let (mut metadata, h1) = metadata.start_sync().await.unwrap();
             metadata.put(key.clone(), vec![4]);
-            let (metadata, h2) = metadata.start_sync().await;
+            let (metadata, h2) = metadata.start_sync().await.unwrap();
             h1.await.unwrap();
             h2.await.unwrap();
             metadata.destroy().await.unwrap();
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_failure_is_retained() {
+    fn test_start_sync_failure_fails_next_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -154,20 +154,14 @@ mod tests {
             .unwrap();
 
             metadata.put(U64::new(1), vec![3]);
-            let (mut metadata, handle) = metadata.start_sync().await;
+            let (mut metadata, handle) = metadata.start_sync().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(handle.await.is_err());
 
-            // The failed copy's on-disk state is unknown, so every later sync must keep
-            // failing rather than write to the only durable copy.
+            // The failed copy's on-disk state is unknown: the next sync observes the failure
+            // and fails, consuming the store, without writing the only durable copy.
             metadata.put(U64::new(1), vec![4]);
-            let (metadata, retry) = metadata.start_sync().await;
-            assert!(retry.await.is_err());
-            let (metadata, retry) = metadata.start_sync().await;
-            assert!(retry.await.is_err());
-
-            // Destroy ignores the retained failure: everything is being removed.
-            metadata.destroy().await.unwrap();
+            assert!(metadata.start_sync().await.is_err());
         });
     }
 
@@ -193,7 +187,7 @@ mod tests {
             // Drop the handle while its sync is still parked: the sync must proceed anyway.
             let key = U64::new(1);
             metadata.put(key.clone(), vec![3]);
-            let (metadata, handle) = metadata.start_sync().await;
+            let (metadata, handle) = metadata.start_sync().await.unwrap();
             drop(handle);
             release_pending_syncs(&pending);
             let metadata = drive_pending_syncs(&pending, metadata.sync())
@@ -209,7 +203,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_dropped_handle_retains_failure() {
+    fn test_start_sync_dropped_handle_fails_next_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -228,15 +222,12 @@ mod tests {
             .unwrap();
 
             // Drop the handle before its sync fails: nobody observes the failure directly,
-            // but the store must still refuse every later sync.
+            // but the next sync does, failing without writing the only durable copy.
             metadata.put(U64::new(1), vec![3]);
-            let (metadata, handle) = metadata.start_sync().await;
+            let (metadata, handle) = metadata.start_sync().await.unwrap();
             drop(handle);
             fail_pending_syncs(&pending);
 
-            let (metadata, retry) = metadata.start_sync().await;
-            assert!(retry.await.is_err());
-            // A failed sync consumes the store, so it is the final observation.
             assert!(metadata.sync().await.is_err());
         });
     }
@@ -256,9 +247,9 @@ mod tests {
 
             let key = U64::new(1);
             metadata.put(key.clone(), vec![3]);
-            let (mut metadata, h1) = metadata.start_sync().await;
+            let (mut metadata, h1) = metadata.start_sync().await.unwrap();
             metadata.put(key.clone(), vec![4]);
-            let (metadata, h2) = metadata.start_sync().await;
+            let (metadata, h2) = metadata.start_sync().await.unwrap();
             h1.await.unwrap();
             h2.await.unwrap();
             drop(metadata);
@@ -271,7 +262,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_inline_write_failure_is_retained() {
+    fn test_start_sync_write_failure_consumes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let faults = WriteFaults::default();
@@ -284,7 +275,7 @@ mod tests {
                     inner: context.child("first"),
                     faults: faults.clone(),
                 },
-                cfg,
+                cfg.clone(),
             )
             .await
             .unwrap();
@@ -298,21 +289,24 @@ mod tests {
             metadata = metadata.sync().await.unwrap();
 
             // The injected failure hits the inline writes, after the cursor has rotated onto
-            // the target copy: its on-disk state is now unknown. The failed start surfaces as
-            // an already-failed handle.
+            // the target copy: the call fails, consuming the store.
             faults.arm();
             metadata.put(key.clone(), vec![3; 8]);
-            let (mut metadata, failed) = metadata.start_sync().await;
-            assert!(failed.await.is_err());
+            assert!(metadata.start_sync().await.is_err());
             faults.disarm();
 
-            // The failure is retained: every later sync fails without writing either copy.
-            let writes_before = faults.writes();
-            metadata.put(key.clone(), vec![4; 8]);
-            let (metadata, retry) = metadata.start_sync().await;
-            assert!(retry.await.is_err());
-            assert_eq!(faults.writes(), writes_before);
-            assert!(metadata.sync().await.is_err());
+            // The store died with the target copy in an unknown state: a reopen recovers the
+            // last durable value.
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(
+                WriteFaultContext {
+                    inner: context.child("second"),
+                    faults,
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&key), Some(&vec![2; 8]));
         });
     }
 
@@ -344,7 +338,7 @@ mod tests {
             // single byte to the other (only durable) copy.
             let key = U64::new(1);
             metadata.put(key.clone(), vec![3]);
-            let (mut metadata, handle) = metadata.start_sync().await;
+            let (mut metadata, handle) = metadata.start_sync().await.unwrap();
             metadata.put(key.clone(), vec![4]);
             let writes_before = faults.writes();
             let mut second = Box::pin(metadata.sync());
