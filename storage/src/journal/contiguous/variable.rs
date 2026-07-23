@@ -2631,7 +2631,7 @@ mod tests {
     }
 
     /// With the barrier covering the boundary, a prune completes without starting (or
-    /// waiting on) any sync — including the offsets commit — and the durable prefix
+    /// waiting on) any sync, including the offsets commit, and the durable prefix
     /// survives reopen.
     #[test_traced]
     fn test_prune_skips_sync_when_barrier_covers_boundary() {
