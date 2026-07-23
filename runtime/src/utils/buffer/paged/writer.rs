@@ -680,8 +680,8 @@ impl<B: Blob> Writer<B> {
     /// Build a CRC record that preserves the old CRC in its original slot and places the new CRC
     /// in the other slot.
     ///
-    /// A subsequent flush writes around the preserved slot, so an interrupted rewrite can recover
-    /// either the old partial page or the new one.
+    /// The rewrite resubmits the preserved slot byte-identically, so an interrupted rewrite can
+    /// recover either the old partial page or the new one.
     const fn build_crc_record_preserving_old(
         new_len: u16,
         new_crc: u32,
@@ -822,14 +822,13 @@ impl<B: Blob> Writer<B> {
     /// The flush's write can be persisted with [`Blob::write_at_sync`]. If there are earlier
     /// unsynced mutations, durability is completed with [`Blob::sync`].
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Flush any buffered data, including any partial page.
-        // An emitted write is made durable directly during the flush.
+        // Flush any buffered data, including any partial page. A flush that writes to the blob
+        // makes that write durable itself and returns true.
         if self.flush_internal(true, true).await? {
             return Ok(());
         }
 
-        // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
-        // durability barrier is still pending.
+        // The flush had nothing to write. Sync only if a durability barrier is still pending.
         self.sync_state.sync(&self.blob).await
     }
 
@@ -2980,6 +2979,145 @@ mod tests {
         async fn start_sync(&self) -> Handle<()> {
             self.inner.start_sync().await
         }
+    }
+
+    /// Blob wrapper that turns one write into a durable suffix-only write followed by an error.
+    ///
+    /// The torn-write contract on [crate::Blob] allows any subset of a write's bytes to land.
+    /// This models the adversarial subset for a partial-page rewrite: the trailing CRC record
+    /// persists while the payload bytes ahead of it do not.
+    #[derive(Clone)]
+    struct SuffixWriteBlob<B: Blob> {
+        inner: B,
+        writes: Arc<AtomicUsize>,
+        fail_on: usize,
+        suffix_len: usize,
+    }
+
+    impl<B: Blob> SuffixWriteBlob<B> {
+        fn new(inner: B, fail_on: usize, suffix_len: usize) -> Self {
+            Self {
+                inner,
+                writes: Arc::new(AtomicUsize::new(0)),
+                fail_on,
+                suffix_len,
+            }
+        }
+
+        async fn tear(&self, offset: u64, bytes: IoBuf) -> Result<(), Error> {
+            let keep_start = bytes.len() - self.suffix_len.min(bytes.len());
+            self.inner
+                .write_at(offset + keep_start as u64, bytes.slice(keep_start..))
+                .await?;
+            self.inner.sync().await?;
+            Err(Error::Io(
+                std::io::Error::other("injected torn write").into(),
+            ))
+        }
+    }
+
+    impl<B: Blob> crate::Blob for SuffixWriteBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            let bufs = bufs.into();
+            let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if write == self.fail_on {
+                return self.tear(offset, bufs.coalesce()).await;
+            }
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let bufs = bufs.into();
+            let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if write == self.fail_on {
+                return self.tear(offset, bufs.coalesce()).await;
+            }
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    #[test]
+    fn test_torn_rewrite_lands_crc_without_payload() {
+        // The adversarial tear for a partial-page rewrite: the new CRC record persists while the
+        // extension payload does not. The new checksum must fail validation and recovery must
+        // fall back to the preserved slot's committed prefix.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let (blob, size) = context
+                .open("test_partition", b"torn_rewrite")
+                .await
+                .unwrap();
+
+            // The first write persists a partial page. The second (the extension's full-page
+            // rewrite) is torn down to its trailing CRC record.
+            let faulty = SuffixWriteBlob::new(blob.clone(), 2, CHECKSUM_SIZE as usize);
+            let mut append = Writer::new(faulty, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Durably commit a partial page.
+            append.append(b"abc").await.unwrap();
+            append.sync().await.unwrap();
+
+            // Extend it. The injected tear persists only the new CRC record.
+            append.append(b"de").await.unwrap();
+            assert!(append.sync().await.is_err());
+            drop(append);
+
+            // The new record reached the blob: the preserved slot still covers the prefix and
+            // the alternate slot advertises the torn extension.
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
+            let page = blob
+                .read_at(0, physical_page_size)
+                .await
+                .unwrap()
+                .coalesce();
+            let record = read_crc_record_from_page(page.as_ref());
+            assert_eq!(record.len1, 3);
+            assert_eq!(record.len2, 5);
+
+            // Recovery falls back to the preserved slot covering the committed prefix.
+            let (blob, size) = context
+                .open("test_partition", b"torn_rewrite")
+                .await
+                .unwrap();
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size(), 3);
+            let read = append.read_at(0, 3).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"abc");
+        });
     }
 
     /// Blob wrapper that delays one selected read after capturing its current bytes.

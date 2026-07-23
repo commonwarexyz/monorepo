@@ -42,6 +42,10 @@ pub struct Config {
     /// before failure) rather than a complete failure (no bytes written).
     /// Only applies when `write_rate` triggers a failure.
     /// Value from 0.0 (always complete failure) to 1.0 (always partial write).
+    ///
+    /// Injected partial writes persist a prefix of the buffer, a strictly narrower
+    /// outcome than the torn-write contract on [crate::Blob], which allows any
+    /// subset of a write's bytes to land.
     pub partial_write_rate: Option<f64>,
 
     /// Failure rate for `sync` operations.

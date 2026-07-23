@@ -43,9 +43,51 @@ where
     );
 }
 
+/// Bytes appended per record in the sync-cadence benchmark.
+const SYNC_CHUNK: usize = 256;
+
+fn bench_sync_backend<R>(c: &mut Criterion, backend: &str, per_sync: usize)
+where
+    R: Runner + Default,
+    R::Context: Storage + BufferPooler,
+{
+    c.bench_function(
+        &format!("{}/backend={backend} per_sync={per_sync}", module_path!()),
+        |b| {
+            b.iter_custom(|iters| {
+                let name = format!("append_sync_{backend}_{per_sync}").into_bytes();
+                let data = vec![0xABu8; SYNC_CHUNK];
+
+                let executor = R::default();
+                executor.start(|ctx| async move {
+                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let mut append = create_append(&ctx, &name, cache_ref).await;
+
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        for _ in 0..per_sync {
+                            append.append(&data).await.unwrap();
+                        }
+                        append.sync().await.unwrap();
+                    }
+                    let elapsed = start.elapsed();
+
+                    destroy_append(&ctx, append, &name).await;
+
+                    elapsed
+                })
+            });
+        },
+    );
+}
+
 pub fn bench(c: &mut Criterion) {
     for chunk_size in [64, 256, 1024, 4096] {
         bench_backend::<deterministic::Runner>(c, "deterministic", chunk_size);
         bench_backend::<tokio::Runner>(c, "tokio", chunk_size);
+    }
+    for per_sync in [1, 16] {
+        bench_sync_backend::<deterministic::Runner>(c, "deterministic", per_sync);
+        bench_sync_backend::<tokio::Runner>(c, "tokio", per_sync);
     }
 }
