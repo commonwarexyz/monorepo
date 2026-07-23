@@ -314,11 +314,22 @@ struct Shared {
     spawned_workers: AtomicBool,
 }
 
+/// The alarm queue of one worker's sleepers.
+///
+/// Wrapped in `Mutex<Option<Sleeping>>` on the [Executor]: the mutex is the
+/// single synchronization point for every sleeper interaction (registration,
+/// the still-open check on re-polls, and teardown), and `None` marks the
+/// worker as torn down so late interactions fail loudly instead of parking
+/// state nothing will ever drain.
+struct Sleeping {
+    alarms: BinaryHeap<Alarm>,
+}
+
 /// Runtime state shared by every [Context] on one worker thread.
 pub struct Executor {
     shared: Arc<Shared>,
     tasks: Arc<Tasks>,
-    sleeping: Mutex<BinaryHeap<Alarm>>,
+    sleeping: Mutex<Option<Sleeping>>,
 }
 
 impl Executor {
@@ -328,11 +339,21 @@ impl Executor {
     /// so a park in progress recomputes its timeout: without this, an alarm
     /// registered from another thread while the runtime is parked would not
     /// fire until the previous park deadline elapsed.
+    ///
+    /// Panics if this worker already tore down: an alarm registered after the
+    /// queue closed would never fire, so the sleep fails loudly in the
+    /// registering task instead of hanging it.
     fn register_alarm(&self, alarm: Alarm) {
         let earliest = {
             let mut sleeping = self.sleeping.lock();
-            let earliest = sleeping.peek().is_none_or(|next| alarm.time < next.time);
-            sleeping.push(alarm);
+            let sleeping = sleeping
+                .as_mut()
+                .expect("sleep registered on a torn-down io_uring worker");
+            let earliest = sleeping
+                .alarms
+                .peek()
+                .is_none_or(|next| alarm.time < next.time);
+            sleeping.alarms.push(alarm);
             earliest
         };
         if earliest {
@@ -340,12 +361,20 @@ impl Executor {
         }
     }
 
+    /// Whether this worker's alarm queue is still accepting sleepers.
+    fn alarms_open(&self) -> bool {
+        self.sleeping.lock().is_some()
+    }
+
     /// Wake any sleepers whose deadlines have elapsed.
     fn wake_ready_sleepers(&self, current: Instant) {
         let mut sleeping = self.sleeping.lock();
-        while let Some(next) = sleeping.peek() {
+        let sleeping = sleeping
+            .as_mut()
+            .expect("alarm queue closed while the worker loop is running");
+        while let Some(next) = sleeping.alarms.peek() {
             if next.time <= current {
-                let sleeper = sleeping.pop().unwrap();
+                let sleeper = sleeping.alarms.pop().unwrap();
                 sleeper.waker.wake();
             } else {
                 break;
@@ -356,7 +385,11 @@ impl Executor {
     /// Return the delay until the next sleeper alarm, if any.
     fn next_alarm(&self) -> Option<Duration> {
         let sleeping = self.sleeping.lock();
+        let sleeping = sleeping
+            .as_ref()
+            .expect("alarm queue closed while the worker loop is running");
         sleeping
+            .alarms
             .peek()
             .map(|alarm| alarm.time.saturating_duration_since(Instant::now()))
     }
@@ -424,7 +457,9 @@ impl Worker {
 
         let executor = Arc::new(Executor {
             tasks: Arc::new(Tasks::new(driver.waker())),
-            sleeping: Mutex::new(BinaryHeap::new()),
+            sleeping: Mutex::new(Some(Sleeping {
+                alarms: BinaryHeap::new(),
+            })),
             shared,
         });
         Self {
@@ -532,11 +567,17 @@ impl Worker {
         // until after we have dropped all tasks (as they may attempt to
         // upgrade their weak reference to the executor during drop).
         let teardown = catch_unwind(AssertUnwindSafe(|| {
-            // Wake discarded alarms instead of dropping them: a waiter parked
-            // on a foreign thread re-polls and fails loudly rather than
-            // hanging on a wake that will never arrive.
-            let alarms = take(&mut *executor.sleeping.lock());
-            for alarm in alarms {
+            // Close the alarm queue (registrations racing teardown now fail
+            // loudly instead of landing in a heap nobody drains), then wake
+            // the discarded alarms outside the lock: a woken foreign waiter
+            // re-polls, observes the closed queue, and panics in its own
+            // task rather than hanging on a wake that will never arrive.
+            let sleeping = executor
+                .sleeping
+                .lock()
+                .take()
+                .expect("alarm queue closed twice");
+            for alarm in sleeping.alarms {
                 alarm.waker.wake();
             }
             for task in executor.tasks.clear() {
@@ -1367,13 +1408,19 @@ impl Future for Sleeper {
         if Instant::now() >= self.time {
             return Poll::Ready(());
         }
+        let executor = self.executor.upgrade().expect("executor already dropped");
         if !self.registered {
             self.registered = true;
-            let executor = self.executor.upgrade().expect("executor already dropped");
             executor.register_alarm(Alarm {
                 time: self.time,
                 waker: cx.waker().clone(),
             });
+        } else {
+            // A pending re-poll before the deadline is either a spurious wake
+            // or the teardown wake of a worker that discarded this sleeper's
+            // alarm. The closed queue is the discard signal: fail loudly
+            // instead of returning `Pending` with no alarm left to fire.
+            assert!(executor.alarms_open(), "sleep outlived its io_uring worker");
         }
         Poll::Pending
     }
@@ -1782,6 +1829,57 @@ mod tests {
                 });
             // Return immediately: both workers tear down through the abort
             // cascade while the root drains and joins.
+        });
+    }
+
+    /// A task awaiting a sleep created from another worker's context must
+    /// fail loudly (not hang) when that worker tears down before the
+    /// deadline: the teardown wake makes the sleeper re-poll and observe the
+    /// closed alarm queue.
+    #[test]
+    fn test_foreign_sleep_fails_on_worker_teardown() {
+        let cfg = Config::default().with_catch_panics(true);
+        Runner::new(cfg).start(|context| async move {
+            let (send, recv) = oneshot::channel();
+            let origin = context
+                .child("origin")
+                .dedicated()
+                .spawn(move |context| async move {
+                    let _ = send.send(context.child("clock"));
+                    // Stay alive long enough for the sleeper to register.
+                    context.sleep(Duration::from_millis(300)).await;
+                });
+            let clock = recv.await.unwrap();
+            let sleeper = context.child("sleeper").spawn(move |_| async move {
+                clock.sleep(Duration::from_secs(3600)).await;
+            });
+            origin.await.unwrap();
+            assert!(matches!(sleeper.await, Err(Error::Exited)));
+        });
+    }
+
+    /// Sleeping on a context whose worker already tore down fails loudly in
+    /// the sleeping task instead of registering an alarm nothing will fire.
+    #[test]
+    fn test_sleep_on_dead_worker_fails() {
+        let cfg = Config::default().with_catch_panics(true);
+        Runner::new(cfg).start(|context| async move {
+            let (send, recv) = oneshot::channel();
+            let origin = context
+                .child("origin")
+                .dedicated()
+                .spawn(move |context| async move {
+                    let _ = send.send(context.child("clock"));
+                });
+            let clock = recv.await.unwrap();
+            origin.await.unwrap();
+            // Give the origin worker time to finish its teardown (the handle
+            // resolves before the worker closes its queue).
+            context.sleep(Duration::from_millis(200)).await;
+            let sleeper = context.child("sleeper").spawn(move |_| async move {
+                clock.sleep(Duration::from_secs(3600)).await;
+            });
+            assert!(matches!(sleeper.await, Err(Error::Exited)));
         });
     }
 
