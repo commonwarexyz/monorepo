@@ -22,7 +22,7 @@ pub enum Error {
 }
 
 /// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX;
+const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
 /// Prefix byte used to identify a [Payload] with variant Greeting.
 const GREETING_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant BitVec.
@@ -393,6 +393,11 @@ mod tests {
             public_key: c.public_key(),
             signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
         }
+    }
+
+    #[test]
+    fn test_data_prefix_value() {
+        assert_eq!(DATA_PREFIX, 0);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_runtime::{Buf, BufMut};
 
 /// Prefix that identifies the message as a Data message.
-pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX;
+pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
 /// Prefix that identifies the message as a Ping message.
 pub const PING_PREFIX: u8 = 1;
 
@@ -66,6 +66,11 @@ mod tests {
     use crate::authenticated::data::MAX_PAYLOAD_DATA_OVERHEAD;
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_runtime::IoBuf;
+
+    #[test]
+    fn test_data_prefix_value() {
+        assert_eq!(DATA_PREFIX, 0);
+    }
 
     #[test]
     fn test_max_payload_overhead() {
