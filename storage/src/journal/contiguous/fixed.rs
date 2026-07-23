@@ -1091,8 +1091,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Ok((self, false));
         }
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
         // durable, so pruning without this sync could leave a recovered journal whose
@@ -1104,6 +1102,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // Both hazards vanish once the barrier covers the new boundary: retained items below
         // the barrier cannot tear, recovery truncates only above it, and the caller
         // guarantees the boundary is justified by durable data (see [Mutable::prune]).
+        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         if self.barrier.size() < new_boundary {
             let sync = self.blobs.start_sync().await;
             sync.await?;
