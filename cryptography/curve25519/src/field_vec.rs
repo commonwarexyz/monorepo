@@ -402,6 +402,11 @@ impl Unreduced {
 }
 
 impl Reduced {
+    /// `LANES` copies of zero, every limb trivially `< 2^52`.
+    pub(crate) const ZERO: Self = Self {
+        limbs: [[0; LANES]; 5],
+    };
+
     /// Adds two `Reduced` values. The sum is not itself guaranteed `< 2^52` per limb, so the
     /// result is [`Unreduced`]; callers needing to multiply/square it call [`Unreduced::reduce`]
     /// first.
@@ -412,6 +417,11 @@ impl Reduced {
     /// Subtracts two `Reduced` values; see [`Reduced::add`] for why the result is [`Unreduced`].
     pub(crate) fn sub(&self, rhs: &Self) -> Unreduced {
         Unreduced::from(*self).sub(&Unreduced::from(*rhs))
+    }
+
+    /// Negates a `Reduced` value, mirroring [`FieldElement::neg`]'s `ZERO.sub(self)`.
+    pub(crate) fn neg(&self) -> Unreduced {
+        Self::ZERO.sub(self)
     }
 
     /// Unpacks this value back into eight field elements; see [`Unreduced::to_lanes`].
@@ -536,6 +546,29 @@ pub(crate) fn fused_point_add(
     }
     #[cfg(not(target_arch = "x86_64"))]
     let _ = (ax, ay, az, at, bx, by, bz, bt);
+    None
+}
+
+/// Computes the dedicated `dbl-2008-hwcd` doubling formula 8-wide (see
+/// [`crate::signing::point::PointVec::double`]) via a single fused AVX-512 function when
+/// available, same [`fused_point_add`] pattern and for the same reason (see
+/// [`avx512::point_double`]'s doc comment) -- returns `None` on any CPU without this backend.
+// Not `const`: on `x86_64` this calls `avx512::available()`, a runtime CPU check (see
+// `simd_available`'s own `#[allow]` for the same reason).
+#[allow(clippy::missing_const_for_fn)]
+pub(crate) fn fused_point_double(
+    ax: &Reduced,
+    ay: &Reduced,
+    az: &Reduced,
+) -> Option<(Reduced, Reduced, Reduced, Reduced)> {
+    #[cfg(target_arch = "x86_64")]
+    if avx512::available() {
+        // SAFETY: `available()` just confirmed the CPU supports every feature
+        // `avx512::point_double` requires.
+        return Some(unsafe { avx512::point_double(ax, ay, az) });
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (ax, ay, az);
     None
 }
 
