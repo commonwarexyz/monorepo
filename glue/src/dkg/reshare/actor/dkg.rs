@@ -76,6 +76,7 @@ where
             }
             Err(error) => {
                 warn!(epoch = %epoch, %error, "failed to activate DKG peer set, shutting down");
+                self.complete_dkg(completion, store);
                 return;
             }
         };

@@ -4,7 +4,7 @@ use crate::{
         bootstrap,
         tests::{
             max_supported_mode,
-            mocks::{FilteredReceiver, MemorySecretStore},
+            mocks::{FailingManager, FilteredReceiver, MemorySecretStore},
         },
         types::EpochInfo,
     },
@@ -424,5 +424,70 @@ pub(super) fn run_closed_network_receiver() {
             0,
             "bootstrap child actors should be canceled"
         );
+    });
+}
+
+pub(super) fn run_activation_failure_completes_empty() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(5));
+    runner.start(|context| async move {
+        let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
+            context.child("network"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+        );
+        network.start();
+
+        let engine = DkgEngine::new(1);
+        let public_key = engine.participant(0);
+        let control = oracle.control(public_key.clone());
+        let mut channels = Vec::new();
+        for (channel, quota) in engine.channels() {
+            channels.push(
+                control
+                    .register(channel, quota)
+                    .await
+                    .expect("channel registration failed"),
+            );
+        }
+
+        let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
+            context.child("dkg"),
+            bootstrap::Config {
+                signer: engine.signer(&public_key),
+                manager: FailingManager(oracle.manager()),
+                blocker: oracle.control(public_key),
+                secret_store: engine.store(&engine.participant(0)),
+                strategy: Sequential,
+                namespace: NAMESPACE,
+                sharing_mode: Mode::NonZeroCounter,
+                max_supported_mode: max_supported_mode(),
+                partition_prefix: "dkg-activation-failure".into(),
+                participants: engine.participants_set(),
+                directory: (),
+                blocks_per_epoch: EPOCH_LENGTH,
+            },
+        );
+        let (handle, completion) = bootstrap.start(
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+            channels.remove(0),
+        );
+
+        let completion = select! {
+            result = completion => {
+                result.expect("activation failure should report DKG completion")
+            },
+            _ = context.sleep(Duration::from_secs(1)) => {
+                panic!("activation failure did not report DKG completion");
+            },
+        };
+        assert!(completion.info.is_none());
+        handle.abort();
     });
 }
