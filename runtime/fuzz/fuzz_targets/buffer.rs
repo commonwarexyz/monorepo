@@ -2,14 +2,14 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    Blob, BufferPooler, Runner, Storage,
+    Blob, BufferPoolConfig, BufferPooler, Runner, Storage,
     buffer::{
         Read, Write,
         paged::{CacheRef, Writer},
     },
     deterministic,
 };
-use commonware_utils::{NZU16, NZUsize};
+use commonware_utils::{NZU16, NZU32, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
@@ -17,10 +17,33 @@ const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
 
+/// Smallest storage class exponent fuzzed (4 KiB).
+const MIN_CLASS_EXPONENT: u32 = 12;
+/// Largest storage class exponent fuzzed (8 MiB).
+const MAX_CLASS_EXPONENT: u32 = 23;
+
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     seed: u64,
+    /// Bit `i` enables the storage class of size `1 << (MIN_CLASS_EXPONENT + i)`,
+    /// so the fuzzer exercises sparse layouts whose gaps route to the next
+    /// enabled class. The largest class is always enabled so every request the
+    /// operations can produce stays within the pool's routing range.
+    storage_class_mask: u16,
     operations: Vec<FuzzOperation>,
+}
+
+/// Builds a sparse storage pool layout from the fuzzed class mask.
+fn storage_pool_config(mask: u16) -> BufferPoolConfig {
+    let classes = (MIN_CLASS_EXPONENT..=MAX_CLASS_EXPONENT).filter_map(|exponent| {
+        let bit = exponent - MIN_CLASS_EXPONENT;
+        // Force the largest class on so the layout is never empty.
+        let enabled = mask & (1 << bit) != 0 || exponent == MAX_CLASS_EXPONENT;
+        enabled.then(|| (NZUsize!(1usize << exponent), NZU32!(32)))
+    });
+    BufferPoolConfig::for_storage()
+        .with_size_classes(classes)
+        .with_thread_cache_disabled()
 }
 
 #[derive(Arbitrary, Debug)]
@@ -88,7 +111,10 @@ enum FuzzOperation {
 }
 
 fn fuzz(input: FuzzInput) {
-    let executor = deterministic::Runner::default();
+    let executor = deterministic::Runner::new(
+        deterministic::Config::new()
+            .with_storage_buffer_pool_config(storage_pool_config(input.storage_class_mask)),
+    );
     executor.start(|context| async move {
         let (blob, initial_size) = context
             .open("test_partition", SHARED_BLOB)
@@ -163,12 +189,16 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
-                    // Cache slots are allocated from the storage pool, which rounds
-                    // requests up to a power-of-two size class. Cap capacity against that
-                    // actual allocation size rather than the requested page size.
-                    let cache_slot_size = (cache_page_size as usize)
-                        .max(context.storage_buffer_pool().config().min_size.get())
-                        .next_power_of_two();
+                    // Cache slots come from the storage pool, so each slot occupies
+                    // the smallest enabled size class that fits the page, which in
+                    // sparse layouts can be much larger than the page itself. Cap
+                    // capacity against that class size. Pages larger than every
+                    // class fall back to untracked allocations of their exact size.
+                    let cache_slot_size = context
+                        .storage_buffer_pool()
+                        .config()
+                        .class_for(cache_page_size as usize)
+                        .map_or(cache_page_size as usize, |class| class.size.get());
                     let max_cache_capacity = (MAX_CACHE_BYTES / cache_slot_size).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));

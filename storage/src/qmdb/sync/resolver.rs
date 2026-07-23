@@ -23,6 +23,7 @@ use crate::{
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
         },
         operation::Key,
+        sync::compact::ServeError,
     },
     translator::Translator,
 };
@@ -320,7 +321,7 @@ macro_rules! impl_resolver {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+            type Error = ServeError<F, H::Digest>;
 
             async fn get_operations(
                 &self,
@@ -331,8 +332,8 @@ macro_rules! impl_resolver {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                fetch_operations(
+                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
+                Ok(fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -342,7 +343,7 @@ macro_rules! impl_resolver {
                     },
                     |start_loc| db.pinned_nodes_at(start_loc),
                 )
-                .await
+                .await?)
             }
         }
     };
@@ -460,7 +461,7 @@ macro_rules! impl_resolver_immutable {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+            type Error = ServeError<F, H::Digest>;
 
             async fn get_operations(
                 &self,
@@ -471,8 +472,8 @@ macro_rules! impl_resolver_immutable {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                fetch_operations(
+                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
+                Ok(fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -482,7 +483,7 @@ macro_rules! impl_resolver_immutable {
                     },
                     |start_loc| db.pinned_nodes_at(start_loc),
                 )
-                .await
+                .await?)
             }
         }
     };
@@ -583,7 +584,7 @@ macro_rules! impl_resolver_keyless {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, V>;
-            type Error = qmdb::Error<F>;
+            type Error = ServeError<F, H::Digest>;
 
             async fn get_operations(
                 &self,
@@ -594,8 +595,8 @@ macro_rules! impl_resolver_keyless {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                fetch_operations(
+                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
+                Ok(fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -605,7 +606,7 @@ macro_rules! impl_resolver_keyless {
                     },
                     |start_loc| db.pinned_nodes_at(start_loc),
                 )
-                .await
+                .await?)
             }
         }
     };

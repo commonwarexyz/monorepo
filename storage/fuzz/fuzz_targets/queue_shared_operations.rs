@@ -254,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 SharedOperation::Ack { pos_offset } => {
-                    let size = writer.size().await;
+                    let size = writer.size().await.unwrap();
                     if size == 0 {
                         continue;
                     }
@@ -272,7 +272,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 SharedOperation::AckUpTo { pos_offset } => {
-                    let size = writer.size().await;
+                    let size = writer.size().await.unwrap();
                     // Map offset to valid range [0, size]
                     let up_to = (*pos_offset as u64) % (size + 1);
 
@@ -287,29 +287,29 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 SharedOperation::Reset => {
-                    reader.reset().await;
+                    reader.reset().await.unwrap();
                     reference.reset();
                 }
             }
 
             // Verify invariants after each operation
             assert_eq!(
-                writer.size().await,
+                writer.size().await.unwrap(),
                 reference.size(),
                 "size mismatch after {op:?}"
             );
             assert_eq!(
-                reader.ack_floor().await,
+                reader.ack_floor().await.unwrap(),
                 reference.ack_floor(),
                 "ack_floor mismatch after {op:?}"
             );
             assert_eq!(
-                reader.read_position().await,
+                reader.read_position().await.unwrap(),
                 reference.read_pos(),
                 "read_position mismatch after {op:?}"
             );
             assert_eq!(
-                reader.is_empty().await,
+                reader.is_empty().await.unwrap(),
                 reference.is_empty(),
                 "is_empty mismatch after {op:?}"
             );

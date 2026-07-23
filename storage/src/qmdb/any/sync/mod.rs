@@ -46,6 +46,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::{Array, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 
@@ -62,16 +63,18 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: usize,
+    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
-    E: Context,
+    E: Context + Spawner,
     U: Update + Send + Sync + 'static,
-    I: IndexFactory<T, Value = Location<F>>,
+    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
@@ -96,8 +99,19 @@ where
         apply_batch_size as u64,
     )
     .await?;
+    let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    let db = Db::init_from_log(index, log, None, cache_size, metrics).await?;
+    let db = Db::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        None,
+        init_concurrency,
+        init_buffer,
+        cache_size,
+        metrics,
+    )
+    .await?;
 
     Ok(db)
 }
@@ -110,7 +124,7 @@ macro_rules! impl_sync_database {
         impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
             F: merkle::Family,
-            E: Context,
+            E: Context + Spawner,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,
@@ -137,6 +151,8 @@ macro_rules! impl_sync_database {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
                 let cache_size = config.init_cache_size;
+                let init_buffer = config.init_buffer;
+                let init_concurrency = config.init_concurrency;
                 build_db::<F, _, $update<K, V>, _, H, _, T, S>(
                     context,
                     merkle_config,
@@ -145,6 +161,8 @@ macro_rules! impl_sync_database {
                     pinned_nodes,
                     range,
                     apply_batch_size,
+                    init_concurrency,
+                    init_buffer,
                     cache_size,
                 )
                 .await

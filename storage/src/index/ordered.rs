@@ -339,7 +339,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     #[cfg(test)]
     fn keys(&self) -> usize {
-        self.map.len()
+        self.keys.get() as usize
     }
 
     #[cfg(test)]

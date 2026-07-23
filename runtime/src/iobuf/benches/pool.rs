@@ -66,7 +66,7 @@ pub fn bench(c: &mut Criterion) {
 
     for &size in SIZES {
         let pool = build_pool(size, threads);
-        let alignment = pool.config().alignment.get();
+        let alignment = pool.config().alignment().get();
 
         for threading in threadings {
             for touch in [false, true] {
@@ -192,9 +192,7 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         u32::try_from(threads * 4).expect("bench capacity must fit in u32 slot ids");
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(0)
-        .with_min_size(NZUsize!(size))
-        .with_max_size(NZUsize!(size))
-        .with_max_per_class(NZU32!(max_per_class))
+        .with_size_class_range(NZUsize!(size), NZUsize!(size), NZU32!(max_per_class))
         .with_parallelism(NZUsize!(threads))
         .with_prefill(true);
 

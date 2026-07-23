@@ -58,7 +58,10 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
 }
 
 /// Append `items_to_write` random items to the given fixed journal, syncing the changes before returning.
-async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(journal: &mut C, items_to_write: u64)
+async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(
+    mut journal: C,
+    items_to_write: u64,
+) -> C
 where
     C: Mutable<Item = FixedBytes<ITEM_SIZE>>,
 {
@@ -67,14 +70,14 @@ where
     let mut arr = [0; ITEM_SIZE];
     for _ in 0..items_to_write {
         rng.fill_bytes(&mut arr);
-        journal
+        (journal, _) = journal
             .append(&FixedBytes::new(arr))
             .await
             .expect("failed to append data");
     }
 
     // Sync the journal to ensure all data is written to disk.
-    journal.sync().await.expect("failed to sync journal");
+    journal.sync().await.expect("failed to sync journal")
 }
 
 /// Open and return a temp variable journal with the given config parameters.

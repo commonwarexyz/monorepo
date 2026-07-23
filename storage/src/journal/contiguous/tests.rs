@@ -95,7 +95,7 @@ where
 
     // Append some items
     for i in 0..10 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     let bounds = journal.bounds();
@@ -117,7 +117,7 @@ where
 
     // Append items across multiple sections
     for i in 0..30 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     // Initially bounds should be 0..30
@@ -126,7 +126,7 @@ where
     assert_eq!(bounds.end, 30);
 
     // Prune first section - trait only guarantees section-aligned pruning
-    journal.prune(10).await.unwrap();
+    (journal, _) = journal.prune(10).await.unwrap();
 
     // Assumed blob-aligned pruning and items_per_blob = 10.
     let bounds = journal.bounds();
@@ -134,7 +134,7 @@ where
     assert_eq!(bounds.end, 30);
 
     // Prune more
-    journal.prune(25).await.unwrap();
+    (journal, _) = journal.prune(25).await.unwrap();
 
     // bounds.start should have advanced to 20 (section-aligned)
     let bounds = journal.bounds();
@@ -142,7 +142,7 @@ where
     assert_eq!(bounds.end, 30);
 
     // Prune all
-    journal.prune(30).await.unwrap();
+    (journal, _) = journal.prune(30).await.unwrap();
     let bounds = journal.bounds();
     assert_eq!(bounds.start, 30);
     assert_eq!(bounds.end, 30);
@@ -150,7 +150,6 @@ where
 
     // Drop and reopen
     journal.sync().await.unwrap();
-    drop(journal);
     let journal = factory("bounds-after-prune".into()).await.unwrap();
     let bounds = journal.bounds();
     assert!(bounds.is_empty());
@@ -165,9 +164,12 @@ where
 {
     let mut journal = factory("append-and-size".into()).await.unwrap();
 
-    let pos1 = journal.append(&100).await.unwrap();
-    let pos2 = journal.append(&200).await.unwrap();
-    let pos3 = journal.append(&300).await.unwrap();
+    let pos1;
+    (journal, pos1) = journal.append(&100).await.unwrap();
+    let pos2;
+    (journal, pos2) = journal.append(&200).await.unwrap();
+    let pos3;
+    (journal, pos3) = journal.append(&300).await.unwrap();
 
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
@@ -191,7 +193,8 @@ where
     let mut journal = factory("sequential-appends".into()).await.unwrap();
 
     for i in 0..25u64 {
-        let pos = journal.append(&(i * 10)).await.unwrap();
+        let pos;
+        (journal, pos) = journal.append(&(i * 10)).await.unwrap();
         assert_eq!(pos, i);
     }
 
@@ -213,7 +216,7 @@ where
     let mut journal = factory("replay-from-start".into()).await.unwrap();
 
     for i in 0..10u64 {
-        journal.append(&(i * 10)).await.unwrap();
+        (journal, _) = journal.append(&(i * 10)).await.unwrap();
     }
 
     {
@@ -244,7 +247,7 @@ where
     let mut journal = factory("replay-from-middle".into()).await.unwrap();
 
     for i in 0..15u64 {
-        journal.append(&(i * 10)).await.unwrap();
+        (journal, _) = journal.append(&(i * 10)).await.unwrap();
     }
 
     {
@@ -275,7 +278,7 @@ where
     let mut journal = factory("replay-from-unsealed-tail".into()).await.unwrap();
 
     for i in 0..17u64 {
-        journal.append(&(i * 10)).await.unwrap();
+        (journal, _) = journal.append(&(i * 10)).await.unwrap();
     }
 
     {
@@ -307,7 +310,7 @@ where
     let mut journal = factory("replay-with-small-buffer".into()).await.unwrap();
 
     for i in 0..25u64 {
-        journal.append(&(i * 10)).await.unwrap();
+        (journal, _) = journal.append(&(i * 10)).await.unwrap();
     }
 
     {
@@ -338,22 +341,21 @@ where
     let mut journal = factory("prune-retains-size".into()).await.unwrap();
 
     for i in 0..20u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     let size_before = journal.bounds().end;
-    journal.prune(10).await.unwrap();
+    (journal, _) = journal.prune(10).await.unwrap();
     let size_after = journal.bounds().end;
 
     assert_eq!(size_before, size_after);
     assert_eq!(size_after, 20);
 
-    journal.prune(20).await.unwrap();
+    (journal, _) = journal.prune(20).await.unwrap();
     let size_after_all = journal.bounds().end;
     assert_eq!(size_after, size_after_all);
 
     journal.sync().await.unwrap();
-    drop(journal);
 
     let journal = factory("prune-retains-size".into()).await.unwrap();
     let size_after_close = journal.bounds().end;
@@ -368,10 +370,10 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
-    let mut journal = factory("through-trait".into()).await.unwrap();
+    let journal = factory("through-trait".into()).await.unwrap();
 
-    let pos1 = Mutable::append(&mut journal, &42).await.unwrap();
-    let pos2 = Mutable::append(&mut journal, &100).await.unwrap();
+    let (journal, pos1) = Mutable::append(journal, &42).await.unwrap();
+    let (journal, pos2) = Mutable::append(journal, &100).await.unwrap();
 
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
@@ -391,10 +393,10 @@ where
     let mut journal = factory("replay-after-prune".into()).await.unwrap();
 
     for i in 0..20u64 {
-        journal.append(&(i * 10)).await.unwrap();
+        (journal, _) = journal.append(&(i * 10)).await.unwrap();
     }
 
-    journal.prune(10).await.unwrap();
+    let (journal, _) = journal.prune(10).await.unwrap();
 
     {
         // Replay from a position that may or may not be pruned (section-aligned)
@@ -430,15 +432,16 @@ where
 
     // Append exactly one section (10 items)
     for i in 0..10u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     // Prune all items at a blob boundary.
-    journal.prune(10).await.unwrap();
+    (journal, _) = journal.prune(10).await.unwrap();
     assert!(journal.bounds().is_empty());
 
     // Append new items after pruning - position should continue from 10
-    let pos = journal.append(&999).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&999).await.unwrap();
     assert_eq!(pos, 10);
 
     assert_eq!(journal.bounds().end, 11);
@@ -456,15 +459,16 @@ where
 
     // Append initial items
     for i in 0..20u64 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     // Prune first 10
-    journal.prune(10).await.unwrap();
+    (journal, _) = journal.prune(10).await.unwrap();
 
     // Append more items
     for i in 20..25u64 {
-        let pos = journal.append(&(i * 100)).await.unwrap();
+        let pos;
+        (journal, pos) = journal.append(&(i * 100)).await.unwrap();
         assert_eq!(pos, i);
     }
 
@@ -504,14 +508,15 @@ where
     let mut journal = factory("sync-behavior".into()).await.unwrap();
 
     for i in 0..5u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
-    journal.sync().await.unwrap();
+    journal = journal.sync().await.unwrap();
 
     // Verify operations work after sync
     assert_eq!(journal.read(0).await.unwrap(), 0);
-    let pos = journal.append(&100).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&100).await.unwrap();
     assert_eq!(pos, 5);
     assert_eq!(journal.read(5).await.unwrap(), 100);
 
@@ -552,7 +557,7 @@ where
     let mut journal = factory("replay-at-exact-size".into()).await.unwrap();
 
     for i in 0..10u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     let bounds = journal.bounds();
@@ -581,11 +586,13 @@ where
     let mut journal = factory("multiple-prunes".into()).await.unwrap();
 
     for i in 0..20u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
-    let pruned1 = journal.prune(10).await.unwrap();
-    let pruned2 = journal.prune(10).await.unwrap();
+    let pruned1;
+    (journal, pruned1) = journal.prune(10).await.unwrap();
+    let pruned2;
+    (journal, pruned2) = journal.prune(10).await.unwrap();
 
     assert!(pruned1);
     assert!(!pruned2); // Second prune should return false (nothing to prune)
@@ -606,16 +613,17 @@ where
     let mut journal = factory("prune-beyond-size".into()).await.unwrap();
 
     for i in 0..10u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     // Prune with min_position > size should be safe
-    journal.prune(100).await.unwrap();
+    (journal, _) = journal.prune(100).await.unwrap();
 
     // Verify journal still works
     assert_eq!(journal.bounds().end, 10);
 
-    let pos = journal.append(&999).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&999).await.unwrap();
     assert_eq!(pos, 10);
     assert_eq!(journal.read(10).await.unwrap(), 999);
 
@@ -635,7 +643,8 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         for i in 0..15u64 {
-            let pos = journal.append(&(i * 10)).await.unwrap();
+            let pos;
+            (journal, pos) = journal.append(&(i * 10)).await.unwrap();
             assert_eq!(pos, i);
         }
 
@@ -689,11 +698,12 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         for i in 0..25u64 {
-            journal.append(&(i * 100)).await.unwrap();
+            (journal, _) = journal.append(&(i * 100)).await.unwrap();
         }
 
         // Prune first 10 items
-        let pruned = journal.prune(10).await.unwrap();
+        let pruned;
+        (journal, pruned) = journal.prune(10).await.unwrap();
         assert!(pruned);
 
         assert_eq!(journal.bounds().end, 25);
@@ -737,7 +747,8 @@ where
         }
 
         // Append more items after re-opening
-        let pos = journal.append(&999).await.unwrap();
+        let pos;
+        (journal, pos) = journal.append(&999).await.unwrap();
         assert_eq!(pos, 25);
 
         // Verify the newly appended item can be read
@@ -756,7 +767,7 @@ where
     let mut journal = factory("read-by-position".into()).await.unwrap();
 
     for i in 0..1000u64 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
         assert_eq!(journal.read(i).await.unwrap(), i * 100);
     }
 
@@ -777,7 +788,7 @@ where
     let mut journal = factory("read-many".into()).await.unwrap();
 
     for i in 0..15u64 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     let items = journal.read_many(&[1, 4, 12]).await.unwrap();
@@ -794,7 +805,7 @@ where
 {
     let mut journal = factory("read-out-of-range".into()).await.unwrap();
 
-    journal.append(&42).await.unwrap();
+    (journal, _) = journal.append(&42).await.unwrap();
 
     // Try to read beyond size
     let result = journal.read(10).await;
@@ -812,10 +823,10 @@ where
     let mut journal = factory("read-after-prune".into()).await.unwrap();
 
     for i in 0..20u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
-    journal.prune(10).await.unwrap();
+    let (journal, _) = journal.prune(10).await.unwrap();
 
     let bounds = journal.bounds();
     let result = journal.read(bounds.start - 1).await;
@@ -834,11 +845,11 @@ where
 
     // Append 20 items
     for i in 0..20u64 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     // Rewind to 12 items
-    journal.rewind(12).await.unwrap();
+    journal = journal.rewind(12).await.unwrap();
 
     assert_eq!(journal.bounds().end, 12);
 
@@ -856,7 +867,8 @@ where
     }
 
     // Next append should get position 12
-    let pos = journal.append(&999).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&999).await.unwrap();
     assert_eq!(pos, 12);
     assert_eq!(journal.read(12).await.unwrap(), 999);
 
@@ -872,17 +884,18 @@ where
     let mut journal = factory("rewind-to-zero".into()).await.unwrap();
 
     for i in 0..10u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
-    journal.rewind(0).await.unwrap();
+    journal = journal.rewind(0).await.unwrap();
 
     let bounds = journal.bounds();
     assert_eq!(bounds.end, 0);
     assert!(bounds.is_empty());
 
     // Next append should get position 0
-    let pos = journal.append(&42).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&42).await.unwrap();
     assert_eq!(pos, 0);
 
     journal.destroy().await.unwrap();
@@ -897,11 +910,11 @@ where
     let mut journal = factory("rewind-current-size".into()).await.unwrap();
 
     for i in 0..10u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     // Rewind to current size should be no-op
-    journal.rewind(10).await.unwrap();
+    let journal = journal.rewind(10).await.unwrap();
     assert_eq!(journal.bounds().end, 10);
 
     journal.destroy().await.unwrap();
@@ -916,13 +929,14 @@ where
     let mut journal = factory("rewind-invalid-forward".into()).await.unwrap();
 
     for i in 0..10u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     // Try to rewind forward (invalid)
     let result = journal.rewind(20).await;
     assert!(matches!(result, Err(Error::InvalidRewind(20))));
 
+    let journal = factory("rewind-invalid-forward".into()).await.unwrap();
     journal.destroy().await.unwrap();
 }
 
@@ -935,16 +949,17 @@ where
     let mut journal = factory("rewind-invalid-pruned".into()).await.unwrap();
 
     for i in 0..20u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     // Prune first 10 items
-    journal.prune(10).await.unwrap();
+    let (journal, _) = journal.prune(10).await.unwrap();
 
     // Try to rewind to pruned position (invalid)
     let result = journal.rewind(5).await;
     assert!(matches!(result, Err(Error::ItemPruned(5))));
 
+    let journal = factory("rewind-invalid-pruned".into()).await.unwrap();
     journal.destroy().await.unwrap();
 }
 
@@ -959,15 +974,17 @@ where
 
     // Append across a blob boundary (15 items = 1.5 blobs).
     for i in 0..15u64 {
-        journal.append(&i).await.unwrap();
+        (journal, _) = journal.append(&i).await.unwrap();
     }
 
     // Rewind to position 8 (within first section, not at boundary)
-    journal.rewind(8).await.unwrap();
+    journal = journal.rewind(8).await.unwrap();
 
     // Append should continue from position 8
-    let pos1 = journal.append(&888).await.unwrap();
-    let pos2 = journal.append(&999).await.unwrap();
+    let pos1;
+    (journal, pos1) = journal.append(&888).await.unwrap();
+    let pos2;
+    (journal, pos2) = journal.append(&999).await.unwrap();
 
     assert_eq!(pos1, 8);
     assert_eq!(pos2, 9);
@@ -987,11 +1004,11 @@ where
 
     // Append some items
     for i in 0..10u64 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     // Rewind to 0 (empty journal)
-    journal.rewind(0).await.unwrap();
+    journal = journal.rewind(0).await.unwrap();
 
     // Verify journal is empty
     let bounds = journal.bounds();
@@ -999,7 +1016,8 @@ where
     assert!(bounds.is_empty());
 
     // Append should work
-    let pos = journal.append(&42).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&42).await.unwrap();
     assert_eq!(pos, 0);
     assert_eq!(journal.bounds().end, 1);
     assert_eq!(journal.read(0).await.unwrap(), 42);
@@ -1018,16 +1036,16 @@ where
 
     // Append items across 3 blobs (30 items, assuming items_per_blob = 10).
     for i in 0..30u64 {
-        journal.append(&(i * 100)).await.unwrap();
+        (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
     // Prune first section (items 0-9)
-    journal.prune(10).await.unwrap();
+    (journal, _) = journal.prune(10).await.unwrap();
     let bounds = journal.bounds();
     assert_eq!(bounds.start, 10);
 
     // Rewind to position 20 (still in retained range)
-    journal.rewind(20).await.unwrap();
+    journal = journal.rewind(20).await.unwrap();
     let bounds = journal.bounds();
     assert_eq!(bounds.end, 20);
     assert_eq!(bounds.start, 10);
@@ -1037,21 +1055,18 @@ where
         assert_eq!(journal.read(i).await.unwrap(), i * 100);
     }
 
-    // Attempt to rewind to a pruned position should fail
-    let result = journal.rewind(5).await;
-    assert!(matches!(result, Err(Error::ItemPruned(5))));
-
-    // Verify journal state is unchanged after failed rewind
-    let bounds = journal.bounds();
-    assert_eq!(bounds.end, 20);
-    assert_eq!(bounds.start, 10);
-
     // Append should continue from position 20
-    let pos = journal.append(&999).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&999).await.unwrap();
     assert_eq!(pos, 20);
     assert_eq!(journal.read(20).await.unwrap(), 999);
     assert_eq!(journal.bounds().start, 10);
 
+    // Attempt to rewind to a pruned position should fail
+    let result = journal.rewind(5).await;
+    assert!(matches!(result, Err(Error::ItemPruned(5))));
+
+    let journal = factory("rewind-after-prune".into()).await.unwrap();
     journal.destroy().await.unwrap();
 }
 
@@ -1066,7 +1081,8 @@ where
 
     // Append exactly one section worth of items (10 items)
     for i in 0..10u64 {
-        let pos = journal.append(&(i * 100)).await.unwrap();
+        let pos;
+        (journal, pos) = journal.append(&(i * 100)).await.unwrap();
         assert_eq!(pos, i);
     }
 
@@ -1074,12 +1090,13 @@ where
     assert_eq!(journal.bounds().end, 10);
 
     // Append one more item to cross the boundary
-    let pos = journal.append(&999).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&999).await.unwrap();
     assert_eq!(pos, 10);
     assert_eq!(journal.bounds().end, 11);
 
     // Prune exactly at the blob boundary.
-    journal.prune(10).await.unwrap();
+    (journal, _) = journal.prune(10).await.unwrap();
     assert_eq!(journal.bounds().start, 10);
 
     // Verify only the item after the boundary is readable
@@ -1087,19 +1104,21 @@ where
     assert_eq!(journal.read(10).await.unwrap(), 999);
 
     // Append another item to move past the boundary
-    let pos = journal.append(&888).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&888).await.unwrap();
     assert_eq!(pos, 11);
     assert_eq!(journal.bounds().end, 12);
 
     // Rewind to exactly the blob boundary (position 10).
     // This leaves bounds.end=10, bounds.start=10, making the journal fully pruned
-    journal.rewind(10).await.unwrap();
+    journal = journal.rewind(10).await.unwrap();
     let bounds = journal.bounds();
     assert_eq!(bounds.end, 10);
     assert!(bounds.is_empty());
 
     // Append after rewinding to boundary should continue from position 10
-    let pos = journal.append(&777).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&777).await.unwrap();
     assert_eq!(pos, 10);
     assert_eq!(journal.bounds().end, 11);
     assert_eq!(journal.read(10).await.unwrap(), 777);
@@ -1124,10 +1143,10 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         for i in 0..20u64 {
-            journal.append(&(i * 100)).await.unwrap();
+            (journal, _) = journal.append(&(i * 100)).await.unwrap();
         }
 
-        journal.prune(10).await.unwrap();
+        let (journal, _) = journal.prune(10).await.unwrap();
         assert_eq!(journal.bounds().end, 20);
         assert!(!journal.bounds().is_empty());
 
@@ -1169,16 +1188,18 @@ where
     let mut journal = factory("append-many-empty".into()).await.unwrap();
 
     // Append some items first.
-    journal.append(&10).await.unwrap();
-    journal.append(&20).await.unwrap();
+    (journal, _) = journal.append(&10).await.unwrap();
+    (journal, _) = journal.append(&20).await.unwrap();
+
+    assert_eq!(journal.bounds().end, 2);
 
     // append_many with empty slice should return an error.
     assert!(matches!(
         journal.append_many(Many::Flat(&[])).await,
         Err(Error::EmptyAppend)
     ));
-    assert_eq!(journal.bounds().end, 2);
 
+    let journal = factory("append-many-empty".into()).await.unwrap();
     journal.destroy().await.unwrap();
 }
 
@@ -1190,7 +1211,8 @@ where
 {
     let mut journal = factory("append-many-basic".into()).await.unwrap();
 
-    let pos = journal
+    let pos;
+    (journal, pos) = journal
         .append_many(Many::Flat(&[100, 200, 300]))
         .await
         .unwrap();
@@ -1214,7 +1236,8 @@ where
 
     // Append 25 items in one call, crossing section boundaries at 10 and 20.
     let items: Vec<u64> = (0..25).map(|i| i * 10).collect();
-    let pos = journal.append_many(Many::Flat(&items)).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append_many(Many::Flat(&items)).await.unwrap();
     assert_eq!(pos, 24);
     assert_eq!(journal.bounds().end, 25);
 
@@ -1233,11 +1256,12 @@ where
 {
     let mut journal = factory("append-many-then-single".into()).await.unwrap();
 
-    journal
+    (journal, _) = journal
         .append_many(Many::Flat(&[10, 20, 30]))
         .await
         .unwrap();
-    let pos = journal.append(&40).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append(&40).await.unwrap();
     assert_eq!(pos, 3);
 
     assert_eq!(journal.read(0).await.unwrap(), 10);
@@ -1256,7 +1280,8 @@ where
 {
     let mut journal = factory("append-many-single".into()).await.unwrap();
 
-    let pos = journal.append_many(Many::Flat(&[42])).await.unwrap();
+    let pos;
+    (journal, pos) = journal.append_many(Many::Flat(&[42])).await.unwrap();
     assert_eq!(pos, 0);
     assert_eq!(journal.read(0).await.unwrap(), 42);
 

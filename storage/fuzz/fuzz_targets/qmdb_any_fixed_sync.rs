@@ -114,6 +114,8 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Se
         },
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(3)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -182,13 +184,15 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Update { key, value } => {
                     pending_writes.push((Key::new(*key), Some(Value::new(*value))));
+                    db
                 }
 
                 Operation::Delete { key } => {
                     pending_writes.push((Key::new(*key), None));
+                    db
                 }
 
                 Operation::Commit => {
@@ -212,16 +216,16 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         .merkleize(&db, Some(FixedBytes::new(commit_id)))
                         .await
                         .unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("Commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    db.commit().await.expect("Commit should not fail")
                 }
 
                 Operation::Prune => {
-                    db.prune(db.sync_boundary())
-                        .await
-                        .expect("Prune should not fail");
+                    let boundary = db.sync_boundary();
+                    db.prune(boundary).await.expect("Prune should not fail")
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
@@ -239,10 +243,11 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         .merkleize(&db, Some(FixedBytes::new(commit_id)))
                         .await
                         .unwrap();
-                    db.apply_batch(merkleized)
+                    let (db, _) = db
+                        .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
-                    db.commit().await.expect("Commit should not fail");
+                    let db = db.commit().await.expect("Commit should not fail");
                     let target = sync::Target::new(
                         db.root(),
                         non_empty_range!(db.sync_boundary(), db.bounds().end),
@@ -258,9 +263,10 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         sync_id,
                     )
                     .await;
-                    db = Arc::try_unwrap(wrapped_src)
+                    let db = Arc::try_unwrap(wrapped_src)
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"));
                     sync_id += 1;
+                    db
                 }
 
                 Operation::SimulateFailure => {
@@ -269,15 +275,16 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     drop(db);
 
                     let cfg = test_config(&test_name, &context);
-                    db = Db::init(
+                    let db = Db::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )
                     .await
                     .expect("Failed to init source db");
                     restarts += 1;
+                    db
                 }
-            }
+            };
         }
 
         let mut batch = db.new_batch();
@@ -285,7 +292,8 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized)
+        let (db, _) = db
+            .apply_batch(merkleized)
             .await
             .expect("commit should not fail");
         db.destroy().await.expect("Destroy should not fail");
