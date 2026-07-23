@@ -1559,6 +1559,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data_sync = self.blobs.start_sync().await;
         data_sync.await?;
         self.offsets.commit().await?;
+        self.durable_size.mark_durable(self.bounds.end);
 
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
@@ -1580,16 +1581,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(true)
     }
 
-    /// In-place [Journal::start_sync].
-    pub(crate) async fn start_sync(&mut self) -> Handle<()> {
+    /// See [Journal::start_sync].
+    pub(crate) async fn start_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
         self.metrics.start_sync_calls.inc();
         let data = self.blobs.start_sync().await;
         let offsets = self.offsets.start_data_sync().await;
 
-        let watermark_handle = self
-            .offsets
-            .start_watermark_sync(self.durable_size.size())
-            .await;
+        let size = self.durable_size.size();
+        let (offsets_journal, watermark_handle) = self.offsets.start_watermark_sync(size).await;
+        self.offsets = offsets_journal;
 
         let journal_handle: SyncCompletion =
             async move { try_join(data, offsets).await.map(|_| ()) }
@@ -1597,10 +1597,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 .shared();
         self.durable_size
             .record(self.bounds.end, journal_handle.clone());
-        Handle::from_future(async move {
+        let handle = Handle::from_future(async move {
             journal_handle.await?;
             watermark_handle.await
-        })
+        });
+        (self, handle)
     }
 
     /// See [Journal::commit].
@@ -2325,14 +2326,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
     /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
-    /// At most one sync is in flight at a time: this call waits for the sync the prior
-    /// call started before starting another. It does not wait for a pending rollover fsync:
+    /// At most one data sync and one watermark sync are in flight at a time: this call waits
+    /// for the prior call's syncs before starting new ones. It does not wait for a pending
+    /// rollover fsync:
     /// the returned handle joins it, so an earlier call's handle may still be pending when
     /// this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
     /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {
-        let handle = self.0.start_sync().await;
+        let (inner, handle) = self.0.start_sync().await;
+        self.0 = inner;
         (self, handle)
     }
 
@@ -2563,8 +2566,8 @@ mod tests {
         buffer::paged::{CacheRef, Writer},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync,
-            release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
+            next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -2641,7 +2644,7 @@ mod tests {
             drive_pending_syncs(&pending, h1).await.unwrap();
 
             // The first sync is jointly proven (data and offsets), so the next call advances
-            // the offsets watermark to its size — one interval behind the tip.
+            // the offsets watermark to its size, one interval behind the tip.
             journal.append(&4).await.unwrap();
             let h2 = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 3);
@@ -2752,6 +2755,51 @@ mod tests {
             let h2 = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 2);
             assert!(h2.await.is_err());
+        });
+    }
+
+    #[test]
+    fn test_start_sync_watermark_advance_deferred_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-watermark-deferred".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Inner::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let h1 = journal.start_sync().await;
+            release_pending_syncs(&pending);
+            h1.await.unwrap();
+
+            // Only the advance's offsets-checkpoint fsync is in flight: its failure surfaces
+            // on the journal handle even though the data is durable.
+            let h2 = journal.start_sync().await;
+            fail_pending_syncs(&pending);
+            assert!(h2.await.is_err());
+
+            // The checkpoint store retained the failure: commit (which does not write the
+            // checkpoint) still succeeds, and the next operation that does fails.
+            journal.append(&4).await.unwrap();
+            drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+            let journal = Box::new(journal);
+            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
         });
     }
 

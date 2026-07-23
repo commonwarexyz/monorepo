@@ -852,15 +852,17 @@ impl WriteFaults {
         self.state.lock().written.clear();
     }
 
-    fn record(&self, name: &str) -> Result<(), Error> {
-        let mut state = self.state.lock();
-        if state.fail {
+    fn check(&self) -> Result<(), Error> {
+        if self.state.lock().fail {
             return Err(Error::Io(
                 std::io::Error::other("injected write failure").into(),
             ));
         }
-        state.written.push(name.to_string());
         Ok(())
+    }
+
+    fn note(&self, name: &str) {
+        self.state.lock().written.push(name.to_string());
     }
 }
 
@@ -928,8 +930,10 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.faults.record(&self.name)?;
-        self.inner.write_at(offset, bufs).await
+        self.faults.check()?;
+        self.inner.write_at(offset, bufs).await?;
+        self.faults.note(&self.name);
+        Ok(())
     }
 
     async fn write_at_sync(
@@ -937,8 +941,10 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.faults.record(&self.name)?;
-        self.inner.write_at_sync(offset, bufs).await
+        self.faults.check()?;
+        self.inner.write_at_sync(offset, bufs).await?;
+        self.faults.note(&self.name);
+        Ok(())
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

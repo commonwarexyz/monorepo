@@ -7,10 +7,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
-use futures::{
-    FutureExt as _,
-    future::{ready, try_join_all},
-};
+use futures::{FutureExt as _, future::try_join_all};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -69,11 +66,19 @@ struct State<B: Blob, K: Span> {
     next_version: u64,
     key_order_changed: u64,
     blobs: [Wrapper<B, K>; 2],
-    /// The sync started by the last [Metadata::start_sync], if it has not been observed complete.
+    /// The outcome of the last sync that began mutating blob state, until observed complete.
     ///
     /// At most one sync is ever in flight: a new sync always targets the copy the pending sync
     /// left as last-known-durable, so it must first prove the pending sync completed.
-    pending: Option<SyncCompletion>,
+    pending: Option<Pending>,
+}
+
+/// The outcome of a sync that began mutating blob state.
+enum Pending {
+    /// The sync's shared completion, in flight or not yet observed.
+    Sync(SyncCompletion),
+    /// The sync's writes failed, leaving the target blob's on-disk state unknown.
+    Failed(RError),
 }
 
 /// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
@@ -324,12 +329,14 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// Wait for an in-flight sync started by [Metadata::start_sync], surfacing its failure.
     async fn wait_for_pending(&mut self) -> Result<(), RError> {
-        let Some(pending) = &self.state.pending else {
-            return Ok(());
-        };
         // A failure is retained so every later sync keeps failing: the failed copy's on-disk
         // state is unknown, and a write to the other (only durable) copy could destroy both.
-        pending.clone().await?;
+        let completion = match &self.state.pending {
+            None => return Ok(()),
+            Some(Pending::Sync(completion)) => completion.clone(),
+            Some(Pending::Failed(err)) => return Err(err.clone()),
+        };
+        completion.await?;
         self.state.pending = None;
         Ok(())
     }
@@ -356,10 +363,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         match self.write_next_version(pipelined).await {
             Ok(handle) => Ok(handle),
             Err(err) => {
-                // The failed write leaves the target blob in an unknown on-disk state, so
-                // retain the failure: a later sync would otherwise write the other (only
-                // durable) copy and could destroy both.
-                self.state.pending = Some(ready(Err(err.clone())).boxed().shared());
+                self.state.pending = Some(Pending::Failed(err.clone()));
                 Err(err)
             }
         }
@@ -547,13 +551,13 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         };
         let completion: SyncCompletion = sync.boxed().shared();
         let handle = Handle::from_future(completion.clone());
-        self.state.pending = Some(completion);
+        self.state.pending = Some(Pending::Sync(completion));
         handle
     }
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
-        if let Some(pending) = self.state.pending.take() {
+        if let Some(Pending::Sync(pending)) = self.state.pending.take() {
             let _ = pending.await;
         }
         let state = self.state;
@@ -578,7 +582,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 /// Implementation of [Metadata] storage.
 ///
 /// Storage-mutating functions consume the store and return it only on success: an error (or a
-/// dropped future) destroys the handle.
+/// dropped future) destroys the handle. [Self::start_sync] always returns the store and surfaces
+/// failures on its handle instead, poisoning the store so every later sync fails.
 pub struct Metadata<E: Context, K: Span, V: Codec>(Box<Inner<E, K, V>>);
 
 impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
@@ -673,11 +678,13 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     ///
     /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. Failures
     /// surface only on the handle: a call that fails to start its sync returns an already-failed
-    /// handle. At most one sync is in flight: a second call first waits for the first. The handle
-    /// is a detached observer — dropping it neither cancels the sync nor loses a failure. Any
-    /// failure leaves the store unusable: every later sync fails, matching [Self::sync].
-    pub async fn start_sync(&mut self) -> Handle<()> {
-        self.0.start_sync().await
+    /// handle. At most one sync is in flight: a new call first waits for the prior sync. The
+    /// handle is a detached observer, so dropping it neither cancels the sync nor loses a
+    /// failure. Any failure leaves the store unusable: every later sync fails, matching
+    /// [Self::sync].
+    pub async fn start_sync(mut self) -> (Self, Handle<()>) {
+        let handle = self.0.start_sync().await;
+        (self, handle)
     }
 
     /// Remove the underlying blobs for this [Metadata].

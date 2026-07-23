@@ -359,6 +359,44 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_start_sync_dropped_call_poisons() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                WriteFaultContext {
+                    inner: context.child("first"),
+                    faults: faults.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            // Drop the call future while its writes are parked: the target copy's on-disk
+            // state is unknown, so the store must refuse every later sync.
+            metadata.put(U64::new(1), vec![3]);
+            faults.hold();
+            {
+                let mut call = Box::pin(metadata.start_sync());
+                for _ in 0..8 {
+                    assert!((&mut call).now_or_never().is_none());
+                }
+            }
+            faults.release();
+
+            metadata.put(U64::new(1), vec![4]);
+            let retry = metadata.start_sync().await;
+            assert!(retry.await.is_err());
+            assert!(metadata.sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
     fn test_put_get_clear() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

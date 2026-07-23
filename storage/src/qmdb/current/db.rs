@@ -800,9 +800,9 @@ where
     /// plus a best-effort attempt to bound the recovery needed on startup.
     /// Bitmap metadata is only persisted by [Self::sync]. A new sync waits for the prior sync
     /// before starting. Failures of the deferred durability work surface on the returned
-    /// handle. A failed operation-log sync also fails the next durability operation. A failed
-    /// merkle-node sync is not observed by [Self::commit] and resurfaces on the next
-    /// [Self::start_sync] or [Self::sync].
+    /// handle. A failed data sync also fails the next durability operation. A failed
+    /// recovery-watermark or merkle-node sync is not observed by [Self::commit] and resurfaces
+    /// on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {

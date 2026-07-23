@@ -39,7 +39,7 @@ impl DurableSize {
         if result.is_ok() {
             self.size = self.size.max(*size);
         }
-        // A failure is discarded here — the proven size simply does not advance. The layer
+        // A failure is discarded here: the proven size simply does not advance. The layer
         // that started the sync retains the failure and resurfaces it on its next sync of
         // the failed component.
         self.pending = None;
