@@ -696,6 +696,13 @@ stability_scope!(BETA {
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
+    ///
+    /// # Torn writes
+    ///
+    /// A write interrupted by a crash before it is synced may be partially applied: any subset
+    /// of its bytes may hold the new value, with the rest holding their old values. No byte
+    /// ever holds anything other than its old or new value, and bytes outside the written
+    /// range are unaffected.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read `len` bytes at `offset` into caller-provided buffer(s).
