@@ -1241,7 +1241,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Awaiting the returned [Handle] guarantees state appended before this call survives a
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
-    /// size, bounding startup recovery; only `sync()` guarantees a current watermark.
+    /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
     /// At most one sync is in flight at a time: this call waits for the sync the prior
     /// call started before starting another. It does not wait for a pending rollover fsync:
@@ -1738,8 +1738,8 @@ mod tests {
         buffer::paged::Writer,
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
+            fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -1894,8 +1894,7 @@ mod tests {
             let h2 = journal.start_sync().await;
             assert_eq!(journal.recovery_watermark(), 3);
 
-            // Rewind below the in-flight advance: it must drain the parked metadata sync and
-            // persist the lowered value before blob state moves backward.
+            // Rewind below the in-flight advance: the lowered value must win on reopen.
             let journal = drive_pending_syncs(&pending, journal.rewind(2))
                 .await
                 .unwrap();
@@ -1908,6 +1907,156 @@ mod tests {
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 2);
             assert_eq!(journal.bounds(), 0..2);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_watermark_advance_inline_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let mut journal = Inner::<_, u64>::init(
+                WriteFaultContext {
+                    inner: context.child("journal"),
+                    faults: faults.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            // Prove three items durable (watermark 3), then one more so the next call has an
+            // advance to start.
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let h1 = journal.start_sync().await;
+            h1.await.unwrap();
+            journal.append(&4).await.unwrap();
+            journal.commit().await.unwrap();
+
+            // The advance's inline metadata writes fail: the journal handle must still
+            // resolve Ok (the advance is best effort) and the journal must stay usable.
+            faults.arm();
+            let h2 = journal.start_sync().await;
+            h2.await.unwrap();
+            faults.disarm();
+            journal.append(&5).await.unwrap();
+            journal.commit().await.unwrap();
+
+            // The metadata store retained the failure, so the next operation that must
+            // write the checkpoint fails.
+            assert!(Box::new(journal).sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_watermark_advance_deferred_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let mut journal = Inner::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let h1 = journal.start_sync().await;
+            release_pending_syncs(&pending);
+            h1.await.unwrap();
+
+            // Only the advance's metadata fsync is in flight: failing it must not fail the
+            // journal handle (the advance is best effort).
+            let h2 = journal.start_sync().await;
+            fail_pending_syncs(&pending);
+            h2.await.unwrap();
+
+            // The journal stays usable, but the metadata store retained the failure: the
+            // next operation that must write the checkpoint fails.
+            journal.append(&4).await.unwrap();
+            drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+            let journal = Box::new(journal);
+            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_watermark_lowering_failure_keeps_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let make = |faults: WriteFaults| {
+                Inner::<_, u64>::init(
+                    WriteFaultContext {
+                        inner: context.child("journal"),
+                        faults,
+                    },
+                    cfg.clone(),
+                )
+            };
+            let mut journal = Box::new(make(faults.clone()).await.unwrap());
+            journal
+                .append_many(Many::Flat(&[1, 2, 3, 4]))
+                .await
+                .unwrap();
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
+
+            // Rewind must durably lower the watermark before touching blob state: when the
+            // lowering fails, the rewind fails with the blobs intact.
+            faults.arm();
+            assert!(journal.rewind(2).await.is_err());
+            faults.disarm();
+
+            let journal = make(faults).await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
+            assert_eq!(journal.bounds(), 0..4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_truncates_durable_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 3);
+
+            // Rewind discards the proof for position 2: while re-appended data is still
+            // syncing, the next call's advance must not raise the watermark past the rewind
+            // point.
+            let mut journal = drive_pending_syncs(&pending, journal.rewind(2))
+                .await
+                .unwrap();
+            journal.append(&9).await.unwrap();
+            let handle = journal.start_sync().await;
+            assert_eq!(journal.recovery_watermark(), 2);
+
+            pending.unblock();
+            handle.await.unwrap();
             journal.destroy().await.unwrap();
         });
     }

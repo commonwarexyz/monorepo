@@ -109,6 +109,8 @@ impl<E: Context> Checkpoint<E> {
 
     /// Begin raising the watermark to `watermark`, returning a completion handle. A `watermark`
     /// at or below the current one is ignored, returning a resolved handle.
+    /// A failed advance leaves the raised value staged: later advances at or below it are
+    /// ignored, and the retained failure resurfaces on the next durable checkpoint write.
     /// Invariant: all items below `watermark` are durable.
     pub(super) async fn start_watermark_sync(
         &mut self,

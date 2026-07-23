@@ -854,10 +854,12 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Also makes a best-effort attempt to bound the recovery needed on startup; use
+    /// Also makes a best-effort attempt to bound the recovery needed on startup. Use
     /// [Self::sync] to guarantee none is needed. A new sync waits for the prior sync before
-    /// starting. Failures of the deferred durability work surface on the returned handle and
-    /// again on the next durability operation.
+    /// starting. Failures of the deferred durability work surface on the returned handle. A
+    /// failed operation-log sync also fails the next durability operation. A failed
+    /// merkle-node sync is not observed by [Self::commit] and resurfaces on the next
+    /// [Self::start_sync] or [Self::sync].
     #[tracing::instrument(
         name = "qmdb.any.db.start_sync",
         level = "info",

@@ -2324,7 +2324,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Awaiting the returned [Handle] guarantees state appended before this call survives a
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
-    /// size, bounding startup recovery; only `sync()` guarantees a current watermark.
+    /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
     /// At most one sync is in flight at a time: this call waits for the sync the prior
     /// call started before starting another. It does not wait for a pending rollover fsync:
@@ -2700,6 +2700,58 @@ mod tests {
 
             let h2 = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 0);
+            assert!(h2.await.is_err());
+        });
+    }
+
+    #[test]
+    fn test_rewind_truncates_durable_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-rewind-truncate".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+            assert_eq!(journal.offsets.recovery_watermark(), 3);
+
+            // Rewind discards the joint proof for position 2. Re-append it, then fail the
+            // data sync while the offsets sync lands: the advance must not trust the stale
+            // proof.
+            let mut journal = drive_pending_syncs(&pending, journal.rewind(2))
+                .await
+                .unwrap();
+            journal.append(&9).await.unwrap();
+            let h1 = journal.start_sync().await;
+            let data = next_pending_sync(&pending);
+            release_pending_syncs(&pending);
+            data.release
+                .send(Err(commonware_runtime::Error::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            assert!(h1.await.is_err());
+
+            let h2 = journal.start_sync().await;
+            assert_eq!(journal.offsets.recovery_watermark(), 2);
             assert!(h2.await.is_err());
         });
     }

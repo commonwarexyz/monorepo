@@ -7,7 +7,10 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
-use futures::{FutureExt as _, future::try_join_all};
+use futures::{
+    FutureExt as _,
+    future::{ready, try_join_all},
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -344,10 +347,23 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// Shared implementation of [Self::sync] and [Self::start_sync]. When `pipelined`, the final
     /// blob sync is only started, recorded as pending, and observable through the returned
-    /// [Handle]; otherwise it completes before returning and the handle is already resolved.
+    /// [Handle]. Otherwise it completes before returning and the handle is already resolved.
     async fn sync_inner(&mut self, pipelined: bool) -> Result<Handle<()>, Error> {
         self.wait_for_pending().await?;
+        match self.write_next_version(pipelined).await {
+            Ok(handle) => Ok(handle),
+            Err(err) => {
+                // The failed write leaves the target blob in an unknown on-disk state, so
+                // retain the failure: a later sync would otherwise write the other (only
+                // durable) copy and could destroy both.
+                self.state.pending = Some(ready(Err(err.clone())).boxed().shared());
+                Err(Error::Runtime(err))
+            }
+        }
+    }
 
+    /// Write and persist the next version of the store to the target blob.
+    async fn write_next_version(&mut self, pipelined: bool) -> Result<Handle<()>, RError> {
         // Extract values we need
         let cursor = self.state.cursor;
         let next_version = self.state.next_version;

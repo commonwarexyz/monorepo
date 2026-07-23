@@ -94,11 +94,12 @@ mod tests {
     use commonware_runtime::{
         Blob, Metrics as _, Runner, Storage, Supervisor as _, deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
+            fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::sequence::U64;
+    use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
 
     #[test_traced]
@@ -125,7 +126,7 @@ mod tests {
             h2.await.unwrap();
             metadata.destroy().await.unwrap();
 
-            // Destroy drained the pending sync; nothing survives the reopen.
+            // Destroy drained the pending sync, so nothing survives the reopen.
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
@@ -263,6 +264,91 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(metadata.get(&key), Some(&vec![4]));
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_inline_write_failure_is_retained() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                WriteFaultContext {
+                    inner: context.child("first"),
+                    faults: faults.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            // Establish a stable key order with equal-size values so later syncs take the
+            // overwrite path, which mutates the target copy's state before writing.
+            let key = U64::new(1);
+            metadata.put(key.clone(), vec![1; 8]);
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(key.clone(), vec![2; 8]);
+            metadata = metadata.sync().await.unwrap();
+
+            // The injected failure hits the inline writes, after the cursor has rotated onto
+            // the target copy: its on-disk state is now unknown.
+            faults.arm();
+            metadata.put(key.clone(), vec![3; 8]);
+            assert!(metadata.start_sync().await.is_err());
+            faults.disarm();
+
+            // The failure is retained: every later sync fails without writing either copy.
+            faults.clear_written();
+            metadata.put(key.clone(), vec![4; 8]);
+            assert!(metadata.start_sync().await.is_err());
+            assert!(faults.written().is_empty());
+            assert!(metadata.sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_second_sync_waits_for_first() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                DelayedSyncContext {
+                    inner: context.child("first"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+
+            // Park the first sync, then start a second: it must wait for the first before
+            // writing the copy the first left as last-known-durable.
+            let key = U64::new(1);
+            metadata.put(key.clone(), vec![3]);
+            let handle = metadata.start_sync().await.unwrap();
+            metadata.put(key.clone(), vec![4]);
+            let mut second = Box::pin(metadata.sync());
+            for _ in 0..8 {
+                assert!((&mut second).now_or_never().is_none());
+            }
+            assert_eq!(
+                pending.starts(),
+                1,
+                "second sync must not start a blob sync"
+            );
+
+            release_pending_syncs(&pending);
+            handle.await.unwrap();
+            let metadata = drive_pending_syncs(&pending, second).await.unwrap();
+            metadata.destroy().await.unwrap();
         });
     }
 

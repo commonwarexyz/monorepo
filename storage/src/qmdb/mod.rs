@@ -28,7 +28,7 @@
 //!
 //! # Durability
 //!
-//! `commit()` makes applied state durable; `start_sync()` is its non-blocking form, which also
+//! `commit()` makes applied state durable. `start_sync()` is its non-blocking form, which also
 //! keeps startup recovery short (best effort). `sync()` makes applied state durable and
 //! guarantees no recovery is needed on startup after a crash.
 //!
