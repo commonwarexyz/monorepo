@@ -561,12 +561,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "mocks")]
+    use crate::simplex::SimplexCertificateMock;
     use crate::{FuzzInput, ReporterWiring, simplex::SimplexId, strategy::StrategyChoice};
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;
-
-    #[cfg(feature = "mocks")]
-    use crate::simplex::SimplexCertificateMock;
 
     /// Episode length the ignored integration tests run: short (versus the
     /// production cap) so a full deterministic episode, runtime, schedule, and
