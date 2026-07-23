@@ -798,11 +798,9 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup.
-    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for the prior sync
-    /// before starting. Failures of the deferred durability work surface on the returned
-    /// handle. A failed data sync also fails the next durability operation. A failed
-    /// recovery-watermark or merkle-node sync is not observed by [Self::commit] and resurfaces
-    /// on the next [Self::sync].
+    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
+    /// the prior sync before starting. Failures surface as described on
+    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -1484,7 +1482,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("first"),
-                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+                fixed_config::<OneCap>("start-sync-recovery", &ctx),
             )
             .await
             .unwrap();
@@ -1504,7 +1502,7 @@ mod tests {
 
             let db = MmrDb::init(
                 ctx.child("second"),
-                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+                fixed_config::<OneCap>("start-sync-recovery", &ctx),
             )
             .await
             .unwrap();

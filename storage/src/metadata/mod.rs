@@ -307,11 +307,11 @@ mod tests {
             faults.disarm();
 
             // The failure is retained: every later sync fails without writing either copy.
-            faults.clear_written();
+            let writes_before = faults.writes();
             metadata.put(key.clone(), vec![4; 8]);
             let (metadata, retry) = metadata.start_sync().await;
             assert!(retry.await.is_err());
-            assert!(faults.written().is_empty());
+            assert_eq!(faults.writes(), writes_before);
             assert!(metadata.sync().await.is_err());
         });
     }

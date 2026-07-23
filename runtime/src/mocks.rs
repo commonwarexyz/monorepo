@@ -819,7 +819,7 @@ impl PendingSyncs {
 }
 
 /// Controls a [WriteFaultContext]: while armed, every `write_at`/`write_at_sync` fails with an
-/// injected error. Successful writes record their blob name.
+/// injected error. Successful writes are counted.
 #[derive(Clone, Default)]
 pub struct WriteFaults {
     state: Arc<Mutex<WriteFaultState>>,
@@ -828,7 +828,7 @@ pub struct WriteFaults {
 #[derive(Default)]
 struct WriteFaultState {
     fail: bool,
-    written: Vec<String>,
+    writes: u64,
 }
 
 impl WriteFaults {
@@ -842,14 +842,9 @@ impl WriteFaults {
         self.state.lock().fail = false;
     }
 
-    /// Names of blobs successfully written so far.
-    pub fn written(&self) -> Vec<String> {
-        self.state.lock().written.clone()
-    }
-
-    /// Forget recorded writes.
-    pub fn clear_written(&self) {
-        self.state.lock().written.clear();
+    /// The number of successful writes so far.
+    pub fn writes(&self) -> u64 {
+        self.state.lock().writes
     }
 
     fn check(&self) -> Result<(), Error> {
@@ -861,14 +856,14 @@ impl WriteFaults {
         Ok(())
     }
 
-    fn note(&self, name: &str) {
-        self.state.lock().written.push(name.to_string());
+    fn note(&self) {
+        self.state.lock().writes += 1;
     }
 }
 
 /// Context wrapper whose blobs fail `write_at`/`write_at_sync` while the shared [WriteFaults]
-/// is armed, recording the names of blobs successfully written. Unlike [DelayedSyncContext],
-/// this injects failures into inline writes issued before any blob sync starts.
+/// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
+/// into inline writes issued before any blob sync starts.
 #[derive(Clone)]
 pub struct WriteFaultContext<E> {
     pub inner: E,
@@ -890,7 +885,6 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
         Ok((
             WriteFaultBlob {
                 inner,
-                name: String::from_utf8_lossy(name).into_owned(),
                 faults: self.faults.clone(),
             },
             len,
@@ -911,7 +905,6 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
 #[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
-    name: String,
     faults: WriteFaults,
 }
 
@@ -932,7 +925,7 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.faults.check()?;
         self.inner.write_at(offset, bufs).await?;
-        self.faults.note(&self.name);
+        self.faults.note();
         Ok(())
     }
 
@@ -943,7 +936,7 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
     ) -> Result<(), Error> {
         self.faults.check()?;
         self.inner.write_at_sync(offset, bufs).await?;
-        self.faults.note(&self.name);
+        self.faults.note();
         Ok(())
     }
 

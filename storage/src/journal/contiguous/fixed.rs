@@ -1231,9 +1231,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Durably persists the current state of the structure.
     ///
-    /// Does not advance the recovery watermark, so external consumers may need to replay entries
-    /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
-    /// crash after this call doesn't require any recovery.
+    /// Does not advance the recovery watermark, so reopen may replay entries above it. Use
+    /// `sync()` to advance the watermark and to ensure that a crash after this call doesn't
+    /// require any recovery.
     pub async fn commit(mut self) -> Result<Self, Error> {
         self.0.commit().await?;
         Ok(self)
@@ -1248,9 +1248,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// At most one data sync and one watermark sync are in flight at a time: this call waits
     /// for the prior call's syncs before starting new ones. It does not wait for a pending
     /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
-    /// pending when this call returns. Reads always proceed while the returned handle is pending, and
-    /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
-    /// the in-flight fsync). Dropping the handle does not cancel the sync.
+    /// pending when this call returns. Reads always proceed while the returned handle is
+    /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
+    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {
         let (inner, handle) = self.0.start_sync().await;
         self.0 = inner;

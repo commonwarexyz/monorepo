@@ -1352,7 +1352,7 @@ fn test_fixed_start_sync_durability() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = fixed::Config {
-            partition: "fixed-start-commit".into(),
+            partition: "fixed-start-sync".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
@@ -1370,7 +1370,7 @@ fn test_variable_start_sync_durability() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = variable::Config {
-            partition: "variable-start-commit".into(),
+            partition: "variable-start-sync".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
@@ -1577,7 +1577,7 @@ fn test_fixed_start_sync_overlaps_predecessor_and_tail() {
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = fixed::Config {
-            partition: "fixed-start-commit-predecessor".into(),
+            partition: "fixed-start-sync-predecessor".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
@@ -1595,7 +1595,7 @@ fn test_variable_start_sync_overlaps_predecessor_and_tail() {
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = variable::Config {
-            partition: "variable-start-commit-predecessor".into(),
+            partition: "variable-start-sync-predecessor".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
@@ -1614,7 +1614,7 @@ fn test_fixed_start_sync_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-commit-overlap");
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-overlap");
         test_start_sync_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(ctx, cfg)
@@ -1628,7 +1628,7 @@ fn test_variable_start_sync_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-commit-overlap");
+        let cfg = variable_overlap_cfg(&context, "variable-start-sync-overlap");
         test_start_sync_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(ctx, cfg)
@@ -1642,7 +1642,7 @@ fn test_fixed_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-commit-fail");
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-fail");
         test_start_sync_failure_propagates(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -1655,7 +1655,7 @@ fn test_variable_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-commit-fail");
+        let cfg = variable_overlap_cfg(&context, "variable-start-sync-fail");
         test_start_sync_failure_propagates(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })

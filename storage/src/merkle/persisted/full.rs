@@ -629,9 +629,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Flush all nodes cached in the in-memory structure to the journal and begin making them
     /// durable, returning a completion handle.
     ///
-    /// `journal_dirty` is deliberately not cleared: the started sync covers only nodes flushed
-    /// so far, and [Self::sync] remains the durability authority.
+    /// The handle covers only nodes flushed so far. A later [Self::sync] still performs a full
+    /// durable sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        // `journal_dirty` is deliberately not cleared: the started sync covers only nodes
+        // flushed so far, and sync() remains the durability authority.
         self = self.flush_internal().await?;
         let (journal, handle) = self.journal.start_sync().await;
         self.journal = journal;
