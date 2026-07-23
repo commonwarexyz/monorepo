@@ -5,18 +5,19 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity, Floor, Plan},
-    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
+    simplex::{Floor, Plan, elector::Elector, types::Activity},
+    types::{Epoch, ViewDelta},
 };
 pub use actor::Actor;
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
+use core::num::NonZeroUsize;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
-use std::{num::NonZeroUsize, time::Duration};
+use std::time::Duration;
 
 pub struct Config<
     S: Scheme,
@@ -41,7 +42,7 @@ pub struct Config<
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
-    pub activity_timeout: ViewDelta,
+    pub view_retention: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
     pub page_cache: CacheRef,
@@ -51,50 +52,49 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
+        Viewable,
         simplex::{
             actors::{
                 batcher,
                 resolver::{self, MailboxMessage},
             },
-            elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
+            elector::{self, Config as _, Random, RoundRobin, RoundRobinElector},
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
-                bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-                secp256r1, Scheme,
+                Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
+                ed25519, secp256r1,
             },
             types::{
                 Artifact, Certificate, Finalization, Finalize, Notarization, Notarize,
                 Nullification, Nullify, Proposal, Vote,
             },
         },
-        types::{Participant, Round, View},
-        Viewable,
+        types::{Participant, Round, TermLength, View},
     };
     use commonware_actor::mailbox;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher as _, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network, Oracle},
         Recipients,
+        simulated::{Config as NConfig, Link, Network, Oracle},
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic,
-        mocks::{next_pending_sync, DelayedSyncContext, PendingSyncs},
+        Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
         reschedule,
         telemetry::traces::collector::TraceStorage,
-        Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -180,17 +180,38 @@ mod tests {
         (votes, certificate)
     }
 
+    /// Voter knobs for [`setup_voter`], named so call sites cannot transpose
+    /// the timeouts. Tests override only the fields they exercise.
+    struct VoterOptions {
+        leader_timeout: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
+        certify_latency_ms: f64,
+        certifier: mocks::application::Certifier<Sha256Digest>,
+    }
+
+    impl Default for VoterOptions {
+        /// A short leader timeout with certification and retry timeouts far
+        /// beyond test duration, so only leader timeouts fire.
+        fn default() -> Self {
+            Self {
+                leader_timeout: Duration::from_millis(500),
+                certification_timeout: Duration::from_secs(1000),
+                timeout_retry: Duration::from_secs(1000),
+                certify_latency_ms: 1.0,
+                certifier: mocks::application::Certifier::Always,
+            }
+        }
+    }
+
     /// Helper to set up a voter actor for tests.
-    #[allow(clippy::too_many_arguments)]
     async fn setup_voter<S, L>(
         context: &mut deterministic::Context,
         oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
         participants: &[S::PublicKey],
         schemes: &[S],
         elector: L,
-        leader_timeout: Duration,
-        certification_timeout: Duration,
-        timeout_retry: Duration,
+        options: VoterOptions,
     ) -> (
         Mailbox<S, Sha256Digest>,
         mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
@@ -200,43 +221,7 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
-    {
-        setup_voter_with_certifier(
-            context,
-            oracle,
-            participants,
-            schemes,
-            elector,
-            leader_timeout,
-            certification_timeout,
-            timeout_retry,
-            mocks::application::Certifier::Always,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn setup_voter_with_certifier<S, L>(
-        context: &mut deterministic::Context,
-        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
-        participants: &[S::PublicKey],
-        schemes: &[S],
-        elector: L,
-        leader_timeout: Duration,
-        certification_timeout: Duration,
-        timeout_retry: Duration,
-        should_certify: mocks::application::Certifier<Sha256Digest>,
-    ) -> (
-        Mailbox<S, Sha256Digest>,
-        mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
-        mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
-        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
-        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
-    )
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let signing = schemes[0].clone();
         let me = participants[0].clone();
@@ -246,16 +231,16 @@ mod tests {
             elector: elector.clone(),
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let relay = Arc::new(mocks::relay::Relay::new());
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+        let elector = elector.build(signing.participants());
 
-        let application_cfg = mocks::application::Config {
-            hasher: Sha256::default(),
+        let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
-            certify_latency: (1.0, 0.0),
-            should_certify,
+            certify_latency: (options.certify_latency_ms, 0.0),
+            should_certify: options.certifier,
         };
         let (actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
@@ -272,10 +257,10 @@ mod tests {
             epoch: Epoch::new(333),
             floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
             mailbox_size: NZUsize!(128),
-            leader_timeout,
-            certification_timeout,
-            timeout_retry,
-            activity_timeout: ViewDelta::new(10),
+            leader_timeout: options.leader_timeout,
+            certification_timeout: options.certification_timeout,
+            timeout_retry: options.timeout_retry,
+            view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -358,7 +343,7 @@ mod tests {
         .expect("unable to initialize voter journal");
         for artifact in artifacts {
             assert_eq!(artifact.view(), view);
-            journal
+            (journal, _, _) = journal
                 .append(view.get(), &artifact)
                 .await
                 .expect("unable to append voter journal artifact");
@@ -396,7 +381,7 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let VoterFloorStart {
             partition,
@@ -411,9 +396,9 @@ mod tests {
             elector: elector.clone(),
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let relay = Arc::new(mocks::relay::Relay::new());
-        let application_cfg = mocks::application::Config {
-            hasher: Sha256::default(),
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+        let elector = elector.build(schemes[0].participants());
+        let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (1.0, 0.0),
@@ -437,9 +422,9 @@ mod tests {
             floor,
             mailbox_size: NZUsize!(128),
             leader_timeout: Duration::from_secs(5),
-            certification_timeout: Duration::from_secs(5),
+            certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
-            activity_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache,
@@ -544,7 +529,7 @@ mod tests {
             let old_proposal = Proposal::new(
                 Round::new(epoch, old_view),
                 old_view.previous().unwrap(),
-                Sha256::hash(b"old-journal-finalization"),
+                Sha256::hash(&[b"old-journal-finalization"]),
             );
             let (_, old_finalization) = build_finalization(&schemes, &old_proposal, quorum);
             seed_voter_journal(
@@ -561,7 +546,7 @@ mod tests {
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
                 floor_view.previous().unwrap(),
-                Sha256::hash(b"newer-floor-finalization"),
+                Sha256::hash(&[b"newer-floor-finalization"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
             let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
@@ -624,7 +609,7 @@ mod tests {
             let journal_proposal = Proposal::new(
                 Round::new(epoch, journal_view),
                 journal_view.previous().unwrap(),
-                Sha256::hash(b"newer-journal-finalization"),
+                Sha256::hash(&[b"newer-journal-finalization"]),
             );
             let (_, journal_finalization) = build_finalization(&schemes, &journal_proposal, quorum);
             seed_voter_journal(
@@ -641,7 +626,7 @@ mod tests {
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
                 floor_view.previous().unwrap(),
-                Sha256::hash(b"older-floor-finalization"),
+                Sha256::hash(&[b"older-floor-finalization"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
             let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
@@ -702,7 +687,7 @@ mod tests {
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
                 floor_view.previous().unwrap(),
-                Sha256::hash(b"static-replay-floor"),
+                Sha256::hash(&[b"static-replay-floor"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
 
@@ -713,7 +698,7 @@ mod tests {
             let journal_proposal = Proposal::new(
                 Round::new(epoch, journal_view),
                 journal_view.previous().unwrap(),
-                Sha256::hash(b"same-section-finalize"),
+                Sha256::hash(&[b"same-section-finalize"]),
             );
             let (mut finalizes, journal_finalization) =
                 build_finalization(&schemes, &journal_proposal, quorum);
@@ -774,7 +759,7 @@ mod tests {
         target: View,
     ) -> Sha256Digest {
         let prev_view = target.previous().expect("target view must be > 0");
-        let payload = Sha256::hash(prev_view.get().to_be_bytes().as_slice());
+        let payload = Sha256::hash(&[&prev_view.get().to_be_bytes()]);
         let proposal = Proposal::new(
             Round::new(Epoch::new(333), prev_view),
             prev_view.previous().unwrap_or(View::zero()),
@@ -810,7 +795,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -842,9 +827,9 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let elector = elector.build(schemes[0].participants());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
@@ -869,7 +854,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -917,7 +902,7 @@ mod tests {
             }
 
             // Send finalization via voter mailbox (view 100)
-            let payload = Sha256::hash(b"test");
+            let payload = Sha256::hash(&[b"test"]);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(100)),
                 View::new(50),
@@ -962,7 +947,7 @@ mod tests {
             }
 
             // Send old notarization from resolver that should be ignored (view 50)
-            let payload = Sha256::hash(b"test2");
+            let payload = Sha256::hash(&[b"test2"]);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(50)),
                 View::new(49),
@@ -972,7 +957,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization));
 
             // Send new finalization via voter mailbox (view 300)
-            let payload = Sha256::hash(b"test3");
+            let payload = Sha256::hash(&[b"test3"]);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(300)),
                 View::new(100),
@@ -1033,7 +1018,7 @@ mod tests {
     /// 1. Advance last_finalized to a view 50.
     /// 2. Ensure self.views contains a view V_A (45) which is interesting,
     ///    and becomes the 'oldest' view when prune_views runs, setting the journal floor.
-    ///    Crucially, ensure there's a "gap" so that V_A is not LF - activity_timeout.
+    ///    Crucially, ensure there's a "gap" so that V_A is not LF - view_retention.
     /// 3. Let prune_views run, setting the journal floor to V_A.
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
@@ -1041,12 +1026,12 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Get participants
@@ -1072,9 +1057,9 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let app_config = mocks::application::Config {
-                hasher: Sha256::default(),
+            let elector = elector.build(signing.participants());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let app_config = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -1099,7 +1084,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
-                activity_timeout,
+                view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1153,18 +1138,18 @@ mod tests {
 
             // Establish Prune Floor (50 - 10 + 5 = 45)
             //
-            // Theoretical interesting floor is 50-10 = 40.
+            // Theoretical retention floor is 50-10 = 40.
             // We want journal pruned at 45.
             let lf_target = View::new(50);
             let journal_floor_target = lf_target
-                .saturating_sub(activity_timeout)
+                .saturating_sub(view_retention)
                 .saturating_add(ViewDelta::new(5));
 
             // Send Finalization via voter mailbox to advance last_finalized
             let proposal_lf = Proposal::new(
                 Round::new(Epoch::new(333), lf_target),
                 lf_target.previous().unwrap(),
-                Sha256::hash(b"test"),
+                Sha256::hash(&[b"test"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -1208,7 +1193,7 @@ mod tests {
             let proposal_jft = Proposal::new(
                 Round::new(Epoch::new(333), journal_floor_target),
                 journal_floor_target.previous().unwrap(),
-                Sha256::hash(b"test2"),
+                Sha256::hash(&[b"test2"]),
             );
             let (_, notarization_for_floor) = build_notarization(&schemes, &proposal_jft, quorum);
             mailbox.recovered(Certificate::Notarization(notarization_for_floor));
@@ -1228,15 +1213,15 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
 
-            // Send notarization below oldest interesting view (42)
+            // Send notarization below oldest tracked view (42)
             //
             // problematic_view (42) < journal_floor_target (45)
-            // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
+            // Viewport::retains(42): 42 >= floor (LF(50) - AT(10) = 40)
             let problematic_view = journal_floor_target.saturating_sub(ViewDelta::new(3));
             let proposal_bft = Proposal::new(
                 Round::new(Epoch::new(333), problematic_view),
                 problematic_view.previous().unwrap(),
-                Sha256::hash(b"test3"),
+                Sha256::hash(&[b"test3"]),
             );
             let (_, notarization_for_bft) = build_notarization(&schemes, &proposal_bft, quorum);
             mailbox.recovered(Certificate::Notarization(notarization_for_bft));
@@ -1260,7 +1245,7 @@ mod tests {
             let proposal_lf = Proposal::new(
                 Round::new(Epoch::new(333), View::new(100)),
                 View::new(99),
-                Sha256::hash(b"test4"),
+                Sha256::hash(&[b"test4"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal_lf, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -1317,7 +1302,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1345,9 +1330,7 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterOptions::default(),
                 )
                 .await;
 
@@ -1371,7 +1354,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"finalize_without_notarization"),
+                Sha256::hash(&[b"finalize_without_notarization"]),
             );
             let (_, expected_finalization) = build_finalization(&schemes, &proposal, quorum);
 
@@ -1437,7 +1420,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1465,9 +1448,7 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterOptions::default(),
                 )
                 .await;
 
@@ -1491,7 +1472,7 @@ mod tests {
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_a"),
+                Sha256::hash(&[b"proposal_a"]),
             );
             mailbox.proposal(proposal_a.clone());
 
@@ -1502,7 +1483,7 @@ mod tests {
             let proposal_b = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_b"),
+                Sha256::hash(&[b"proposal_b"]),
             );
             let (_, notarization_b) = build_notarization(&schemes, &proposal_b, quorum);
 
@@ -1571,7 +1552,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1598,9 +1579,7 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterOptions::default(),
                 )
                 .await;
 
@@ -1615,12 +1594,12 @@ mod tests {
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_a"),
+                Sha256::hash(&[b"proposal_a"]),
             );
             let proposal_b = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"proposal_b"),
+                Sha256::hash(&[b"proposal_b"]),
             );
 
             // Send certificate for proposal A FIRST
@@ -1693,7 +1672,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1718,9 +1697,8 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -1734,7 +1712,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1746,7 +1724,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1790,7 +1768,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"same_proposal"),
+                Sha256::hash(&[b"same_proposal"]),
             );
 
             // Send proposal from batcher first
@@ -1897,9 +1875,8 @@ mod tests {
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: leader.clone(),
                 propose_latency: (50.0, 10.0),
@@ -1921,7 +1898,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
-                elector: elector_config,
+                elector: elector_config.clone().build(leader_scheme.participants()),
                 blocker: oracle.control(leader.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1933,7 +1910,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1986,7 +1963,7 @@ mod tests {
             // Now create a finalization certificate for view 1 to advance to view 2
             let view1_round = Round::new(epoch, View::new(1));
             let view1_proposal =
-                Proposal::new(view1_round, View::new(0), Sha256::hash(b"view1_payload"));
+                Proposal::new(view1_round, View::new(0), Sha256::hash(&[b"view1_payload"]));
 
             let (_, finalization) = build_finalization(&schemes, &view1_proposal, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -2015,8 +1992,11 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
 
             // Create a conflicting proposal from ourselves (equivocating) for view 2
-            let conflicting_proposal =
-                Proposal::new(view2_round, View::new(1), Sha256::hash(b"leader_proposal"));
+            let conflicting_proposal = Proposal::new(
+                view2_round,
+                View::new(1),
+                Sha256::hash(&[b"leader_proposal"]),
+            );
 
             // Send the proposal via mailbox (simulating batcher receiving leader's notarize)
             // This happens AFTER we requested a proposal but BEFORE the automaton responds
@@ -2070,7 +2050,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2097,9 +2077,8 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
@@ -2114,7 +2093,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2126,7 +2105,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2182,7 +2161,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"finalize_without_notarization"),
+                Sha256::hash(&[b"finalize_without_notarization"]),
             );
             let (_, expected_finalization) = build_finalization(&schemes, &proposal, quorum);
 
@@ -2207,7 +2186,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2219,7 +2198,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2331,10 +2310,10 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let elector = elector.build(schemes[0].participants());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -2363,7 +2342,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
@@ -2486,11 +2465,256 @@ mod tests {
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
     }
 
+    fn stall_timeout_nullifies_current_view<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"stall_timeout_nullifies_current_view".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let elector = RoundRobin::<Sha256>::default()
+                .with_term(TermLength::new(NZU32!(2)), Duration::from_secs(5));
+            let first_round = Round::new(Epoch::new(333), View::new(1));
+            let built_elector: RoundRobinElector<S> =
+                elector.clone().build(schemes[0].participants());
+            let leader_idx = built_elector.elect(first_round, None);
+            let leader = participants[usize::from(leader_idx)].clone();
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(3),
+                    certification_timeout: Duration::from_secs(4),
+                    timeout_retry: Duration::from_secs(2),
+                    certify_latency_ms: 3500.0,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { .. } => {}
+                _ => panic!("expected initial update"),
+            }
+
+            let view_1 = View::new(1);
+            let genesis =
+                Sha256::hash(&[&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode()]);
+            let proposal_1 = Proposal::new(
+                Round::new(Epoch::new(333), view_1),
+                View::zero(),
+                Sha256::hash(&[b"same_term_timeout_view_1"]),
+            );
+            let contents = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents));
+            mailbox.proposal(proposal_1.clone());
+
+            let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_1));
+
+            loop {
+                if let batcher::Message::Update { current, .. } =
+                    batcher_receiver.recv().await.unwrap()
+                    && current == View::new(2)
+                {
+                    break;
+                }
+            }
+
+            select! {
+                msg = batcher_receiver.recv() => match msg.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify)) => {
+                        assert_eq!(nullify.view(), View::new(2));
+                    }
+                    batcher::Message::Update { .. } => {
+                        panic!("expected current-view nullify before the next update");
+                    }
+                    batcher::Message::Constructed(Vote::Notarize(_)) => {
+                        panic!("expected same-term timeout nullify, got notarize");
+                    }
+                    batcher::Message::Constructed(Vote::Finalize(_)) => {
+                        panic!("expected same-term timeout nullify, got finalize");
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("expected current-view nullify before leader timeout expired");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_stall_timeout_nullifies_current_view() {
+        stall_timeout_nullifies_current_view::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        stall_timeout_nullifies_current_view::<_, _>(ed25519::fixture);
+        stall_timeout_nullifies_current_view::<_, _>(secp256r1::fixture);
+    }
+
+    fn finalize_resumes_after_same_term_heal<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"finalize_resumes_after_same_term_heal".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let elector =
+                RoundRobin::<Sha256>::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(20));
+            let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    certify_latency_ms: 0.0,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { .. } => {}
+                _ => panic!("expected initial update"),
+            }
+
+            // The leader of term [1,3] never proposes, so the leader timeout
+            // fires and we nullify view 1.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify)) => {
+                        assert_eq!(nullify.view(), View::new(1));
+                        break;
+                    }
+                    batcher::Message::Update { .. } => {}
+                    _ => panic!("expected nullify for view 1"),
+                }
+            }
+
+            // Views 1 and 2 notarize and certify anyway, advancing us to view
+            // 3. The finalize votes are blocked by the same-term nullify at
+            // view 1 (no finalization observed yet).
+            let view_1 = View::new(1);
+            let proposal_1 = Proposal::new(
+                Round::new(Epoch::new(333), view_1),
+                View::zero(),
+                Sha256::hash(&[b"finalize_resume_view_1"]),
+            );
+            let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_1));
+
+            let view_2 = View::new(2);
+            let proposal_2 = Proposal::new(
+                Round::new(Epoch::new(333), view_2),
+                view_1,
+                Sha256::hash(&[b"finalize_resume_view_2"]),
+            );
+            let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_2));
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current == View::new(3) => break,
+                    batcher::Message::Constructed(Vote::Finalize(_)) => {
+                        panic!("finalize must be blocked by the same-term nullify");
+                    }
+                    _ => {}
+                }
+            }
+
+            // The finalization for view 1 arrives: our nullify can never form
+            // a nullification, so the gate heals.
+            let (_, finalization_1) = build_finalization(&schemes, &proposal_1, quorum);
+            mailbox.resolved(Certificate::Finalization(finalization_1));
+
+            // View 3 (same term) notarizes and certifies: with the gate
+            // healed, its finalize vote must be broadcast.
+            let view_3 = View::new(3);
+            let proposal_3 = Proposal::new(
+                Round::new(Epoch::new(333), view_3),
+                view_2,
+                Sha256::hash(&[b"finalize_resume_view_3"]),
+            );
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_3));
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(finalize)) = msg.unwrap() {
+                            assert_eq!(
+                                finalize.view(),
+                                View::new(3),
+                                "finalize voting should resume at the first view certified after the heal"
+                            );
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected finalize for view 3 after heal");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_finalize_resumes_after_same_term_heal() {
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(ed25519::fixture);
+        finalize_resumes_after_same_term_heal::<_, _>(secp256r1::fixture);
+    }
+
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         // This is a regression test as the resolver didn't use to send
         // finalizations to the voter
@@ -2519,9 +2743,7 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_millis(500),
-                Duration::from_secs(1000),
-                Duration::from_secs(1000),
+                VoterOptions::default(),
             )
             .await;
 
@@ -2545,7 +2767,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"finalization_from_resolver"),
+                Sha256::hash(&[b"finalization_from_resolver"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Finalization(finalization.clone()));
@@ -2588,7 +2810,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2616,9 +2838,7 @@ mod tests {
                     &participants,
                     &schemes,
                     elector,
-                    Duration::from_millis(500),
-                    Duration::from_secs(1000),
-                    Duration::from_secs(1000),
+                    VoterOptions::default(),
                 )
                 .await;
 
@@ -2642,7 +2862,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(b"no_resolver_boomerang"),
+                Sha256::hash(&[b"no_resolver_boomerang"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.resolved(Certificate::Finalization(finalization.clone()));
@@ -2691,12 +2911,12 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
-        let activity_timeout = ViewDelta::new(10);
+        let view_retention = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
             // Get participants
@@ -2721,10 +2941,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -2741,7 +2960,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2754,7 +2973,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout,
+                view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2802,7 +3021,7 @@ mod tests {
             let mut prev_proposal = Proposal::new(
                 Round::new(Epoch::new(333), current_view),
                 View::zero(),
-                Sha256::hash(b"v0"),
+                Sha256::hash(&[b"v0"]),
             );
 
             let (target_view, leader) = loop {
@@ -2835,7 +3054,7 @@ mod tests {
                 prev_proposal = Proposal::new(
                     Round::new(Epoch::new(333), current_view),
                     current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
             };
 
@@ -2843,19 +3062,17 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
 
             // Broadcast the payload contents so verification can complete (the automaton waits
             // for the contents via the relay).
-            let parent_payload = Sha256::hash(
-                target_view
-                    .previous()
-                    .unwrap()
-                    .get()
-                    .to_be_bytes()
-                    .as_slice(),
-            );
+            let parent_payload = Sha256::hash(&[target_view
+                .previous()
+                .unwrap()
+                .get()
+                .to_be_bytes()
+                .as_slice()]);
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal);
@@ -2902,16 +3119,16 @@ mod tests {
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Tests that observing a leader's `nullify` vote fast-paths timeout for verifiers.
-    fn leader_nullify_fast_paths_timeout<S, F, L>(mut fixture: F)
+    /// Tests that a leader-nullify timeout hint fast-paths local nullify construction.
+    fn leader_nullify_timeout_hint_fast_paths_nullify<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"leader_nullify_fast_paths_timeout".to_vec();
+        let namespace = b"leader_nullify_timeout_hint_fast_paths_nullify".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
@@ -2936,10 +3153,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -2953,7 +3169,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2966,7 +3182,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3011,7 +3227,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3083,21 +3299,21 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_leader_nullify_fast_paths_timeout() {
-        leader_nullify_fast_paths_timeout::<_, _, Random>(
+    fn test_leader_nullify_timeout_hint_fast_paths_nullify() {
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, Random>(
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(ed25519::fixture);
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(secp256r1::fixture);
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(ed25519::fixture);
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Tests that if the application drops proposal requests, the leader emits `nullify`
@@ -3134,10 +3350,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3152,7 +3367,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3165,7 +3380,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3210,7 +3425,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3271,7 +3486,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3299,10 +3514,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3317,7 +3531,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3330,7 +3544,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3373,7 +3587,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3401,18 +3615,16 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"drop_verify"),
+                Sha256::hash(&[b"drop_verify"]),
             );
             let contents = (
                 proposal.round,
-                Sha256::hash(
-                    target_view
-                        .previous()
-                        .unwrap()
-                        .get()
-                        .to_be_bytes()
-                        .as_slice(),
-                ),
+                Sha256::hash(&[target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice()]),
                 7u64,
             )
                 .encode();
@@ -3477,7 +3689,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S> + Default,
+        L: elector::Config<S> + Default,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3502,9 +3714,12 @@ mod tests {
                 &participants,
                 &schemes,
                 L::default(),
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_mins(60),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_mins(60),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -3522,7 +3737,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3552,7 +3767,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 invalid_parent,
-                Sha256::hash(b"invalid_parent_before_finalized"),
+                Sha256::hash(&[b"invalid_parent_before_finalized"]),
             );
             mailbox.proposal(proposal);
 
@@ -3642,10 +3857,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3660,7 +3874,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3672,7 +3886,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(250),
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3735,7 +3949,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3786,7 +4000,7 @@ mod tests {
                 let proposal = Proposal::new(
                     Round::new(epoch, current_view),
                     current_view.previous().unwrap_or(View::zero()),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
                 mailbox.resolved(Certificate::Finalization(finalization));
@@ -3816,18 +4030,16 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"drop_verify_after_ready"),
+                Sha256::hash(&[b"drop_verify_after_ready"]),
             );
             let contents = (
                 proposal.round,
-                Sha256::hash(
-                    target_view
-                        .previous()
-                        .unwrap()
-                        .get()
-                        .to_be_bytes()
-                        .as_slice(),
-                ),
+                Sha256::hash(&[target_view
+                    .previous()
+                    .unwrap()
+                    .get()
+                    .to_be_bytes()
+                    .as_slice()]),
                 11u64,
             )
                 .encode();
@@ -3893,7 +4105,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3922,12 +4134,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let me = participants[0].clone();
 
             // Create application with certify tracking
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -3944,7 +4155,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3956,7 +4167,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3992,7 +4203,7 @@ mod tests {
             let proposal2 = Proposal::new(
                 Round::new(Epoch::new(333), view2),
                 View::new(1),
-                Sha256::hash(b"finalized_payload"),
+                Sha256::hash(&[b"finalized_payload"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal2, quorum);
             mailbox.recovered(Certificate::Finalization(finalization));
@@ -4001,10 +4212,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update { finalized, .. } =
                     batcher_receiver.recv().await.unwrap()
+                    && finalized >= view2
                 {
-                    if finalized >= view2 {
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -4016,7 +4226,7 @@ mod tests {
 
             // Step 2: Send notarization for view 3 (certify SHOULD be called)
             let view3 = View::new(3);
-            let digest3 = Sha256::hash(b"payload_for_certification");
+            let digest3 = Sha256::hash(&[b"payload_for_certification"]);
             let proposal3 = Proposal::new(Round::new(Epoch::new(333), view3), view2, digest3);
 
             // Broadcast payload and send proposal
@@ -4032,10 +4242,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update { current, .. } =
                     batcher_receiver.recv().await.unwrap()
+                    && current > view3
                 {
-                    if current > view3 {
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -4050,8 +4259,7 @@ mod tests {
 
             // Create new application with same tracker
             let tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4070,7 +4278,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4082,7 +4290,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4180,7 +4388,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Install propose + verify observers from the start so we can assert the
             // leader's propose call fires but no verify call is issued for our proposal.
@@ -4188,8 +4396,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4209,7 +4416,7 @@ mod tests {
             // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4221,7 +4428,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4349,12 +4556,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can
             // cleanly propose and journal its own notarize vote for view 2.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4369,7 +4575,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4381,7 +4587,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4447,8 +4653,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4470,7 +4675,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4482,7 +4687,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4604,7 +4809,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-crash: drop every propose response. The leader calls
             // `automaton.propose`, the mock swallows the request, and nothing
@@ -4614,8 +4819,7 @@ mod tests {
             // the voter even became leader.
             let pre_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let pre_propose_tracker = pre_propose_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4640,7 +4844,7 @@ mod tests {
             // guaranteeing the journal contains no `Nullify` either.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4652,7 +4856,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4729,8 +4933,7 @@ mod tests {
             // exactly one call for the target view.
             let post_propose_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let post_propose_tracker = post_propose_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4752,7 +4955,7 @@ mod tests {
             // (dropped) propose request.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4764,7 +4967,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4899,12 +5102,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can verify
             // the leader's proposal and journal its own notarize vote for view 3.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -4919,7 +5121,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4931,7 +5133,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4957,7 +5159,7 @@ mod tests {
             );
 
             // Wait for startup, then advance to view 3 via a synthetic finalization for
-            // view 2. `advance_to_view` uses Sha256::hash(prev_view.to_be_bytes()) as the
+            // view 2. `advance_to_view` uses Sha256::hash(&[prev_view.to_be_bytes()]) as the
             // parent payload, which we reuse below.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
@@ -4982,7 +5184,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"follower_proposal"),
+                Sha256::hash(&[b"follower_proposal"]),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay.broadcast(&leader_pk, Recipients::All, (proposal.payload, contents));
@@ -5010,8 +5212,7 @@ mod tests {
             let verify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let propose_tracker = propose_calls.clone();
             let verify_tracker = verify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5033,7 +5234,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5045,7 +5246,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5173,14 +5374,13 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Install a certify observer to confirm the leader certifies its own
             // proposal for the leader-owned view.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5200,7 +5400,7 @@ mod tests {
             // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5212,7 +5412,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5354,12 +5554,11 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Pre-restart: plain application (no observers) so the voter can
             // cleanly propose and journal its own notarize vote for view 2.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5374,7 +5573,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5386,7 +5585,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5451,8 +5650,7 @@ mod tests {
             handle.abort();
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5474,7 +5672,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5486,7 +5684,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5615,7 +5813,7 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             // Stall the propose response so the slot is never populated with
             // a locally-built proposal. The slot stays empty (proposal=None,
@@ -5628,8 +5826,7 @@ mod tests {
             // leader-owned proposal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5650,7 +5847,7 @@ mod tests {
             // conflicting notarization reaches the voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5662,7 +5859,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5710,7 +5907,7 @@ mod tests {
             // (distinct payload) and build its notarization from all validator
             // schemes. The notarization is well-formed; quorum-worth of signers
             // cover the proposal so it will pass `add_notarization`.
-            let foreign_payload = Sha256::hash(b"foreign_leader_owned_proposal");
+            let foreign_payload = Sha256::hash(&[b"foreign_leader_owned_proposal"]);
             let foreign_proposal = Proposal::new(
                 Round::new(target_epoch, target_view),
                 target_view.previous().unwrap_or(View::zero()),
@@ -5785,7 +5982,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5812,10 +6009,10 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let elector = elector.build(schemes[0].participants());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -5841,7 +6038,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5874,12 +6071,12 @@ mod tests {
 
             // Send a notarization for view 5 to trigger certification
             let view5 = View::new(5);
-            let digest5 = Sha256::hash(b"payload_to_certify");
+            let digest5 = Sha256::hash(&[b"payload_to_certify"]);
             let proposal5 =
                 Proposal::new(Round::new(Epoch::new(333), view5), View::new(0), digest5);
 
             // Broadcast payload
-            let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
+            let contents = (proposal5.round, Sha256::hash(&[b"genesis"]), 42u64).encode();
             relay.broadcast(&me, Recipients::All, (digest5, contents));
 
             // Send proposal to verify
@@ -5900,10 +6097,9 @@ mod tests {
             loop {
                 if let batcher::Message::Update { finalized, .. } =
                     batcher_receiver.recv().await.unwrap()
+                    && finalized >= view5
                 {
-                    if finalized >= view5 {
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -5972,7 +6168,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5999,10 +6195,10 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let elector = elector.build(schemes[0].participants());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let application_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -6028,7 +6224,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6061,12 +6257,12 @@ mod tests {
 
             // Send a notarization for view 5 to trigger certification
             let view5 = View::new(5);
-            let digest5 = Sha256::hash(b"payload_to_certify");
+            let digest5 = Sha256::hash(&[b"payload_to_certify"]);
             let proposal5 =
                 Proposal::new(Round::new(Epoch::new(333), view5), View::new(0), digest5);
 
             // Broadcast payload
-            let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
+            let contents = (proposal5.round, Sha256::hash(&[b"genesis"]), 42u64).encode();
             relay.broadcast(&me, Recipients::All, (digest5, contents));
 
             // Send proposal and notarization
@@ -6162,9 +6358,12 @@ mod tests {
                 &participants,
                 &schemes,
                 RoundRobin::<Sha256>::default(),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_secs(5),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -6188,7 +6387,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"late_notarization_after_nullification"),
+                Sha256::hash(&[b"late_notarization_after_nullification"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.resolved(Certificate::Notarization(notarization));
@@ -6271,9 +6470,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_secs(100),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(100),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -6315,7 +6517,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"timeout_test"),
+                Sha256::hash(&[b"timeout_test"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Notarization(notarization));
@@ -6324,10 +6526,10 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6387,9 +6589,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_secs(100),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(100),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -6415,7 +6620,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"follower_test"),
+                Sha256::hash(&[b"follower_test"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -6465,10 +6670,10 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6536,9 +6741,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(10),
-                Duration::from_secs(10),
-                Duration::from_secs(100),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(100),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -6605,10 +6813,10 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6670,16 +6878,18 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
 
             // Set up voter with Certifier::Cancel
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                Duration::from_mins(60),
-                mocks::application::Certifier::Cancel,
+                VoterOptions {
+                    certification_timeout: Duration::from_millis(500),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Cancel,
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -6700,7 +6910,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -6810,9 +7020,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -6940,14 +7153,13 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             let partition = "cancelled_certification_recertifies_after_restart".to_string();
             let epoch = Epoch::new(333);
 
             // First run: certification receiver gets cancelled.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -6961,7 +7173,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6973,7 +7185,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -7019,7 +7231,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"restart_recertify_payload"),
+                Sha256::hash(&[b"restart_recertify_payload"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7059,8 +7271,7 @@ mod tests {
             // Second run: certification should succeed from replayed state.
             // Use a longer certify latency so there is a real window where an
             // incorrect immediate nullify could fire after restart.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -7074,7 +7285,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -7086,7 +7297,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -7215,16 +7426,19 @@ mod tests {
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector.clone(),
-                Duration::from_secs(2),
-                Duration::from_secs(3),
-                Duration::from_secs(1),
-                mocks::application::Certifier::Cancel,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(2),
+                    certification_timeout: Duration::from_secs(3),
+                    timeout_retry: Duration::from_secs(1),
+                    certifier: mocks::application::Certifier::Cancel,
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -7242,7 +7456,7 @@ mod tests {
             let proposal_4 = Proposal::new(
                 Round::new(Epoch::new(333), view_4),
                 view_4.previous().unwrap(),
-                Sha256::hash(b"view_4_proposal"),
+                Sha256::hash(&[b"view_4_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal_4.round, parent_payload, 0u64).encode();
@@ -7274,7 +7488,7 @@ mod tests {
             let proposal_5 = Proposal::new(
                 Round::new(Epoch::new(333), view_5),
                 view_4, // Parent is view 4 (certified by the advanced validators)
-                Sha256::hash(b"view_5_proposal"),
+                Sha256::hash(&[b"view_5_proposal"]),
             );
             let (_, notarization_5) = build_notarization(&schemes, &proposal_5, quorum);
 
@@ -7289,6 +7503,9 @@ mod tests {
             //    a. Certification of view 4 to succeed (impossible - no context)
             //    b. A nullification certificate for view 4 (impossible - only f votes)
             //    c. A finalization certificate (requires Byzantine to vote finalize)
+            // Use a fixed deadline: timeout retries re-send the nullify vote every
+            // second, which would otherwise restart a per-iteration sleep forever.
+            let deadline = context.current() + Duration::from_secs(5);
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -7307,7 +7524,7 @@ mod tests {
                             _ => {}
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep_until(deadline) => {
                         break false;
                     },
                 }
@@ -7331,16 +7548,17 @@ mod tests {
             mailbox.resolved(Certificate::Finalization(finalization_5));
 
             // Now the validator SHOULD advance (finalization aborts stuck certification)
+            let deadline = context.current() + Duration::from_secs(5);
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > view_5 {
-                                break true;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > view_5
+                        {
+                            break true;
                         }
                     },
-                    _ = context.sleep(Duration::from_secs(5)) => {
+                    _ = context.sleep_until(deadline) => {
                         break false;
                     },
                 }
@@ -7408,16 +7626,20 @@ mod tests {
 
             // Set up voter with Certifier::Custom that always returns false
             // This simulates coding marshal's deferred_verify finding context mismatch
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(100),  // Long timeout to prove nullify comes from cert failure
-                Duration::from_secs(100),
-                Duration::from_secs(100),
-                mocks::application::Certifier::Custom(Box::new(|_, _| false)),
+                VoterOptions {
+                    // Long timeouts to prove nullify comes from cert failure
+                    leader_timeout: Duration::from_secs(100),
+                    certification_timeout: Duration::from_secs(100),
+                    timeout_retry: Duration::from_secs(100),
+                    certifier: mocks::application::Certifier::Custom(Box::new(|_, _| false)),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -7436,7 +7658,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7542,16 +7764,19 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
 
             // Set up voter with Certifier::Pending (certify hangs indefinitely).
-            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(3),
-                Duration::from_secs(4),
-                Duration::from_mins(60),
-                mocks::application::Certifier::Pending,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(3),
+                    certification_timeout: Duration::from_secs(4),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Pending,
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -7570,7 +7795,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"test_proposal"),
+                Sha256::hash(&[b"test_proposal"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7697,9 +7922,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -7718,7 +7946,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"proposal_clears_leader_timeout"),
+                Sha256::hash(&[b"proposal_clears_leader_timeout"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -7833,16 +8061,19 @@ mod tests {
             .await;
 
             let elector = RoundRobin::<Sha256>::default();
-            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter_with_certifier(
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
-                mocks::application::Certifier::Pending,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    certifier: mocks::application::Certifier::Pending,
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -7861,7 +8092,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"recovered_proposal_clears_leader_timeout"),
+                Sha256::hash(&[b"recovered_proposal_clears_leader_timeout"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
@@ -7968,9 +8199,12 @@ mod tests {
                 &participants,
                 &schemes,
                 RoundRobin::<Sha256>::default(),
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -8085,7 +8319,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -8117,9 +8351,12 @@ mod tests {
                 &participants,
                 &schemes,
                 elector,
-                Duration::from_secs(1),
-                Duration::from_secs(5),
-                Duration::from_mins(60),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    ..Default::default()
+                },
             )
             .await;
 
@@ -8136,13 +8373,12 @@ mod tests {
             }
 
             // Build a valid first-view proposal (parent is genesis at view 0).
-            let mut hasher = Sha256::default();
-            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
-            let genesis = hasher.finalize();
+            let genesis =
+                Sha256::hash(&[&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode()]);
             let proposal = Proposal::new(
                 first_round,
                 View::zero(),
-                Sha256::hash(b"first_view_progress_without_timeout"),
+                Sha256::hash(&[b"first_view_progress_without_timeout"]),
             );
             let contents = (proposal.round, genesis, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
@@ -8282,7 +8518,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg.clone());
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
             let target_view = View::new(3);
 
@@ -8294,8 +8530,7 @@ mod tests {
             let pending_syncs_for_certifier = pending_syncs.clone();
 
             // Arm the sync gate immediately before the target certification succeeds.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8315,7 +8550,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8327,7 +8562,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(
@@ -8395,7 +8630,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"cert_replay_payload"),
+                Sha256::hash(&[b"cert_replay_payload"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -8434,12 +8669,11 @@ mod tests {
 
             let mut certified_before_sync = false;
             while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
-                if let MailboxMessage::Certified { round, success, .. } = msg {
-                    if round.view() == target_view {
+                if let MailboxMessage::Certified { round, success, .. } = msg
+                    && round.view() == target_view {
                         assert!(success, "expected successful certification");
                         certified_before_sync = true;
                     }
-                }
             }
             assert!(
                 !certified_before_sync,
@@ -8538,8 +8772,7 @@ mod tests {
             // Second run: replay should process Artifact::Certification from journal.
             let certify_calls: Arc<Mutex<Vec<View>>> = Arc::new(Mutex::new(Vec::new()));
             let certify_tracker = certify_calls.clone();
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8563,7 +8796,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8575,7 +8808,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8618,12 +8851,10 @@ mod tests {
                         if let batcher::Message::Update {
                             current, ..
                         } = msg.unwrap()
-                        {
-                            if current >= target_view.next() {
+                            && current >= target_view.next() {
                                 assert_eq!(current, target_view.next());
                                 advanced = true;
                             }
-                        }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("timed out waiting for restarted voter to advance past view {target_view}");
@@ -8695,12 +8926,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
 
             // First run: certify fails (returns false).
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8714,7 +8944,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8726,7 +8956,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8770,7 +9000,7 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(epoch, target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"failed_cert_replay_payload"),
+                Sha256::hash(&[b"failed_cert_replay_payload"]),
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
@@ -8812,8 +9042,7 @@ mod tests {
             handle.abort();
 
             // Second run: replay should process Artifact::Certification(false) from journal.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8827,7 +9056,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8839,7 +9068,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8951,12 +9180,11 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
 
             // First run: trigger timeout and nullification.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -8970,7 +9198,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8982,7 +9210,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9049,10 +9277,10 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view {
-                                break;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                        {
+                            break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -9072,8 +9300,7 @@ mod tests {
 
             // Second run: replay should process Artifact::Nullify and
             // Artifact::Nullification from journal.
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9087,7 +9314,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9099,7 +9326,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9140,10 +9367,11 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
-                            if current > target_view && replayed_nullification {
-                                break;
-                            }
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current > target_view
+                            && replayed_nullification
+                        {
+                            break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -9208,10 +9436,9 @@ mod tests {
                 elector: elector.clone(),
             };
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let relay = Arc::new(mocks::relay::Relay::new());
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
-            let app_cfg = mocks::application::Config {
-                hasher: Sha256::default(),
+            let app_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
@@ -9225,7 +9452,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9237,7 +9464,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
-                activity_timeout: ViewDelta::new(10),
+                view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -9283,10 +9510,10 @@ mod tests {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), target_view),
                 target_view.previous().unwrap(),
-                Sha256::hash(b"batcher_timeout_view3"),
+                Sha256::hash(&[b"batcher_timeout_view3"]),
             );
             let leader = participants[1].clone();
-            let contents = (proposal.round, Sha256::hash(b"genesis"), 0u64).encode();
+            let contents = (proposal.round, Sha256::hash(&[b"genesis"]), 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);

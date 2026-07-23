@@ -1,6 +1,7 @@
 *.swp
 *.DS_Store
 target
+benchmark-tracking-results
 *.vscode
 .idea
 examples/flood/assets

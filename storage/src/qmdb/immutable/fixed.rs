@@ -2,19 +2,19 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{operation::Operation as BaseOperation, Config as BaseConfig, Immutable};
+use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
-        any::{value::FixedEncoding, FixedValue},
         Error, ROOT_BAGGING,
+        any::{FixedValue, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -53,7 +53,14 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal, context, cfg.translator, cfg.init_cache_size).await
+        Self::init_from_journal(
+            journal,
+            context,
+            cfg.translator,
+            cfg.init_buffer,
+            cfg.init_cache_size,
+        )
+        .await
     }
 }
 
@@ -75,13 +82,13 @@ mod tests {
         qmdb::immutable::test,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
+        BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -107,6 +114,7 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
         }
     }
 
@@ -138,7 +146,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_immutable_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let floor = db.inactivity_floor_loc();
@@ -147,12 +155,12 @@ mod tests {
                 .set(key, value)
                 .merkleize(&db, None, floor)
                 .await;
-            db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let _db = db.prune(crate::merkle::Location::new(0)).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -206,15 +214,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(
-        db: &mut Db<
-            mmr::Family,
-            deterministic::Context,
-            Digest,
-            Digest,
-            Sha256,
-            TwoCap,
-            Sequential,
-        >,
+        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
         key: Digest,
         loc: crate::merkle::mmr::Location,
     ) {
@@ -222,6 +222,13 @@ mod tests {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_rewind_is_send(
+        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+        loc: crate::merkle::mmr::Location,
+    ) {
         is_send(db.rewind(loc));
     }
 
@@ -299,6 +306,18 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_prune(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_fixed_prune_after_uncommitted_apply_batch_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_prune_after_uncommitted_apply_batch_recovery(
+                ctx,
+                open::<mmr::Family>,
+            )
+            .await;
         });
     }
 
@@ -384,8 +403,8 @@ mod tests {
 
     #[boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
-        let mut db = open_db::<F>(ctx.child("db")).await;
-        let mut compact = open_compact::<F>(ctx.child("compact")).await;
+        let db = open_db::<F>(ctx.child("db")).await;
+        let compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let k1 = Sha256::fill(1u8);
@@ -410,10 +429,10 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        db.apply_batch(retained).await.unwrap();
-        compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
-        compact.sync().await.unwrap();
+        let (db, _) = db.apply_batch(retained).await.unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let db = db.commit().await.unwrap();
+        let compact = compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata));

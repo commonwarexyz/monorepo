@@ -1,22 +1,18 @@
-use super::{Operation, COMMIT_CONTEXT, SET_CONTEXT};
+use super::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 use crate::{
     merkle::{Family, Location},
-    qmdb::any::{value::FixedEncoding, FixedValue},
+    qmdb::any::{FixedValue, value::FixedEncoding},
 };
 use commonware_codec::{
-    util::{at_least, ensure_zeros},
     Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    util::{at_least, ensure_zeros},
 };
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
 
 /// `max(a, b)` in a const context.
 const fn const_max(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 const fn set_op_size<K: Array, V: FixedSize>() -> usize {

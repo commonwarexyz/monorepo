@@ -1,12 +1,12 @@
-use super::utils::{append_random, init, ITEMS_PER_BLOB};
+use super::utils::{ITEMS_PER_BLOB, append_random, init};
 use commonware_runtime::{
+    Runner, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner, Supervisor as _,
 };
 use commonware_storage::utils::bits_for_indices;
 use commonware_utils::NZU64;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn bench_restart(c: &mut Criterion) {
@@ -15,9 +15,8 @@ fn bench_restart(c: &mut Criterion) {
     for items in [10_000, 50_000, 100_000, 500_000] {
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let bits = builder.start(|ctx| async move {
-            let mut store = init(ctx, None).await;
-            let indices = append_random(&mut store, items).await;
-            store.sync().await.unwrap();
+            let store = init(ctx, None).await;
+            let (_, indices) = append_random(store, items).await;
             bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
         });
 

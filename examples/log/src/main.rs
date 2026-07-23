@@ -47,16 +47,16 @@
 mod application;
 mod gui;
 
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_consensus::{
     simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ed25519, Sha256, Signer as _};
-use commonware_p2p::{authenticated::discovery, Manager as _};
+use commonware_cryptography::{Sha256, Signer as _, ed25519};
+use commonware_p2p::{Manager as _, authenticated::discovery};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Quota, Runner, Supervisor as _};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -194,10 +194,9 @@ fn main() {
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
             .expect("private key must be in participants");
-        let (application, scheme, reporter, mailbox) = application::Application::new(
+        let (application, scheme, reporter, mailbox) = application::Application::<_, Sha256>::new(
             context.child("application"),
             application::Config {
-                hasher: Sha256::default(),
                 scheme,
                 mailbox_size: NZUsize!(1024),
             },
@@ -221,8 +220,8 @@ fn main() {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
-            activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            view_retention: ViewDelta::new(10),
+            skip_timeout: Duration::from_secs(11),
             fetch_concurrent: NZUsize!(32),
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,

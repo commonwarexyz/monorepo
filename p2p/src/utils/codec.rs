@@ -1,13 +1,13 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
-use commonware_actor::{mailbox, Feedback, Unreliable};
+use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    iobuf::EncodeExt, spawn_cell, BufferPool, ContextCell, Handle, Metrics, Spawner,
+    BufferPool, ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell,
 };
 use commonware_utils::futures::Pool;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
@@ -53,6 +53,16 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         message: V,
         priority: bool,
     ) -> Vec<S::PublicKey> {
+        self.send_ref(recipients, &message, priority)
+    }
+
+    /// Send a borrowed message to a set of recipients.
+    pub fn send_ref(
+        &mut self,
+        recipients: Recipients<S::PublicKey>,
+        message: &V,
+        priority: bool,
+    ) -> Vec<S::PublicKey> {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority)
     }
@@ -87,6 +97,10 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
     }
 
     pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
+        self.send_ref(&message, priority)
+    }
+
+    pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }
@@ -275,25 +289,25 @@ where
 mod tests {
     use super::*;
     use crate::{
-        simulated::{self, Link, Network, Oracle},
         Manager as _, Recipients,
+        simulated::{self, Link, Network, Oracle},
     };
     use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Manual, Sequential, Strategy};
-    use commonware_runtime::{deterministic, Clock as _, IoBuf, Quota, Runner, Supervisor as _};
-    use commonware_utils::{channel::mpsc, ordered::Set, NZUsize};
+    use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, channel::mpsc, ordered::Set};
     use std::{
         io,
         num::{NonZeroU32, NonZeroUsize},
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };

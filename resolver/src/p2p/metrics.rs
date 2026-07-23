@@ -1,6 +1,6 @@
 use commonware_runtime::{
-    telemetry::metrics::{histogram, status, Gauge, MetricsExt as _},
     Metrics as RuntimeMetrics,
+    telemetry::metrics::{Gauge, MetricsExt as _, histogram, status},
 };
 
 /// Metrics for the peer actor.

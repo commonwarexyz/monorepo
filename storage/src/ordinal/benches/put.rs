@@ -1,9 +1,9 @@
 use super::utils::{append_random, init};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
     Supervisor as _,
+    benchmarks::{context, tokio},
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn bench_put(c: &mut Criterion) {
@@ -15,10 +15,10 @@ fn bench_put(c: &mut Criterion) {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let mut store = init(ctx.child("storage"), None).await;
+                    let store = init(ctx.child("storage"), None).await;
 
                     let start = Instant::now();
-                    append_random(&mut store, items).await;
+                    let (store, _) = append_random(store, items).await;
                     total += start.elapsed();
 
                     store.destroy().await.unwrap();

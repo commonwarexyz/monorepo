@@ -1,9 +1,9 @@
 use commonware_cryptography::bls12381::{
     primitives::{ops::keypair, variant::MinSig},
-    tle::{encrypt, Block},
+    tle::{Block, encrypt},
 };
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_tle_encrypt(c: &mut Criterion) {

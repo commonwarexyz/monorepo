@@ -2,10 +2,11 @@
 
 use crate::{
     merkle::{Family, Location, Proof},
-    qmdb::{operation::Key, Error},
+    qmdb::{Error, operation::Key},
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
+use commonware_runtime::Handle;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
@@ -36,29 +37,30 @@ pub trait MerkleizedBatch: Sized {
     fn root(&self) -> Self::Digest;
 }
 
+/// The result of applying a batch: the database and the range of written operations.
+pub type ApplyBatchResult<D> =
+    Result<(D, Range<Location<<D as BatchableDb>::Family>>), Error<<D as BatchableDb>::Family>>;
+
 /// Db that supports updates through a batch API.
-pub trait BatchableDb {
+pub trait BatchableDb: Sized {
     type Family: Family;
     type K;
     type V;
     type Merkleized: MerkleizedBatch;
     type Batch: UnmerkleizedBatch<
-        Self,
-        Family = Self::Family,
-        K = Self::K,
-        V = Self::V,
-        Metadata = Self::V,
-        Merkleized = Self::Merkleized,
-    >;
+            Self,
+            Family = Self::Family,
+            K = Self::K,
+            V = Self::V,
+            Metadata = Self::V,
+            Merkleized = Self::Merkleized,
+        >;
 
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;
 
-    /// Apply a merkleized batch.
-    fn apply_batch(
-        &mut self,
-        batch: Self::Merkleized,
-    ) -> impl Future<Output = Result<Range<Location<Self::Family>>, Error<Self::Family>>>;
+    /// Apply a merkleized batch, returning the range of written operations.
+    fn apply_batch(self, batch: Self::Merkleized) -> impl Future<Output = ApplyBatchResult<Self>>;
 }
 
 /// Unified trait for an authenticated database.
@@ -83,6 +85,12 @@ pub trait DbAny<F: Family>:
         key: &'a Self::Key,
     ) -> impl Future<Output = Result<Option<Self::Value>, Error<F>>> + Send + use<'a, F, Self>;
 
+    /// Get the values of multiple keys, returned in the same order as the input keys.
+    fn get_many<'a>(
+        &'a self,
+        keys: &'a [&'a Self::Key],
+    ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
@@ -101,18 +109,25 @@ pub trait DbAny<F: Family>:
     ) -> impl Future<Output = Result<Option<<Self as DbAny<F>>::Value>, Error<F>>> + Send;
 
     /// Prune historical operations prior to `loc`.
-    fn prune(&mut self, loc: Location<F>) -> impl Future<Output = Result<(), Error<F>>> + Send;
+    fn prune(self, loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
+
+    /// Begin durably persisting the database.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
+    /// for the state applied before the call. Use [Self::sync] to also eliminate recovery on
+    /// startup.
+    fn start_commit(self) -> impl Future<Output = Result<(Self, Handle<()>), Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     ///
     /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
+    fn commit(self) -> impl Future<Output = Result<Self, Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash, and that
     /// no recovery will be needed on startup.
     ///
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error<F>>> + Send;
+    fn sync(self) -> impl Future<Output = Result<Self, Error<F>>> + Send;
 
     /// Destroy the database, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error<F>>> + Send
@@ -188,6 +203,10 @@ macro_rules! impl_db_any {
                 <$ty>::get(self, key).await
             }
 
+            async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
+                <$ty>::get_many(self, keys).await
+            }
+
             fn root(&self) -> $dig {
                 <$ty>::root(self)
             }
@@ -203,17 +222,26 @@ macro_rules! impl_db_any {
             }
 
             async fn prune(
-                &mut self,
+                self,
                 loc: $crate::merkle::Location<$fam>,
-            ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+            ) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
             }
 
-            async fn commit(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+            async fn start_commit(
+                self,
+            ) -> ::core::result::Result<
+                (Self, ::commonware_runtime::Handle<()>),
+                $crate::qmdb::Error<$fam>,
+            > {
+                <$ty>::start_commit(self).await
+            }
+
+            async fn commit(self) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
                 <$ty>::commit(self).await
             }
 
-            async fn sync(&mut self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+            async fn sync(self) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
                 <$ty>::sync(self).await
             }
 

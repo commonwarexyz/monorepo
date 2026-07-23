@@ -1,9 +1,9 @@
 use crate::{
+    Ingress,
     authenticated::{
         dialing::{DialStatus, ReserveResult},
         discovery::types::Info,
     },
-    Ingress,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Clock;
@@ -212,10 +212,10 @@ impl<C: PublicKey> Record<C> {
     /// Indicate that there was a dial failure for this peer using the given `ingress`, which is
     /// checked against the existing record to ensure that we correctly attribute the failure.
     pub fn dial_failure(&mut self, ingress: &Ingress) {
-        if let Address::Discovered(info, fails) = &mut self.address {
-            if &info.ingress == ingress {
-                *fails += 1;
-            }
+        if let Address::Discovered(info, fails) = &mut self.address
+            && &info.ingress == ingress
+        {
+            *fails += 1;
         }
     }
 
@@ -357,7 +357,7 @@ mod tests {
     use super::*;
     use crate::authenticated::discovery::types;
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";

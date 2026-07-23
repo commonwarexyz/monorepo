@@ -4,8 +4,9 @@ use crate::{
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
 use commonware_codec::{Encode, Read};
-use commonware_consensus::simplex::{
-    elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
+use commonware_consensus::{
+    simplex::{elector, mocks::reporter::Reporter, scheme, scheme::Scheme},
+    types::TermLength,
 };
 use commonware_cryptography::{
     certificate::{self, Signers},
@@ -14,7 +15,27 @@ use commonware_cryptography::{
 use rand_core::CryptoRng;
 use std::collections::{HashMap, HashSet};
 
-pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
+// Intentionally restates View::covers with independent integer arithmetic:
+// the fuzz oracle must not delegate to the production term predicates
+// (same_term, term_start) or a bug in them could hide from the fuzzer.
+// View 0 (genesis) is its own term; for views >= 1, term boundaries are
+// [1, term_length], [term_length + 1, 2 * term_length], ...
+fn nullification_conflicts(
+    nullified_view: u64,
+    finalized_view: u64,
+    term_length: TermLength,
+) -> bool {
+    if nullified_view > finalized_view {
+        return false;
+    }
+    if nullified_view == 0 {
+        return finalized_view == 0;
+    }
+    let term_length = term_length.get();
+    (nullified_view - 1) / term_length == (finalized_view - 1) / term_length
+}
+
+pub fn check<P: Simplex>(n: u32, term_length: TermLength, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
@@ -43,16 +64,21 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_nullification_in_finalized_view
-    // If any replica finalized view v, no replica may have a nullification for view v.
+    // If any replica finalized view v, no replica may have a nullification
+    // that covers v (a nullification covers the rest of its term).
     let finalized_views: HashMap<u64, Sha256Digest> = replicas
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
+    let nullified: HashSet<u64> = replicas
+        .iter()
+        .flat_map(|(_, nulls, _)| nulls.keys().cloned())
+        .collect();
     for finalized_view in finalized_views.keys() {
-        for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
+        for nullified_view in &nullified {
             assert!(
-                !nullifications.contains_key(finalized_view),
-                "Invariant violation: replica {idx} nullified view {finalized_view} but it is finalized",
+                !nullification_conflicts(*nullified_view, *finalized_view, term_length),
+                "Invariant violation: view {nullified_view} is nullified but view {finalized_view} is finalized in the same term",
             );
         }
     }
@@ -87,21 +113,6 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
             payloads.len() <= 1,
             "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
         );
-    }
-
-    // Invariant: no_finalization_for_nullified_view
-    // If any replica nullified view v, no replica may finalize v.
-    let nullified: HashSet<u64> = replicas
-        .iter()
-        .flat_map(|(_, nulls, _)| nulls.keys().cloned())
-        .collect();
-    for (idx, (_, _, finals)) in replicas.iter().enumerate() {
-        for v in finals.keys() {
-            assert!(
-                !nullified.contains(v),
-                "Invariant violation: replica {idx} finalized view {v} which is nullified"
-            );
-        }
     }
 
     // Invariant: finalization_requires_notarization
@@ -207,7 +218,7 @@ pub fn extract<E, S, L>(
 where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
-    L: Elector<S>,
+    L: elector::Config<S>,
 {
     reporters
         .iter()
@@ -265,4 +276,49 @@ where
             (notarization_data, nullification_data, finalization_data)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::simplex::SimplexEd25519;
+    use commonware_utils::NZU32;
+    use std::{collections::HashMap, panic};
+
+    #[test]
+    fn same_term_nullification_blocks_later_finalization() {
+        let payload = Sha256Digest::from([7u8; 32]);
+        let mut notarizations = HashMap::new();
+        notarizations.insert(
+            3,
+            Notarization {
+                payload,
+                signature_count: Some(3),
+            },
+        );
+        let mut nullifications = HashMap::new();
+        nullifications.insert(
+            1,
+            Nullification {
+                signature_count: Some(3),
+            },
+        );
+        let mut finalizations = HashMap::new();
+        finalizations.insert(
+            3,
+            Finalization {
+                payload,
+                signature_count: Some(3),
+            },
+        );
+
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(
+                4,
+                TermLength::new(NZU32!(5)),
+                vec![(notarizations, nullifications, finalizations)],
+            );
+        });
+        assert!(result.is_err());
+    }
 }

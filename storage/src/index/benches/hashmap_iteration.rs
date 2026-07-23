@@ -1,5 +1,5 @@
 use commonware_utils::TestRng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::{collections::HashMap, hint::black_box};
 

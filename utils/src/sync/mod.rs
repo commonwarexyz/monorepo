@@ -25,7 +25,7 @@
 
 use core::ops::{Deref, DerefMut};
 pub use parking_lot::{
-    Condvar, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Condvar, MappedMutexGuard, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 pub use tokio::sync::{
     Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, RwLock as AsyncRwLock,
@@ -219,7 +219,7 @@ impl<T> Deref for UpgradableAsyncRwLockUpgradableReadGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{AsyncRwLock, TracedAsyncMutex, TracedAsyncRwLock, UpgradableAsyncRwLock};
-    use futures::{pin_mut, FutureExt};
+    use futures::{FutureExt, pin_mut};
 
     #[test]
     fn test_traced_async_mutex() {

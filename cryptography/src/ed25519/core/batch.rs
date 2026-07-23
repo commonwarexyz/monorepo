@@ -54,7 +54,7 @@ use curve25519_dalek::{
 };
 use hashbrown::HashMap;
 use rand_core::{CryptoRng, Rng};
-use sha2::{digest::Update, Sha512};
+use sha2::{Sha512, digest::Update};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
@@ -273,7 +273,7 @@ impl Verifier {
 mod tests {
     use super::{super::SigningKey, *};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_utils::{NZUsize, test_rng};
     use rand::RngExt as _;
 
     /// Generate `signers` keys with `per_signer` signed messages each.

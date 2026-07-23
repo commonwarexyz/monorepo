@@ -1,7 +1,7 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::{histogram, status, Counter, EncodeStruct, GaugeFamily, MetricsExt as _},
     Metrics as RuntimeMetrics,
+    telemetry::metrics::{Counter, EncodeStruct, GaugeFamily, MetricsExt as _, histogram, status},
 };
 
 /// Per-sequencer label.

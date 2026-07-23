@@ -10,14 +10,14 @@ use crate::{
         warm_read_loop,
     },
 };
-use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
+use commonware_runtime::{Blob as _, Storage as _, tokio::Context};
 use commonware_utils::TestRng;
-use futures::{stream::FuturesUnordered, TryStreamExt};
-use rand::{rngs::SmallRng, RngExt as _, SeedableRng};
+use futures::{TryStreamExt, stream::FuturesUnordered};
+use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Instant,
 };

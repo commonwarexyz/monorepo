@@ -1,12 +1,12 @@
-use super::utils::{append_random, init, FreezerType, Key};
+use super::utils::{FreezerType, Key, append_random, init};
 use commonware_runtime::{
+    Runner,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
 };
 use commonware_storage::freezer::Identifier;
 use commonware_utils::TestRng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
@@ -64,8 +64,8 @@ fn bench_get(c: &mut Criterion) {
     let cfg = Config::default();
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let (keys, checkpoint) = builder.start(|ctx| async move {
-        let mut store = init(ctx, None).await;
-        let keys = append_random(&mut store, ITEMS).await;
+        let store = init(ctx, None).await;
+        let (store, keys) = append_random(store, ITEMS).await;
         let checkpoint = store.close().await.unwrap();
         (keys, checkpoint)
     });

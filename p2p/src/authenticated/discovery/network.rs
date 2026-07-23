@@ -6,12 +6,12 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::discovery::types::InfoVerifier, Channel};
+use crate::{Channel, authenticated::discovery::types::InfoVerifier};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota,
-    Resolver, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
+    Spawner, spawn_cell,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
@@ -187,6 +187,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             self.context.child("dialer"),
             dialer::Config {
                 stream_cfg,
+                dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,

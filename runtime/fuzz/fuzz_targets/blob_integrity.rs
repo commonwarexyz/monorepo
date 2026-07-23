@@ -16,10 +16,11 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
+    Blob, Buf, Error, Runner, Storage,
     buffer::paged::{CacheRef, Writer},
-    deterministic, Blob, Buf, Error, Runner, Storage,
+    deterministic,
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 /// CRC record size.

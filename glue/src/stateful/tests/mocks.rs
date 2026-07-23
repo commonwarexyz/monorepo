@@ -1,23 +1,21 @@
 use crate::stateful::{
-    db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
-    Application, Proposed,
+    Application, Input, Proposed,
+    db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    marshal::standard::Standard,
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    ed25519, sha256::Digest as Sha256Digest, Digest as _, Digestible, Signer as _,
+    Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{deterministic, Buf, BufMut};
-use commonware_utils::sync::TracedAsyncRwLock;
-use futures::Stream;
-use std::{convert::Infallible, sync::Arc};
+use commonware_runtime::{Buf, BufMut};
+use std::convert::Infallible;
 
-pub(crate) type TestDatabases = Arc<TracedAsyncRwLock<TestDb>>;
+pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -59,11 +57,15 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Config = ();
     type SyncTarget = u64;
 
+    fn initial_sync_target() -> Self::SyncTarget {
+        unreachable!("TestDb is constructed directly in tests")
+    }
+
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
         Ok(Self)
     }
 
-    async fn new_batch(_db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -71,16 +73,16 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-        Ok(())
+    async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        Ok(self)
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
         0
     }
 
-    async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-        Ok(())
+    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+        Ok(self)
     }
 }
 
@@ -166,16 +168,23 @@ impl CertifiableBlock for TestBlock {
 #[derive(Clone)]
 pub(crate) struct TestApp;
 
-impl Application<deterministic::Context> for TestApp {
+impl<
+    E: rand_core::Rng
+        + commonware_runtime::Spawner
+        + commonware_runtime::Metrics
+        + commonware_runtime::Clock
+        + Send
+        + Sync,
+> Application<E> for TestApp
+{
     type SigningScheme = TestScheme;
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
-    fn sync_targets(
-        block: &Self::Block,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         block.height().get()
     }
 
@@ -185,35 +194,35 @@ impl Application<deterministic::Context> for TestApp {
 
     async fn propose(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
+        _context: (E, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _input: Input<Self::Input, Self::Provider>,
+    ) -> Option<Proposed<Self, E>> {
         None
     }
 
     async fn verify(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+        _context: (E, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         None
     }
 
     async fn apply(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         TestMerkleized
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Arc::new(TracedAsyncRwLock::new("test", TestDb))
+    Shared::new("test", TestDb)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

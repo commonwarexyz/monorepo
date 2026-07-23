@@ -1,5 +1,5 @@
 use crate::Channel;
-use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
 use std::collections::HashMap;
 
@@ -99,7 +99,7 @@ impl arbitrary::Arbitrary<'_> for Data {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
-    use commonware_runtime::{deterministic, BufferPooler as _, Runner as _};
+    use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
 
     #[test]
     fn test_data_codec() {

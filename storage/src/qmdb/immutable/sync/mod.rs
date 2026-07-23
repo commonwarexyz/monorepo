@@ -1,21 +1,20 @@
 use crate::{
+    Context,
     index::unordered::Index,
     journal::{authenticated, contiguous::Mutable},
     merkle::{
-        full::{self, Merkle},
         Family, Location,
+        full::{self, Merkle},
     },
     qmdb::{
-        self,
+        self, Error,
         any::ValueEncoding,
         build_snapshot_from_log,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
         sync::{self},
-        Error,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
@@ -111,6 +110,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
+                db_config.init_buffer,
                 db_config.init_cache_size,
                 |_, _| {},
             )
@@ -125,7 +125,7 @@ where
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
-        let mut db = Self {
+        let db = Self {
             journal,
             root,
             snapshot,
@@ -135,8 +135,7 @@ where
         };
         db.update_metrics();
 
-        db.sync().await?;
-        Ok(db)
+        db.sync().await
     }
 
     async fn local_boundary_nodes(
@@ -214,7 +213,7 @@ where
         self.root()
     }
 
-    async fn persist_compact_state(&mut self) -> Result<(), Error<F>> {
+    async fn persist_compact_state(self) -> Result<Self, Error<F>> {
         self.sync().await
     }
 }

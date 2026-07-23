@@ -2,8 +2,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{
-    bls12381::{self, Batch},
     BatchVerifier, Signer, Verifier,
+    bls12381::{self, Batch},
 };
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;

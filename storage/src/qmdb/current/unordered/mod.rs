@@ -23,27 +23,27 @@ pub mod tests {
         journal::contiguous::{Contiguous as _, Mutable},
         merkle::{Graftable, Location, Proof},
         qmdb::{
+            Error,
             any::{
+                ValueEncoding,
                 operation::update::Unordered as UnorderedUpdate,
                 traits::{DbAny, UnmerkleizedBatch as _},
                 unordered::Operation,
-                ValueEncoding,
             },
-            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
+            current::{BitmapPrunedBits, proof::RangeProof, tests::apply_random_ops},
             store::tests::{TestKey, TestValue},
-            Error,
         },
         translator::TwoCap,
     };
     use commonware_codec::Codec;
-    use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
+    use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
     use commonware_runtime::{
-        deterministic::{self, Context},
         Runner as _, Supervisor as _,
+        deterministic::{self, Context},
     };
     use commonware_utils::{
-        bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
+        bitmap::{Prunable as BitMap, Readable as _},
     };
     use core::future::Future;
     use rand::Rng;
@@ -81,7 +81,7 @@ pub mod tests {
         assert_eq!(db.oldest_retained(), 0);
         let root0 = db.root();
         drop(db);
-        let mut db: C = open_db(context.child("second"), partition.clone()).await;
+        let db: C = open_db(context.child("second"), partition.clone()).await;
         assert!(db.get_metadata().await.unwrap().is_none());
         assert_eq!(db.root(), root0);
 
@@ -95,14 +95,14 @@ pub mod tests {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get_metadata().await.unwrap().is_none());
         let root1 = db.root();
         assert_ne!(root1, root0);
         drop(db);
-        let mut db: C = open_db(context.child("third"), partition.clone()).await;
+        let db: C = open_db(context.child("third"), partition.clone()).await;
         assert!(db.get_metadata().await.unwrap().is_none());
         assert_eq!(db.root(), root1);
 
@@ -118,22 +118,22 @@ pub mod tests {
             .merkleize(&db, Some(metadata.clone()))
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         let root2 = db.root();
 
         // Repeated delete of same key should fail (key already deleted).
         assert!(db.get(&k1).await.unwrap().is_none());
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.sync().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.sync().await.unwrap();
         let root3 = db.root();
         assert_ne!(root3, root2);
 
         // Confirm re-open preserves state.
         drop(db);
-        let mut db: C = open_db(context.child("fourth"), partition.clone()).await;
+        let db: C = open_db(context.child("fourth"), partition.clone()).await;
         // Last commit had no metadata (passed None to merkleize).
         assert!(db.get_metadata().await.unwrap().is_none());
         assert_eq!(db.root(), root3);
@@ -152,7 +152,7 @@ pub mod tests {
             .merkleize(&db, None)
             .await
             .unwrap();
-        db.apply_batch(merkleized).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root3);
 
         db.destroy().await.unwrap();
@@ -176,7 +176,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build-small".to_string();
-            let mut db = open_db(context.child("db"), partition.clone()).await;
+            let db = open_db(context.child("db"), partition.clone()).await;
 
             // Add one key.
             let k = Sha256::fill(0x01);
@@ -187,7 +187,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(k).await.unwrap();
@@ -211,7 +211,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -336,11 +336,11 @@ pub mod tests {
                 &root,
             ));
 
-            let mut db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -390,11 +390,11 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let db = open_db(context.child("db"), partition.clone()).await;
-            let mut db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -425,17 +425,17 @@ pub mod tests {
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
-                let wrong_val = Sha256::hash(&[0xFF]);
+                let wrong_val = Sha256::hash(&[&[0xFF]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     key, wrong_val, &proof, &root
                 ));
                 // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[0xEE]);
+                let wrong_key = Sha256::hash(&[&[0xEE]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     wrong_key, value, &proof, &root
                 ));
                 // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[0xDD]);
+                let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     key,
                     value,
@@ -478,7 +478,7 @@ pub mod tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                db.apply_batch(merkleized).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 let root = db.root();
 

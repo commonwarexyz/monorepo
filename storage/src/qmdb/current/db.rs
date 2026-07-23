@@ -3,21 +3,22 @@
 //! The impl blocks in this file define shared functionality across all Current QMDB variants.
 
 use crate::{
+    Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable},
         Error as JournalError,
+        contiguous::{Contiguous, Mutable},
     },
     merkle::{
-        self, hasher::Hasher as _, mem::Mem, storage::Storage as MerkleStorage, Graftable,
-        Location, Position,
+        self, Graftable, Location, Position, hasher::Hasher as _, mem::Mem,
+        storage::Storage as MerkleStorage,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
-        self,
+        self, Error,
         any::{
             self,
-            operation::{update::Update, Operation},
+            operation::{Operation, update::Update},
         },
         current::{
             batch::BitmapBatch,
@@ -25,17 +26,18 @@ use crate::{
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
         operation::Operation as _,
-        Error,
     },
-    Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::telemetry::metrics::{
-    histogram::{ScopedTimer, Timed},
-    Counter, Gauge, GaugeExt as _, MetricsExt as _,
+use commonware_runtime::{
+    Handle,
+    telemetry::metrics::{
+        Counter, Gauge, GaugeExt as _, MetricsExt as _,
+        histogram::{ScopedTimer, Timed},
+    },
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
@@ -157,6 +159,30 @@ pub struct Db<
 
     /// Metrics for the Current layer.
     pub(super) metrics: Metrics<E>,
+
+    /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
+    /// so tests can drop the pending future at that exact point.
+    #[cfg(test)]
+    pub(super) halt_before_prune_log: bool,
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
+where
+    F: merkle::Graftable,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Db")
+            .field("bounds", &self.bounds())
+            .field("inactivity_floor_loc", &self.any.inactivity_floor_loc)
+            .finish_non_exhaustive()
+    }
 }
 
 // Shared read-only functionality.
@@ -186,6 +212,11 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error<F>> {
         self.any.get_metadata().await
+    }
+
+    /// Batch read multiple keys, returning results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        self.any.get_many(keys).await
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
@@ -495,6 +526,9 @@ where
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// uncommitted operations are not guaranteed to survive.
+    ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
     /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
     /// tree advance to the sync boundary regardless of `prune_loc`.
@@ -507,13 +541,21 @@ where
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
     #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
-    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+    #[boxed]
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let sync_boundary = self.sync_boundary();
         if prune_loc > sync_boundary {
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
         }
+
+        // The sync boundary may be advanced by applied-but-uncommitted operations, and the
+        // pruning metadata persisted below durably records it. Commit the log first so
+        // recovery can replay to that boundary: otherwise a crash before the log prune
+        // recovers the older durable floor alongside newer pruning metadata and fails to
+        // initialize the bitmap.
+        self.any.log = self.any.log.commit().await?;
 
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
@@ -524,12 +566,17 @@ where
         // `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
-        self.sync_metadata().await?;
+        self = self.sync_metadata().await?;
 
-        self.any.prune_log(prune_loc).await?;
+        #[cfg(test)]
+        if self.halt_before_prune_log {
+            std::future::pending::<()>().await;
+        }
+
+        (self.any, _) = self.any.prune_log(prune_loc).await?;
         self.any.update_metrics();
         self.update_metrics();
-        Ok(())
+        Ok(self)
     }
 
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
@@ -553,13 +600,14 @@ where
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
-    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
+    #[boxed]
+    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
         let current_size = *self.any.last_commit_loc + 1;
         // No-op short-circuit. Avoids the post-rewind grafted-tree rebuild and the validation
         // and journal-read overhead below. Validation runs after this on the non-no-op path.
         if rewind_size == current_size {
-            return Ok(());
+            return Ok(self);
         }
         // Reject zero / out-of-range up front: lines below compute `rewind_size - 1`, which
         // underflows when `rewind_size == 0`. `any::Db::rewind` would catch these, but it isn't
@@ -575,10 +623,10 @@ where
         if rewind_size < pruned_bits {
             return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
         }
-        if let Some(rewind_floor) = self.delayed_merge_rewind_floor() {
-            if rewind_size < rewind_floor {
-                return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
-            }
+        if let Some(rewind_floor) = self.delayed_merge_rewind_floor()
+            && rewind_size < rewind_floor
+        {
+            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
         }
 
         // Ensure the target commit's logical range is fully representable with the current
@@ -615,7 +663,7 @@ where
         // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore active
         // bits + set the rewound tail's CommitFloor). Live pre-rewind batches must be dropped by
         // the caller; reads through them now return inconsistent data.
-        self.any.rewind(size).await?;
+        self.any = self.any.rewind(size).await?;
 
         let ops_size = self.any.log.merkle.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
@@ -648,11 +696,11 @@ where
         self.root = root;
         self.update_metrics();
 
-        Ok(())
+        Ok(self)
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
+    pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
@@ -674,9 +722,9 @@ where
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await?;
+        self.metadata = self.metadata.sync().await?;
 
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -746,25 +794,43 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
+    /// bitmap metadata is not durably persisted, so recovery may be required on startup in the
+    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
+    /// the prior commit's sync before starting. Failures of the deferred durability work
+    /// surface on the returned handle and again on the next durability operation.
+    #[tracing::instrument(name = "qmdb.current.db.start_commit", level = "info", skip_all)]
+    #[boxed]
+    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let (any, handle) = self.any.start_commit().await?;
+        self.any = any;
+        Ok((self, handle))
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
-    pub async fn commit(&mut self) -> Result<(), Error<F>> {
-        self.any.commit().await
+    #[boxed]
+    pub async fn commit(mut self) -> Result<Self, Error<F>> {
+        self.any = self.any.commit().await?;
+        Ok(self)
     }
 
     /// Sync all database state to disk.
     #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
-    pub async fn sync(&mut self) -> Result<(), Error<F>> {
+    #[boxed]
+    pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        self.any.sync().await?;
+        self.any = self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.sync_metadata().await?;
+        self = self.sync_metadata().await?;
         self.update_metrics();
-        Ok(())
+        Ok(self)
     }
 
     /// Destroy the db, removing all data from disk.
@@ -789,6 +855,18 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Check that `batch` can be applied to the database in its current state, without
+    /// applying it.
+    ///
+    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
+    /// fails; callers that want to reject a bad batch and keep the handle can check first.
+    pub fn validate_batch(
+        &self,
+        batch: &super::batch::MerkleizedBatch<F, H::Digest, U, N, S>,
+    ) -> Result<(), Error<F>> {
+        self.any.validate_batch(&batch.inner)
+    }
+
     /// Apply a batch to the database, returning the range of written operations.
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
@@ -801,16 +879,17 @@ where
     /// durability.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
-        &mut self,
+        mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<Range<Location<F>>, Error<F>> {
+    ) -> Result<(Self, Range<Location<F>>), Error<F>> {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
-        let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
+        let range;
+        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
-        Ok(range)
+        Ok((self, range))
     }
 }
 
@@ -898,11 +977,11 @@ pub(super) fn combine_roots<H: Hasher>(
 ) -> H::Digest {
     let hasher = qmdb::hasher::<H>();
     match (pending, partial) {
-        (None, None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
-        (Some(pe), None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()]),
+        (None, None) => hasher.hash(&[ops_root.as_ref(), grafted_root.as_ref()]),
+        (Some(pe), None) => hasher.hash(&[ops_root.as_ref(), grafted_root.as_ref(), pe.as_ref()]),
         (None, Some((nb, p))) => {
             let nb_bytes = nb.to_be_bytes();
-            hasher.hash([
+            hasher.hash(&[
                 ops_root.as_ref(),
                 grafted_root.as_ref(),
                 nb_bytes.as_slice(),
@@ -911,7 +990,7 @@ pub(super) fn combine_roots<H: Hasher>(
         }
         (Some(pe), Some((nb, p))) => {
             let nb_bytes = nb.to_be_bytes();
-            hasher.hash([
+            hasher.hash(&[
                 ops_root.as_ref(),
                 grafted_root.as_ref(),
                 pe.as_ref(),
@@ -1197,7 +1276,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
-        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
+        merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
@@ -1205,9 +1284,9 @@ mod tests {
         translator::OneCap,
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Sha256};
+    use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1247,8 +1326,8 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
         let r1 = combine_roots::<Sha256>(&ops, &grafted, None, None);
         let r2 = combine_roots::<Sha256>(&ops, &grafted, None, None);
         assert_eq!(r1, r2);
@@ -1256,9 +1335,9 @@ mod tests {
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let partial_digest = Sha256::hash(b"partial");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let partial_digest = Sha256::hash(&[b"partial"]);
 
         let without = combine_roots::<Sha256>(&ops, &grafted, None, None);
         let with = combine_roots::<Sha256>(&ops, &grafted, None, Some((5, &partial_digest)));
@@ -1267,9 +1346,9 @@ mod tests {
 
     #[test]
     fn combine_roots_with_pending_differs() {
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let pending_digest = Sha256::hash(b"pending");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending_digest = Sha256::hash(&[b"pending"]);
 
         let without = combine_roots::<Sha256>(&ops, &grafted, None, None);
         let with = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
@@ -1278,10 +1357,10 @@ mod tests {
 
     #[test]
     fn combine_roots_pending_and_partial_independent() {
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let pending_digest = Sha256::hash(b"pending");
-        let partial_digest = Sha256::hash(b"partial");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending_digest = Sha256::hash(&[b"pending"]);
+        let partial_digest = Sha256::hash(&[b"partial"]);
 
         let only_pending = combine_roots::<Sha256>(&ops, &grafted, Some(&pending_digest), None);
         let only_partial =
@@ -1299,9 +1378,9 @@ mod tests {
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let ops_a = Sha256::hash(b"ops_a");
-        let ops_b = Sha256::hash(b"ops_b");
-        let grafted = Sha256::hash(b"grafted");
+        let ops_a = Sha256::hash(&[b"ops_a"]);
+        let ops_b = Sha256::hash(&[b"ops_b"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
 
         let r1 = combine_roots::<Sha256>(&ops_a, &grafted, None, None);
         let r2 = combine_roots::<Sha256>(&ops_b, &grafted, None, None);
@@ -1314,28 +1393,28 @@ mod tests {
     #[test]
     fn combine_roots_format_golden() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let ops = Sha256::hash(b"ops");
-        let grafted = Sha256::hash(b"grafted");
-        let pending = Sha256::hash(b"pending");
-        let partial = Sha256::hash(b"partial");
+        let ops = Sha256::hash(&[b"ops"]);
+        let grafted = Sha256::hash(&[b"grafted"]);
+        let pending = Sha256::hash(&[b"pending"]);
+        let partial = Sha256::hash(&[b"partial"]);
         let next_bit: u64 = 0x1122_3344_5566_7788;
 
         // Neither pending nor partial.
         assert_eq!(
             combine_roots::<Sha256>(&ops, &grafted, None, None),
-            hasher.hash([ops.as_ref(), grafted.as_ref()])
+            hasher.hash(&[ops.as_ref(), grafted.as_ref()])
         );
 
         // Pending only.
         assert_eq!(
             combine_roots::<Sha256>(&ops, &grafted, Some(&pending), None),
-            hasher.hash([ops.as_ref(), grafted.as_ref(), pending.as_ref()])
+            hasher.hash(&[ops.as_ref(), grafted.as_ref(), pending.as_ref()])
         );
 
         // Partial only.
         assert_eq!(
             combine_roots::<Sha256>(&ops, &grafted, None, Some((next_bit, &partial))),
-            hasher.hash([
+            hasher.hash(&[
                 ops.as_ref(),
                 grafted.as_ref(),
                 next_bit.to_be_bytes().as_slice(),
@@ -1346,7 +1425,7 @@ mod tests {
         // Both: pending precedes partial.
         assert_eq!(
             combine_roots::<Sha256>(&ops, &grafted, Some(&pending), Some((next_bit, &partial))),
-            hasher.hash([
+            hasher.hash(&[
                 ops.as_ref(),
                 grafted.as_ref(),
                 pending.as_ref(),
@@ -1377,20 +1456,122 @@ mod tests {
         commonware_parallel::Sequential,
     >;
 
-    async fn populate_fixed_db<F, DB>(db: &mut DB, start: u64, count: u64)
+    #[boxed]
+    async fn populate_fixed_db<F, DB>(db: DB, start: u64, count: u64) -> DB
     where
         F: merkle::Graftable,
         DB: DbAny<F, Key = sha256::Digest, Value = sha256::Digest>,
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {
-            let key = Sha256::hash(&idx.to_be_bytes());
-            let value = Sha256::hash(&(idx + count).to_be_bytes());
+            let key = Sha256::hash(&[&idx.to_be_bytes()]);
+            let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
-        let merkleized = batch.merkleize(db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
+    }
+
+    /// State committed via an awaited start_commit handle is recovered on reopen, including the
+    /// grafted bitmap contribution to the root.
+    #[test_traced]
+    fn test_start_commit_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("first"),
+                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+            )
+            .await
+            .unwrap();
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let merkleized = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let (db, handle) = db.start_commit().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = MmrDb::init(
+                ctx.child("second"),
+                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune dropped between the pruning-metadata sync and the log prune must remain
+    /// recoverable: the metadata durably records a bitmap boundary derived from a floor that
+    /// may exist only in buffered operations, and reopening panics if the recovered floor
+    /// lies below that boundary.
+    #[test_traced]
+    fn test_current_prune_dropped_before_log_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("prune-park", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Establish a durable state, then apply (but do not commit) a batch that rewrites
+            // every key, advancing the in-memory floor well past the durable commit's floor.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+            let durable_floor = db.inactivity_floor_loc();
+            let mut batch = db.new_batch();
+            for idx in 0..512u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                let value = Sha256::hash(&[&(idx + 1024).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert!(db.sync_boundary() > durable_floor);
+            let bounds = db.bounds();
+            let floor = db.inactivity_floor_loc();
+            let root = db.root();
+
+            // Drop the production prune future while it is parked after the metadata sync,
+            // before the log prune: a genuine cancellation at that await.
+            db.halt_before_prune_log = true;
+            let boundary = db.sync_boundary();
+            {
+                let fut = db.prune(boundary);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+            }
+
+            // Reopening must succeed and recover the post-batch state: prune committed the
+            // buffered operations before durably recording the pruning metadata that depends
+            // on them. Asserting the advanced floor, root, and persisted pruned boundary
+            // proves the drop happened after both the commit and the metadata sync.
+            let db = MmrDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>("prune-park", &ctx),
+            )
+            .await
+            .expect("prune crash must leave the db recoverable");
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.root(), root);
+            assert!(db.any.bitmap.pruned_bits() > *durable_floor);
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]
@@ -1404,10 +1585,10 @@ mod tests {
             .await
             .unwrap();
             let mut next_idx = 0;
-            populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 256).await;
+            db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 256).await;
             next_idx += 256;
             while partial_chunk::<_, 32>(db.any.bitmap.as_ref()).is_some() {
-                populate_fixed_db::<mmr::Family, _>(&mut db, next_idx, 1).await;
+                db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 1).await;
                 next_idx += 1;
             }
             let witness = db.ops_root_witness().await.unwrap();
@@ -1417,14 +1598,14 @@ mod tests {
             assert!(witness.partial_chunk.is_none());
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
-            let wrong_ops_root = Sha256::hash(b"wrong ops root");
+            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!witness.verify::<Sha256>(&wrong_ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
@@ -1433,13 +1614,13 @@ mod tests {
     fn test_ops_root_witness_verifies_with_partial_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            let mut db = MmbDb::init(
+            let db = MmbDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
             )
             .await
             .unwrap();
-            populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
+            let db = populate_fixed_db::<mmb::Family, _>(db, 0, 260).await;
             let witness = db.ops_root_witness().await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
@@ -1447,14 +1628,14 @@ mod tests {
             assert!(witness.partial_chunk.is_some());
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
-            let wrong_ops_root = Sha256::hash(b"wrong ops root");
+            let wrong_ops_root = Sha256::hash(&[b"wrong ops root"]);
             assert!(!witness.verify::<Sha256>(&wrong_ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
-            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
@@ -1462,7 +1643,7 @@ mod tests {
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
 
             let mut tampered = witness;
-            tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
+            tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(&[b"wrong partial chunk"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
@@ -1480,9 +1661,10 @@ mod tests {
 
             // Churn the same keys repeatedly to drive the inactivity floor past chunk boundaries.
             for _ in 0..5 {
-                populate_fixed_db::<mmr::Family, _>(&mut db, 0, 512).await;
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
             }
-            db.prune(db.sync_boundary()).await.unwrap();
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
             assert!(
                 db.any.bitmap.pruned_chunks() > 0,
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
@@ -1493,11 +1675,11 @@ mod tests {
 
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
 
-            let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
+            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
             assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(b"wrong grafted root");
+            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
             assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }

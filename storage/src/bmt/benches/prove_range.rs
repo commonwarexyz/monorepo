@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 
 const SAMPLE_SIZE: usize = 100;
@@ -36,11 +36,12 @@ fn bench_prove_range(c: &mut Criterion) {
                         )
                     },
                     |(start, end, proof)| {
-                        let mut hasher = Sha256::new();
                         let range_leaves = &elements[start..=end];
-                        assert!(proof
-                            .verify_range_inclusion(&mut hasher, start as u32, range_leaves, &root)
-                            .is_ok());
+                        assert!(
+                            proof
+                                .verify_range_inclusion::<Sha256>(start as u32, range_leaves, &root)
+                                .is_ok()
+                        );
                     },
                     criterion::BatchSize::SmallInput,
                 )

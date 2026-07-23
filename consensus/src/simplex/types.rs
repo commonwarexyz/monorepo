@@ -1,15 +1,15 @@
 //! Types used in [crate::simplex].
 
 use crate::{
+    Epochable, Viewable,
     simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
-    Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
-    certificate::{Attestation, Scheme},
     Digest, PublicKey,
+    certificate::{Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
@@ -26,10 +26,13 @@ pub struct Context<D: Digest, P: PublicKey> {
     pub leader: P,
     /// Parent the payload is built on.
     ///
-    /// If there is a gap between the current view and the parent view, the participant
-    /// must possess a nullification for each discarded view to safely vote on the proposed
-    /// payload (any view without a nullification may eventually be finalized and skipping
-    /// it would result in a fork).
+    /// When the current view is not a term start, the parent must be the immediately
+    /// previous view. When the current view is a term start, the parent may be an older
+    /// certified view as long as the participant possesses nullifications covering every
+    /// skipped term (a nullification covers the view it was created for and the remainder
+    /// of that term); any uncovered view may eventually be finalized and skipping it would
+    /// result in a fork. The parent remains valid even if a later nullification in its own
+    /// term covers the parent view.
     pub parent: (View, D),
 }
 
@@ -419,14 +422,35 @@ pub enum Certificate<S: Scheme, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
+/// The discriminant of a [Certificate], naming its kind without its contents.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Notarization,
+    Nullification,
+    Finalization,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for Kind {
+    /// Writes the stable trace field value for this certificate type.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Notarization => "notarization",
+            Self::Nullification => "nullification",
+            Self::Finalization => "finalization",
+        })
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    /// Returns the stable trace field value for this certificate's type.
-    pub(crate) const fn kind(&self) -> &'static str {
+    /// Returns this certificate's type.
+    pub(crate) const fn kind(&self) -> Kind {
         match self {
-            Self::Notarization(_) => "notarization",
-            Self::Nullification(_) => "nullification",
-            Self::Finalization(_) => "finalization",
+            Self::Notarization(_) => Kind::Notarization,
+            Self::Nullification(_) => Kind::Nullification,
+            Self::Finalization(_) => Kind::Finalization,
         }
     }
 }
@@ -1217,7 +1241,9 @@ where
 }
 
 /// Aggregated nullification certificate recovered from nullify votes.
-/// When a view is nullified, the consensus moves to the next view without finalizing a block.
+/// When a view is nullified, consensus moves to the first view of the next
+/// term without finalizing a block (the next view when `term_length` is 1);
+/// a nullification covers the nullified view and the rest of its term.
 #[derive(Clone, Debug)]
 pub struct Nullification<S: Scheme> {
     /// The round in which this nullification is made.
@@ -2625,11 +2651,11 @@ mod tests {
     use crate::simplex::{
         quorum,
         scheme::{
-            bls12381_multisig,
+            Scheme, bls12381_multisig,
             bls12381_threshold::{
                 standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
             },
-            ed25519, secp256r1, Scheme,
+            ed25519, secp256r1,
         },
     };
     use bytes::Bytes;
@@ -2640,7 +2666,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 

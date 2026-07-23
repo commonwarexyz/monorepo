@@ -3,36 +3,35 @@
 //!
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key.
-//! The wrapper types here capture `Arc<TracedAsyncRwLock<Keyless>>` so the batch API
+//! The wrapper types here capture a [`Shared`] database handle so the batch API
 //! can read through to committed state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_storage::{
+    Context,
     journal::contiguous::{
-        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
+        Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
     },
     merkle::{Family, Location},
     qmdb::{
+        Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
+            Keyless, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, variable, Keyless, Operation,
+            fixed, initial_root, variable,
         },
-        sync::{self, resolver::Resolver, Target as AnySyncTarget},
-        Error,
+        sync::{self, Target as AnySyncTarget, resolver::Resolver},
     },
-    Context,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
+use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
-
-type KeylessDbHandle<F, E, V, C, H, S> = Arc<TracedAsyncRwLock<Keyless<F, E, V, C, H, S>>>;
 
 /// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -47,7 +46,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    db: KeylessDbHandle<F, E, V, C, H, S>,
+    db: Shared<Keyless<F, E, V, C, H, S>>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -97,7 +96,7 @@ where
     /// Read a value by location, falling back to committed state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get(location, &*db).await
+        self.batch.get(location, &db).await
     }
 
     /// Read multiple values by location, falling back to committed state.
@@ -109,7 +108,7 @@ where
         locations: &[Location<F>],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.batch.get_many(locations, &*db).await
+        self.batch.get_many(locations, &db).await
     }
 
     /// Append a value to the speculative batch.
@@ -132,7 +131,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    db: KeylessDbHandle<F, E, V, C, H, S>,
+    db: Shared<Keyless<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
@@ -165,7 +164,7 @@ where
     /// Read a value by location, falling back to committed state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get(location, &*db).await
+        self.inner.get(location, &db).await
     }
 
     /// Read multiple values by location, falling back to committed state.
@@ -177,7 +176,7 @@ where
         locations: &[Location<F>],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        self.inner.get_many(locations, &*db).await
+        self.inner.get_many(locations, &db).await
     }
 }
 
@@ -199,7 +198,7 @@ where
         let merkleized = self
             .batch
             .merkleize(
-                &*db,
+                &db,
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
@@ -258,10 +257,17 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, FixedEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         KeylessUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
             inactivity_floor: None,
@@ -274,12 +280,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -291,16 +297,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -336,10 +342,17 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+    fn initial_sync_target() -> Self::SyncTarget {
+        AnySyncTarget::new(
+            initial_root::<F, VariableEncoding<V>, H>(),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
+        let guard = db.read().await;
         KeylessUnmerkleized {
-            batch: inner.new_batch(),
+            batch: guard.new_batch(),
             db: db.clone(),
             metadata: None,
             inactivity_floor: None,
@@ -352,12 +365,12 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.sync().await
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        db.sync().await
     }
 
-    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
         self.prune((*target.range.start()).into()).await
     }
 
@@ -369,16 +382,16 @@ where
         )
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        self.rewind(target.range.end()).await?;
-        self.sync().await?;
+    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+        let db = self.rewind(target.range.end()).await?;
+        let db = db.sync().await?;
 
-        let rewound_target = self.sync_target();
+        let rewound_target = db.sync_target();
         assert_eq!(
             rewound_target, target,
             "rewound database target mismatch after rewind",
         );
-        Ok(())
+        Ok(db)
     }
 }
 
@@ -464,13 +477,13 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
     };
-    use commonware_utils::{non_empty_range, sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -521,7 +534,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -533,10 +546,12 @@ mod tests {
                 .unwrap();
 
             {
-                let mut guard = db.write().await;
-                <FixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
-                    .await
-                    .unwrap();
+                let (slot, database) = db.write().await;
+                slot.put(
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap(),
+                );
             }
 
             let guard = db.read().await;
@@ -546,7 +561,7 @@ mod tests {
             );
             assert_eq!(guard.get_metadata().await.unwrap(), Some(U64::new(9)));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard);
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));
@@ -558,7 +573,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
+            let db = Shared::new("test", db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await

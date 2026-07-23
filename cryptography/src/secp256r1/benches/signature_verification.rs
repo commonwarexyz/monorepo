@@ -1,6 +1,6 @@
-use commonware_cryptography::{secp256r1, PrivateKey, Verifier};
+use commonware_cryptography::{PrivateKey, Verifier, secp256r1};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 

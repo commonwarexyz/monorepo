@@ -1,6 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::Rng;
 
 fn bench_hash_message(c: &mut Criterion) {
@@ -11,11 +11,7 @@ fn bench_hash_message(c: &mut Criterion) {
         sampler.fill_bytes(msg.as_mut_slice());
         let msg = msg.as_slice();
         c.bench_function(&format!("{}/msg_len={}", module_path!(), msg.len()), |b| {
-            b.iter(|| {
-                let mut hasher = Sha256::new();
-                hasher.update(msg);
-                hasher.finalize();
-            });
+            b.iter(|| Sha256::hash(&[msg]));
         });
     }
 }

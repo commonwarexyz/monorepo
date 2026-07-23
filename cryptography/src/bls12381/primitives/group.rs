@@ -15,10 +15,11 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
-    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
-    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
-    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
+    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
+    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
@@ -26,7 +27,7 @@ use blst::{
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar_from_fr,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -1900,7 +1901,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_math::algebra::{test_suites, Random};
+    use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
     use std::{

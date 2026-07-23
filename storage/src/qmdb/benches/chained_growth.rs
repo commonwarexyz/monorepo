@@ -6,14 +6,14 @@
 //! Timed: do `batches` more merkleize + apply iterations on top of the pre-built chain, with a
 //! single random update per batch so each overlay covers a tiny fraction of chunks.
 
-use crate::common::{seed_db, write_random_updates, Digest, WRITE_BUFFER_SIZE};
+use crate::common::{Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
+    BufferPooler, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Strategizer, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -24,8 +24,8 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -86,6 +86,8 @@ fn cur_fix_cfg(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -159,12 +161,12 @@ async fn run_chained_growth<
     C: DbAny<F, Key = Digest, Value = Digest>,
     Fork: Fn(&C::Merkleized) -> C::Batch,
 >(
-    mut db: C,
+    db: C,
     grow: u64,
     fork_child: Fork,
 ) -> Duration {
-    seed_db(&mut db, NUM_KEYS).await;
-    db.sync().await.unwrap();
+    let db = seed_db(db, NUM_KEYS).await;
+    let mut db = db.sync().await.unwrap();
     let mut rng = TestRng::new(99);
 
     // Pre-build a deep chain (untimed).
@@ -174,13 +176,13 @@ async fn run_chained_growth<
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
         let child = child_batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(parent).await.unwrap();
+        (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
 
     // Flush buffered data so the timed region doesn't inherit setup fsync cost.
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
+    db = db.commit().await.unwrap();
+    db = db.sync().await.unwrap();
 
     // Timed: grow more batches on top of the pre-built chain.
     let start = Instant::now();
@@ -189,10 +191,10 @@ async fn run_chained_growth<
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
         let child = child_batch.merkleize(&db, None).await.unwrap();
         black_box(child.root());
-        db.apply_batch(parent).await.unwrap();
+        (db, _) = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
-    db.apply_batch(parent).await.unwrap();
+    let (db, _) = db.apply_batch(parent).await.unwrap();
     let total = start.elapsed();
 
     db.destroy().await.unwrap();

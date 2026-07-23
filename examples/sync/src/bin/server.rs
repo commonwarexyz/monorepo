@@ -8,27 +8,28 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
+    BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf, Spawner, Storage, StreamOf,
+    Supervisor as _,
     telemetry::metrics::{Counter, MetricsExt as _},
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
-    Spawner, Storage, StreamOf, Supervisor as _,
+    tokio as tokio_runtime,
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{compact, Target},
+    qmdb::sync::{Target, compact},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any, crate_version, current,
+    Error, Key, any, crate_version, current,
     databases::{CompactSyncable, DatabaseType, ExampleDatabase, StorageKind, SyncMode, Syncable},
     immutable, immutable_compact, keyless, keyless_compact,
-    net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
-    Error, Key,
+    net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE, wire},
 };
 use commonware_utils::{
+    DurationExt,
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
-    sys_rng, DurationExt,
+    sys_rng,
 };
 use rand_core::Rng;
 use std::{
@@ -71,8 +72,11 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async rwlock.
-    database: Arc<AsyncRwLock<DB>>,
+    /// The database wrapped in an async rwlock. Owned mutations take the
+    /// database out of the slot and put it back on success; a failure, panic,
+    /// or cancellation mid-mutation leaves the slot empty, and handlers then
+    /// return [`Error::DatabaseUnavailable`].
+    database: Arc<AsyncRwLock<Option<DB>>>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -89,7 +93,7 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         Self {
-            database: Arc::new(AsyncRwLock::new(database)),
+            database: Arc::new(AsyncRwLock::new(Some(database))),
             request_counter: context.counter("requests", "Number of requests received"),
             error_counter: context.counter("error", "Number of errors"),
             ops_counter: context.counter(
@@ -187,17 +191,22 @@ where
     };
     if should_add {
         let seed = context.next_u64();
-        let mut database = state.database.write().await;
+        let mut guard = state.database.write().await;
+        let database = guard.take().ok_or(Error::DatabaseUnavailable)?;
         let starting_loc = database.current_floor();
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, seed, starting_loc);
         let new_operations_len = new_operations.len();
-        if let Err(err) = database.add_operations(new_operations).await {
-            error!(?err, "failed to add operations to database");
-            return Err(err.into());
-        }
+        let database = match database.add_operations(new_operations).await {
+            Ok(database) => database,
+            Err(err) => {
+                error!(?err, "failed to add operations to database");
+                return Err(err.into());
+            }
+        };
         let root = database.root();
-        drop(database);
+        *guard = Some(database);
+        drop(guard);
         state.ops_counter.inc_by(new_operations_len as u64);
         info!(
             new_operations_len,
@@ -221,7 +230,8 @@ where
 
     // Get the current database state
     let (root, sync_boundary, size) = {
-        let database = state.database.read().await;
+        let guard = state.database.read().await;
+        let database = guard.as_ref().ok_or(Error::DatabaseUnavailable)?;
         (database.root(), database.sync_boundary(), database.size())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
@@ -244,8 +254,8 @@ where
     state.request_counter.inc();
 
     let target = {
-        let database = state.database.read().await;
-        database.target()
+        let guard = state.database.read().await;
+        guard.as_ref().ok_or(Error::DatabaseUnavailable)?.target()
     };
     let response = wire::GetCompactTargetResponse::<Key> {
         request_id: request.request_id,
@@ -267,7 +277,8 @@ where
     state.request_counter.inc();
     request.validate()?;
 
-    let database = state.database.read().await;
+    let guard = state.database.read().await;
+    let database = guard.as_ref().ok_or(Error::DatabaseUnavailable)?;
 
     // Check if we have enough operations
     let db_size = database.size();
@@ -316,7 +327,7 @@ where
         None
     };
 
-    drop(database);
+    drop(guard);
 
     debug!(
         request_id = request.request_id,
@@ -340,12 +351,12 @@ async fn handle_get_compact_state<DB>(
 ) -> Result<wire::GetCompactStateResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
-    Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+    Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     state.request_counter.inc();
 
@@ -356,9 +367,8 @@ where
             match err {
                 compact::ServeError::Database(err) => Error::Database(err),
                 compact::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
-                compact::ServeError::InvalidTarget(_) | compact::ServeError::MissingSource => {
-                    Error::InvalidRequest(err.to_string())
-                }
+                compact::ServeError::MissingSource => Error::DatabaseUnavailable,
+                compact::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
             }
         })?;
 
@@ -405,12 +415,12 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+    Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     const LISTENING_MESSAGE: &'static str =
         "compact server listening and continuously adding operations";
@@ -536,7 +546,7 @@ where
 
 /// Initialize and display database state with initial operations.
 async fn initialize_database<DB, E>(
-    mut database: DB,
+    database: DB,
     config: &Config,
     context: &mut E,
 ) -> Result<DB, BoxError>
@@ -554,7 +564,7 @@ where
         operations_len = initial_ops.len(),
         "creating initial operations"
     );
-    database.add_operations(initial_ops).await?;
+    let database = database.add_operations(initial_ops).await?;
 
     // Display database state
     let size = database.size();
@@ -567,7 +577,7 @@ where
 
 /// Initialize and display compact-source database state with initial operations.
 async fn initialize_compact_database<DB, E>(
-    mut database: DB,
+    database: DB,
     config: &Config,
     context: &mut E,
 ) -> Result<DB, BoxError>
@@ -584,7 +594,7 @@ where
         operations_len = initial_ops.len(),
         "creating initial operations"
     );
-    database.add_operations(initial_ops).await?;
+    let database = database.add_operations(initial_ops).await?;
 
     let target = database.target();
     let root = target.root;
@@ -630,9 +640,10 @@ where
             debug!("{}", Mode::SHUTDOWN_MESSAGE);
         },
         _ = context.sleep_until(next_op_time) => {
-            // Add operations to the database
+            // Add operations to the database. A failed mutation is fatal; stop serving.
             if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
-                warn!(?err, "failed to add additional operations");
+                error!(?err, "failed to add additional operations; shutting down");
+                return Err(err);
             }
             next_op_time = context.current() + config.op_interval;
         },
@@ -680,12 +691,12 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
-    Arc<AsyncRwLock<DB>>: compact::Resolver<
-        Family = mmr::Family,
-        Op = DB::Operation,
-        Digest = Key,
-        Error = compact::ServeError<mmr::Family, Key>,
-    >,
+    Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
+            Family = mmr::Family,
+            Op = DB::Operation,
+            Digest = Key,
+            Error = compact::ServeError<mmr::Family, Key>,
+        >,
 {
     let database = initialize_compact_database(database, &config, &mut context).await?;
     run_server::<DB, E, CompactMode>(context, config, database).await

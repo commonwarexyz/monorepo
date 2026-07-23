@@ -1,4 +1,3 @@
-use super::Header;
 use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
@@ -22,6 +21,8 @@ pub struct Blob {
     name: Vec<u8>,
     file: Arc<File>,
     pool: BufferPool,
+    /// Physical offset where logical offset 0 begins (the size of the header region).
+    data_offset: u64,
     /// The in-flight content mutation, if any.
     ///
     /// Dropping a future does not stop its operation: the spawned pwrite or set_len keeps
@@ -32,12 +33,19 @@ pub struct Blob {
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File, pool: BufferPool) -> Self {
+    pub fn new(
+        partition: String,
+        name: &[u8],
+        file: File,
+        pool: BufferPool,
+        data_offset: u64,
+    ) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(file),
             pool,
+            data_offset,
             inflight: Arc::new(Mutex::new(None)),
         }
     }
@@ -55,10 +63,10 @@ impl Blob {
         if let Some(handle) = inflight.as_mut() {
             let result = handle.await;
             *inflight = None;
-            if let Err(err) = result {
-                if err.is_panic() {
-                    panic::resume_unwind(err.into_panic());
-                }
+            if let Err(err) = result
+                && err.is_panic()
+            {
+                panic::resume_unwind(err.into_panic());
             }
         }
     }
@@ -192,7 +200,7 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let pool = self.pool.clone();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         // Wait for any in-flight mutation so this read sees it.
         self.wait_for_inflight().await;
@@ -217,7 +225,7 @@ impl crate::Blob for Blob {
         let bufs = bufs.into();
         let file = self.file.clone();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         self.run_ordered(
             move || match bufs.try_into_single() {
@@ -237,7 +245,7 @@ impl crate::Blob for Blob {
         let bufs = bufs.into();
         let file = self.file.clone();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
 
         if !bufs.has_remaining() {
@@ -262,7 +270,7 @@ impl crate::Blob for Blob {
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.clone();
         let len = len
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         let partition = self.partition.clone();
         let name = self.name.clone();

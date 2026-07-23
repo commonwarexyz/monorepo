@@ -3,18 +3,18 @@
 //! For variable-size values, use [super::variable].
 
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
+        Error, ROOT_BAGGING,
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Error, ROOT_BAGGING,
     },
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -73,10 +73,10 @@ mod test {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner as _,
-        Strategizer as _, Supervisor as _,
+        BufferPooler, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -152,7 +152,7 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let value = commonware_utils::sequence::U64::new(7);
             let floor = db.inactivity_floor_loc();
             let batch = db
@@ -160,15 +160,15 @@ mod test {
                 .append(value.clone())
                 .merkleize(&db, None, floor)
                 .await;
-            let range = db.apply_batch(batch).await.unwrap();
+            let (db, range) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
             assert_eq!(
                 db.get_many(&[range.start]).await.unwrap(),
                 vec![Some(value)]
             );
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let _db = db.prune(crate::merkle::Location::new(0)).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -307,8 +307,8 @@ mod test {
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
-        let mut db = open_db::<F>(ctx.child("db")).await;
-        let mut compact = open_compact::<F>(ctx.child("compact")).await;
+        let db = open_db::<F>(ctx.child("db")).await;
+        let compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let v1 = commonware_utils::sequence::U64::new(1);
@@ -331,10 +331,10 @@ mod test {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        db.apply_batch(retained).await.unwrap();
-        compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
-        compact.sync().await.unwrap();
+        let (db, _) = db.apply_batch(retained).await.unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let db = db.commit().await.unwrap();
+        let compact = compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));
@@ -366,7 +366,7 @@ mod test {
     fn test_keyless_fixed_pruning() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_pruning(db).await;
+            tests::test_keyless_db_pruning(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -462,7 +462,7 @@ mod test {
     fn test_keyless_fixed_stale_batch() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_stale_batch(db).await;
+            tests::test_keyless_stale_batch(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -518,7 +518,8 @@ mod test {
     fn test_keyless_fixed_rewind_pruned_target_errors() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+            tests::test_keyless_db_rewind_pruned_target_errors(ctx, db, reopen::<mmr::Family>())
+                .await;
         });
     }
 
@@ -534,7 +535,8 @@ mod test {
     fn test_keyless_fixed_floor_regression_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_regression_rejected(db).await;
+            tests::test_keyless_db_floor_regression_rejected(ctx, db, reopen::<mmr::Family>())
+                .await;
         });
     }
 
@@ -542,7 +544,12 @@ mod test {
     fn test_keyless_fixed_floor_beyond_commit_loc_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(
+                ctx,
+                db,
+                reopen::<mmr::Family>(),
+            )
+            .await;
         });
     }
 
@@ -584,7 +591,12 @@ mod test {
     fn test_keyless_fixed_ancestor_floor_regression_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(
+                ctx,
+                db,
+                reopen::<mmr::Family>(),
+            )
+            .await;
         });
     }
 
@@ -707,7 +719,7 @@ mod test {
     fn test_keyless_fixed_pruning_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_pruning(db).await;
+            tests::test_keyless_db_pruning(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 
@@ -795,7 +807,7 @@ mod test {
     fn test_keyless_fixed_stale_batch_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_stale_batch(db).await;
+            tests::test_keyless_stale_batch(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 
@@ -851,7 +863,8 @@ mod test {
     fn test_keyless_fixed_rewind_pruned_target_errors_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+            tests::test_keyless_db_rewind_pruned_target_errors(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 
@@ -867,7 +880,8 @@ mod test {
     fn test_keyless_fixed_floor_regression_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_regression_rejected(db).await;
+            tests::test_keyless_db_floor_regression_rejected(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 
@@ -875,7 +889,12 @@ mod test {
     fn test_keyless_fixed_floor_beyond_commit_loc_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(
+                ctx,
+                db,
+                reopen::<mmb::Family>(),
+            )
+            .await;
         });
     }
 
@@ -917,7 +936,12 @@ mod test {
     fn test_keyless_fixed_ancestor_floor_regression_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(
+                ctx,
+                db,
+                reopen::<mmb::Family>(),
+            )
+            .await;
         });
     }
 
@@ -952,17 +976,16 @@ mod test {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::sync::{self, engine::Config, Target},
+            qmdb::sync::{self, Target, engine::Config},
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;
 
         deterministic::Runner::default().start(|ctx| async move {
             let target_config = db_config("sync-target", &ctx, Sequential);
-            let mut target_db: TestDb<mmr::Family> =
-                TestDb::init(ctx.child("target"), target_config)
-                    .await
-                    .unwrap();
+            let target_db: TestDb<mmr::Family> = TestDb::init(ctx.child("target"), target_config)
+                .await
+                .unwrap();
 
             let mut batch = target_db.new_batch();
             for i in 0..20u64 {
@@ -970,7 +993,7 @@ mod test {
             }
             let floor = target_db.inactivity_floor_loc();
             let merkleized = batch.merkleize(&target_db, None, floor).await;
-            target_db.apply_batch(merkleized).await.unwrap();
+            let (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
             let bounds = target_db.bounds();

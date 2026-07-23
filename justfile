@@ -24,7 +24,7 @@ pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2021 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -64,6 +64,57 @@ test-benches crate test_flags='' lint_flags='':
     for bench in $binaries; do
         cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
     done
+
+# Run the Gungraun benchmark tracking suite
+benchmark-tracking mode='generate' *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    tracking_command=(
+        cargo run -p commonware-bench --bin benchmark-tracker --
+        --config .github/benchmark-tracking.toml
+        --output-dir benchmark-tracking-results
+        {{ args }}
+        {{ mode }}
+    )
+
+    run_tracking() {
+        "${tracking_command[@]}"
+    }
+
+    case "$(uname -s)" in
+        Linux)
+            run_tracking
+            ;;
+        Darwin)
+            image="commonware-gungraun:local"
+            arch="$(uname -m)"
+            if [ "$arch" = "arm64" ]; then
+                platform="linux/arm64"
+            else
+                platform="linux/amd64"
+            fi
+            DEFAULT_TAG="$image" PLATFORMS="$platform" docker buildx bake \
+                --load \
+                --progress plain \
+                -f docker/docker-bake.hcl \
+                gungraun
+            docker run --rm \
+                --platform "$platform" \
+                --security-opt seccomp=unconfined \
+                --user "$(id -u):$(id -g)" \
+                --volume "$PWD:/workspace" \
+                --workdir /workspace \
+                --env CARGO_HOME=/tmp/cargo \
+                --env CARGO_TARGET_DIR=/workspace/target/gungraun-docker \
+                "$image" \
+                "${tracking_command[@]}"
+            ;;
+        *)
+            echo "unsupported platform: $(uname -s)" >&2
+            exit 1
+            ;;
+    esac
 
 # Run tests
 test *args='':
@@ -137,11 +188,31 @@ fix-features:
 
 # Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
 test-conformance *args='':
-    just test --features arbitrary --profile conformance {{ args }}
+    just _conformance check {{ args }}
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance prune {{ args }}
+
+[private]
+_conformance mode *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    inventory="$(mktemp)"
+    trap 'rm -f "$inventory"' EXIT
+
+    cargo nextest list --features arbitrary --profile conformance --message-format json {{ args }} > "$inventory"
+
+    if [[ "{{ mode }}" == "check" ]]; then
+        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- check < "$inventory"
+    fi
+
+    just test --features arbitrary --profile conformance {{ args }}
+
+    if [[ "{{ mode }}" == "prune" ]]; then
+        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- prune < "$inventory"
+    fi
 
 # Find public items missing stability annotations.
 unstable-public *args='':

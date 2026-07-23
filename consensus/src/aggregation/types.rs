@@ -1,18 +1,18 @@
 //! Types used in [aggregation](super).
 
 use crate::{
+    Heightable,
     aggregation::scheme,
     types::{Epoch, Height},
-    Heightable,
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
     Digest,
+    certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{channel::oneshot, union, N3f1};
+use commonware_utils::{N3f1, channel::oneshot, union};
 use rand_core::CryptoRng;
 use std::hash::Hash;
 
@@ -28,9 +28,6 @@ pub enum Error {
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(Epoch, String),
-    /// The local node is not a signer in the scheme for the specified epoch.
-    #[error("Not a signer at epoch {0}")]
-    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -459,17 +456,17 @@ where
 mod tests {
     use super::*;
     use crate::aggregation::scheme::{
-        bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+        Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1,
     };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
-        Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Quorum, test_rng, N3f1, TestRng};
+    use commonware_utils::{N3f1, TestRng, ordered::Quorum, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -492,7 +489,7 @@ mod tests {
         let schemes = &fixture.schemes;
         let item = Item {
             height: Height::new(100),
-            digest: Sha256::hash(b"test_item"),
+            digest: Sha256::hash(&[b"test_item"]),
         };
 
         // Test Item codec

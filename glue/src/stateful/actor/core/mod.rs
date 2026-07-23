@@ -5,6 +5,7 @@
 //! - [`Processing`] manages the pending-tip DAG and drives the inner application.
 
 use crate::stateful::{
+    Application,
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
@@ -12,7 +13,6 @@ use crate::stateful::{
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
-    Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -22,13 +22,13 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{spawn_cell, telemetry::metrics::GaugeExt, ContextCell, Handle, Spawner};
+use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::{channel::oneshot, sync::AsyncMutex};
+use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -93,8 +93,8 @@ where
     /// Configuration used to construct the database set.
     pub db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    pub input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    pub provider: A::Provider,
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     pub marshal: MarshalMailbox<S, V>,
@@ -140,8 +140,8 @@ where
     /// The inner application that drives state transitions.
     application: A,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    provider: A::Provider,
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     marshal: MarshalMailbox<S, V>,
@@ -187,7 +187,7 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 application: config.application,
-                input_provider: config.input_provider,
+                provider: config.provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
                 plan: config.plan,
@@ -207,7 +207,7 @@ where
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
         } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted state sync must resume from a newly selected floor");
+            panic!("interrupted state sync is missing its persisted floor");
         } else {
             self.start_from_marshal().await;
         }
@@ -217,14 +217,17 @@ where
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = Arc::new(AsyncMutex::new(self.plan.into_sync_metadata()));
+        let sync_metadata = self
+            .plan
+            .into_sync_metadata()
+            .begin_sync(floor.clone())
+            .await;
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            sync_metadata: sync_metadata.clone(),
             finalization: floor,
             marshal: self.marshal.clone(),
             sync_complete,
@@ -233,7 +236,7 @@ where
             context: self.context,
             mailbox: self.mailbox,
             application: self.application,
-            input_provider: self.input_provider,
+            provider: self.provider,
             marshal: self.marshal,
             sync_metadata,
             syncer: syncer_mailbox,
@@ -279,7 +282,7 @@ where
         Processing {
             context: self.context,
             mailbox: self.mailbox,
-            input_provider: self.input_provider,
+            provider: self.provider,
             marshal: self.marshal,
             processor,
             skip_finalized_until,
@@ -294,36 +297,36 @@ mod tests {
     use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
     };
     use commonware_consensus::{
+        Application as _, CertifiableBlock as _,
         marshal::{self, ancestry, core::Actor as MarshalActor},
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Round, View, ViewDelta},
-        Application as _, CertifiableBlock as _,
     };
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
+        certificate::{ConstantProvider, mocks::Fixture},
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
+        Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
+    use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
+        async fn attach_database(&self, _db: Shared<TestDb>) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
@@ -417,7 +420,7 @@ mod tests {
                         start: marshal::Start::Genesis(TestBlock::new(0, 0)),
                         partition_prefix: "pending-floor-marshal".to_string(),
                         mailbox_size: NZUsize!(8),
-                        view_retention_timeout: ViewDelta::new(1),
+                        view_retention: ViewDelta::new(1),
                         prunable_items_per_section: NZU64!(4),
                         page_cache,
                         replay_buffer: NZUsize!(64),
@@ -437,7 +440,7 @@ mod tests {
                 Config {
                     application: TestApp,
                     db_config: (),
-                    input_provider: (),
+                    provider: (),
                     marshal,
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
@@ -458,6 +461,7 @@ mod tests {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
                     ancestry::from_iter([]),
+                    (),
                 ) => {
                     assert!(result.is_none());
                 },

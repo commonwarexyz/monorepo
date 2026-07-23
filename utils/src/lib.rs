@@ -7,7 +7,7 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub use rng::{test_rng, FuzzRng, TestRng};
+    pub use rng::{FuzzRng, TestRng, test_rng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
@@ -32,7 +32,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod range;
 
     use bytes::Buf;
-    use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///

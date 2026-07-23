@@ -143,30 +143,29 @@ use super::{
     metrics::ShardMetrics,
 };
 use crate::{
+    Block, CertifiableBlock, Heightable,
     marshal::coding::{
         types::{CodedBlock, Shard},
-        validation::{validate_reconstruction, ReconstructionError as InvariantError},
+        validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
-    types::{coding::Commitment, Epoch, Round},
-    Block, CertifiableBlock, Heightable,
+    types::{Epoch, Round, coding::Commitment},
 };
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher, PublicKey,
+    certificate::{Provider, Scheme as CertificateScheme},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, HistogramExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -177,6 +176,7 @@ use rand_core::Rng;
 use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -276,7 +276,7 @@ where
     H: Hasher,
 {
     round: Round,
-    block: CodedBlock<B, C, H>,
+    block: Arc<CodedBlock<B, C, H>>,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -363,7 +363,7 @@ where
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
-        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
+        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -572,19 +572,19 @@ where
             // Notarized recovery can create state before leader discovery. Until
             // the leader is known, only sender-indexed gossip shards are safe to
             // ingest: a participant may only gossip its own shard.
-            if existing.leader().is_none() {
-                if let Some(sender_index) = scheme.participants().index(&peer) {
-                    let expected_index: u16 = sender_index
-                        .get()
-                        .try_into()
-                        .expect("participant index impossibly out of bounds");
-                    if shard.index() != expected_index {
-                        // A mismatched shard is invalid for a non-leader, but it may be
-                        // the assigned shard if this peer later turns out to be the leader.
-                        // Keep it buffered until the sender's role is known.
-                        self.buffer_peer_shard(peer, shard);
-                        return;
-                    }
+            if existing.leader().is_none()
+                && let Some(sender_index) = scheme.participants().index(&peer)
+            {
+                let expected_index: u16 = sender_index
+                    .get()
+                    .try_into()
+                    .expect("participant index impossibly out of bounds");
+                if shard.index() != expected_index {
+                    // A mismatched shard is invalid for a non-leader, but it may be
+                    // the assigned shard if this peer later turns out to be the leader.
+                    // Keep it buffered until the sender's role is known.
+                    self.buffer_peer_shard(peer, shard);
+                    return;
                 }
             }
 
@@ -637,7 +637,7 @@ where
     fn try_reconstruct(
         &mut self,
         commitment: Commitment,
-    ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
         }
@@ -693,8 +693,7 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = CodedBlock::new_trusted(inner, commitment);
-        self.cache_block(round, block.clone());
+        let block = self.cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)));
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -880,16 +879,21 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
-    fn cache_block(&mut self, round: Round, block: CodedBlock<B, C, H>) {
+    fn cache_block(
+        &mut self,
+        round: Round,
+        block: Arc<CodedBlock<B, C, H>>,
+    ) -> Arc<CodedBlock<B, C, H>> {
         let commitment = block.commitment();
         self.reconstructed_blocks.insert(
             commitment,
             ReconstructedBlock {
                 round,
-                block: block.clone(),
+                block: Arc::clone(&block),
             },
         );
-        self.notify_block_subscribers(block);
+        self.notify_block_subscribers(Arc::clone(&block));
+        block
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
@@ -900,7 +904,7 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
-        mut block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
     ) {
         let commitment = block.commitment();
 
@@ -1072,7 +1076,7 @@ where
     fn handle_block_subscription(
         &mut self,
         key: BlockSubscriptionKey<B::Digest>,
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     ) {
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => self
@@ -1087,7 +1091,7 @@ where
 
         // Answer immediately if we have the block cached.
         if let Some(block) = block {
-            response.send_lossy(block.clone());
+            response.send_lossy(Arc::clone(block));
             return;
         }
 
@@ -1111,7 +1115,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: CodedBlock<B, C, H>) {
+    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -1121,7 +1125,7 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(block.clone());
+                subscriber.send_lossy(Arc::clone(&block));
             }
         }
 
@@ -1131,7 +1135,7 @@ where
             .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(block.clone());
+                subscriber.send_lossy(Arc::clone(&block));
             }
         }
     }
@@ -1626,17 +1630,12 @@ where
                 blocker,
             );
 
-            if progressed {
-                if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state.try_transition(
-                        commitment,
-                        ctx.participants_len,
-                        ctx.strategy,
-                        blocker,
-                    ) {
-                        *self = Self::Ready(ready);
-                    }
-                }
+            if progressed
+                && let Self::AwaitingQuorum(state) = self
+                && let Some(ready) =
+                    state.try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
+            {
+                *self = Self::Ready(ready);
             }
             return progressed;
         }
@@ -1678,29 +1677,29 @@ mod tests {
         CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
     };
     use commonware_cryptography::{
+        Committable, Digest, Sha256, Signer,
         certificate::{Scoped, Subject},
         ed25519::{PrivateKey, PublicKey},
         impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
-        Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{self, Control, Link, Oracle},
         Manager as _, TrackedPeers,
+        simulated::{self, Control, Link, Oracle},
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
+        NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
     };
     use std::{
         future::Future,
         marker::PhantomData,
         num::NonZeroU32,
         sync::{
-            atomic::{AtomicIsize, Ordering},
             Arc,
+            atomic::{AtomicIsize, Ordering},
         },
         time::Duration,
     };
@@ -4369,7 +4368,7 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let real_commitment = coded_block.commitment();
 
-                let wrong_context_digest = Sha256::hash(b"wrong_context");
+                let wrong_context_digest = Sha256::hash(&[b"wrong_context"]);
                 assert_ne!(
                     real_commitment.context::<Sha256Digest>(),
                     wrong_context_digest,
@@ -4473,13 +4472,16 @@ mod tests {
         // - we receive a shard for commitment B (the certifiable one)
         // - commitment A reconstructs first
         // - commitment B must still remain recoverable
+        // - the leader must not be blocked (a leader that crashes after its
+        //   broadcast but before its local persist legitimately re-proposes
+        //   a different block for the same round after restart)
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
 
         fixture.start(
-            |config, context, _oracle, mut peers, _, coding_config| async move {
+            |config, context, oracle, mut peers, _, coding_config| async move {
                 let receiver_idx = 3usize;
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
@@ -4567,6 +4569,17 @@ mod tests {
                         panic!("certifiable commitment was not recoverable after same-round equivocation");
                     },
                 }
+
+                // Cross-commitment equivocation within a round is tolerated,
+                // so the leader must not be blocked.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let is_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &receiver_pk && b == &leader);
+                assert!(
+                    !is_blocked,
+                    "leader must not be blocked for same-round cross-commitment shards"
+                );
             },
         );
     }

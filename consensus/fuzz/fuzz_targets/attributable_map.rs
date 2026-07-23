@@ -8,7 +8,7 @@ use commonware_consensus::{
     },
     types::{Epoch, Participant, Round, View},
 };
-use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
+use commonware_cryptography::{Signer, certificate::Attestation, ed25519::PrivateKey};
 use commonware_math::algebra::Random;
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;

@@ -8,21 +8,22 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::ordered::Index,
     journal::contiguous::variable::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
+        Error,
+        any::{VariableValue, ordered::variable::Operation, value::VariableEncoding},
         current::VariableConfig as Config,
         operation::Key,
-        Error,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
@@ -37,15 +38,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 where
     Operation<F, K, V>: Codec,
 {
@@ -85,24 +86,23 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Key,
-            V: VariableValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context + Spawner,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     where
         Operation<F, K, V>: Codec,
     {
         /// Initializes a [Db] from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
@@ -116,7 +116,7 @@ mod test {
         qmdb::current::{ordered::tests as shared, tests::variable_config},
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::deterministic;
 

@@ -1,13 +1,13 @@
-use super::utils::{append_random, init, Ordinal, ITEMS_PER_BLOB};
+use super::utils::{ITEMS_PER_BLOB, Ordinal, append_random, init};
 use commonware_runtime::{
+    Runner,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
 };
 use commonware_storage::utils::bits_for_indices;
-use commonware_utils::{TestRng, NZU64};
-use criterion::{criterion_group, Criterion};
-use futures::{stream::FuturesUnordered, StreamExt};
+use commonware_utils::{NZU64, TestRng};
+use criterion::{Criterion, criterion_group};
+use futures::{StreamExt, stream::FuturesUnordered};
 use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
@@ -49,9 +49,8 @@ fn bench_get(c: &mut Criterion) {
     // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let bits = builder.start(|ctx| async move {
-        let mut store = init(ctx, None).await;
-        let indices = append_random(&mut store, ITEMS).await;
-        store.sync().await.unwrap();
+        let store = init(ctx, None).await;
+        let (_, indices) = append_random(store, ITEMS).await;
         bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
     });
 

@@ -1,12 +1,12 @@
-use super::{Operation, COMMIT_CONTEXT, SET_CONTEXT};
+use super::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        any::{value::VariableEncoding, VariableValue},
+        any::{VariableValue, value::VariableEncoding},
         operation::Key,
     },
 };
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{Buf, BufMut};
 
 impl<F: Family, K: Key, V: VariableValue> EncodeSize for Operation<F, K, VariableEncoding<V>> {

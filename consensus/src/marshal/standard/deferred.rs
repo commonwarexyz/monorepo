@@ -71,38 +71,37 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
+    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     marshal::{
+        Update,
         application::{
-            gates::{self, Gates},
-            validation::{is_inferred_reproposal_at_certify, Stage},
+            gates::{self, GateOutcome, Gates},
+            validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
+            Standard, relay,
             validation::{
-                await_and_validate_parent, precheck_epoch_and_reproposal, run_app_verify, Decision,
-                ParentCheck,
+                Decision, ParentCheck, await_and_validate_parent, precheck_epoch_and_reproposal,
+                run_app_verify,
             },
-            Standard,
         },
-        Update,
     },
-    simplex::{types::Context, Plan},
+    simplex::{Plan, types::Context},
     types::{Epocher, Round},
-    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
-use commonware_p2p::Recipients;
 use commonware_runtime::{
+    Clock, Metrics, Spawner,
     telemetry::{
         metrics::{
-            histogram::{Buckets, Timed},
             MetricsExt as _,
+            histogram::{Buckets, Timed},
         },
         traces::TracedExt as _,
     },
-    Clock, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -110,7 +109,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::sync::Arc;
-use tracing::{debug, info_span, Instrument as _};
+use tracing::{Instrument as _, debug, info_span};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -152,7 +151,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    gates: Gates<<B as Digestible>::Digest>,
+    gates: Gates<<B as Digestible>::Digest, B>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -185,7 +184,13 @@ impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -239,10 +244,10 @@ where
     async fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
-        block: B,
-        parent_request: oneshot::Receiver<B>,
+        block: Arc<B>,
+        parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -267,12 +272,12 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, block.clone());
+                let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
                     // Validate the parent we already started fetching.
                     let parent = match await_and_validate_parent(
                         context.parent.1,
-                        &block,
+                        block.as_ref(),
                         parent_request,
                         &mut tx,
                     )
@@ -285,7 +290,7 @@ where
                     run_app_verify(
                         runtime_context,
                         context,
-                        &block,
+                        Arc::clone(&block),
                         parent,
                         &mut application,
                         &marshal,
@@ -299,8 +304,8 @@ where
                 // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
-                if let Some(application_valid) = gates::handle(verdict, durable) {
-                    tx.send_lossy(application_valid);
+                if let Some(application_valid) = gates::resolve(verdict, durable) {
+                    tx.send_lossy(GateOutcome::Ready(application_valid));
                 }
             }
             .instrument(span)
@@ -410,7 +415,7 @@ where
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
                     .await;
-                if let Ok(result) = verify_rx.await {
+                if let Ok(GateOutcome::Ready(result)) = verify_rx.await {
                     tx.send_lossy(result);
                 }
             }
@@ -428,7 +433,7 @@ where
         &mut self,
         round: Round,
         digest: B::Digest,
-        task: oneshot::Receiver<bool>,
+        task: oneshot::Receiver<GateOutcome>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
@@ -436,8 +441,9 @@ where
         // digest is also the variant commitment.
         self.marshal.hint_notarized(round, digest);
 
-        // A completed gate is a live local verdict. After an unclean restart the
-        // in-memory task is gone, so recover via the embedded-context fetch path.
+        // A completed gate either carries an applicable local verdict or requests
+        // recovery. After an unclean restart the in-memory task is gone, which also
+        // recovers via the embedded-context fetch path.
         let mut marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
@@ -464,7 +470,13 @@ impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -478,9 +490,10 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's digest when ready. The block's persistence is enqueued
-    /// before the digest is delivered, and the resulting sync handle is awaited only at
-    /// certification so it overlaps consensus voting. The digest does not imply durability on
+    /// contain the proposed block's digest when ready. The block is staged before the digest is
+    /// delivered and handed to marshal when consensus requests the relay broadcast, which
+    /// persists it after the send. The resulting sync handle is awaited only at certification so
+    /// it overlaps consensus voting. The digest does not imply durability on
     /// its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate before
     /// the finalize vote.
     #[allow(clippy::async_yields_async)]
@@ -513,8 +526,9 @@ where
         context.spawn(move |runtime_context| {
             async move {
                 // On leader recovery, marshal may already hold a verified block
-                // for this round (persisted by a pre-crash propose whose
-                // notarize vote never reached the journal).
+                // for this round (persisted by a pre-crash propose that reached
+                // its relay broadcast while the notarize vote never reached the
+                // journal).
                 //
                 // The pre-crash digest may already have been broadcast, so
                 // building a fresh block would equivocate. The stored block is
@@ -536,14 +550,25 @@ where
                         );
                         return;
                     }
+                    // Stage the recovered block so the relay broadcast re-sends
+                    // it through the same handshake as a fresh proposal. The
+                    // relay-time persist deduplicates against the pre-crash
+                    // write, with the handle covering the original.
                     let digest = block.digest();
-                    let success = tx.send_lossy(digest);
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
-                        success,
-                        "reused verified block from marshal on leader recovery"
+                        "reusing verified block from marshal on leader recovery"
                     );
+                    gates
+                        .stage(
+                            consensus_context.round,
+                            digest,
+                            Arc::new(block),
+                            tx,
+                            "recovered block",
+                        )
+                        .await;
                     return;
                 }
 
@@ -591,14 +616,12 @@ where
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
-
-                    let persist = marshal.verified_deferred(consensus_context.round, parent);
                     gates
-                        .persist_and_defer(
+                        .stage(
                             consensus_context.round,
                             digest,
+                            parent,
                             tx,
-                            persist,
                             "re-proposed boundary block",
                         )
                         .await;
@@ -617,6 +640,7 @@ where
                             consensus_context.clone(),
                         ),
                         ancestor_stream,
+                        (),
                     )
                     .instrument(info_span!(
                         "marshal.deferred.application.propose",
@@ -646,14 +670,12 @@ where
                 build_timer.observe(&runtime_context);
 
                 let digest = built_block.digest();
-
-                let persist = marshal.proposed_deferred(consensus_context.round, built_block);
                 gates
-                    .persist_and_defer(
+                    .stage(
                         consensus_context.round,
                         digest,
+                        Arc::new(built_block),
                         tx,
-                        persist,
                         "proposed block",
                     )
                     .await;
@@ -750,7 +772,15 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
-                        task_tx.send_lossy(valid);
+                        //
+                        // A rejection is safe to publish as a gate verdict because the
+                        // precheck depends only on the block's height and the gate key's
+                        // epoch, never on the declared parent. A conflicting header for
+                        // the same `(round, digest)` cannot produce an honest
+                        // notarization: reading the digest as a re-proposal requires it
+                        // to be the recorded payload of an earlier view, so its embedded
+                        // context fails the mismatch check under any normal header.
+                        task_tx.send_lossy(GateOutcome::Ready(valid));
                         tx.send_lossy(valid);
                         return;
                     }
@@ -776,7 +806,7 @@ where
                         block_context = ?block.context(),
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
-                    task_tx.send_lossy(false);
+                    task_tx.send_lossy(GateOutcome::Recover);
                     tx.send_lossy(false);
                     return;
                 }
@@ -814,13 +844,21 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
+    A: Application<
+            E,
+            Block = B,
+            SigningScheme = S,
+            Context = Context<B::Digest, S::PublicKey>,
+            Input = (),
+        >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        self.gates.flush_unrelayed(&self.marshal, round, digest);
+
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);
         if let Some(task) = task {
@@ -844,11 +882,7 @@ where
     type Plan = Plan<S::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
-        let (round, recipients) = match plan {
-            Plan::Propose { round } => (round, Recipients::All),
-            Plan::Forward { round, recipients } => (round, recipients),
-        };
-        self.marshal.forward(round, commitment, recipients)
+        relay::broadcast(&self.gates, &self.marshal, commitment, plan)
     }
 }
 
@@ -877,26 +911,26 @@ where
 mod tests {
     use super::Deferred;
     use crate::{
+        Automaton, CertifiableAutomaton, Relay,
         marshal::mocks::{
             harness::{
-                default_leader, make_raw_block, setup_network_with_participants, Ctx,
-                StandardHarness, TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                B, BLOCKS_PER_EPOCH, Ctx, NAMESPACE, NUM_VALIDATORS, S, StandardHarness,
+                TestHarness, V, default_leader, make_raw_block, setup_network_with_participants,
             },
             verifying::{GatedVerifyingApp, MockVerifyingApp},
         },
-        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+        simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
-        sha256::Sha256,
         Digestible, Hasher as _,
+        certificate::{ConstantProvider, mocks::Fixture},
+        sha256::Sha256,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-    use commonware_utils::{channel::fallible::OneshotExt, NZUsize};
+    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use std::time::Duration;
 
     #[test_traced("INFO")]
@@ -926,7 +960,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut marshaled = Deferred::new(
@@ -1057,7 +1091,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -1161,7 +1195,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut marshaled = Deferred::new(
@@ -1252,7 +1286,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.child("deferred"),
@@ -1278,7 +1312,7 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(marshal.proposed(round, block).await);
+            assert!(marshal.verified(round, block).await);
             let certify_rx = marshaled.certify(round, digest).await;
             select! {
                 result = certify_rx => {
@@ -1328,7 +1362,7 @@ mod tests {
             let marshal = setup.mailbox;
             let buffer = setup.extra;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
                 GatedVerifyingApp::new();
             let mut marshaled = Deferred::new(
@@ -1407,7 +1441,10 @@ mod tests {
     /// Regression: when marshal holds a verified block for a round from a
     /// pre-crash propose, a restarted leader's `propose` must return that
     /// block's digest instead of asking the application to build afresh.
-    /// See `standard::inline::tests::test_propose_reuses_verified_block_on_restart`.
+    /// The recovered proposal must also be staged for the relay, so the
+    /// broadcast re-sends it and certification resolves through the
+    /// deduplicated re-persist. The inline variant skips the view instead
+    /// (see `inline::tests::test_propose_skips_when_verified_block_exists_on_restart`).
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1434,7 +1471,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let round = Round::new(Epoch::zero(), View::new(1));
             let ctx = Ctx {
                 round,
@@ -1445,12 +1482,13 @@ mod tests {
             let digest_a = block_a.digest();
             assert!(marshal.verified(round, block_a.clone()).await);
 
-            let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
-            let digest_b = block_b.digest();
-            assert_ne!(digest_a, digest_b, "test requires distinct digests");
-
-            let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new().with_propose_result(block_b);
+            // The app cannot build (`propose` returns None) and its
+            // verification never completes, so the assertions below hold
+            // only if the stored block is reused as-is and certification
+            // resolves through the durability gate registered by the
+            // recovery staging.
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<B, S>, _, _) =
+                GatedVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.child("deferred"),
                 mock_app,
@@ -1464,6 +1502,24 @@ mod tests {
                 digest, digest_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
+
+            // The relay broadcast must find the recovered proposal staged and
+            // re-persist it (a dedup no-op whose handle covers the pre-crash
+            // write), resolving the certification gate registered by the
+            // recovery path.
+            let _ = marshaled.broadcast(digest, Plan::Propose { round });
+            let certify_rx = marshaled.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "recovered proposal must certify through the relay handshake"
+                    );
+                },
+                _ = verify_started => {
+                    panic!("certifying a recovered proposal must not run app verification");
+                },
+            }
         });
     }
 
@@ -1501,7 +1557,7 @@ mod tests {
             .await;
             let marshal = setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Stash a stale block built against genesis as its parent at round V=2.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1515,7 +1571,7 @@ mod tests {
 
             // Simulate a replay where parent selection now points to a
             // different parent view than the cached block was built for.
-            let new_parent_digest = Sha256::hash(b"late-certified-parent");
+            let new_parent_digest = Sha256::hash(&[b"late-certified-parent"]);
             let new_ctx = Ctx {
                 round,
                 leader: me.clone(),
@@ -1569,7 +1625,7 @@ mod tests {
             let marshal = setup.mailbox;
             let actor_handle = setup.actor_handle;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Seed the parent at its round so `propose` can fetch it locally.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
@@ -1640,6 +1696,204 @@ mod tests {
                 marshal2.get_block(&child_digest).await.is_some(),
                 "certify resolved true for the leader's own proposal so the block must be durable"
             );
+        });
+    }
+
+    /// Shared scenario for the proposal-parent equivocation tests.
+    ///
+    /// The local validator certified the view-1 block but only nullified view 2,
+    /// while the rest of the network notarized and certified the view-2 block.
+    /// The view-3 leader builds on the view-2 block and broadcasts it, so the
+    /// block is buffered locally but was never verified here. The equivocating
+    /// context names the certified view-1 block as parent, which this
+    /// validator's parent selection accepts (view 1 certified, view 2 nullified).
+    struct EquivocationFixture {
+        marshaled: Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher>,
+        round: Round,
+        digest: <B as Digestible>::Digest,
+        embedded_ctx: Ctx,
+        equivocating_ctx: Ctx,
+        _extra: <StandardHarness as TestHarness>::ValidatorExtra,
+    }
+
+    async fn equivocation_fixture(
+        context: &mut deterministic::Context,
+        app: MockVerifyingApp<B, S>,
+    ) -> EquivocationFixture {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let me = participants[0].clone();
+        let setup = StandardHarness::setup_validator(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let marshal = setup.mailbox;
+        let buffer = setup.extra;
+
+        let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+        let leader = participants[1].clone();
+
+        // The view-1 block: the parent this validator last certified.
+        let certified_round = Round::new(Epoch::zero(), View::new(1));
+        let certified_ctx = Ctx {
+            round: certified_round,
+            leader: default_leader(),
+            parent: (View::zero(), genesis.digest()),
+        };
+        let certified = B::new::<Sha256>(certified_ctx, genesis.digest(), Height::new(1), 100);
+        let certified_digest = certified.digest();
+        assert!(marshal.verified(certified_round, certified).await);
+
+        // The view-2 block: notarized by the network but only nullified here,
+        // so this validator never certified it.
+        let notarized_round = Round::new(Epoch::zero(), View::new(2));
+        let notarized_ctx = Ctx {
+            round: notarized_round,
+            leader: leader.clone(),
+            parent: (View::new(1), certified_digest),
+        };
+        let notarized = B::new::<Sha256>(notarized_ctx, certified_digest, Height::new(2), 200);
+        let notarized_digest = notarized.digest();
+        assert!(marshal.verified(notarized_round, notarized).await);
+
+        // The view-3 block builds on the view-2 block. The leader's broadcast
+        // delivered it into the local buffer without a local verification.
+        let round = Round::new(Epoch::zero(), View::new(3));
+        let embedded_ctx = Ctx {
+            round,
+            leader: leader.clone(),
+            parent: (View::new(2), notarized_digest),
+        };
+        let block = B::new::<Sha256>(embedded_ctx.clone(), notarized_digest, Height::new(3), 300);
+        let digest = block.digest();
+        assert!(
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), block)
+                .accepted(),
+            "buffer broadcast for the candidate should be accepted"
+        );
+
+        let equivocating_ctx = Ctx {
+            round,
+            leader,
+            parent: (View::new(1), certified_digest),
+        };
+
+        let marshaled = Deferred::new(
+            context.child("deferred"),
+            app,
+            marshal,
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
+        );
+        context.sleep(Duration::from_millis(10)).await;
+
+        EquivocationFixture {
+            marshaled,
+            round,
+            digest,
+            embedded_ctx,
+            equivocating_ctx,
+            _extra: buffer,
+        }
+    }
+
+    /// A leader can equivocate at the proposal layer: sign one proposal for a
+    /// digest declaring the notarized view-2 parent (sent to the validators
+    /// that certified view 2) and another declaring the certified view-1
+    /// parent (sent to a validator that only nullified view 2). Both pass
+    /// their recipients' parent selection and carry the same digest because
+    /// they name the same block.
+    ///
+    /// Refusing to notarize the mismatched proposal is correct. That refusal
+    /// must not outlive the proposal: once the honest notarization for
+    /// `(round, digest)` arrives, certification must judge the block against
+    /// its embedded context (defended by the notarizing quorum) and succeed.
+    /// Adopting the verdict computed under the equivocating context wedges
+    /// this validator in the view: the other honest validators have certified
+    /// and advanced, leaving too few validators to form either a nullification
+    /// or a finalization after the Byzantine validator stops participating.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut fixture = equivocation_fixture(&mut context, MockVerifyingApp::new()).await;
+
+            let verify_rx = fixture
+                .marshaled
+                .verify(fixture.equivocating_ctx.clone(), fixture.digest)
+                .await;
+            assert!(
+                !verify_rx.await.expect("verify result missing"),
+                "the equivocating proposal must not be notarized"
+            );
+
+            let certify_rx = fixture
+                .marshaled
+                .certify(fixture.round, fixture.digest)
+                .await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized digest must not adopt the verdict computed under the equivocating context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
+        });
+    }
+
+    /// Control for the equivocation tests: a live application rejection under
+    /// the matching context is a real verdict. Certification must keep
+    /// honoring it, because deferred voting means a notarization can exist
+    /// for an application-invalid block.
+    #[test_traced("WARN")]
+    fn test_certify_honors_application_rejection() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut fixture =
+                equivocation_fixture(&mut context, MockVerifyingApp::with_verify_result(false))
+                    .await;
+
+            let verify_rx = fixture
+                .marshaled
+                .verify(fixture.embedded_ctx.clone(), fixture.digest)
+                .await;
+            assert!(
+                verify_rx.await.expect("verify result missing"),
+                "optimistic verify accepts an available block with a matching context"
+            );
+
+            let certify_rx = fixture
+                .marshaled
+                .certify(fixture.round, fixture.digest)
+                .await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.expect("certify result missing"),
+                        "certify must propagate the application rejection"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
         });
     }
 }

@@ -6,7 +6,7 @@
 use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write, varint::UInt};
 use commonware_math::algebra::Random;
 #[commonware_macros::stability(ALPHA)]
 use commonware_utils::NZU64;
@@ -242,7 +242,7 @@ impl Transcript {
     ///
     /// The label will also affect the noise. Changing the label will change
     /// the stream of bytes generated.
-    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRng {
+    pub fn noise(&self, label: &'static [u8]) -> impl CryptoRng + use<> {
         let mut out = Self::start(StartTag::Noise, Some(self.summarize()));
         out.commit(label);
         Rng::new(out.hasher.finalize_xof())

@@ -64,56 +64,57 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay,
         marshal::{
             ancestry::BlockProvider,
             coding::{
-                shards,
-                types::{coding_config_for_participants, hash_context, CodedBlock},
-                Coding, Marshaled, MarshaledConfig,
+                Coding, Marshaled, MarshaledConfig, shards,
+                types::{CodedBlock, coding_config_for_participants, hash_context},
             },
             config::{Config, Start},
             core,
             mocks::{
                 application::Application,
                 harness::{
-                    self, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
-                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, D, K, LINK,
-                    NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, UNRELIABLE_LINK, V,
+                    self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
+                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
+                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
+                    setup_network_links, setup_network_with_participants,
                 },
-                verifying::MockVerifyingApp,
+                verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
             resolver::handler,
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
-        types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock,
+        simplex::{
+            Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal,
+        },
+        types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
     };
     use bytes::Bytes;
-    use commonware_actor::{mailbox, Feedback};
+    use commonware_actor::{Feedback, mailbox};
     use commonware_codec::{Encode, FixedSize};
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Verifier as _},
-        sha256::Sha256,
         Committable, Digestible, Hasher,
+        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::Recipients;
+    use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Supervisor as _,
+        Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        channel::oneshot, sync::Mutex, vec::NonEmptyVec, NZUsize, NZU16, NZU64,
+        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use std::{sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
+    type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
     const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
@@ -130,8 +131,8 @@ mod tests {
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
-        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
-        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
@@ -148,15 +149,18 @@ mod tests {
     impl core::Buffer<TestCodingVariant> for RecordingCodingBuffer {
         type PublicKey = K;
 
-        async fn find_by_digest(&self, _digest: D) -> Option<TestCodedBlock> {
+        async fn find_by_digest(&self, _digest: D) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<TestCodedBlock> {
+        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<TestCodedBlock>> {
+        fn subscribe_by_digest(
+            &self,
+            _digest: D,
+        ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
             Some(receiver)
@@ -165,7 +169,7 @@ mod tests {
         fn subscribe_by_commitment(
             &self,
             _commitment: Commitment,
-        ) -> Option<oneshot::Receiver<TestCodedBlock>> {
+        ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
@@ -173,7 +177,7 @@ mod tests {
 
         fn finalized(&self, _commitment: Commitment) {}
 
-        fn send(&self, round: Round, block: TestCodedBlock, recipients: Recipients<K>) {
+        fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
         }
     }
@@ -324,7 +328,7 @@ mod tests {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
@@ -453,7 +457,7 @@ mod tests {
             leader: default_leader(),
             parent: (View::zero(), genesis_commitment()),
         };
-        make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0)
+        make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0)
     }
 
     fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
@@ -531,19 +535,21 @@ mod tests {
             let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
 
             let (response, response_rx) = oneshot::channel();
-            assert!(resolver_tx
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Notarization { round },
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (notarization, dishonest_block).encode(),
-                    response,
-                })
-                .accepted());
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, dishonest_block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
             assert!(
                 !response_rx.await.unwrap(),
                 "notarized delivery should reject a dishonest coding config"
@@ -1025,7 +1031,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1107,7 +1113,7 @@ mod tests {
 
             // Build a 2-block chain: parent at height 1, descendant at height 2.
             let parent_block = CodingHarness::make_test_block(
-                Sha256::hash(b""),
+                Sha256::hash(&[b""]),
                 CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
                 Height::new(1),
                 1,
@@ -1227,7 +1233,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Create parent block at height 1
             let parent_ctx = CodingCtx {
@@ -1349,14 +1355,21 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
-            // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
-            // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
+            // Build a chain up to just below the epoch boundary (height 19 is the last
+            // block in epoch 0 with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights
+            // 0-19), so the boundary block below chains onto height 18.
             let mut parent = genesis.digest();
             let mut last_view = View::zero();
             let mut last_commitment = genesis_commitment();
-            for i in 1..BLOCKS_PER_EPOCH.get() {
+
+            // Capture a genuinely-chained non-boundary block (height 10) so Test 2
+            // can re-propose one that validates cleanly under its own embedded
+            // context. Without this, a certify rejection there could come from an
+            // ancestry error rather than the re-proposal boundary gate under test.
+            let mut non_boundary = None;
+            for i in 1..BLOCKS_PER_EPOCH.get() - 1 {
                 let round = Round::new(Epoch::new(0), View::new(i));
                 let ctx = CodingCtx {
                     round,
@@ -1366,10 +1379,15 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
                 last_commitment = coded_block.commitment();
+                if i == 10 {
+                    non_boundary = Some((View::new(i), last_commitment));
+                }
                 shards.proposed(round, coded_block);
                 parent = block.digest();
                 last_view = View::new(i);
             }
+            let (non_boundary_view, non_boundary_commitment) =
+                non_boundary.expect("chain includes a non-boundary block");
 
             // Create the epoch boundary block (height 19, last block in epoch 0)
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -1428,37 +1446,45 @@ mod tests {
                 "Valid re-proposal at epoch boundary should be accepted"
             );
 
-            // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
-            // Create a block at height 10 (not at epoch boundary)
-            let non_boundary_height = Height::new(10);
-            let non_boundary_round = Round::new(Epoch::new(0), View::new(10));
-            // For simplicity, we'll create a fresh non-boundary block and test re-proposal
-            let non_boundary_context = CodingCtx {
-                round: non_boundary_round,
+            // The same boundary commitment may be re-proposed again after the
+            // first re-proposal certifies. Its parent view advances while its
+            // parent payload remains the boundary commitment. Re-proposal
+            // validation is intrinsic to the committed block and must return
+            // the same result under both headers.
+            let repeated_reproposal_round =
+                Round::new(Epoch::new(0), View::new(boundary_height.get() + 2));
+            let repeated_reproposal_context = CodingCtx {
+                round: repeated_reproposal_round,
                 leader: me.clone(),
-                parent: (View::new(9), last_commitment), // Use a prior commitment
+                parent: (reproposal_round.view(), boundary_commitment),
             };
-            let non_boundary_block = make_coding_block(
-                non_boundary_context.clone(),
-                parent,
-                non_boundary_height,
-                1000,
+            let repeated_verify = marshaled
+                .verify(repeated_reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                repeated_verify.unwrap(),
+                "Repeated re-proposal should remain valid as the parent view advances"
             );
-            let coded_non_boundary =
-                CodedBlock::new(non_boundary_block.clone(), coding_config, &Sequential);
-            let non_boundary_commitment = coded_non_boundary.commitment();
+            let repeated_certify = marshaled
+                .certify(repeated_reproposal_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                repeated_certify.unwrap(),
+                "Repeated re-proposal certification should remain valid"
+            );
 
-            // Make the non-boundary block available
-            shards.proposed(non_boundary_round, coded_non_boundary);
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Attempt to re-propose the non-boundary block
+            // Test 2: Invalid re-proposal (not at epoch boundary) should be
+            // rejected. Re-propose the genuinely-chained height-10 block at view
+            // 15. Because that block validates cleanly under its embedded context,
+            // a certify rejection can only come from the re-proposal boundary gate,
+            // not from an ancestry error.
             let invalid_reproposal_round = Round::new(Epoch::new(0), View::new(15));
             let invalid_reproposal_context = CodingCtx {
                 round: invalid_reproposal_round,
                 leader: me.clone(),
-                parent: (View::new(10), non_boundary_commitment),
+                parent: (non_boundary_view, non_boundary_commitment),
             };
 
             // Call verify to kick off deferred verification.
@@ -1555,7 +1581,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let cfg = MarshaledConfig {
@@ -1659,7 +1685,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Build a valid boundary re-proposal, but keep it unavailable until
             // after the optimistic verify receiver has been dropped.
@@ -1756,9 +1782,9 @@ mod tests {
 
             // Re-proposal payload with valid coding config, but no block available.
             let missing_payload = Commitment::from((
-                Sha256::hash(b"missing_block"),
-                Sha256::hash(b"missing_root"),
-                Sha256::hash(b"missing_context"),
+                Sha256::hash(&[b"missing_block"]),
+                Sha256::hash(&[b"missing_root"]),
+                Sha256::hash(&[b"missing_context"]),
                 coding_config,
             ));
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1832,9 +1858,9 @@ mod tests {
 
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
             let missing_commitment = Commitment::from((
-                Sha256::hash(b"missing_block"),
-                Sha256::hash(b"missing_root"),
-                Sha256::hash(b"missing_context"),
+                Sha256::hash(&[b"missing_block"]),
+                Sha256::hash(&[b"missing_root"]),
+                Sha256::hash(&[b"missing_context"]),
                 coding_config,
             ));
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1936,7 +1962,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let limited_epocher = LimitedEpocher {
@@ -2040,7 +2066,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
@@ -2208,7 +2234,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let cfg = MarshaledConfig {
@@ -2263,6 +2289,124 @@ mod tests {
         })
     }
 
+    /// A Byzantine leader can deliver assigned shards to only f+1 honest
+    /// validators and form a notarization with its own vote, leaving no peer
+    /// able to serve a full-block fetch. A validator that never saw the
+    /// proposal then holds only buffered sender-indexed gossip shards, and
+    /// draining them requires the reconstruction interest that `certify`
+    /// registers with the shard engine (`shards.notarized`).
+    #[test_traced("WARN")]
+    fn test_certify_reconstructs_from_buffered_gossip_shards() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            // Register the peers' shard-channel senders and link the network.
+            // No peer runs a marshal actor, so round-bound block fetches go
+            // unanswered.
+            let mut peer_senders = Vec::new();
+            for peer in participants.iter().skip(1) {
+                let (sender, _receiver) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                peer_senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The parent is available locally. The notarized candidate is not:
+            // this validator never saw its proposal.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.proposed(parent_round, coded_parent);
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = CodingCtx {
+                round: child_round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let coded_child: TestCodedBlock = CodedBlock::new(child, coding_config, &Sequential);
+            let child_commitment = coded_child.commitment();
+
+            // Deliver each peer's sender-indexed gossip shard. Without leader
+            // discovery or reconstruction interest, the shard engine only
+            // buffers them.
+            for (i, sender) in peer_senders.iter_mut().enumerate() {
+                let index = u16::try_from(i + 1).expect("peer index fits in u16");
+                let shard = coded_child.shard(index).expect("missing shard").encode();
+                sender.send(Recipients::One(me.clone()), shard, true);
+            }
+            context.sleep(Duration::from_millis(250)).await;
+
+            // Certify must register reconstruction interest with the shard
+            // engine, drain the buffered shards, and verify the reconstructed
+            // block through its embedded context.
+            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify must reconstruct the candidate from buffered gossip shards"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify did not reconstruct from buffered gossip shards");
+                },
+            }
+        })
+    }
+
     /// Regression test: a Byzantine leader must not be able to crash honest nodes
     /// by proposing a `Commitment` with invalid `CodingConfig` bytes (e.g.
     /// zero-valued `NonZeroU16` fields). The fix validates the embedded config
@@ -2285,9 +2429,9 @@ mod tests {
         // A validly-constructed Commitment must still round-trip.
         let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
         let valid = Commitment::from((
-            Sha256::hash(b"block"),
-            Sha256::hash(b"root"),
-            Sha256::hash(b"context"),
+            Sha256::hash(&[b"block"]),
+            Sha256::hash(&[b"root"]),
+            Sha256::hash(&[b"context"]),
             coding_config,
         ));
         let encoded = valid.encode();
@@ -2331,7 +2475,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             // 2) Force application verification to fail in deferred verification.
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::with_verify_result(false);
@@ -2384,6 +2528,139 @@ mod tests {
                 !certify.await.expect("certify result missing"),
                 "certify should propagate deferred application verify failure"
             );
+        })
+    }
+
+    /// Coding analog of the standard equivocation tests. The commitment binds
+    /// the proposal context, so a proposal that names a different parent for
+    /// the same commitment fails `validate_proposal` before any certification
+    /// gate is registered. Certification of the notarized commitment then
+    /// recovers through the block's embedded context.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The view-1 block: the parent this validator last certified.
+            let certified_round = Round::new(Epoch::zero(), View::new(1));
+            let certified_ctx = CodingCtx {
+                round: certified_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let certified = make_coding_block(certified_ctx, genesis.digest(), Height::new(1), 100);
+            let certified_digest = certified.digest();
+            let coded_certified = CodedBlock::new(certified, coding_config, &Sequential);
+            let certified_commitment = coded_certified.commitment();
+            shards.proposed(certified_round, coded_certified);
+
+            // The view-2 block: notarized by the network but only nullified
+            // here, so this validator never certified it.
+            let notarized_round = Round::new(Epoch::zero(), View::new(2));
+            let notarized_ctx = CodingCtx {
+                round: notarized_round,
+                leader: me.clone(),
+                parent: (View::new(1), certified_commitment),
+            };
+            let notarized = make_coding_block(notarized_ctx, certified_digest, Height::new(2), 200);
+            let notarized_digest = notarized.digest();
+            let coded_notarized = CodedBlock::new(notarized, coding_config, &Sequential);
+            let notarized_commitment = coded_notarized.commitment();
+            shards.proposed(notarized_round, coded_notarized);
+
+            // The view-3 block builds on the view-2 block.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let block_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(2), notarized_commitment),
+            };
+            let block = make_coding_block(block_ctx, notarized_digest, Height::new(3), 300);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.proposed(round, coded_block);
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The equivocating proposal names the certified view-1 block as
+            // parent, which this validator's parent selection accepts
+            // (view 1 certified, view 2 nullified). The commitment's context
+            // digest exposes the mismatch, so verify rejects it without
+            // registering a certification gate.
+            let equivocating_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(1), certified_commitment),
+            };
+            let verify_rx = marshaled.verify(equivocating_ctx, commitment).await;
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        !result.expect("verify result missing"),
+                        "the equivocating proposal must not be notarized"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should reject the equivocating proposal promptly");
+                },
+            }
+
+            // The honest notarization for the same `(round, commitment)`
+            // arrives. Certification recovers through the embedded context.
+            let certify_rx = marshaled.certify(round, commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized commitment must succeed via the embedded context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
         })
     }
 
@@ -2440,7 +2717,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             let round1 = Round::new(Epoch::zero(), View::new(1));
             let block1_ctx = CodingCtx {
@@ -2525,7 +2802,8 @@ mod tests {
                 leader: participants[0].clone(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let parent = make_coding_block(parent_context, Sha256::hash(b""), Height::new(1), 100);
+            let parent =
+                make_coding_block(parent_context, Sha256::hash(&[b""]), Height::new(1), 100);
 
             let floor_round = Round::new(Epoch::zero(), View::new(2));
             let bad_context = CodingCtx {
@@ -2661,7 +2939,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
             // Push parent (height 1) and child (height 2) into the shards
             // engine. These are reconstructable but NOT durably persisted.
@@ -2785,7 +3063,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Build the block we want propose() to return. Its embedded context
@@ -2823,8 +3101,9 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Drive the leader-side propose path. `propose` must persist the
-            // block before returning the commitment.
+            // Drive the leader-side propose path. `propose` stages the block
+            // and returns the commitment. Durability is established by the
+            // certify flush below.
             let commitment = marshaled
                 .propose(propose_context)
                 .await
@@ -2871,12 +3150,122 @@ mod tests {
         });
     }
 
+    /// A propose relay with a staged proposal must send it through the shard
+    /// engine and complete the durability handshake. The freshly built block
+    /// is nowhere persisted at broadcast time, so the forward fallback has
+    /// nothing to serve: only the staged-hit path can seed the shard engine.
+    #[test_traced("WARN")]
+    fn test_marshaled_propose_relay_sends_staged_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let propose_round = Round::new(Epoch::zero(), View::new(1));
+            let propose_context = CodingCtx {
+                round: propose_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block_to_propose = make_coding_block(
+                propose_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let block_digest = block_to_propose.digest();
+            let expected_commitment = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::new(
+                block_to_propose.clone(),
+                coding_config,
+                &Sequential,
+            )
+            .commitment();
+
+            let mock_app: MockVerifyingApp<CodingB, S> =
+                MockVerifyingApp::new().with_propose_result(block_to_propose);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let commitment = marshaled
+                .propose(propose_context)
+                .await
+                .await
+                .expect("propose should produce a commitment");
+            assert_eq!(commitment, expected_commitment);
+
+            // The relay must take the staged proposal and broadcast its
+            // shards, seeding the shard engine's local cache.
+            let subscription = shards.subscribe(commitment);
+            let _ = marshaled.broadcast(
+                commitment,
+                Plan::Propose {
+                    round: propose_round,
+                },
+            );
+            let cached = subscription
+                .await
+                .expect("shard engine must cache the relayed proposal");
+            assert_eq!(cached.digest(), block_digest);
+
+            // The relayed proposal is persisted through the staged ack, so
+            // certification resolves durably without a flush.
+            assert!(
+                marshaled
+                    .certify(propose_round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certify must succeed for the relayed proposal"
+            );
+        });
+    }
+
     /// Regression: if marshal already holds a verified block for a round
     /// (say, persisted by a pre-crash propose whose notarize vote never
     /// reached the journal), a restarted leader's `propose` must return
     /// that block's commitment instead of rebuilding. The pre-crash
     /// commitment may already have been broadcast, so proposing a rebuilt
-    /// block for the same round would equivocate.
+    /// block for the same round would equivocate. The recovered proposal
+    /// must also be staged for the relay, so the broadcast re-sends its
+    /// shards and certification resolves through the deduplicated
+    /// re-persist.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -2911,7 +3300,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -2928,19 +3317,13 @@ mod tests {
             let commitment_a = coded_a.commitment();
             assert!(marshal.verified(round, coded_a).await);
 
-            // After restart, a fresh application would build a different
-            // block for the same round.
-            let block_b = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
-            let coded_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                CodedBlock::new(block_b.clone(), coding_config, &Sequential);
-            let commitment_b = coded_b.commitment();
-            assert_ne!(
-                commitment_a, commitment_b,
-                "test requires distinct commitments"
-            );
-
-            let mock_app: MockVerifyingApp<CodingB, S> =
-                MockVerifyingApp::new().with_propose_result(block_b);
+            // The app cannot build (`propose` returns None) and its
+            // verification never completes, so the assertions below hold
+            // only if the stored block is reused as-is and certification
+            // resolves through the durability gate registered by the
+            // recovery staging.
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
+                GatedVerifyingApp::new();
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -2960,6 +3343,24 @@ mod tests {
                 commitment, commitment_a,
                 "propose must reuse the block marshal already persisted for this round"
             );
+
+            // The relay broadcast must find the recovered proposal staged and
+            // re-persist it (a dedup no-op whose handle covers the pre-crash
+            // write), resolving the certification gate registered by the
+            // recovery path.
+            let _ = marshaled.broadcast(commitment, Plan::Propose { round });
+            let certify_rx = marshaled.certify(round, commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "recovered proposal must certify through the relay handshake"
+                    );
+                },
+                _ = verify_started => {
+                    panic!("certifying a recovered proposal must not run app verification");
+                },
+            }
         });
     }
 
@@ -3004,7 +3405,7 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Stash a stale block built against genesis as its parent at round V=2.
@@ -3022,9 +3423,9 @@ mod tests {
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.
             let new_parent_commitment = Commitment::from((
-                Sha256::hash(b"different-parent-block"),
-                Sha256::hash(b"different-parent-inner"),
-                Sha256::hash(b"different-parent-ctx"),
+                Sha256::hash(&[b"different-parent-block"]),
+                Sha256::hash(&[b"different-parent-inner"]),
+                Sha256::hash(&[b"different-parent-ctx"]),
                 coding_config,
             ));
             let new_ctx = CodingCtx {

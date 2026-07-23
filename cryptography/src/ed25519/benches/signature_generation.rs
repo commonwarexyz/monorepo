@@ -1,7 +1,7 @@
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{Signer as _, ed25519};
 use commonware_math::algebra::Random;
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 

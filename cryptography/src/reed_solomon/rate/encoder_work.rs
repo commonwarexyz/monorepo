@@ -1,6 +1,6 @@
 use crate::reed_solomon::{
-    engine::{Shards, ShardsRefMut, SHARD_CHUNK_BYTES},
     Error,
+    engine::{SHARD_CHUNK_BYTES, Shards, ShardsRefMut},
 };
 
 // ======================================================================

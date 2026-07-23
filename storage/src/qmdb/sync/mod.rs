@@ -19,7 +19,7 @@ pub use metrics::Metrics;
 
 mod database;
 pub(crate) use database::{
-    journal_covers_range, local_boundary_nodes, Config as DatabaseConfig, Database,
+    Config as DatabaseConfig, Database, journal_covers_range, local_boundary_nodes,
 };
 
 pub mod resolver;
@@ -56,5 +56,5 @@ where
     DB::Op: Encode,
     R: DbResolver<DB>,
 {
-    Box::pin(Engine::new(config).await?.sync()).await
+    Engine::new(config).await?.sync().await
 }
