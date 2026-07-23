@@ -168,27 +168,44 @@ unsafe fn carry_cols(mut col: [__m512i; 10]) -> [__m512i; 10] {
     col
 }
 
-/// Register-level counterpart to [`mul`]: identical computation, but every intermediate (the raw
-/// columns, the folded, un-reduced product) stays in registers -- no `Reduced`/`Unreduced` struct
-/// is materialized to/from memory anywhere in between. [`mul`] and callers chaining multiple
-/// primitive operations without ever needing the intermediate as a `Reduced` value (e.g.
-/// [`point_add`]) should call this directly instead of `mul`, since `mul`'s own [`load`]/[`store`]
-/// round trip is exactly the memory traffic profiling found dominating the transposed MSM's inner
-/// loop (see the module docs) -- a `#[target_feature]` function cannot be inlined into a caller
-/// that does not share its exact feature set, so every `Reduced`/`Unreduced` method call is a real
-/// function boundary, and each one paid for its own load-from-memory/store-to-memory even when the
-/// very next line just fed that value into another such call.
+/// Register-level counterpart to [`mul`], but skipping the final [`reduce_regs`]: the schoolbook
+/// accumulate, [`carry_cols`] narrowing, and `*608` fold all still happen (so the result is a
+/// correct value, congruent to the true product mod `p`), but it is left "loose" -- each limb up
+/// to `~2^61.3` (one raw, unmasked column, `< 9 * 2^52`, plus a masked column scaled by
+/// [`super::FOLD_608`], `< 608 * 2^52`) -- rather than brought under `2^52`.
+///
+/// Callers must not feed this into [`mul_regs`]/[`square_regs`] (which require [`Reduced`]-quality,
+/// strictly `< 2^52` input) or use it as [`sub_regs`]'s *right-hand* operand (`b` in `a - b`):
+/// [`super::SUB_BIAS`] is sized with a `16x` margin over a `< 2^52` right-hand operand specifically,
+/// and this value can be `~2^61.3`, `2^9.3`-ish times looser than that margin covers, which would
+/// underflow the biased subtraction (wrap to a huge, wrong result) instead of merely losing
+/// precision. It *is* safe as [`add_regs`]'s operand (either side) or [`sub_regs`]'s left-hand
+/// operand (`a` in `a - b`): both just need the raw sum/difference to fit in a `u64` lane before
+/// their own single [`carry`] pass, and `2 * 2^61.3 ~= 2^62.3` is nowhere near overflowing that.
+/// Use this whenever the result only ever reaches such a position before its own consumer's
+/// `reduce_regs` call -- see [`point_add`]/[`point_double`] for where this actually applies (audited
+/// per call site, not blanket) and why it's safe there.
 ///
 /// # Safety
 ///
 /// The CPU executing this must support AVX-512F, AVX-512IFMA, AVX-512VL, and AVX-512DQ (checked
 /// by [`available`]).
 #[target_feature(enable = "avx512f,avx512ifma,avx512vl,avx512dq")]
-unsafe fn mul_regs(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
+unsafe fn mul_regs_loose(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
     // SAFETY: function-level requirement covers every intrinsic used here.
     unsafe {
         // 10 raw columns: column `k` accumulates every `low52(a[i]*b[j])` with `i+j == k` and every
         // `high52(a[i]*b[j])` with `i+j+1 == k`, i.e. the full, un-folded schoolbook product.
+        //
+        // Splitting lo-terms and hi-terms into separate accumulator sets (combined via one final
+        // add) shortens each busy column's dependency chain -- a real technique (see
+        // curve25519-dalek-ng's `docs/ifma-notes.md`, ipp-crypto's IFMA RSA Montgomery kernel, and
+        // OpenSSL's `rsaz-avx512.pl`) -- but measured here, inside this already register-pressured
+        // fused caller (`point_add`/`point_double` juggle up to 8 coordinates' worth of limbs at
+        // once), it roughly tripled this function's stack-spill traffic and the net effect on real
+        // hardware was a wash-to-regression, not a win. Kept as plain shared-column accumulation;
+        // the split is worth revisiting for a truly standalone `mul`/`square` call with registers
+        // to spare, not for the fused point ops.
         let mut col = [_mm512_setzero_si512(); 10];
         for i in 0..5 {
             for j in 0..5 {
@@ -210,19 +227,45 @@ unsafe fn mul_regs(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
             folded[k] = _mm512_add_epi64(col[k], scaled);
         }
 
-        reduce_regs(folded)
+        folded
     }
 }
 
-/// Register-level counterpart to [`square`]; see [`mul_regs`] for why callers chaining several
-/// primitive operations should prefer this over [`square`] directly.
+/// Register-level counterpart to [`mul`]: identical computation, but every intermediate (the raw
+/// columns, the folded, un-reduced product) stays in registers -- no `Reduced`/`Unreduced` struct
+/// is materialized to/from memory anywhere in between. [`mul`] and callers chaining multiple
+/// primitive operations without ever needing the intermediate as a `Reduced` value (e.g.
+/// [`point_add`]) should call this directly instead of `mul`, since `mul`'s own [`load`]/[`store`]
+/// round trip is exactly the memory traffic profiling found dominating the transposed MSM's inner
+/// loop (see the module docs) -- a `#[target_feature]` function cannot be inlined into a caller
+/// that does not share its exact feature set, so every `Reduced`/`Unreduced` method call is a real
+/// function boundary, and each one paid for its own load-from-memory/store-to-memory even when the
+/// very next line just fed that value into another such call. Callers only needing an
+/// [`Unreduced`]-quality (loose) result should call [`mul_regs_loose`] instead and skip this
+/// function's [`reduce_regs`] pass -- see that function's doc comment for exactly when that's safe.
 ///
 /// # Safety
 ///
 /// The CPU executing this must support AVX-512F, AVX-512IFMA, AVX-512VL, and AVX-512DQ (checked
 /// by [`available`]).
 #[target_feature(enable = "avx512f,avx512ifma,avx512vl,avx512dq")]
-unsafe fn square_regs(a: [__m512i; 5]) -> [__m512i; 5] {
+unsafe fn mul_regs(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
+    // SAFETY: function-level requirement covers every intrinsic used here.
+    unsafe { reduce_regs(mul_regs_loose(a, b)) }
+}
+
+/// Register-level counterpart to [`square`], but skipping the final [`reduce_regs`] -- see
+/// [`mul_regs_loose`]'s doc comment for exactly what "loose" means here and when it's safe to
+/// consume: the same bound (each limb `< ~2^61.3`) and the same restrictions apply (never feed
+/// this into another `mul_regs`/`square_regs`/`mul_regs_loose`/`square_regs_loose` call, or use it
+/// as [`sub_regs`]'s right-hand operand).
+///
+/// # Safety
+///
+/// The CPU executing this must support AVX-512F, AVX-512IFMA, AVX-512VL, and AVX-512DQ (checked
+/// by [`available`]).
+#[target_feature(enable = "avx512f,avx512ifma,avx512vl,avx512dq")]
+unsafe fn square_regs_loose(a: [__m512i; 5]) -> [__m512i; 5] {
     // SAFETY: function-level requirement covers every intrinsic used here.
     unsafe {
         let mut diag = [_mm512_setzero_si512(); 10];
@@ -253,8 +296,22 @@ unsafe fn square_regs(a: [__m512i; 5]) -> [__m512i; 5] {
             folded[k] = _mm512_add_epi64(col[k], scaled);
         }
 
-        reduce_regs(folded)
+        folded
     }
+}
+
+/// Register-level counterpart to [`square`]; see [`mul_regs`] for why callers chaining several
+/// primitive operations should prefer this over [`square`] directly, and [`mul_regs_loose`] for
+/// when to call [`square_regs_loose`] instead and skip this function's [`reduce_regs`] pass.
+///
+/// # Safety
+///
+/// The CPU executing this must support AVX-512F, AVX-512IFMA, AVX-512VL, and AVX-512DQ (checked
+/// by [`available`]).
+#[target_feature(enable = "avx512f,avx512ifma,avx512vl,avx512dq")]
+unsafe fn square_regs(a: [__m512i; 5]) -> [__m512i; 5] {
+    // SAFETY: function-level requirement covers every intrinsic used here.
+    unsafe { reduce_regs(square_regs_loose(a)) }
 }
 
 /// Register-level counterpart to [`add`]: an [`Unreduced`]-equivalent (not fully reduced) result,
@@ -267,10 +324,20 @@ unsafe fn square_regs(a: [__m512i; 5]) -> [__m512i; 5] {
 #[target_feature(enable = "avx512f,avx512dq")]
 unsafe fn add_regs(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
     // SAFETY: function-level requirement covers every intrinsic used here.
-    unsafe {
-        let sum = core::array::from_fn(|i| _mm512_add_epi64(a[i], b[i]));
-        carry(sum)
-    }
+    unsafe { carry(add_raw(a, b)) }
+}
+
+/// Elementwise add with no [`carry`] pass -- callers immediately chaining this into another
+/// `add_raw`/`sub_raw` or straight into [`reduce_regs`] should use this instead of [`add_regs`] to
+/// skip a wasted intermediate carry pass. See [`sub_raw`]'s doc comment for the bound argument
+/// covering both.
+///
+/// # Safety
+///
+/// The CPU executing this must support AVX-512F.
+#[target_feature(enable = "avx512f")]
+unsafe fn add_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
+    core::array::from_fn(|i| _mm512_add_epi64(a[i], b[i]))
 }
 
 /// Register-level counterpart to [`sub`]; see [`mul_regs`] for why callers chaining several
@@ -282,13 +349,31 @@ unsafe fn add_regs(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
 #[target_feature(enable = "avx512f,avx512dq")]
 unsafe fn sub_regs(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
     // SAFETY: function-level requirement covers every intrinsic used here.
-    unsafe {
-        let diff = core::array::from_fn(|i| {
-            let biased = _mm512_add_epi64(a[i], _mm512_set1_epi64(super::SUB_BIAS[i] as i64));
-            _mm512_sub_epi64(biased, b[i])
-        });
-        carry(diff)
-    }
+    unsafe { carry(sub_raw(a, b)) }
+}
+
+/// Elementwise biased-subtract with no [`carry`] pass -- callers immediately chaining this into
+/// another `add_raw`/`sub_raw` or straight into [`reduce_regs`] should use this instead of
+/// [`sub_regs`] to skip a wasted intermediate carry pass: every current call site either feeds the
+/// result straight to [`reduce_regs`] (which runs three carry passes regardless of how loose its
+/// input is -- see [`mul_regs_loose`]'s doc comment for that bound argument) or chains one more
+/// raw op first. Chaining raw ops before finally reducing keeps every intermediate a valid, if
+/// loose, redundant-radix-52 value (each limb independently `<= a[i] + SUB_BIAS[i]`, comfortably
+/// under `2^57` even after two chained raw subtracts starting from a loose
+/// [`mul_regs_loose`]-quality operand, `~2^61.3` from `2^61.3 + SUB_BIAS ~2^56`) -- nowhere near a
+/// `u64` lane overflow, and no less resolvable by three [`carry`] passes than the already-tested
+/// `~2^61.3` fold-output bound.
+///
+/// # Safety
+///
+/// The CPU executing this must support AVX-512F and AVX-512DQ (for [`super::SUB_BIAS`]'s 64-bit
+/// per-limb constant).
+#[target_feature(enable = "avx512f,avx512dq")]
+unsafe fn sub_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
+    core::array::from_fn(|i| {
+        let biased = _mm512_add_epi64(a[i], _mm512_set1_epi64(super::SUB_BIAS[i] as i64));
+        _mm512_sub_epi64(biased, b[i])
+    })
 }
 
 /// Reduces an [`Unreduced`] value so every limb is strictly `< 2^52`. Callers must check
@@ -413,18 +498,94 @@ pub(crate) unsafe fn point_add(
         );
         let two_d = load(&two_d.limbs);
 
-        let a = mul_regs(reduce_regs(sub_regs(y1, x1)), reduce_regs(sub_regs(y2, x2)));
-        let b = mul_regs(reduce_regs(add_regs(y1, x1)), reduce_regs(add_regs(y2, x2)));
+        // Every `sub_regs`/`add_regs` call below was immediately wrapped in an explicit
+        // `reduce_regs` (or feeds one after one more raw combine), which already runs three carry
+        // passes over whatever comes in regardless of looseness -- so `sub_regs`/`add_regs`'s own
+        // single internal carry pass was wasted work, immediately superseded. `sub_raw`/`add_raw`
+        // skip it; see `sub_raw`'s doc comment for the bound argument.
+        let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+        // `b` is only ever consumed as `sub_regs`'s *left*-hand operand (`e` below) or as an
+        // `add_regs` operand (`h` below) -- never the right-hand side of a subtraction, so
+        // `mul_regs_loose`'s bound is safe here (see that function's doc comment).
+        let b = mul_regs_loose(
+            reduce_regs(add_raw(y1, x1)),
+            reduce_regs(add_raw(y2, x2)),
+        );
         let t1t2 = mul_regs(t1, t2);
         // `two_d` is `2*d`, folding in the doubling `c = td.add(&td)` the non-fused formula does
         // separately -- one multiply-by-a-reduced-constant instead of a multiply plus an add.
+        // `c` feeds `sub_raw(dd, c)` (`f` below) as the right-hand operand, so it must stay fully
+        // reduced.
         let c = mul_regs(t1t2, two_d);
-        let zz = mul_regs(z1, z2);
-        let dd = add_regs(zz, zz);
-        let e = reduce_regs(sub_regs(b, a));
-        let f = reduce_regs(sub_regs(dd, c));
-        let g = reduce_regs(add_regs(dd, c));
-        let h = reduce_regs(add_regs(b, a));
+        // `zz` (and thus `dd`) is only ever an `add_raw`/`sub_raw`-left-hand-side operand below
+        // (never a subtraction's right-hand side), same reasoning as `b`; left raw since it only
+        // ever feeds another raw op before `reduce_regs`.
+        let zz = mul_regs_loose(z1, z2);
+        let dd = add_raw(zz, zz);
+        let e = reduce_regs(sub_raw(b, a));
+        let f = reduce_regs(sub_raw(dd, c));
+        let g = reduce_regs(add_raw(dd, c));
+        let h = reduce_regs(add_raw(b, a));
+
+        (
+            Reduced {
+                limbs: store(mul_regs(e, f)),
+            },
+            Reduced {
+                limbs: store(mul_regs(g, h)),
+            },
+            Reduced {
+                limbs: store(mul_regs(f, g)),
+            },
+            Reduced {
+                limbs: store(mul_regs(e, h)),
+            },
+        )
+    }
+}
+
+/// Fused point doubling: the dedicated `dbl-2008-hwcd` formula (see
+/// [`crate::signing::point::PointVec::double`]), with every intermediate held in registers, same
+/// [`point_add`] pattern and for the same reason (see that function's doc comment). Only the 3
+/// input coordinates (doubling never reads `t`) and the 4 output coordinates touch memory.
+///
+/// # Safety
+///
+/// The CPU executing this must support AVX-512F, AVX-512IFMA, AVX-512VL, and AVX-512DQ (checked
+/// by [`available`]).
+#[target_feature(enable = "avx512f,avx512ifma,avx512vl,avx512dq")]
+pub(crate) unsafe fn point_double(
+    ax: &Reduced,
+    ay: &Reduced,
+    az: &Reduced,
+) -> (Reduced, Reduced, Reduced, Reduced) {
+    // SAFETY: function-level requirement covers every intrinsic used here.
+    unsafe {
+        let (x, y, z) = (load(&ax.limbs), load(&ay.limbs), load(&az.limbs));
+
+        // `a`/`b` are each used as `sub_regs`'s *right*-hand operand below (in `e`'s and `h`'s
+        // inner subtractions, and directly in `g`), so both must stay fully reduced.
+        let a = square_regs(x);
+        let b = square_regs(y);
+        // `c0` is only ever consumed by `add_regs` (`c` below) -- never a subtraction's right-hand
+        // side -- so `square_regs_loose` is safe here (see that function's doc comment). `c`
+        // itself does become `sub_regs(g, c)`'s right-hand operand, so it keeps its explicit
+        // `reduce_regs` rather than relying on `add_regs`'s own single pass.
+        let c0 = square_regs_loose(z);
+        // Every `sub_regs`/`add_regs` below (including this one) was immediately wrapped in
+        // `reduce_regs`, or feeds one after one more raw combine -- `sub_raw`/`add_raw` skip the
+        // wasted intermediate carry pass that would just get superseded; see that function's doc
+        // comment for the bound argument.
+        let c = reduce_regs(add_raw(c0, c0));
+        // `xy2` is only ever `sub_regs(xy2, a)`'s *left*-hand operand (`e` below), never a
+        // right-hand side, so it's safe loose too.
+        let xy2 = square_regs_loose(reduce_regs(add_raw(x, y)));
+        let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
+        let g = reduce_regs(sub_raw(b, a));
+        let f = reduce_regs(sub_raw(g, c));
+        // `h = -a - b`: no zero-constant load needed, `_mm512_setzero_si512` is free.
+        let zero = [_mm512_setzero_si512(); 5];
+        let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
 
         (
             Reduced {
@@ -647,6 +808,85 @@ mod tests {
             let h = Unreduced::from(b_val)
                 .add_portable(&Unreduced::from(a_val))
                 .reduce_portable();
+            let expected = (
+                e.mul_portable(&f),
+                g.mul_portable(&h),
+                f.mul_portable(&g),
+                e.mul_portable(&h),
+            );
+
+            let actual_lanes = (
+                actual.0.to_lanes(),
+                actual.1.to_lanes(),
+                actual.2.to_lanes(),
+                actual.3.to_lanes(),
+            );
+            let expected_lanes = (
+                expected.0.to_lanes(),
+                expected.1.to_lanes(),
+                expected.2.to_lanes(),
+                expected.3.to_lanes(),
+            );
+            for i in 0..super::super::LANES {
+                assert!(actual_lanes.0[i].eq(&expected_lanes.0[i]), "x lane {i}");
+                assert!(actual_lanes.1[i].eq(&expected_lanes.1[i]), "y lane {i}");
+                assert!(actual_lanes.2[i].eq(&expected_lanes.2[i]), "z lane {i}");
+                assert!(actual_lanes.3[i].eq(&expected_lanes.3[i]), "t lane {i}");
+            }
+        }
+    }
+
+    /// Same structure as [`point_add_matches_portable_formula_on_real_hardware`], but for
+    /// [`point_double`] against the `dbl-2008-hwcd` formula written out with the portable
+    /// kernels directly.
+    #[test]
+    fn point_double_matches_portable_formula_on_real_hardware() {
+        skip_unless_available!();
+        let mut rng = test_rng();
+        let rand_reduced = |rng: &mut _| {
+            let lanes: [_; super::super::LANES] = core::array::from_fn(|_| rand_field_element(rng));
+            Unreduced::from_lanes(&lanes).reduce()
+        };
+        for _ in 0..64 {
+            let (ax, ay, az) = (
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+            );
+
+            // SAFETY: `available()` returned true above.
+            let actual = unsafe { point_double(&ax, &ay, &az) };
+
+            let a_val = ax.mul_portable(&ax);
+            let b_val = ay.mul_portable(&ay);
+            let c0 = az.mul_portable(&az);
+            let c = Unreduced::from(c0)
+                .add_portable(&Unreduced::from(c0))
+                .reduce_portable();
+            let xy = Unreduced::from(ax)
+                .add_portable(&Unreduced::from(ay))
+                .reduce_portable();
+            let xy2 = xy.mul_portable(&xy);
+            let e_step1 = Unreduced::from(xy2)
+                .sub_portable(&Unreduced::from(a_val))
+                .reduce_portable();
+            let e = Unreduced::from(e_step1)
+                .sub_portable(&Unreduced::from(b_val))
+                .reduce_portable();
+            let g = Unreduced::from(b_val)
+                .sub_portable(&Unreduced::from(a_val))
+                .reduce_portable();
+            let f = Unreduced::from(g)
+                .sub_portable(&Unreduced::from(c))
+                .reduce_portable();
+            let zero = Reduced::from_raw_limbs_for_test([[0; super::super::LANES]; 5]);
+            let h_step1 = Unreduced::from(zero)
+                .sub_portable(&Unreduced::from(a_val))
+                .reduce_portable();
+            let h = Unreduced::from(h_step1)
+                .sub_portable(&Unreduced::from(b_val))
+                .reduce_portable();
+
             let expected = (
                 e.mul_portable(&f),
                 g.mul_portable(&h),

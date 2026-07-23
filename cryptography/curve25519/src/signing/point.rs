@@ -325,19 +325,52 @@ impl PointVec {
         }
     }
 
-    /// Doubles `LANES` points at once.
+    /// Doubles `LANES` points at once via the dedicated `dbl-2008-hwcd` formula (see
+    /// [`EdwardsPoint::double`]): 4M+4S instead of [`PointVec::add`]'s 9M, and a square costs
+    /// less than a full multiply on this backend (15 multiply-accumulates versus 25; see
+    /// [`Reduced::square`]'s doc comment) -- a real win, since doubling dominates the MSM's
+    /// window-shifting (see `EdwardsPoint::double`'s doc comment).
     ///
-    /// Deliberately *not* the dedicated `dbl-2008-hwcd` formula [`EdwardsPoint::double`] uses:
-    /// an earlier version of this function used that formula directly on the (then-undivided)
-    /// `FieldVec` type and, measured on real AVX-512 hardware, diverged from the scalar reference
-    /// within ~180 chained doublings (well inside the MSM's ~264) -- an under-reduced operand
-    /// reaching `vpmadd52lo`/`vpmadd52hi`, the bug `Reduced`/`Unreduced` now makes structurally
-    /// impossible to write by accident (see the `field_vec` module docs). `add(self)` costs more
-    /// multiplies per doubling (9M instead of 4M+4S) but has not been re-profiled against a
-    /// `Reduced`-safe rewrite of the dedicated formula since that fix landed; that rewrite is a
-    /// reasonable follow-up; this is the known-correct baseline in the meantime.
+    /// Dispatches to a single fused AVX-512 function when available
+    /// ([`field_vec::fused_point_double`]), same reason as [`PointVec::add`]: measured on real
+    /// hardware, the memory-traffic cost of chaining separate `Reduced`/`Unreduced` method calls
+    /// (each its own `load`/`store` round trip) outweighed this formula's multiply-count
+    /// advantage over `add(self)`, turning an algorithmic win into a wash or regression. Falls
+    /// back to the formula written out against the ordinary methods on any CPU without that
+    /// backend, where there is no such fused path to miss out on.
+    ///
+    /// An earlier version of this function used this same formula directly on the
+    /// (then-undivided) `FieldVec` type and, measured on real AVX-512 hardware, diverged from the
+    /// scalar reference within ~180 chained doublings (well inside the MSM's ~264): an
+    /// under-reduced operand reaching `vpmadd52lo`/`vpmadd52hi`. Every squaring/multiplication
+    /// below takes a [`Reduced`] operand -- the type [`Unreduced::reduce`] alone can produce --
+    /// so an operand that skipped reduction before reaching `square`/`mul` is now a compile error
+    /// rather than a silent hardware bug (see the `field_vec` module docs); the fused backend
+    /// carries the same discipline by hand, mirrored from this fallback line for line (see
+    /// [`field_vec::avx512::point_double`]). Re-verify against
+    /// `tests::point_vec_interleaved_double_and_add_matches_scalar` (which exercises well past
+    /// both the original failure's round count and the real MSM's window count) on real AVX-512
+    /// hardware before trusting a further change here.
     pub(crate) fn double(&self) -> Self {
-        self.add(self)
+        if let Some((x, y, z, t)) = field_vec::fused_point_double(&self.x, &self.y, &self.z) {
+            return Self { x, y, z, t };
+        }
+
+        let a = self.x.square();
+        let b = self.y.square();
+        let c0 = self.z.square();
+        let c = c0.add(&c0).reduce();
+        let xy2 = self.x.add(&self.y).reduce().square();
+        let e = xy2.sub(&a).sub(&Unreduced::from(b)).reduce();
+        let g = b.sub(&a).reduce();
+        let f = g.sub(&c).reduce();
+        let h = a.neg().sub(&Unreduced::from(b)).reduce();
+        Self {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
     }
 }
 
