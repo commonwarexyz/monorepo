@@ -2630,6 +2630,74 @@ mod tests {
         });
     }
 
+    /// With the barrier covering the boundary, a prune completes without starting (or
+    /// waiting on) any sync — including the offsets commit — and the durable prefix
+    /// survives reopen.
+    #[test_traced]
+    fn test_prune_skips_sync_when_barrier_covers_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-prune-fast".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let make = |pending: PendingSyncs| {
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending,
+                    },
+                    cfg.clone(),
+                )
+            };
+
+            // Make two full sections durable, proving the barrier past the boundary.
+            let mut journal = Box::new(
+                drive_pending_syncs(&pending, make(pending.clone()))
+                    .await
+                    .unwrap(),
+            );
+            drive_pending_syncs(
+                &pending,
+                journal.append_many(Many::Flat(&[0, 1, 2, 3, 4, 5])),
+            )
+            .await
+            .unwrap();
+            let mut journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // Park a newer sync covering a fresh append.
+            drive_pending_syncs(&pending, journal.append(&6))
+                .await
+                .unwrap();
+            let (journal, parked) = journal.start_sync().await.unwrap();
+
+            // The barrier covers the boundary, so the prune must neither start a new sync
+            // nor wait on the parked one.
+            let starts_before = pending.starts();
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(pruned);
+            assert_eq!(pending.starts(), starts_before);
+            assert_eq!(journal.bounds().start, 3);
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, parked).await.unwrap();
+            pending.unblock();
+            drop(journal);
+
+            // The pruned boundary and the released append both survive reopen.
+            let journal = make(pending.clone()).await.unwrap();
+            assert_eq!(journal.bounds(), 3..7);
+            for i in 3..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+        });
+    }
+
     #[test_traced]
     fn test_start_sync_advances_offsets_watermark_lagged() {
         let executor = deterministic::Runner::default();

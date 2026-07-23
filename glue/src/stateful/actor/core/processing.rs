@@ -605,7 +605,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            // Dropping block 2's release resolves its flush as shutdown; the
+            // Dropping block 2's release resolves its flush as shutdown. The
             // acknowledgement must be withheld so marshal's floor cannot pass
             // unflushed state.
             drop(control.flushes.lock().remove(0));

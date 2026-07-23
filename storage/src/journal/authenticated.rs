@@ -2225,7 +2225,7 @@ mod tests {
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
             // Build two durably synced blobs, driving the parked rollover syncs.
-            let journal = drive_pending_syncs(&pending, async {
+            let mut journal = drive_pending_syncs(&pending, async {
                 let mut journal =
                     open_delayed_journal(&context, "first", "prune_barrier_fast", &pending)
                         .await
@@ -2243,7 +2243,6 @@ mod tests {
                 journal.sync().await.unwrap()
             })
             .await;
-            let mut journal = journal;
 
             // Park a newer sync covering fresh appends.
             for i in 14..17 {

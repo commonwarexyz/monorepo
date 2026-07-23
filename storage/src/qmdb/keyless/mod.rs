@@ -398,8 +398,13 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        // Recovery reads only the last retained operation, so the boundary needs no
-        // durable justification before pruning.
+        // Recovery rewinds to the last durable commit, which may sit below the boundary
+        // while the floor-declaring commit is unflushed (pruning it away would leave the
+        // journal unopenable). Commit first so recovery always lands at or above the
+        // boundary.
+        if self.journal.barrier() <= *self.last_commit_loc {
+            self.journal = self.journal.commit().await?;
+        }
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();
         Ok(self)

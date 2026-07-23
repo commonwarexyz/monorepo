@@ -23,7 +23,10 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
@@ -92,7 +95,7 @@ pub struct Db<
 
     /// Commits appended but not yet proven durable, oldest first, as
     /// `(commit location, declared inactivity floor)` pairs.
-    pub(crate) pending_commits: std::collections::VecDeque<(Location<F>, Location<F>)>,
+    pub(crate) pending_commits: VecDeque<(Location<F>, Location<F>)>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -861,7 +864,7 @@ where
             snapshot: index,
             last_commit_loc,
             durable_floor: inactivity_floor_loc,
-            pending_commits: std::collections::VecDeque::new(),
+            pending_commits: VecDeque::new(),
             active_keys,
             bitmap,
             metrics,

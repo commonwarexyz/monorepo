@@ -698,7 +698,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
     ///
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
-    /// state, requiring it sync the structure to write any potential unsynced updates.
+    /// state, syncing the structure first unless the barrier already covers the prune
+    /// position. Unsynced nodes above the barrier are not guaranteed to survive a crash.
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
@@ -712,9 +713,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        // Once the barrier covers the prune position, retained nodes below it survive a
-        // crash and nodes above it are rebuilt by replaying the retained portion of the
-        // backing journal, so the flush is skipped.
+        // Once the barrier covers the prune position, the durable journal prefix always
+        // covers the metadata boundary written below, so the flush is skipped. Nodes above
+        // the barrier stay cached and are not guaranteed to survive a crash.
         if self.barrier() < pos {
             self = self.sync().await?;
         }

@@ -4153,6 +4153,42 @@ mod tests {
         });
     }
 
+    /// A retained flush failure must fail a prune even when the barrier covers the
+    /// boundary and the prune performs no sync of its own: the non-blocking observation
+    /// of completed syncs is then the only place the failure surfaces.
+    #[test_traced]
+    fn test_fixed_prune_surfaces_retained_failed_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg)
+                .await
+                .unwrap();
+
+            // Make two full blobs durable, proving the barrier past the boundary.
+            for i in 0..6u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Fail a flush of fresh appends, dropping the returned handle unobserved.
+            for i in 6..8u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(1.0),
+                ..Default::default()
+            };
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            // The barrier covers the boundary, so the prune skips its own sync and must
+            // surface the retained failure instead of removing anything.
+            assert!(matches!(journal.prune(3).await, Err(Error::Runtime(_))));
+        });
+    }
+
     /// A crash right after pruning must retain every durable item: blob removal is durable,
     /// and recovery must not truncate below the barrier even though the never-synced tail
     /// vanishes with the crash. The barrier covered the boundary, so the prune performed no

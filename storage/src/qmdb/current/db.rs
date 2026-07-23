@@ -1579,11 +1579,11 @@ mod tests {
         });
     }
 
-    /// A prune whose bitmap boundary is covered by the log's durable frontier but not by
-    /// any durable commit's floor must still commit before durably recording pruning
+    /// A prune whose bitmap boundary is covered by the log's barrier but not by any
+    /// durable commit's floor must still commit before durably recording pruning
     /// metadata: recovery otherwise lands on the older floor below the recorded boundary
-    /// and the database can never reopen. An op-frontier gate takes the fast path here, so
-    /// this pins the durable-floor gate.
+    /// and the database can never reopen. A barrier-only gate takes the fast path here,
+    /// so this pins the durable-floor gate.
     #[test_traced]
     fn test_current_prune_commits_when_boundary_exceeds_durable_floor() {
         let executor = deterministic::Runner::default();
@@ -1597,7 +1597,7 @@ mod tests {
 
             // Establish a durable state, then apply (but do not sync) a small batch that
             // advances the floor past the next bitmap chunk boundary while staying below
-            // the durable op frontier.
+            // the barrier.
             let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
             let durable_floor = db.inactivity_floor_loc();
             let mut batch = db.new_batch();
@@ -1612,7 +1612,7 @@ mod tests {
             assert!(boundary > durable_floor);
             assert!(
                 *boundary <= crate::journal::contiguous::Mutable::barrier(&mut db.any.log),
-                "the boundary must sit below the durable op frontier",
+                "the boundary must sit below the barrier",
             );
 
             let db = db.prune(boundary).await.unwrap();
