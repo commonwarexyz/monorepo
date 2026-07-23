@@ -370,6 +370,11 @@ pub(super) struct Inner<E: Context, A> {
     /// The known-durable size of the journal.
     barrier: Barrier,
 
+    /// Test-only: park [Self::prune] after the boundary commit, before any removal, so tests
+    /// can drop the pending future at that exact point.
+    #[cfg(test)]
+    pub(in crate::journal::contiguous) halt_prune_removals: bool,
+
     _phantom: PhantomData<A>,
 }
 
@@ -410,6 +415,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             bounds,
             items_per_blob,
             metrics: Arc::new(metrics),
+            #[cfg(test)]
+            halt_prune_removals: false,
             _phantom: PhantomData,
         }
     }
@@ -445,6 +452,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
         // from an incomplete write (the page-CRC layer surfaces it as a partial logical tail).
         // The truncation is synced before `recover_bounds` queries lengths.
+        //
+        // This runs before the pruning boundary is reconciled, so the "a failed init leaves
+        // surviving blobs untouched" guarantee holds for crash-reachable states: a synced blob is
+        // chunk-aligned, so an in-model crash produces trailing bytes only on the unsynced tail. A
+        // blob mutated here despite a later corruption verdict implies external corruption of an
+        // already-durable blob, which is outside the crash model.
         for (&blob, writer) in &mut pending {
             let size = writer.size();
             let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
@@ -506,6 +519,16 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             writer.sync().await?;
         }
 
+        // Complete any interrupted prune (a committed boundary ahead of physical storage) and
+        // reconcile the pruning boundary before walking blob lengths.
+        let pruning_boundary = Self::reconcile_pruning_boundary(
+            &partition,
+            &mut pending,
+            cfg.items_per_blob.get(),
+            checkpoint.boundary_hint(),
+        )
+        .await?;
+
         let RecoveredBounds {
             pruning_boundary,
             size,
@@ -514,18 +537,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         } = Self::recover_bounds(
             &pending,
             cfg.items_per_blob.get(),
-            checkpoint.boundary_hint(),
+            pruning_boundary,
             checkpoint.watermark(),
         )?;
 
         // Persist any lowered checkpoint before applying blob repairs that move recovered state
         // backward.
         let checkpoint = checkpoint
-            .persist(
-                cfg.items_per_blob.get(),
-                pruning_boundary,
-                recovery_watermark,
-            )
+            .persist(pruning_boundary, recovery_watermark)
             .await?;
 
         // Apply repair (if any). The short blob becomes the new tail; blobs strictly newer
@@ -583,9 +602,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         );
         let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
         let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
-        let checkpoint = checkpoint
-            .finish_clear(cfg.items_per_blob.get(), clear_target)
-            .await?;
+        let checkpoint = checkpoint.finish_clear(clear_target).await?;
 
         let metrics = Metrics::new(context);
         metrics.update(clear_target, clear_target, cfg.items_per_blob.get());
@@ -600,21 +617,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// Recover the journal bounds and any tail repair from the checkpoint and blob state.
     ///
-    /// A boundary hint that lags blob state is repaired from the blob boundary; a hint ahead of
-    /// blob state or a watermark beyond the recovered size is corruption. The caller persists the
-    /// checkpoint before applying the returned repair (see comment at the call site).
+    /// The pruning boundary has already been reconciled with physical blob state: an ahead
+    /// boundary completed an interrupted prune, and a boundary whose blob is missing while later
+    /// blobs survive was rejected as corruption. A watermark beyond the recovered size is
+    /// corruption. The caller persists the checkpoint before applying the returned repair (see
+    /// comment at the call site).
     fn recover_bounds(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
-        boundary_hint: Option<u64>,
+        pruning_boundary: u64,
         watermark_hint: Option<u64>,
     ) -> Result<RecoveredBounds, Error> {
-        let pruning_boundary = Self::recover_pruning_boundary(
-            boundary_hint,
-            pending.keys().next().copied(),
-            items_per_blob,
-        )?;
-
         let (size, repair) =
             Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary)?;
 
@@ -652,55 +665,62 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         })
     }
 
-    /// Recover the pruning boundary from the checkpoint hint if it still matches the oldest
-    /// retained blob.
+    /// Reconcile blobs against the recorded pruning boundary before recovering lengths.
     ///
-    /// A missing or blob-aligned hint means the blob boundary is authoritative. A mid-blob hint
-    /// is trusted only when it belongs to the current oldest blob.
-    fn recover_pruning_boundary(
-        boundary_hint: Option<u64>,
-        oldest_blob: Option<u64>,
+    /// New checkpoints always record the boundary. If it is ahead of physical storage, a prune
+    /// was interrupted after committing its boundary and recovery finishes the removals. A
+    /// boundary whose blob is missing while later blobs survive is corruption: the boundary is
+    /// recorded before any removal and removals never touch the boundary blob, so its absence
+    /// means the retained data was lost, not pruned. Legacy checkpoints without a recorded
+    /// boundary derive it from the oldest blob.
+    async fn reconcile_pruning_boundary(
+        partition: &Partition<E>,
+        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
+        boundary_hint: Option<u64>,
     ) -> Result<u64, Error> {
-        let blob_boundary = match oldest_blob {
-            Some(oldest) => super::blob_first_position(oldest, items_per_blob)?,
-            None => 0,
+        let Some(boundary) = boundary_hint else {
+            return pending.keys().next().copied().map_or(Ok(0), |oldest| {
+                super::blob_first_position(oldest, items_per_blob)
+            });
         };
+        let boundary_blob = super::position_to_blob(boundary, items_per_blob);
 
-        let Some(boundary_hint) = boundary_hint else {
-            return Ok(blob_boundary);
-        };
-        if boundary_hint.is_multiple_of(items_per_blob) {
-            return Ok(blob_boundary);
+        // The boundary is recorded before any blob is removed, and removals never touch the
+        // boundary blob, so a missing boundary blob with any surviving blob means the retained
+        // data was lost, not pruned. Classify before removing the stale prefix below the
+        // boundary, so a failed init leaves every surviving blob untouched.
+        if !pending.contains_key(&boundary_blob)
+            && let Some((&survivor, _)) = pending.first_key_value()
+        {
+            return Err(Error::Corruption(format!(
+                "blob at pruning boundary {boundary} is missing \
+                 (oldest surviving blob is {survivor})"
+            )));
         }
 
-        let hint_blob = super::position_to_blob(boundary_hint, items_per_blob);
-        match oldest_blob {
-            Some(oldest_blob) if hint_blob == oldest_blob => Ok(boundary_hint),
-            Some(oldest_blob) if hint_blob < oldest_blob => {
-                warn!(
-                    hint_blob,
-                    oldest_blob, "crash repair: boundary hint stale, computing from blobs"
-                );
-                Ok(blob_boundary)
+        // A recorded boundary ahead of the oldest blob is a committed prune that crashed before
+        // finishing its removals. Remove the files concurrently; the durable boundary makes
+        // removal order irrelevant to recovery.
+        let stale: Vec<u64> = pending
+            .range(..boundary_blob)
+            .map(|(&blob, _)| blob)
+            .collect();
+        if !stale.is_empty() {
+            warn!(
+                count = stale.len(),
+                boundary, "crash repair: completing interrupted prune"
+            );
+            for blob in &stale {
+                drop(pending.remove(blob));
             }
-            Some(oldest_blob) => {
-                // A hint ahead of blob state should never arise: prune removes blobs before
-                // sync persists the checkpoint, and clear_to_size stages a clear intent.
-                Err(Error::Corruption(format!(
-                    "boundary hint references blob {hint_blob} \
-                     but oldest blob is blob {oldest_blob}"
-                )))
-            }
-            None => {
-                // A mid-blob hint with no blobs should never arise: a staged clear is completed
-                // before we get here, and no other operation removes all blobs without updating
-                // the checkpoint.
-                Err(Error::Corruption(format!(
-                    "boundary hint references blob {hint_blob} but no blobs exist"
-                )))
-            }
+            try_join_all(stale.into_iter().map(|blob| partition.remove(blob))).await?;
         }
+
+        // After the corruption check, the boundary blob is present (and now the oldest, since the
+        // stale prefix was removed) or no blob survives. Either way the recorded boundary is
+        // authoritative.
+        Ok(boundary)
     }
 
     /// Classify a blob's untrusted on-disk length against its capacity. A missing blob counts
@@ -729,7 +749,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Recover size by walking blob lengths from oldest to newest, truncating at the
     /// first short or missing non-tail blob.
     ///
-    /// `pruning_boundary` is trusted (already reconciled by `recover_pruning_boundary`); blob
+    /// `pruning_boundary` is trusted (already reconciled by `reconcile_pruning_boundary`); blob
     /// lengths are untrusted disk state. The returned size is chunk-exact and the retained
     /// prefix is contiguous.
     fn recover_by_walking_lengths(
@@ -886,10 +906,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let handle = self.blobs.start_sync().await;
         handle.await?;
         self.barrier.mark_durable(size);
-        self.checkpoint = self
-            .checkpoint
-            .persist(self.items_per_blob.get(), self.bounds.start, size)
-            .await?;
+        self.checkpoint = self.checkpoint.persist(self.bounds.start, size).await?;
         Ok(self)
     }
 
@@ -1081,31 +1098,55 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         min_item_pos: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
+        // Cap the target at the physical tail, but never below the adopted boundary's blob.
+        // This handles cancelled rollovers and prune cleanup.
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
-        let min_blob = std::cmp::min(target_blob, tail_blob);
+        let min_blob = target_blob
+            .min(self.blobs.tail_blob_index())
+            .max(super::position_to_blob(
+                self.bounds.start,
+                self.items_per_blob.get(),
+            ));
 
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok((self, false));
         }
 
-        // Make all data durable before removing any: the prune target may be justified by an
-        // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this sync could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The sync also covers unsynced
-        // survivors above the boundary: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor could discard every synced blob
-        // behind it.
+        // Make all data durable before persisting a boundary that authorizes removal: the target
+        // may be justified by an appended-but-unflushed item, and a committed boundary lets
+        // recovery complete removals, so an unsynced survivor above the boundary could otherwise be
+        // lost. `start_sync` joins the tail and its predecessor (the only blobs that can be
+        // unsynced), so awaiting it is a full barrier.
         let sync = self.blobs.start_sync().await;
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-        self.blobs.prune(min_blob).await?;
+        // The max keeps a mid-blob adopted boundary from regressing to its blob's start.
+        let new_boundary =
+            super::blob_first_position(min_blob, self.items_per_blob.get())?.max(self.bounds.start);
+
+        // Adopt the boundary in memory before persisting it. A dropped prune future consumes the
+        // journal, discarding this in-memory advance; the durable boundary persisted below is
+        // what recovery completes on reopen.
         self.bounds.start = new_boundary;
 
+        // Commit the boundary before removing blobs. Recovery treats an ahead boundary as an
+        // interrupted prune and completes it, so blob removal never has to finish atomically
+        // or in order. The sync above proved every item through `bounds.end` durable, so that is
+        // the watermark to record: persisting the older checkpoint watermark would under-record
+        // durability and let recovery accept the loss of the just-synced retained items as pruned
+        // history.
+        self.checkpoint = self
+            .checkpoint
+            .persist(new_boundary, self.bounds.end)
+            .await?;
+
+        #[cfg(test)]
+        if self.halt_prune_removals {
+            std::future::pending::<()>().await;
+        }
+
+        self.blobs.prune(min_blob).await?;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1151,10 +1192,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.barrier = Barrier::new(new_size);
 
         // Complete the clear in the checkpoint.
-        self.checkpoint = self
-            .checkpoint
-            .finish_clear(self.items_per_blob.get(), new_size)
-            .await?;
+        self.checkpoint = self.checkpoint.finish_clear(new_size).await?;
 
         self.metrics.update(
             self.bounds.end,
@@ -1359,8 +1397,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
-    /// event of failure as items are always pruned in order from oldest to newest.
+    /// Note that this operation is NOT atomic and does not remove blobs in order: a failure or
+    /// crash can leave gaps below the committed pruning boundary. Recovery tolerates this because
+    /// the boundary is durably recorded before any removal, so reopening discards everything below
+    /// it regardless of which blobs survive. A binary built before two-phase pruning must not open
+    /// a journal left in that state; it infers the boundary from the oldest surviving blob and
+    /// would misread a gap as retained history.
     pub async fn prune(mut self, min_item_pos: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min_item_pos).await?;
         self.0 = inner;
@@ -1734,6 +1776,55 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 
     async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
         Self::init(context, cfg).await
+    }
+}
+
+#[cfg(test)]
+impl<E: Context, A: CodecFixedShared> Inner<E, A> {
+    /// Test helper: the boundary-commit half of [Self::prune] (sync then persist the boundary)
+    /// without removing any blob, reproducing the state a prune future dropped at its removal
+    /// park leaves behind. Returns the first retained blob when the prune is effective.
+    async fn commit_prune(
+        mut self: Box<Self>,
+        min_item_pos: u64,
+    ) -> Result<(Box<Self>, Option<u64>), Error> {
+        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
+        let min_blob = target_blob
+            .min(self.blobs.tail_blob_index())
+            .max(super::position_to_blob(
+                self.bounds.start,
+                self.items_per_blob.get(),
+            ));
+        if min_blob <= self.blobs.oldest_blob_index() {
+            return Ok((self, None));
+        }
+
+        let sync = self.blobs.start_sync().await;
+        sync.await?;
+        self.barrier.mark_durable(self.bounds.end);
+
+        let new_boundary =
+            super::blob_first_position(min_blob, self.items_per_blob.get())?.max(self.bounds.start);
+        self.bounds.start = new_boundary;
+        self.checkpoint = self
+            .checkpoint
+            .persist(new_boundary, self.bounds.end)
+            .await?;
+        Ok((self, Some(min_blob)))
+    }
+}
+
+#[cfg(test)]
+impl<E: Context, A: CodecFixedShared> Journal<E, A> {
+    /// Test helper: commit and adopt the prune boundary without removing any blob, the state
+    /// a prune future dropped at the removal await leaves behind.
+    pub(crate) async fn test_prune_commit_only(
+        mut self,
+        min_item_pos: u64,
+    ) -> Result<(Self, bool), Error> {
+        let (inner, min_blob) = self.0.commit_prune(min_item_pos).await?;
+        self.0 = inner;
+        Ok((self, min_blob.is_some()))
     }
 }
 
@@ -2133,6 +2224,12 @@ mod tests {
         /// Test helper: Get the oldest blob from the blob store.
         pub(crate) const fn test_oldest_blob(&self) -> Option<u64> {
             Some(self.blobs.oldest_blob_index())
+        }
+
+        /// Test helper: park [Checkpoint::persist] after its durable sync so a pending prune
+        /// future can be dropped with the boundary durable but the call unreturned.
+        pub(in crate::journal::contiguous) fn test_halt_checkpoint_persist(&mut self, halt: bool) {
+            self.checkpoint.halt_after_persist_sync = halt;
         }
 
         /// Test helper: Get the newest blob from the blob store.
@@ -2822,12 +2919,7 @@ mod tests {
             // Persist the recovered metadata (watermark=9) as init_with_checkpoint does before
             // applying the rewind repair. This simulates a crash after metadata sync but before
             // the repair removes stale blobs.
-            journal.0.checkpoint = journal
-                .0
-                .checkpoint
-                .persist(cfg.items_per_blob.get(), 0, 9)
-                .await
-                .unwrap();
+            journal.0.checkpoint = journal.0.checkpoint.persist(0, 9).await.unwrap();
             drop(journal);
 
             // Shorten blob 1 to simulate a short non-tail blob. Recovery will compute
@@ -3022,133 +3114,10 @@ mod tests {
         });
     }
 
+    /// Prune commits its boundary before removing blobs. Recovery completes the removals when a
+    /// crash leaves that boundary ahead of physical storage.
     #[test_traced]
-    fn test_fixed_journal_stale_pruning_metadata_preserves_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .expect("failed to initialize journal at size");
-
-            for i in 0..10u64 {
-                (journal, _) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            let journal = journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds(), 7..17);
-
-            // Stage the stale forward-looking watermark while the journal is alive (so we go
-            // through the public metadata path), then drop and corrupt the underlying blob.
-            let journal = journal
-                .test_set_recovery_watermark(12)
-                .await
-                .expect("failed to sync recovery watermark");
-            drop(journal);
-
-            // Shorten blob 2 to two items via Append::resize so the on-disk logical view
-            // matches the staged watermark of 12.
-            {
-                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-                let (blob, blob_size) = context
-                    .open(&blob_partition(&cfg), &2u64.to_be_bytes())
-                    .await
-                    .expect("failed to open blob 2");
-                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
-                    .await
-                    .expect("failed to wrap blob 2");
-                append
-                    .resize(2 * Digest::SIZE as u64)
-                    .await
-                    .expect("failed to shorten anchored blob");
-                append.sync().await.expect("failed to sync blob 2");
-            }
-
-            // Remove the checkpoint's oldest blob so the boundary hint of 7 is stale. The
-            // watermark is preserved because length-based recovery ends at the same point.
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .expect("failed to remove stale oldest blob");
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds(), 10..12);
-            assert_eq!(journal.0.recovery_watermark(), 12);
-            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
-            assert_eq!(journal.read(11).await.unwrap(), test_digest(4));
-            assert!(matches!(
-                journal.read(12).await,
-                Err(Error::ItemOutOfRange(12))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_stale_pruning_metadata_without_watermark_walks_lengths() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .expect("failed to initialize journal at size");
-
-            for i in 0..10u64 {
-                (journal, _) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            let mut journal = journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds(), 7..17);
-
-            {
-                journal.0.checkpoint.set_watermark(None);
-                journal.0.checkpoint = journal
-                    .0
-                    .checkpoint
-                    .sync()
-                    .await
-                    .expect("failed to remove recovery watermark");
-            }
-            drop(journal);
-
-            // Remove the checkpoint's oldest blob so the boundary hint of 7 is stale. Without a
-            // recovery watermark, recovery must still walk lengths from the recovered blob boundary.
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .expect("failed to remove stale oldest blob");
-
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds(), 10..17);
-            // No watermark: watermark at the tail blob start, not size.
-            assert_eq!(journal.0.recovery_watermark(), 15);
-            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
-            assert_eq!(journal.read(16).await.unwrap(), test_digest(9));
-
-            // After sync, watermark advances to the full recovered size.
-            journal = journal.sync().await.expect("failed to sync");
-            assert_eq!(journal.0.recovery_watermark(), 17);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// A boundary hint ahead of the oldest blob is not a reachable crash state: prune removes
-    /// blobs before sync persists the checkpoint, and clear_to_size stages a clear intent for
-    /// atomicity. Verify it is rejected as corruption.
-    #[test_traced]
-    fn test_fixed_journal_boundary_hint_ahead_of_blobs_is_corruption() {
+    fn test_fixed_journal_completes_prune_from_ahead_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -3164,24 +3133,25 @@ mod tests {
             let mut journal = journal.sync().await.unwrap();
             assert_eq!(journal.bounds(), 3..15);
 
-            // Set the boundary hint to 8 (blob 1) and lower the watermark so it won't
-            // independently trigger the watermark > size corruption check. Then remove blob 1's
-            // blob so blob 0 is the oldest. The boundary hint now references a blob ahead
-            // of the oldest blob, which is the corruption we're testing.
+            // Persist the boundary that prune records before deleting blobs, then simulate a
+            // crash before the first deletion.
             {
-                journal.0.checkpoint.set_boundary_hint(8);
-                journal.0.checkpoint.set_watermark(Some(3));
+                journal.0.checkpoint.set_boundary_hint(10);
                 journal.0.checkpoint = journal.0.checkpoint.sync().await.unwrap();
             }
             drop(journal);
 
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-
-            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            assert_eq!(journal.bounds(), 10..15);
+            for position in 10..15 {
+                assert_eq!(
+                    journal.read(position).await.unwrap(),
+                    test_digest(position - 3)
+                );
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -3335,7 +3305,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_prune_to_blob_boundary_removes_pruning_metadata() {
+    fn test_fixed_journal_prune_to_blob_boundary_persists_pruning_metadata() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -3361,7 +3331,7 @@ mod tests {
             let checkpoint = Checkpoint::open(context.child("metadata"), &cfg.partition)
                 .await
                 .expect("failed to reopen checkpoint");
-            assert!(checkpoint.boundary_hint().is_none());
+            assert_eq!(checkpoint.boundary_hint(), Some(10));
             drop(checkpoint);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -3369,6 +3339,54 @@ mod tests {
                 .expect("failed to reopen journal");
             assert_eq!(journal.bounds(), 10..15);
             assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune future dropped at the removal await consumes the journal but leaves the boundary
+    /// durably committed. Recovery completes the interrupted prune from that boundary regardless
+    /// of which blobs a partial concurrent removal happened to unlink first.
+    #[test_traced]
+    fn test_fixed_journal_prune_interrupted_removal_keeps_committed_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drop a prune parked before its removals: the consuming future destroys the journal,
+            // but the boundary is durably committed and no blob has been removed yet.
+            journal.0.halt_prune_removals = true;
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the removals"
+                );
+            }
+
+            // Simulate one concurrent unlink having completed before the crash: blob 1 is removed
+            // while blob 0 survives, leaving the physical prefix partially removed.
+            context
+                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            // Recovery completes the interrupted prune from the committed boundary regardless of
+            // which blobs the partial removal left behind.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
             journal.destroy().await.unwrap();
         });
     }
@@ -3392,7 +3410,7 @@ mod tests {
             drop(journal);
 
             // Inject an extra item into blob 0 at the blob level so its length exceeds
-            // items_per_blob -- this is what `recover_bounds` validates and rejects as Corruption.
+            // items_per_blob; this is what `recover_bounds` validates and rejects as Corruption.
             {
                 let extra = test_digest(99);
                 let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -4137,6 +4155,203 @@ mod tests {
         });
     }
 
+    /// After a cancelled prune adopted (and possibly persisted) a boundary the physical
+    /// state has not caught up to, a smaller prune request must not move the boundary
+    /// backward. Its physical cleanup still catches up to the adopted boundary.
+    #[test_traced]
+    fn test_fixed_prune_boundary_is_monotonic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Cancel a prune parked before its removals: the consuming future destroys the
+            // journal, but boundary 10 is durably committed and the blobs are not yet removed.
+            journal.0.halt_prune_removals = true;
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the removals"
+                );
+            }
+
+            // Recovery adopts the committed boundary and completes the removals.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("journal must reopen with the committed boundary");
+            assert_eq!(journal.bounds(), 10..15);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+
+            // A smaller request must not lower the recovered boundary: the cleanup is already
+            // complete, so it is a no-op that leaves the boundary at 10.
+            let (journal, pruned) = journal.prune(5).await.unwrap();
+            assert!(!pruned);
+            assert_eq!(journal.pruning_boundary(), 10);
+
+            // The condemned blobs were removed by recovery.
+            let names = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert!(!names.contains(&0u64.to_be_bytes().to_vec()));
+            assert!(!names.contains(&1u64.to_be_bytes().to_vec()));
+
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune future dropped mid-unlink leaves condemned files the journal no longer
+    /// tracks. A later clear_to_size must not adopt one as its fresh tail, which would
+    /// resurrect the condemned items.
+    #[test_traced]
+    fn test_fixed_clear_after_prune_dropped_mid_unlink() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drop the prune after its boundary commit but mid-unlink (before any condemned file
+            // is removed): the dropped future consumes the journal, but the committed boundary is
+            // durable and blobs 0 and 1 survive on disk.
+            journal.0.blobs.halt_prune_unlinks = true;
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the unlinks"
+                );
+            }
+
+            // Re-open: recovery completes the interrupted prune, removing the leftover condemned
+            // files, so a subsequent clear whose tail index collides with a formerly-condemned
+            // blob still starts from a genuinely empty tail.
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            journal.0 = journal.0.clear_to_size(5).await.unwrap();
+            assert_eq!(journal.bounds(), 5..5);
+            let pos;
+            (journal, pos) = journal.append(&test_digest(100)).await.unwrap();
+            assert_eq!(pos, 5);
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.read(5).await.unwrap(), test_digest(100));
+
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .expect("journal must reopen after the clear");
+            assert_eq!(journal.bounds(), 5..6);
+            assert_eq!(journal.read(5).await.unwrap(), test_digest(100));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune future dropped inside the checkpoint persist consumes the journal but can leave
+    /// the new boundary durable (the persist's sync completed before the drop). Recovery
+    /// completes the prune from that durable boundary.
+    #[test_traced]
+    fn test_fixed_prune_dropped_during_persist_adopts_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drop a prune parked inside the checkpoint persist, after its durable sync: the
+            // consuming future destroys the journal, but the boundary is already durable.
+            journal.0.test_halt_checkpoint_persist(true);
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park inside the checkpoint persist"
+                );
+            }
+
+            // Recovery completes the prune from the durable boundary.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("journal must reopen after the dropped prune");
+            assert_eq!(journal.bounds(), 10..12);
+            for i in 10..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Lower-level state test: the logical size can lead the physical tail (the shape a roll-over
+    /// interrupted mid-`seal_tail` leaves). The consuming public `append` cannot leave a live
+    /// handle in that state, so the borrowed inner append constructs it directly. A prune issued
+    /// then must cap its boundary at the physical tail rather than panic on the missing next blob.
+    #[test_traced]
+    fn test_fixed_prune_after_cancelled_seal_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..9u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drive the borrowed inner append and drop it parked at the tail roll-over,
+            // constructing a state the consuming public `append` cannot leave a live handle in:
+            // the logical size leads the physical tail by one blob (blob 2 is never created).
+            journal.0.blobs.halt_seal_tail = true;
+            let item = test_digest(9);
+            {
+                let fut = journal.0.append(&item);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "append must park at the tail roll-over"
+                );
+            }
+            journal.0.blobs.halt_seal_tail = false;
+            assert_eq!(journal.size(), 10);
+
+            // Prune to the logical end: capped at the physical tail, pruning only blob 0.
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 5..10);
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("journal must reopen after a capped prune");
+            assert_eq!(journal.bounds(), 5..10);
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// A crash right after pruning must not lose retained items that were appended but never
     /// synced. Blob removal is durable, so prune makes all data durable first: otherwise the
     /// unsynced tail would vanish with the crash and recovery would truncate the journal to
@@ -4173,6 +4388,228 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning after unsynced appends makes the retained data durable, so the committed boundary
+    /// must record a watermark that covers it. Persisting the stale checkpoint watermark instead
+    /// would let recovery accept the loss of that just-synced retained data as pruned history and
+    /// reopen an empty journal. Losing the retained region must be reported as corruption.
+    #[test_traced]
+    fn test_fixed_recovery_prune_watermark_covers_retained_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 20 items across four blobs without an intervening sync, so the checkpoint
+            // watermark still lags bounds.end when the prune runs.
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Prune away the first two blobs. The prune syncs all data durable, so the retained
+            // items 10..20 are acknowledged and the committed watermark must record that.
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose every retained data blob. The watermark proves items 10..20 were durable, so
+            // their disappearance is corruption, not a completed prune to an empty journal.
+            for name in context.scan(&blob_partition(&cfg)).await.unwrap() {
+                context
+                    .remove(&blob_partition(&cfg), Some(&name))
+                    .await
+                    .unwrap();
+            }
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, Digest>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A recorded mid-blob boundary (from `init_at_size`) whose blob is missing while later blobs
+    /// survive is rejected as corruption, uniformly with the blob-aligned case: the boundary is
+    /// recorded before any removal, so a missing boundary blob means the retained data was lost,
+    /// not pruned. Recovery leaves the survivors untouched and is stable across retries.
+    #[test_traced]
+    fn test_fixed_recovery_rejects_lagging_mid_blob_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            // init_at_size(7) records a mid-blob boundary at 7 (blob 1).
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 0..8u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds(), 7..15);
+            drop(journal);
+
+            // Lose the boundary blob (blob 1) while a later blob survives.
+            context
+                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The surviving blob above the lost boundary blob is left intact for diagnosis.
+            assert!(
+                context
+                    .open(&blob_partition(&cfg), &2u64.to_be_bytes())
+                    .await
+                    .is_ok()
+            );
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, Digest>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A blob-aligned boundary is recorded before any removal, so it can never lag physical
+    /// state. If its blob is missing while later blobs survive, recovery must report
+    /// corruption rather than silently reclassifying the retained items as pruned.
+    #[test_traced]
+    fn test_fixed_recovery_rejects_missing_aligned_boundary_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose the blob at the recorded boundary while later blobs survive.
+            context
+                .remove(&blob_partition(&cfg), Some(&2u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The surviving suffix is left intact for diagnosis.
+            assert!(
+                context
+                    .open(&blob_partition(&cfg), &3u64.to_be_bytes())
+                    .await
+                    .is_ok()
+            );
+        });
+    }
+
+    /// A failed init must not mutate the blob set: when a committed prune's removals were
+    /// interrupted and the aligned boundary blob is then lost, the missing-boundary corruption
+    /// verdict must be reached before the stale prefix below the boundary is unlinked, and the
+    /// verdict must be stable across retries.
+    #[test_traced]
+    fn test_fixed_recovery_missing_boundary_preserves_stale_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(5));
+            cfg.partition = "missing-boundary-preserves-prefix".into();
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Commit the boundary without removing any blob, as a prune interrupted after its
+            // checkpoint persist would.
+            let (journal, pruned) = journal.test_prune_commit_only(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose the blob at the committed boundary while a later blob survives.
+            context
+                .remove(&blob_partition(&cfg), Some(&2u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // Every surviving blob is untouched, including the stale prefix below the boundary.
+            let names = context.scan(&blob_partition(&cfg)).await.unwrap();
+            assert!(names.contains(&0u64.to_be_bytes().to_vec()));
+            assert!(names.contains(&1u64.to_be_bytes().to_vec()));
+            assert!(names.contains(&3u64.to_be_bytes().to_vec()));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, Digest>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A missing aligned boundary blob is corruption even when nothing survives past it: an
+    /// interrupted prune never removes its boundary blob, so a surviving stale prefix alone
+    /// proves the retained blobs were lost. The verdict must be reached before the prefix is
+    /// unlinked and must be stable across retries.
+    #[test_traced]
+    fn test_fixed_recovery_missing_boundary_with_only_stale_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(5));
+            cfg.partition = "missing-boundary-only-prefix".into();
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Commit the boundary without removing any blob, as a prune interrupted after its
+            // checkpoint persist would.
+            let (journal, pruned) = journal.test_prune_commit_only(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose every blob at and after the committed boundary, leaving only the stale
+            // prefix below it.
+            for name in context.scan(&blob_partition(&cfg)).await.unwrap() {
+                let blob = u64::from_be_bytes(name.as_slice().try_into().unwrap());
+                if blob >= 2 {
+                    context
+                        .remove(&blob_partition(&cfg), Some(&name))
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The failed init left the stale prefix untouched.
+            let names = context.scan(&blob_partition(&cfg)).await.unwrap();
+            assert!(names.contains(&0u64.to_be_bytes().to_vec()));
+            assert!(names.contains(&1u64.to_be_bytes().to_vec()));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, Digest>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
         });
     }
 
