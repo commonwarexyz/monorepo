@@ -110,9 +110,145 @@ pub(crate) struct Ops {
     pub(super) released_deadlines: Vec<Tick>,
     /// Tasks waiting for a free waiter slot, woken all at once whenever a
     /// slot frees (a woken future re-registers if it loses the race).
-    pub(super) capacity: Vec<Waker>,
+    pub(super) capacity: CapacityWaiters,
     /// Set at teardown: admission fails with the kind-specific error.
     pub(super) closed: bool,
+}
+
+/// The capacity wait list: tasks parked until a waiter slot frees.
+///
+/// Registrations live in a slot arena (with a free list, so cancellation
+/// under a saturated ring reuses slots instead of growing the arena) and are
+/// epoch-tagged: [Self::drain] wakes every waiter and bumps the epoch,
+/// invalidating all outstanding registrations at once. Each admission holds
+/// at most one slot — re-polls refresh the stored waker in place — and
+/// cancellation clears the slot immediately, so a long-saturated ring
+/// retains no wakers for admissions that no longer exist.
+pub(super) struct CapacityWaiters {
+    /// Slot arena; `None` entries are cancelled registrations awaiting reuse.
+    slots: Vec<Option<Waker>>,
+    /// Indices of `None` entries in `slots`.
+    free: Vec<usize>,
+    /// Bumped by every drain: a [CapacitySlot] from an older epoch is no
+    /// longer registered (its waker was already woken and discarded).
+    epoch: u64,
+}
+
+/// One admission attempt's registration in [CapacityWaiters].
+struct CapacitySlot {
+    epoch: u64,
+    index: usize,
+}
+
+impl CapacityWaiters {
+    const fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+            epoch: 0,
+        }
+    }
+
+    /// Register an admission attempt, or refresh its waker in place when it
+    /// already holds a live slot.
+    fn register(&mut self, registration: &mut Option<CapacitySlot>, waker: &Waker) {
+        if let Some(slot) = registration
+            && slot.epoch == self.epoch
+        {
+            self.slots[slot.index]
+                .as_mut()
+                .expect("registered capacity slot missing its waker")
+                .clone_from(waker);
+            return;
+        }
+        // First registration, or the previous one was invalidated by a drain.
+        let index = match self.free.pop() {
+            Some(index) => {
+                self.slots[index] = Some(waker.clone());
+                index
+            }
+            None => {
+                self.slots.push(Some(waker.clone()));
+                self.slots.len() - 1
+            }
+        };
+        *registration = Some(CapacitySlot {
+            epoch: self.epoch,
+            index,
+        });
+    }
+
+    /// Cancel a registration whose admission attempt no longer exists,
+    /// releasing its waker and recycling the slot.
+    fn cancel(&mut self, registration: CapacitySlot) {
+        if registration.epoch != self.epoch {
+            return;
+        }
+        let waker = self.slots[registration.index].take();
+        assert!(waker.is_some(), "capacity slot cancelled twice");
+        self.free.push(registration.index);
+    }
+
+    /// Release every waiter for the caller to wake, invalidating all
+    /// outstanding registrations (woken futures re-register if they lose the
+    /// admission race).
+    ///
+    /// This is the only wake-all path: every slot-free and close site funnels
+    /// through it, so the epoch advances in exactly one place.
+    pub(super) fn drain_into(&mut self, wakers: &mut Vec<Waker>) {
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .expect("capacity epoch overflowed");
+        self.free.clear();
+        wakers.extend(self.slots.drain(..).flatten());
+    }
+
+    /// [Self::drain_into] into a fresh vector.
+    fn drain(&mut self) -> Vec<Waker> {
+        let mut wakers = Vec::new();
+        self.drain_into(&mut wakers);
+        wakers
+    }
+
+    /// Number of live registrations.
+    #[cfg(test)]
+    pub(super) fn registered(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    /// Size of the slot arena, including recyclable entries.
+    #[cfg(test)]
+    pub(super) const fn arena_len(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+/// RAII registration of one admission attempt on the capacity wait list.
+///
+/// The slot is cleared on admission or closed-driver resolution (inside the
+/// admission poll) and cancelled when the attempt is dropped while parked. A
+/// foreign-thread drop cannot clear its slot (drop must not panic); the entry
+/// is discarded by the next drain, consistent with the documented policy that
+/// op futures must not move to other threads.
+struct Registration<'a> {
+    handle: &'a Handle,
+    slot: Option<CapacitySlot>,
+}
+
+impl<'a> Registration<'a> {
+    const fn new(handle: &'a Handle) -> Self {
+        Self { handle, slot: None }
+    }
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        let Some(slot) = self.slot.take() else {
+            return;
+        };
+        let _ = self.handle.try_with(|ops| ops.capacity.cancel(slot));
+    }
 }
 
 /// Thread-affine handle to the driver's op state, cloned by the network and
@@ -136,7 +272,7 @@ impl Handle {
                 staged: VecDeque::with_capacity(capacity),
                 pending_cancels: VecDeque::with_capacity(capacity),
                 released_deadlines: Vec::new(),
-                capacity: Vec::new(),
+                capacity: CapacityWaiters::new(),
                 closed: false,
             }))),
         }
@@ -161,7 +297,7 @@ impl Handle {
     pub(crate) fn close(&self) -> Vec<Waker> {
         self.with(|ops| {
             ops.closed = true;
-            std::mem::take(&mut ops.capacity)
+            ops.capacity.drain()
         })
     }
 
@@ -336,20 +472,29 @@ impl Handle {
 ///
 /// On a closed driver the request resolves immediately to its kind-specific
 /// failure (returned as `Err`). On a full slab the task parks on the capacity
-/// wait list. Otherwise the request is admitted: the slab owns it (along with
-/// the task waker) and its id is pushed onto the staged queue for the loop.
+/// wait list through `registration` (one slot per attempt, refreshed on
+/// re-polls and released here once the attempt resolves). Otherwise the
+/// request is admitted: the slab owns it (along with the task waker) and its
+/// id is pushed onto the staged queue for the loop.
 fn poll_admission(
     handle: &Handle,
     request: &mut Option<Request>,
+    registration: &mut Registration<'_>,
     cx: &mut Context<'_>,
 ) -> Poll<Result<WaiterId, Output>> {
     let outcome = handle.with(|ops| {
         if ops.closed {
+            if let Some(slot) = registration.slot.take() {
+                ops.capacity.cancel(slot);
+            }
             return Admission::Closed;
         }
         if ops.waiters.is_full() {
-            ops.capacity.push(cx.waker().clone());
+            ops.capacity.register(&mut registration.slot, cx.waker());
             return Admission::Full;
+        }
+        if let Some(slot) = registration.slot.take() {
+            ops.capacity.cancel(slot);
         }
         let request = request.take().expect("request consumed before admission");
         let id = ops.waiters.insert(request, cx.waker().clone());
@@ -374,7 +519,7 @@ fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<
     let (output, wakers) = handle.with(|ops| {
         let output = ops.waiters.poll_take(id, cx.waker());
         let wakers = if output.is_some() {
-            std::mem::take(&mut ops.capacity)
+            ops.capacity.drain()
         } else {
             Vec::new()
         };
@@ -396,7 +541,7 @@ fn orphan(handle: &Handle, id: WaiterId) {
     let wakers = handle.try_with(|ops| {
         match ops.waiters.mark_orphaned(id) {
             // A parked result was dropped, freeing a slot.
-            DropOutcome::Freed => std::mem::take(&mut ops.capacity),
+            DropOutcome::Freed => ops.capacity.drain(),
             DropOutcome::Cancel {
                 needs_sqe,
                 target_tick,
@@ -450,6 +595,9 @@ enum OpState {
 struct Op<'a> {
     handle: &'a Handle,
     state: OpState,
+    /// Capacity wait-list registration while queued on a full slab; released
+    /// on admission or by drop (via its RAII guard).
+    registration: Registration<'a>,
 }
 
 impl<'a> Op<'a> {
@@ -457,6 +605,7 @@ impl<'a> Op<'a> {
         Self {
             handle,
             state: OpState::Queued(Some(request)),
+            registration: Registration::new(handle),
         }
     }
 }
@@ -468,7 +617,7 @@ impl Future for Op<'_> {
         let this = self.get_mut();
         match &mut this.state {
             OpState::Queued(request) => {
-                match poll_admission(this.handle, request, cx) {
+                match poll_admission(this.handle, request, &mut this.registration, cx) {
                     // Completion cannot be ready before the loop's next turn,
                     // so an admitted op always returns pending here.
                     Poll::Ready(Ok(id)) => {
@@ -531,10 +680,15 @@ impl Ticket {
     /// Admit `request`, parking on slab capacity, and return the reservation.
     async fn admit(handle: &Handle, request: Request) -> Self {
         let mut request = Some(request);
+        // The guard lives outside the poll closure so cancelling this future
+        // while parked releases its capacity slot.
+        let mut registration = Registration::new(handle);
         let state = std::future::poll_fn(|cx| {
-            poll_admission(handle, &mut request, cx).map(|admitted| match admitted {
-                Ok(id) => TicketState::Waiting(id),
-                Err(output) => TicketState::Failed(Some(output)),
+            poll_admission(handle, &mut request, &mut registration, cx).map(|admitted| {
+                match admitted {
+                    Ok(id) => TicketState::Waiting(id),
+                    Err(output) => TicketState::Failed(Some(output)),
+                }
             })
         })
         .await;

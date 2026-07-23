@@ -188,7 +188,7 @@ impl IoUringLoop {
     /// Called whenever a slot frees. Woken futures re-register if they lose
     /// the admission race.
     fn notify_capacity(&mut self, ops: &mut Ops) {
-        self.pending_wakers.append(&mut ops.capacity);
+        ops.capacity.drain_into(&mut self.pending_wakers);
     }
 
     /// Make progress on the ring without blocking.
@@ -1337,6 +1337,78 @@ mod tests {
         unsafe { buf_b.set_len(read_b) };
         assert_eq!(buf_a.as_ref(), &[1]);
         assert_eq!(buf_b.as_ref(), &[2]);
+    }
+
+    #[test]
+    fn test_capacity_cancel_releases_slot() {
+        // Cancelled admission attempts must release their capacity slots
+        // immediately and reuse the arena, so a long-saturated ring retains
+        // no wakers (and no growing arena) for attempts that no longer exist.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let driver = harness.handle.clone();
+
+        // Fill the single waiter slot with a recv that stays in flight.
+        let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(driver.recv(
+            Arc::new(blocker_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+
+        // Park-and-cancel churn: every attempt holds exactly one slot
+        // (re-polls refresh in place), releases it on drop, and the arena
+        // recycles that slot instead of growing.
+        for _ in 0..64 {
+            let (left, _right) = UnixStream::pair().unwrap();
+            let mut parked = Box::pin(driver.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_secs(60),
+            ));
+            assert!(poll_once(&harness, &mut parked).is_pending());
+            assert!(poll_once(&harness, &mut parked).is_pending());
+            harness.handle.with(|ops| {
+                assert_eq!(ops.capacity.registered(), 1);
+                assert_eq!(ops.capacity.arena_len(), 1);
+            });
+            drop(parked);
+            harness
+                .handle
+                .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+        }
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.arena_len(), 1));
+
+        // A registration invalidated by a drain is ignored by a later cancel
+        // (stale epoch) instead of corrupting another attempt's slot.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut parked = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut parked).is_pending());
+        for waker in harness.driver().close() {
+            waker.wake();
+        }
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+        drop(parked);
     }
 
     #[test]
