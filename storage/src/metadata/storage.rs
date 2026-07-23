@@ -534,8 +534,6 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
-        // Everything is being removed, so a retained sync failure no longer matters; awaiting
-        // only keeps the removal from racing an in-flight fsync.
         if let Some(pending) = self.state.pending.take() {
             let _ = pending.await;
         }
