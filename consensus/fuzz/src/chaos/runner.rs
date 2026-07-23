@@ -311,8 +311,8 @@ fn check_safety<P: Simplex>(
         reporter.assert_no_faults();
     }
     invariants::check_no_invalid_reports(reporters);
-    invariants::check_vote_invariants_with_byzantine(
-        &HashSet::new(),
+    invariants::check_vote_invariants(
+        0,
         P::elector(term_length),
         Epoch::new(crate::EPOCH),
         term_length,
