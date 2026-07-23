@@ -136,7 +136,8 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     /// serialized by ownership of the store, so `Relaxed` suffices.
     import_pending: AtomicBool,
 
-    /// Whether a pipelined journal sync from [`Self::start_sync`] may still be in flight.
+    /// Whether the journal may hold work from [`Self::start_sync`] not yet proven by a full
+    /// journal sync.
     sync_started: bool,
 }
 
@@ -255,7 +256,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
                     Durability::Commit => self.journal.commit().await?,
                     Durability::Sync => self.journal.sync().await?,
                 };
-                self.sync_started = false;
+                if matches!(durability, Durability::Sync) {
+                    self.sync_started = false;
+                }
             }
             return Ok(self);
         };
@@ -264,7 +267,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             Durability::Commit => self.journal.commit().await?,
             Durability::Sync => self.journal.sync().await?,
         };
-        self.sync_started = false;
+        if matches!(durability, Durability::Sync) {
+            self.sync_started = false;
+        }
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
         self.replace(verified);

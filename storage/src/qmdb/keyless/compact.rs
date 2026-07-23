@@ -932,6 +932,58 @@ mod tests {
         });
     }
 
+    /// A metadata sync failure from `start_sync` that `commit` does not observe still
+    /// resurfaces on the next `sync`, even when that sync has nothing new to persist.
+    #[test_traced]
+    fn test_compact_start_sync_metadata_failure_resurfaces_on_sync() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-meta-fail", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+
+            // start_sync parks the data sync and then the offsets sync. Complete the data
+            // sync and fail the offsets sync: a failure commit() does not observe.
+            {
+                let mut parked = pending.lock();
+                assert_eq!(
+                    parked.len(),
+                    2,
+                    "expected the data and offsets syncs parked"
+                );
+                let offsets = parked.pop().unwrap();
+                let data = parked.pop().unwrap();
+                data.release.send(Ok(())).unwrap();
+                offsets
+                    .release
+                    .send(Err(commonware_runtime::Error::Io(
+                        std::io::Error::other("injected sync failure").into(),
+                    )))
+                    .unwrap();
+            }
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+
+            // Later syncs pass; only the retained offsets failure remains.
+            pending.unblock();
+
+            // A data-only commit succeeds without observing the metadata failure.
+            let db = db.commit().await.unwrap();
+
+            // sync() has nothing new to persist but must still reach the journal and
+            // resurface the retained failure.
+            assert!(
+                db.sync().await.is_err(),
+                "sync absorbed the metadata failure after a commit-level drain"
+            );
+        });
+    }
+
     /// The first persist after a compact-sync import can be pipelined: awaiting the handle
     /// makes the imported witness durable.
     #[test_traced("INFO")]
