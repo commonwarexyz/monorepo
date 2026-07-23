@@ -284,12 +284,15 @@ impl IoUringLoop {
         // futex until another thread latches a wake. Before parking, spin
         // briefly to avoid the futex round-trip when work is imminent.
         if fully_idle && deadline.is_none() {
-            if self
-                .idle_spinner
-                .spin(|| self.waker.pending(self.processed_seq))
-            {
-                return;
-            }
+            // A wake that lands during the spin ends it early; `park_idle`'s
+            // post-arm snapshot then consumes the latch without a futex round
+            // trip. The spin must not skip `park_idle` on a hit: only the
+            // arm-and-clear cycle consumes the latch, and leaving it set
+            // would make every subsequent idle park return instantly. The
+            // published-sequence check rides along for the dormant
+            // cross-thread submission protocol.
+            self.idle_spinner
+                .spin(|| self.waker.signalled() || self.waker.pending(self.processed_seq));
             if let Some(park_duration) = self.waker.park_idle(self.processed_seq) {
                 self.idle_spinner.on_wake(park_duration);
             }
@@ -900,7 +903,12 @@ pub(crate) mod testing {
             for waker in driver.close() {
                 waker.wake();
             }
-            driver.drain();
+            // Mirror the runtime's teardown: a drain panic must not unwind
+            // while the kernel may still write into slab-owned buffers.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.drain())).is_err() {
+                eprintln!("io_uring drain panicked with operations in flight, aborting");
+                std::process::abort();
+            }
         }
 
         /// Number of tracked waiters (including parked results).

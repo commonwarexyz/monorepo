@@ -310,6 +310,18 @@ impl Waker {
         delta != 0 && delta < HALF_SUBMISSION_SEQUENCE_DOMAIN
     }
 
+    /// Return whether an out-of-band wake is currently latched.
+    ///
+    /// This is a hint for opportunistic checks (e.g. the idle spinner): the
+    /// load carries no synchronization and does not consume the latch, so
+    /// callers must follow up with an arming wait primitive ([Self::park_idle]
+    /// or [Self::arm]) whose post-arm snapshot revalidates the latch and whose
+    /// wait-state clear consumes it.
+    #[inline]
+    pub fn signalled(&self) -> bool {
+        self.inner.state.load(Ordering::Relaxed) & WAKE_SIGNALLED_BIT != 0
+    }
+
     /// Park on the idle path until the packed wake state changes.
     ///
     /// This method hides the arm-and-recheck futex sequence used when the ring

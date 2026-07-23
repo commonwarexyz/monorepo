@@ -16,9 +16,11 @@
 //! task waker. Dropping an op future orphans its slot: cancelable kinds are
 //! async-cancelled eagerly, while storage writes and syncs detach and keep
 //! running for durability parity with the tokio backend. Dropping an admitted
-//! op future on a foreign thread cannot be rejected (drop must not panic), so
-//! it leaks the slot until shutdown; this is reachable only by deliberately
-//! moving an already-polled future to a raw thread.
+//! op future or a [Ticket] (including one held inside a front-end object such
+//! as a listener) on a foreign thread cannot be rejected (drop must not
+//! panic), so it leaks the slot until shutdown; this is reachable only by
+//! deliberately moving one to a raw thread or another worker's thread, which
+//! the runtime documents as unsupported for ring-bound resources.
 
 use super::{
     Tick,
@@ -61,10 +63,17 @@ unsafe impl<T: Send> Sync for Affine<T> {}
 impl<T> Affine<T> {
     /// Wrap `cell`, pinning access to the calling thread.
     pub(crate) fn new(cell: T) -> Self {
-        Self {
-            owner: thread::current().id(),
-            cell,
-        }
+        Self::pinned(thread::current().id(), cell)
+    }
+
+    /// Wrap `cell`, pinning access to `owner`.
+    ///
+    /// Used when the cell is built away from its owning thread (e.g. a task
+    /// registered from another thread but polled only on its worker). Handing
+    /// the contents to `owner` is an ordinary `Send` transfer, which the auto
+    /// `Send` bound on `Affine<T>` already requires.
+    pub(crate) const fn pinned(owner: ThreadId, cell: T) -> Self {
+        Self { owner, cell }
     }
 
     /// Access the contents from the owning thread.

@@ -17,8 +17,11 @@
 //! Resources created on one worker (blobs, sockets, listeners) are bound to
 //! that worker's thread and must not be driven from another. Cross-thread
 //! interactions that do not submit ring operations (waking a task from a
-//! helper thread, registering a sleeper alarm, delivering a stop signal)
-//! remain supported through each loop's latched wake state.
+//! helper thread, registering a sleeper alarm, spawning a task through a
+//! moved context, delivering a stop signal) remain supported through each
+//! loop's latched wake state. A context refers to its origin worker: once
+//! that worker has torn down, using the context from elsewhere fails loudly
+//! instead of submitting work nothing will run.
 
 use super::{
     Driver, RingConfig,
@@ -72,6 +75,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{self, Poll, Waker},
+    thread::{self, ThreadId},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -295,8 +299,15 @@ struct Shared {
     panicker: Panicker,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
+    /// Serializes filesystem-shape storage operations (open, remove, scan)
+    /// across all workers sharing the runtime's storage directory.
+    storage_lock: Arc<Mutex<()>>,
     /// Threads running dedicated workers, joined when the root worker exits.
-    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    ///
+    /// `None` once the root has joined every worker: a dedicated spawn racing
+    /// final teardown from a non-worker thread must not create a thread
+    /// nobody joins.
+    workers: Mutex<Option<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 /// Runtime state shared by every [Context] on one worker thread.
@@ -394,6 +405,7 @@ impl Worker {
                 shared.cfg.storage_directory.clone(),
                 handle.clone(),
                 shared.storage_buffer_pool.clone(),
+                Arc::clone(&shared.storage_lock),
             ),
             &mut runtime_registry,
         );
@@ -516,7 +528,13 @@ impl Worker {
         // until after we have dropped all tasks (as they may attempt to
         // upgrade their weak reference to the executor during drop).
         let teardown = catch_unwind(AssertUnwindSafe(|| {
-            executor.sleeping.lock().clear();
+            // Wake discarded alarms instead of dropping them: a waiter parked
+            // on a foreign thread re-polls and fails loudly rather than
+            // hanging on a wake that will never arrive.
+            let alarms = take(&mut *executor.sleeping.lock());
+            for alarm in alarms {
+                alarm.waker.wake();
+            }
             for task in executor.tasks.clear() {
                 task.clear();
             }
@@ -546,10 +564,21 @@ impl Worker {
             std::process::abort();
         }
 
-        // Assert the context doesn't escape the worker (behavior is undefined
-        // in this case)
+        // Assert no context escaped the runtime. Once other workers exist the
+        // count legitimately races: their tasks may hold this worker's
+        // contexts (or sleep futures) and drop them only when their own
+        // teardown observes the abort cascade, so the check applies only to
+        // single-worker runs. A worker's own registration keeps the registry
+        // non-empty for its whole life, so a non-empty registry is exactly
+        // "another worker may still hold a reference".
+        let multi_worker = executor
+            .shared
+            .workers
+            .lock()
+            .as_ref()
+            .is_none_or(|workers| !workers.is_empty());
         assert!(
-            Arc::weak_count(&executor) == 0,
+            multi_worker || Arc::weak_count(&executor) == 0,
             "executor still has weak references"
         );
 
@@ -627,7 +656,8 @@ impl crate::Runner for Runner {
             panicker,
             network_buffer_pool,
             storage_buffer_pool,
-            workers: Mutex::new(Vec::new()),
+            storage_lock: Arc::new(Mutex::new(())),
+            workers: Mutex::new(Some(Vec::new())),
         });
         let worker = Worker::new(Arc::clone(&shared));
 
@@ -649,28 +679,52 @@ impl crate::Runner for Runner {
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = shared.metrics.tasks_running.get_or_create(&label).clone();
 
-        // Build the root context and drive the root task on this worker.
+        // Build the root context and drive the root task on this worker. A
+        // panic (from the root task with `catch_panics` disabled, or from
+        // `f` itself) must not unwind past the join loop below: dedicated
+        // workers may still be draining their rings, and leaking their
+        // threads past `start` would let ring work outlive the runtime.
         let root_tree = Tree::root();
-        let context = worker.context(label.name(), Vec::new(), root_tree.clone());
-        let output = worker.run(panicked.interrupt(f(context)), root_tree);
+        let output = catch_unwind(AssertUnwindSafe(|| {
+            let context = worker.context(label.name(), Vec::new(), root_tree.clone());
+            worker.run(panicked.interrupt(f(context)), Arc::clone(&root_tree))
+        }));
 
-        // Join dedicated worker threads: the tree abort above cascaded to
-        // their roots, so each worker winds down once it observes the abort.
-        // Workers can spawn workers, so drain until the registry stays empty.
-        // A worker infrastructure panic is resumed only after every thread
-        // has been joined.
+        // `run` aborts the tree before it returns or unwinds, but a panic in
+        // `f` itself never reaches `run`; abort again (idempotent) so every
+        // worker observes its wind-down before being joined.
+        root_tree.abort();
+
+        // Join dedicated worker threads: the tree abort cascaded to their
+        // roots, so each worker winds down once it observes the abort.
+        // Workers can spawn workers, so drain until the registry stays
+        // empty, then close it: later dedicated spawns racing from foreign
+        // threads must not create threads nobody joins. Panics are resumed
+        // only after every thread has been joined.
         let mut worker_panic = None;
         loop {
-            let workers = take(&mut *shared.workers.lock());
-            if workers.is_empty() {
-                break;
-            }
-            for worker in workers {
+            let batch = {
+                let mut workers = shared.workers.lock();
+                let list = workers.as_mut().expect("worker registry already closed");
+                if list.is_empty() {
+                    *workers = None;
+                    break;
+                }
+                take(list)
+            };
+            for worker in batch {
                 if let Err(payload) = worker.join() {
                     let _ = worker_panic.get_or_insert(payload);
                 }
             }
         }
+
+        // Resume the root worker's panic first: worker failures during
+        // teardown are usually its cascade.
+        let output = match output {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
         if let Some(payload) = worker_panic {
             resume_unwind(payload);
         }
@@ -710,8 +764,9 @@ where
     slot: usize,
     /// Re-enqueue target for wakes.
     tasks: Weak<Tasks>,
-    /// The future, polled and cleared only on the executor thread (spawns
-    /// run inline, so no lock is needed).
+    /// The future, polled and cleared only on the owning worker thread (a
+    /// spawning thread builds the cell but never touches the future), so no
+    /// lock is needed.
     ///
     /// `None` once the future completed or teardown cleared it.
     future: Affine<RefCell<Option<F>>>,
@@ -854,6 +909,9 @@ struct Tasks {
     root_ready: AtomicBool,
     /// The arena owning all running tasks (for teardown enumeration).
     running: Mutex<Running>,
+    /// The worker thread that polls (and tears down) these tasks. Task cells
+    /// are pinned to it so registration works from any thread.
+    owner: ThreadId,
     /// Wakes the runtime thread when a task becomes ready.
     ///
     /// Latches the event loop's out-of-band wake state so a parked executor
@@ -862,8 +920,8 @@ struct Tasks {
 }
 
 impl Tasks {
-    /// Create a new task queue.
-    const fn new(unpark: RingWaker) -> Self {
+    /// Create a new task queue owned by the calling (worker) thread.
+    fn new(unpark: RingWaker) -> Self {
         Self {
             ready: Mutex::new(Vec::new()),
             root_ready: AtomicBool::new(true),
@@ -872,6 +930,7 @@ impl Tasks {
                 free: Vec::new(),
                 closed: false,
             }),
+            owner: thread::current().id(),
             unpark,
         }
     }
@@ -903,7 +962,10 @@ impl Tasks {
             let cell = Arc::new(TaskCell {
                 slot,
                 tasks: Arc::downgrade(arc_self),
-                future: Affine::new(RefCell::new(Some(future))),
+                // Pin the cell to the worker that polls it, not to the
+                // registering thread: spawns may arrive from any thread
+                // through a moved context.
+                future: Affine::pinned(arc_self.owner, RefCell::new(Some(future))),
             });
             running.slots[slot] = Some(Arc::clone(&cell) as Arc<dyn Erased>);
             cell
@@ -1043,20 +1105,24 @@ impl Context {
 
         // Run the worker until the task completes or teardown aborts it.
         let thread_shared = Arc::clone(&shared);
-        let worker = utils::thread::spawn(shared.cfg.thread_stack_size, move || {
+        let body = move || {
             let worker = Worker::new(Arc::clone(&thread_shared));
             let context = worker.context(name, attributes, Arc::clone(&tree));
 
             // Wrap the future with panic catching, abort support, and
             // cleanup, mirroring the wrapper [Handle::init] builds for
-            // executor tasks.
+            // executor tasks. `f` itself runs inside the catch: a panic in
+            // the closure is task failure (as on the inline path, where `f`
+            // runs in the caller's task), not worker failure.
             let panicker = thread_shared.panicker.clone();
             let wrapped = async move {
-                let result = Abortable::new(
-                    AssertUnwindSafe(f(context)).catch_unwind(),
-                    abort_registration,
-                )
-                .await;
+                let result = match catch_unwind(AssertUnwindSafe(|| f(context))) {
+                    Ok(future) => {
+                        Abortable::new(AssertUnwindSafe(future).catch_unwind(), abort_registration)
+                            .await
+                    }
+                    Err(panic) => Ok(Err(panic)),
+                };
                 match result {
                     Ok(Ok(value)) => {
                         let _ = sender.send(Ok(value));
@@ -1070,8 +1136,19 @@ impl Context {
                 metric.finish();
             };
             worker.run(wrapped, tree);
-        });
-        shared.workers.lock().push(worker);
+        };
+
+        // Register the thread while the registry is open: `start` joins every
+        // registered worker before returning, so a spawn racing final
+        // teardown from a non-worker thread must not create a thread nobody
+        // joins. When the registry is already closed, dropping `body` (and
+        // the result sender inside it) resolves the handle with
+        // [Error::Closed].
+        let mut workers = shared.workers.lock();
+        if let Some(list) = workers.as_mut() {
+            list.push(utils::thread::spawn(shared.cfg.thread_stack_size, body));
+        }
+        drop(workers);
 
         handle
     }
@@ -1529,6 +1606,127 @@ mod tests {
             assert!(start.elapsed() < Duration::from_millis(150));
 
             assert_eq!(blocking.await.unwrap(), 42);
+        });
+    }
+
+    /// A context moved to a raw thread can spawn a task back onto its origin
+    /// worker: the task cell is pinned to the worker that polls it, not to
+    /// the registering thread.
+    #[test]
+    fn test_spawn_from_foreign_thread() {
+        Runner::default().start(|context| async move {
+            let (send, recv) = oneshot::channel();
+            let spawner = context.child("foreign");
+            std::thread::spawn(move || {
+                let handle = spawner.spawn(|context| async move {
+                    context.sleep(Duration::from_millis(10)).await;
+                    42
+                });
+                let _ = send.send(handle);
+            });
+            assert_eq!(recv.await.unwrap().await.unwrap(), 42);
+        });
+    }
+
+    /// A dedicated task can spawn onto another worker through a moved
+    /// context; the spawned task runs on the context's origin worker.
+    #[test]
+    fn test_cross_worker_spawn() {
+        Runner::default().start(|context| async move {
+            let root_spawner = context.child("sibling");
+            let dedicated = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(move |_| async move {
+                    // Register onto the root worker from this worker's
+                    // thread, then await the result across threads.
+                    root_spawner.spawn(|_| async move { 7 }).await.unwrap()
+                });
+            assert_eq!(dedicated.await.unwrap(), 7);
+        });
+    }
+
+    /// A panic in the dedicated spawn closure itself (before it returns the
+    /// future) is task failure, matching the inline path: the handle
+    /// resolves with [Error::Exited] and the runtime survives.
+    #[test]
+    fn test_dedicated_closure_panic() {
+        let cfg = Config::default().with_catch_panics(true);
+        Runner::new(cfg).start(|context| async move {
+            let handle = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(|_| -> std::future::Ready<()> { panic!("closure panic") });
+            assert!(matches!(handle.await, Err(Error::Exited)));
+        });
+    }
+
+    /// Worker threads are joined even when the root task's panic unwinds
+    /// `start`: the dedicated task must have been dropped by the time
+    /// `start` returns.
+    #[test]
+    fn test_root_panic_joins_workers() {
+        struct SetOnDrop(Arc<AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = SetOnDrop(Arc::clone(&dropped));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let _handle =
+                    context
+                        .child("dedicated")
+                        .dedicated()
+                        .spawn(move |context| async move {
+                            let _guard = guard;
+                            loop {
+                                context.sleep(Duration::from_secs(1)).await;
+                            }
+                        });
+                panic!("root panic");
+            })
+        }));
+        assert!(result.is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "worker not joined before start returned"
+        );
+    }
+
+    /// A dedicated task may hold another worker's context across that
+    /// worker's teardown: the escape check must tolerate the cross-worker
+    /// race instead of panicking.
+    #[test]
+    fn test_cross_worker_context_teardown() {
+        /// Holds a root-worker context and releases it only after a delay,
+        /// keeping the root executor's weak count non-zero while the root
+        /// worker tears down.
+        struct SlowRelease(Option<Context>);
+        impl Drop for SlowRelease {
+            fn drop(&mut self) {
+                std::thread::sleep(Duration::from_millis(200));
+                self.0.take();
+            }
+        }
+
+        Runner::default().start(|context| async move {
+            let held = SlowRelease(Some(context.child("held")));
+            let _dedicated =
+                context
+                    .child("dedicated")
+                    .dedicated()
+                    .spawn(move |context| async move {
+                        let _held = held;
+                        loop {
+                            context.sleep(Duration::from_secs(1)).await;
+                        }
+                    });
+            // Return while the dedicated task still holds a root context.
+            context.sleep(Duration::from_millis(20)).await;
         });
     }
 

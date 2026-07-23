@@ -433,6 +433,15 @@ impl Waiters {
 
         match slot.state {
             WaiterState::CancelRequested => {
+                // Cancellation marked while the request sat in the staged
+                // queue: an in-flight request is never restaged (its CQE
+                // requeues it with `in_flight` already cleared), and freeing
+                // an in-flight slot below would release kernel-referenced
+                // buffers.
+                assert!(
+                    !slot.in_flight,
+                    "stage called for cancelled waiter with op in flight"
+                );
                 if slot.orphaned {
                     // Nobody can take the parked result, so free the slot.
                     let _ = self.take(index);
