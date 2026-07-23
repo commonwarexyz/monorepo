@@ -59,7 +59,7 @@ pub trait Certificates: Send + Sync + Sized + 'static {
     /// non-blocking sync path may complete the sync before returning an already-finished handle.
     ///
     /// An error reported by the returned [Handle] is fatal to the store: the caller must
-    /// stop using the returned store and recover by re-initializing.
+    /// stop using the returned store.
     fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
         async move {
             let store = self.sync().await?;
@@ -144,7 +144,7 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     /// non-blocking sync path may complete the sync before returning an already-finished handle.
     ///
     /// An error reported by the returned [Handle] is fatal to the store: the caller must
-    /// stop using the returned store and recover by re-initializing.
+    /// stop using the returned store.
     fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
         async move {
             let store = self.sync().await?;

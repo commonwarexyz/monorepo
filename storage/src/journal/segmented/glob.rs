@@ -322,7 +322,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Start syncing the given `sections` to disk.
     ///
     /// An error reported by the returned [Handle] is fatal to the glob: the caller
-    /// must stop using the returned glob and recover by re-initializing.
+    /// must stop using the returned glob.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,

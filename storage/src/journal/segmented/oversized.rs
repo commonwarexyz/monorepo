@@ -508,7 +508,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     ///
     /// The returned handle completes once both journals' syncs complete, failing with the first
     /// error encountered. An error reported by the returned [Handle] is fatal to the journal:
-    /// the caller must stop using the returned journal and recover by re-initializing.
+    /// the caller must stop using the returned journal.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,

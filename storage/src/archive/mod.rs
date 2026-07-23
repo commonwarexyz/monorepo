@@ -143,7 +143,7 @@ pub trait Archive: Send + Sized {
     /// non-blocking sync path may complete the sync before returning an already-finished handle.
     ///
     /// An error reported by the returned [Handle] is fatal to the archive: the caller must
-    /// stop using the returned archive and recover by re-initializing.
+    /// stop using the returned archive.
     fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send {
         async move {
             let archive = self.sync().await?;
