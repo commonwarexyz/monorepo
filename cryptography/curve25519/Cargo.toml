@@ -13,6 +13,27 @@ documentation = "https://docs.rs/commonware-cryptography-curve25519"
 [lints]
 workspace = true
 
+[dependencies]
+commonware-macros.workspace = true
+commonware-parallel.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+commonware-parallel = { workspace = true, features = [ "std" ] }
+commonware-utils = { workspace = true, features = [ "std" ] }
+criterion.workspace = true
+ed25519-consensus.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "batch_verify"
+harness = false
+path = "benches/batch_verify.rs"
+
 [features]
 default = [ "std" ]
-std = []
+std = [ "commonware-parallel/std" ]

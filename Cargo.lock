@@ -1529,6 +1529,16 @@ dependencies = [
 [[package]]
 name = "commonware-cryptography-curve25519"
 version = "2026.7.0"
+dependencies = [
+ "commonware-macros",
+ "commonware-parallel",
+ "commonware-utils",
+ "criterion",
+ "ed25519-consensus",
+ "rand_core 0.10.1",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "commonware-cryptography-fuzz"
