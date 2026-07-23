@@ -8,7 +8,8 @@
 //! Normal execution has three stages:
 //! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
-//! 3. Finalization: persist the sealed batch via [`ManagedDb::finalize`].
+//! 3. Finalization: apply the sealed batch and start persisting it via
+//!    [`ManagedDb::finalize`], observing durability via [`Durability`].
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -79,7 +80,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{Metrics, Spawner, reschedule};
+use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
 use commonware_storage::{
     merkle::Location,
     qmdb::sync::{compact, resolver},
@@ -100,6 +101,7 @@ use std::{
     ops::Deref,
     sync::Arc,
 };
+use tracing::debug;
 
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
@@ -277,8 +279,8 @@ pub trait Merkleized: Sized + Send + Sync {
 
 /// One database managed by the [`Stateful`](super::Stateful) wrapper.
 ///
-/// Implementations create new batches from committed state and persist finalized
-/// batches back to storage.
+/// Implementations create new batches from committed state and apply finalized
+/// batches back to storage, deferring each batch's flush to a returned handle.
 ///
 /// [`new_batch`](Self::new_batch) receives `Shared<Self>` so batch
 /// types can keep read-through access to committed state.
@@ -336,15 +338,20 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return true if a merkleized batch matches a committed sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
 
-    /// Apply a merkleized batch's changeset to the underlying database.
+    /// Apply a merkleized batch's changeset to the underlying database and
+    /// begin persisting it.
     ///
     /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)` and the database's
-    /// durable finalize step.
+    /// a `Changeset`, then `db.apply_batch(changeset)` and `db.start_sync()`.
+    /// The returned database reflects the batch immediately. The returned
+    /// handle resolves once the batch is durable, and failures of the deferred
+    /// flush surface only there, so the caller must observe every handle.
+    /// Databases without deferred persistence flush before returning and yield
+    /// a ready handle.
     fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send;
 
     /// Prune the database to a previously finalized sync target.
     ///
@@ -369,6 +376,44 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         self,
         target: Self::SyncTarget,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+}
+
+/// Deferred durability for batches applied by [`DatabaseSet::finalize`].
+///
+/// Holds one [`ManagedDb::finalize`] handle per database in the set. Deferred
+/// flush failures surface only here, so every instance must be awaited via
+/// [`durable`](Self::durable), typically on a futures pool. Every outstanding
+/// instance must also resolve before [`DatabaseSet::prune`] runs (see its
+/// contract).
+#[must_use = "deferred flush failures surface only here; await `durable`"]
+pub struct Durability {
+    syncs: Vec<(&'static str, Option<usize>, Handle<()>)>,
+}
+
+impl Durability {
+    /// Resolves `true` once every deferred flush is durable.
+    ///
+    /// A flush failure panics: the databases already advanced past the
+    /// unflushed batch, so the failure cannot be reported as recoverable.
+    /// Resolves `false` only when the runtime shut down before every flush
+    /// completed.
+    pub async fn durable(self) -> bool {
+        let mut durable = true;
+        for (db_type, index, handle) in self.syncs {
+            match handle.await {
+                Ok(()) => {}
+                Err(RuntimeError::Closed | RuntimeError::Aborted) => {
+                    debug!(db_type, "runtime shutdown before finalize flush completed");
+                    durable = false;
+                }
+                Err(err) => {
+                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                    panic!("database finalize flush failed ({index}type {db_type}): {err}");
+                }
+            }
+        }
+        durable
+    }
 }
 
 /// A collection of individually locked [`ManagedDb`] instances.
@@ -417,16 +462,27 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Return true if merkleized batches match the committed sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
-    /// Apply each merkleized batch's changeset to its underlying database.
+    /// Apply each merkleized batch's changeset to its underlying database and
+    /// begin persisting it.
+    ///
+    /// Returns once every database reflects its batch. The returned
+    /// [`Durability`] resolves once every deferred flush completes and must be
+    /// observed (see [`Durability`]).
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.
-    fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
+    fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = Durability> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
     /// This call makes changes durable and ensures they will be present on
     /// startup without replay.
+    ///
+    /// Callers must first observe every outstanding [`Durability`] from
+    /// [`finalize`](Self::finalize): pruning discards the history a restart
+    /// would need to recover unflushed state, so deferred flush failures must
+    /// surface (fatally) before it runs. Waiting outside the write lock also
+    /// keeps reads live while the flush backlog drains.
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.
@@ -606,9 +662,13 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
         T::matches_sync_target(batches, targets)
     }
 
-    async fn finalize(&self, batches: Self::Merkleized) {
+    async fn finalize(&self, batches: Self::Merkleized) -> Durability {
         let (slot, database) = self.write().await;
-        slot.put(finalize_or_panic(database, batches, None).await);
+        let (database, handle) = finalize_or_panic(database, batches, None).await;
+        slot.put(database);
+        Durability {
+            syncs: vec![(core::any::type_name::<T>(), None, handle)],
+        }
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -837,13 +897,19 @@ macro_rules! impl_database_set {
                 $($T::matches_sync_target(&batches.$idx, &targets.$idx))&&+
             }
 
-            async fn finalize(&self, batches: Self::Merkleized) {
-                join!($(
+            async fn finalize(&self, batches: Self::Merkleized) -> Durability {
+                let handles = join!($(
                     async {
                         let (slot, database) = self.$idx.write().await;
-                        slot.put(finalize_or_panic(database, batches.$idx, Some($idx)).await);
+                        let (database, handle) =
+                            finalize_or_panic(database, batches.$idx, Some($idx)).await;
+                        slot.put(database);
+                        (core::any::type_name::<$T>(), Some($idx), handle)
                     },
                 )+);
+                Durability {
+                    syncs: vec![$(handles.$idx,)+],
+                }
             }
 
             async fn prune(&self, targets: &Self::SyncTargets) {
@@ -1496,11 +1562,11 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     database: T,
     batch: T::Merkleized,
     index: Option<usize>,
-) -> T {
+) -> (T, Handle<()>) {
     // Mutable finalize failures are fatal by design because other databases in
     // the same set may already have committed, leaving partially applied state.
     match database.finalize(batch).await {
-        Ok(database) => database,
+        Ok(result) => result,
         Err(err) => {
             let index = index.map_or(String::new(), |i| format!("index {i}, "));
             panic!(
@@ -1630,14 +1696,15 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
-        DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb, StateSyncSet,
-        SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        DatabaseSet, Durability, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb,
+        StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
-        Clock, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
+        Clock, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _,
+        deterministic, reschedule,
     };
     use commonware_utils::channel::{mpsc, oneshot, ring};
     use futures::{FutureExt, SinkExt, pin_mut};
@@ -2067,8 +2134,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
@@ -2101,8 +2171,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2137,8 +2210,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         async fn prune(self, _target: &Self::SyncTarget) -> Result<Self, Self::Error> {
@@ -2244,7 +2320,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Err(TestFinalizeError)
         }
 
@@ -2328,14 +2407,17 @@ mod tests {
             true
         }
 
-        async fn finalize(mut self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        async fn finalize(
+            mut self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             if let Some(started) = self.started.take() {
                 let _ = started.send(());
             }
             if let Some(release) = self.release.take() {
                 let _ = release.await;
             }
-            Ok(self)
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
@@ -2368,8 +2450,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2408,8 +2493,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2444,8 +2532,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2480,8 +2571,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2516,8 +2610,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2552,8 +2649,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2588,8 +2688,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2624,8 +2727,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2660,8 +2766,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2700,8 +2809,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -2845,8 +2957,11 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-            Ok(self)
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
+            Ok((self, Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {
@@ -3341,7 +3456,7 @@ mod tests {
 
             let _ = release1_tx.send(());
             let _ = release2_tx.send(());
-            finalize.await;
+            assert!(finalize.await.durable().await);
         });
     }
 
@@ -3355,14 +3470,46 @@ mod tests {
                 Shared::new("test", TestDb),
                 Shared::new("test", FailingFinalizeDb),
             );
-            <(
-                Shared<TestDb>,
-                Shared<FailingFinalizeDb>,
-            ) as DatabaseSet<deterministic::Context>>::finalize(
-                &databases,
-                (TestMerkleized, TestMerkleized),
-            )
+            let _ = <(Shared<TestDb>, Shared<FailingFinalizeDb>) as DatabaseSet<
+                deterministic::Context,
+            >>::finalize(&databases, (TestMerkleized, TestMerkleized))
             .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "database finalize flush failed (index 1, type db1)")]
+    fn durability_panics_on_flush_failure() {
+        deterministic::Runner::default().start(|_context| async move {
+            let durability = Durability {
+                syncs: vec![
+                    ("db0", Some(0), Handle::ready(Ok(()))),
+                    (
+                        "db1",
+                        Some(1),
+                        Handle::ready(Err(RuntimeError::WriteFailed)),
+                    ),
+                ],
+            };
+            let _ = durability.durable().await;
+        });
+    }
+
+    #[test]
+    fn durability_reports_shutdown_as_not_durable() {
+        deterministic::Runner::default().start(|_context| async move {
+            let durability = Durability {
+                syncs: vec![
+                    ("db0", Some(0), Handle::ready(Ok(()))),
+                    ("db1", Some(1), Handle::ready(Err(RuntimeError::Closed))),
+                ],
+            };
+            assert!(!durability.durable().await);
+
+            let durability = Durability {
+                syncs: vec![("db0", None, Handle::ready(Err(RuntimeError::Aborted)))],
+            };
+            assert!(!durability.durable().await);
         });
     }
 

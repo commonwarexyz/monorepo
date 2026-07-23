@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::{Buf, BufMut, Handle};
 use std::convert::Infallible;
 
 pub(crate) type TestDatabases = Shared<TestDb>;
@@ -73,8 +73,8 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
-        Ok(self)
+    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        Ok((self, Handle::ready(Ok(()))))
     }
 
     fn sync_target(&self) -> Self::SyncTarget {

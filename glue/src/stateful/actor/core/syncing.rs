@@ -259,13 +259,26 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune) = processor
+                    let (status, prune, durability) = processor
                         .finalize(self.context.as_present(), block.as_ref())
                         .await;
+                    // The processing loop's flush pool does not exist yet, so
+                    // observe the deferred flush inline. Acknowledging and
+                    // pruning only once durable preserves the startup rewind
+                    // contract and the pre-prune durability barrier.
+                    let durable = match durability {
+                        Some(durability) => durability.durable().await,
+                        None => true,
+                    };
+                    if !durable {
+                        // Runtime shutdown before the flush completed: marshal
+                        // redelivers the block on the next startup.
+                        return;
+                    }
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }
-                    if let FinalizeStatus::Persisted { height } = status {
+                    if let FinalizeStatus::Applied { height } = status {
                         debug!(
                             height = height.get(),
                             "persisted finalized database batch during sync handoff"

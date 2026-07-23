@@ -15,7 +15,8 @@
 //!   into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   committed databases, then prune all pending entries at or below the
+//!   committed databases and start flushing them (durability is reported via
+//!   [`Durability`]), then prune all pending entries at or below the
 //!   finalized round.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
@@ -25,7 +26,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, DatabaseSet},
+    db::{Anchor, DatabaseSet, Durability},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -87,8 +88,9 @@ pub(super) enum FinalizeStatus {
     /// The finalized digest was already processed.
     Duplicate,
 
-    /// The finalized state was persisted and in-memory forks were pruned.
-    Persisted { height: Height },
+    /// The finalized state was applied, its flush was started, and
+    /// in-memory forks were pruned.
+    Applied { height: Height },
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -100,6 +102,11 @@ pub(super) struct Prune<T> {
 
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
+    ///
+    /// Callers must first observe every outstanding [`Durability`] from
+    /// [`Processor::finalize`] (see [`DatabaseSet::prune`]): marshal must not
+    /// discard blocks a restart would need to replay state that is not yet
+    /// flushed.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
@@ -694,12 +701,20 @@ where
         Ok(())
     }
 
-    /// Persist finalized state and prune dead in-memory forks.
+    /// Apply finalized state, start persisting it, and prune dead in-memory forks.
+    ///
+    /// The returned [`Durability`] resolves once the finalized batch is
+    /// flushed and must be observed (see [`Durability`]). It is absent only
+    /// for duplicate reports.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
         block: &A::Block,
-    ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
+    ) -> (
+        FinalizeStatus,
+        DeferredPrune<PendingSyncTargets<A, E>>,
+        Option<Durability>,
+    ) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -713,7 +728,7 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return (FinalizeStatus::Duplicate, None);
+            return (FinalizeStatus::Duplicate, None, None);
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
@@ -746,7 +761,7 @@ where
             }
         };
 
-        self.databases.finalize(batch).await;
+        let durability = self.databases.finalize(batch).await;
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -760,7 +775,7 @@ where
         };
         timer.observe(context);
 
-        (FinalizeStatus::Persisted { height }, prune)
+        (FinalizeStatus::Applied { height }, prune, Some(durability))
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -1096,15 +1111,9 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FinalizedObserver {
-        db_config: any::FixedConfig<TwoCap, Sequential>,
-        reopened_values: Arc<Mutex<Vec<u64>>>,
-    }
-
-    #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
-        finalized_observer: Option<FinalizedObserver>,
+        finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
     impl ExecutionApp {
@@ -1115,20 +1124,14 @@ mod tests {
             }
         }
 
-        fn with_finalized_observer(
-            db_config: any::FixedConfig<TwoCap, Sequential>,
-        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
-            let reopened_values = Arc::new(Mutex::new(Vec::new()));
-            let observer = FinalizedObserver {
-                db_config,
-                reopened_values: reopened_values.clone(),
-            };
+        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<u64>>>) {
+            let finalized_values = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     genesis: Block::genesis(),
-                    finalized_observer: Some(observer),
+                    finalized_observer: Some(finalized_values.clone()),
                 },
-                reopened_values,
+                finalized_values,
             )
         }
 
@@ -1214,23 +1217,20 @@ mod tests {
 
         async fn finalized(
             &mut self,
-            context: (deterministic::Context, Self::Context),
+            _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            _databases: &Self::Databases,
+            databases: &Self::Databases,
         ) {
             let Some(observer) = self.finalized_observer.clone() else {
                 return;
             };
-            let reopened: Qmdb<deterministic::Context> =
-                Qmdb::init(context.0.child("reopen_finalized"), observer.db_config)
-                    .await
-                    .expect("database reopen should succeed");
-            let value = reopened
+            let db = databases.read().await;
+            let value = db
                 .get(&height_key(block.height()))
                 .await
-                .expect("reopened db read should succeed")
-                .expect("finalized height should be durable");
-            observer.reopened_values.lock().push(digest_to_u64(&value));
+                .expect("database read should succeed")
+                .expect("finalized height should be reflected in the database set");
+            observer.lock().push(digest_to_u64(&value));
         }
 
         fn sync_targets(
@@ -1333,10 +1333,10 @@ mod tests {
         ) -> (Self, Arc<Mutex<Vec<u64>>>) {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            let (app, reopened_values) = ExecutionApp::with_finalized_observer(config.clone());
+            let (app, finalized_values) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
-                reopened_values,
+                finalized_values,
             )
         }
 
@@ -1485,12 +1485,18 @@ mod tests {
             false
         }
 
+        /// Finalize `block` and wait for its deferred flush, restoring the
+        /// blocking-durability semantics the assertions below rely on.
         #[boxed]
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
-            self.processor
+            let (status, _, durability) = self
+                .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await
-                .0
+                .await;
+            if let Some(durability) = durability {
+                assert!(durability.durable().await, "finalize flush must complete");
+            }
+            status
         }
 
         #[boxed]
@@ -1507,9 +1513,14 @@ mod tests {
                 >,
             >,
         ){
-            self.processor
+            let (status, prune, durability) = self
+                .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await
+                .await;
+            if let Some(durability) = durability {
+                assert!(durability.durable().await, "finalize flush must complete");
+            }
+            (status, prune)
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1741,7 +1752,7 @@ mod tests {
             let (status, prune) = harness.finalize_with_prune(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -1767,7 +1778,7 @@ mod tests {
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(2)
                 },
                 "finalization should persist winner state",
@@ -1803,7 +1814,7 @@ mod tests {
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(2)
                 },
                 "finalization should persist winner state",
@@ -1831,7 +1842,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -1871,7 +1882,7 @@ mod tests {
                 let status = harness.finalize(block.clone()).await;
                 assert_eq!(
                     status,
-                    FinalizeStatus::Persisted {
+                    FinalizeStatus::Applied {
                         height: Height::new(view),
                     }
                 );
@@ -1910,7 +1921,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -1947,7 +1958,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -2009,7 +2020,7 @@ mod tests {
             let status = harness.finalize(canonical).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1),
                 }
             );
@@ -2034,7 +2045,7 @@ mod tests {
             let status = harness.finalize(canonical).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1),
                 }
             );
@@ -2053,7 +2064,7 @@ mod tests {
             let status = harness.finalize(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -2069,7 +2080,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalized_hook_runs_for_each_durable_block() {
+    fn execution_finalized_hook_runs_for_each_applied_block() {
         deterministic::Runner::default().start(|context| async move {
             let (mut harness, finalized_values) =
                 Harness::new_with_finalized_observer(context).await;
@@ -2080,21 +2091,21 @@ mod tests {
             let status = harness.finalize(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
             let status = harness.finalize(block2).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(2)
                 }
             );
             assert_eq!(
                 finalized_values.lock().clone(),
                 vec![1, 2],
-                "finalized hook should observe every durably committed block",
+                "finalized hook should observe every applied block",
             );
         });
     }
@@ -2110,7 +2121,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -2162,7 +2173,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -2197,7 +2208,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
