@@ -1,10 +1,10 @@
-//! Tracks the journal size proven durable.
+//! Tracks the barrier below which the journal is proven durable.
 
 use crate::SyncCompletion;
 use futures::FutureExt as _;
 
-/// The highest size known to be durable.
-pub(super) struct DurableSize {
+/// The size below which every item is known durable.
+pub(super) struct Barrier {
     /// The highest size known to be durable.
     size: u64,
 
@@ -12,7 +12,7 @@ pub(super) struct DurableSize {
     pending: Option<(u64, SyncCompletion)>,
 }
 
-impl DurableSize {
+impl Barrier {
     /// Create a tracker starting at `size`.
     pub(super) const fn new(size: u64) -> Self {
         Self {

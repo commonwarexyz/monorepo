@@ -14,7 +14,7 @@
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
-    durability::DurableSize,
+    durability::Barrier,
     fixed,
     metrics::Metrics,
     position_to_blob,
@@ -412,10 +412,9 @@ struct Inner<E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 
     /// The size proven durable for both the data and offsets journals. The offsets watermark
-    /// (this journal's recovery anchor) only ever takes this joint value: a size proven for one
-    /// journal alone could exceed the other's surviving data after a crash, and init rejects a
-    /// watermark beyond surviving data as corruption.
-    durable_size: DurableSize,
+    /// only ever takes this joint value: a one-sided size could exceed the other journal's
+    /// surviving data after a crash, which init rejects as corruption.
+    barrier: Barrier,
 }
 
 /// A reader over a variable journal.
@@ -1165,7 +1164,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // The offsets watermark is this journal's recovery anchor. Init validated it against
         // both journals, so it is a proven size to start from.
-        let durable_size = DurableSize::new(offsets.recovery_watermark());
+        let barrier = Barrier::new(offsets.recovery_watermark());
         Ok(Self {
             blobs,
             offsets,
@@ -1176,7 +1175,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
-            durable_size,
+            barrier,
         })
     }
 
@@ -1240,7 +1239,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
-            durable_size: DurableSize::new(size),
+            barrier: Barrier::new(size),
         })
     }
 
@@ -1347,7 +1346,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
 
         self.bounds.end = size;
-        self.durable_size.truncate(size);
+        self.barrier.truncate(size);
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1563,7 +1562,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data_sync = self.blobs.start_sync().await;
         data_sync.await?;
         self.offsets = self.offsets.commit().await?;
-        self.durable_size.mark_durable(self.bounds.end);
+        self.barrier.mark_durable(self.bounds.end);
 
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
@@ -1592,7 +1591,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data = self.blobs.start_sync().await;
         let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
-        let size = self.durable_size.size();
+        let size = self.barrier.size();
         let (offsets_journal, watermark_handle) = offsets_journal.start_watermark_sync(size).await;
         self.offsets = offsets_journal;
 
@@ -1600,8 +1599,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             async move { try_join(data, offsets).await.map(|_| ()) }
                 .boxed()
                 .shared();
-        self.durable_size
-            .record(self.bounds.end, journal_handle.clone());
+        self.barrier.record(self.bounds.end, journal_handle.clone());
         let handle = Handle::from_future(async move {
             journal_handle.await?;
             watermark_handle.await
@@ -1626,7 +1624,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let handle = self.blobs.start_sync().await;
         handle.await?;
         self.offsets = self.offsets.sync().await?;
-        self.durable_size.mark_durable(size);
+        self.barrier.mark_durable(size);
         Ok(self)
     }
 
@@ -1656,7 +1654,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.offsets = self.offsets.clear_to_size(new_size).await?;
 
         self.bounds = new_size..new_size;
-        self.durable_size = DurableSize::new(new_size);
+        self.barrier = Barrier::new(new_size);
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,

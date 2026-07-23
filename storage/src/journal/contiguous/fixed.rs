@@ -89,7 +89,7 @@
 //! The watermark must never exceed what is durably on disk. `sync()` completes its data sync
 //! before writing the watermark, so it can advance it to the current size. `start_sync()`
 //! returns before its data sync completes, so it advances the watermark using an older proof:
-//! the journal's *durable size*, the highest size whose sync it has already observed complete.
+//! the journal's *barrier*, the highest size whose sync it has already observed complete.
 //! A durable value is safe to write at any time, so the watermark write needs no ordering
 //! against the in-flight data sync.
 //!
@@ -98,11 +98,11 @@
 //!
 //! The invariants:
 //!
-//! - The watermark only takes values the durable size has held (never an in-flight size).
-//! - The durable size advances only on an observed sync success.
-//! - Operations that move blob state backward (rewind, clear) lower the durable size and
-//!   durably lower the watermark before touching blob state, draining any in-flight watermark
-//!   write that could exceed the surviving data.
+//! - The watermark only takes values the barrier has held (never an in-flight size).
+//! - The barrier advances only on an observed sync success.
+//! - Operations that move blob state backward (rewind, clear) lower the barrier and durably
+//!   lower the watermark before touching blob state, draining any in-flight watermark write
+//!   that could exceed the surviving data.
 //!
 //! # Consistency
 //!
@@ -132,7 +132,7 @@
 use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
-    durability::DurableSize,
+    durability::Barrier,
 };
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
@@ -367,7 +367,7 @@ pub(super) struct Inner<E: Context, A> {
     metrics: Arc<Metrics<E>>,
 
     /// The known-durable size of the journal.
-    durable_size: DurableSize,
+    barrier: Barrier,
 
     _phantom: PhantomData<A>,
 }
@@ -400,7 +400,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ) -> Self {
         Self {
             blobs,
-            durable_size: DurableSize::new(
+            barrier: Barrier::new(
                 checkpoint
                     .watermark()
                     .expect("recovery watermark must exist after init"),
@@ -838,17 +838,16 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(super) async fn start_data_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
         let handle = self.blobs.start_sync().await;
         let completion: SyncCompletion = handle.boxed().shared();
-        self.durable_size
-            .record(self.bounds.end, completion.clone());
+        self.barrier.record(self.bounds.end, completion.clone());
         (self, Handle::from_future(completion))
     }
 
-    /// Begin raising the recovery watermark toward `size`, capped at the proven durable size.
+    /// Begin raising the recovery watermark toward `size`, capped at the barrier.
     pub(super) async fn start_watermark_sync(
         mut self: Box<Self>,
         size: u64,
     ) -> (Box<Self>, Handle<()>) {
-        let size = size.min(self.durable_size.size());
+        let size = size.min(self.barrier.size());
         let (checkpoint, handle) = self.checkpoint.start_watermark_sync(size).await;
         self.checkpoint = checkpoint;
         (self, handle)
@@ -858,7 +857,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn start_sync(self: Box<Self>) -> (Box<Self>, Handle<()>) {
         self.metrics.start_sync_calls.inc();
         let (mut journal, data) = self.start_data_sync().await;
-        let size = journal.durable_size.size();
+        let size = journal.barrier.size();
         let (journal, watermark) = journal.start_watermark_sync(size).await;
         let handle = Handle::from_future(async move {
             data.await?;
@@ -874,7 +873,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
-        self.durable_size.mark_durable(size);
+        self.barrier.mark_durable(size);
         Ok(self)
     }
 
@@ -885,7 +884,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
-        self.durable_size.mark_durable(size);
+        self.barrier.mark_durable(size);
         self.checkpoint = self
             .checkpoint
             .persist(self.items_per_blob.get(), self.bounds.start, size)
@@ -1061,7 +1060,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
 
         self.bounds.end = size;
-        self.durable_size.truncate(size);
+        self.barrier.truncate(size);
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1100,7 +1099,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // behind it.
         let sync = self.blobs.start_sync().await;
         sync.await?;
-        self.durable_size.mark_durable(self.bounds.end);
+        self.barrier.mark_durable(self.bounds.end);
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;
@@ -1148,7 +1147,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.bounds = new_size..new_size;
-        self.durable_size = DurableSize::new(new_size);
+        self.barrier = Barrier::new(new_size);
 
         // Complete the clear in the checkpoint.
         self.checkpoint = self
