@@ -39,10 +39,6 @@ impl Read for Data {
 }
 
 /// Prefix byte identifying a data frame on the wire.
-///
-/// Both authenticated wire protocols (discovery and lookup) assign this
-/// discriminant to their data variant; the shared router relies on it when
-/// encoding outbound messages.
 pub(crate) const DATA_PREFIX: u8 = 0;
 
 /// The maximum overhead (in bytes) when encoding a `message` into a data frame.
