@@ -1,10 +1,6 @@
 use crate::{
     Channel, Recipients,
-    authenticated::{
-        channels::Channels,
-        data::{DATA_PREFIX, EncodedData},
-        relay::Relay,
-    },
+    authenticated::{channels::Channels, data::EncodedData, relay::Relay},
     utils::limited::Connected,
 };
 use commonware_actor::{
@@ -125,7 +121,7 @@ impl<P: PublicKey> Messenger<P> {
         priority: bool,
     ) -> Unreliable<Feedback> {
         // Encode the data frame once for all recipients
-        let encoded = EncodedData::new(&self.pool, DATA_PREFIX, channel, message);
+        let encoded = EncodedData::new(&self.pool, channel, message);
 
         self.sender.0.enqueue(Message::Content {
             recipients,

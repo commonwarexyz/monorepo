@@ -338,7 +338,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{data::DATA_PREFIX, router};
+    use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -590,12 +590,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        EncodedData::new(
-                            &pool,
-                            DATA_PREFIX,
-                            0,
-                            IoBufs::from(IoBuf::from(b"first"))
-                        ),
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
                         false,
                     )
                     .accepted(),
@@ -604,12 +599,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        EncodedData::new(
-                            &pool,
-                            DATA_PREFIX,
-                            0,
-                            IoBufs::from(IoBuf::from(b"second"))
-                        ),
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
                         false,
                     )
                     .accepted(),

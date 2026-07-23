@@ -52,14 +52,14 @@ pub(crate) const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
 /// Pre-encoded data ready for transmission.
 ///
 /// Contains the channel ID (for metrics) and the pre-encoded payload bytes.
-/// The `payload` field contains the fully encoded `Payload::Data(...)` bytes,
+/// The `payload` field contains the fully encoded data frame bytes,
 /// stored as one or more buffers ready to be sent directly to the stream layer.
 #[derive(Clone, Debug)]
 pub struct EncodedData {
     /// The channel this data belongs to (used for metrics/logging).
     pub channel: Channel,
 
-    /// Pre-encoded `Payload::Data(...)` bytes ready for transmission.
+    /// Pre-encoded data frame bytes ready for transmission.
     pub payload: IoBufs,
 }
 
@@ -73,14 +73,14 @@ impl EncodedData {
         self
     }
 
-    /// Encode `Payload::Data` bytes in-place as:
-    /// `prefix || channel || message_len || message`.
-    pub fn new(pool: &BufferPool, prefix: u8, channel: Channel, mut message: IoBufs) -> Self {
+    /// Encode data frame bytes in-place as:
+    /// `DATA_PREFIX || channel || message_len || message`.
+    pub fn new(pool: &BufferPool, channel: Channel, mut message: IoBufs) -> Self {
         let payload_len = message.len();
         let header_len =
-            prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
+            DATA_PREFIX.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
         let mut header = pool.alloc(header_len);
-        prefix.write(&mut header);
+        DATA_PREFIX.write(&mut header);
         UInt(channel).write(&mut header);
         payload_len.write(&mut header);
         assert_eq!(header.len(), header_len, "data header size mismatch");
@@ -150,9 +150,9 @@ mod tests {
             };
 
             let mut expected = IoBufs::from(data.encode());
-            expected.prepend(IoBuf::from(vec![7]));
+            expected.prepend(IoBuf::from(vec![DATA_PREFIX]));
 
-            let encoded = EncodedData::new(context.network_buffer_pool(), 7, 12345, message);
+            let encoded = EncodedData::new(context.network_buffer_pool(), 12345, message);
             assert_eq!(encoded.channel, 12345);
             assert_eq!(encoded.payload.coalesce(), expected.coalesce());
         });
