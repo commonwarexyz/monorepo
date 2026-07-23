@@ -44,7 +44,7 @@
 //!
 //! # Durability model
 //!
-//! Recovery relies on the torn-write contract documented on [crate::Blob]: an interrupted write
+//! Recovery relies on the crash model documented on [crate::Blob]: a crash-interrupted write
 //! may leave any subset of its bytes applied, but every byte holds either its old or its new
 //! value, never garbage.
 //!

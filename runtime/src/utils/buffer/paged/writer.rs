@@ -2983,7 +2983,7 @@ mod tests {
 
     /// Blob wrapper that turns one write into a durable suffix-only write followed by an error.
     ///
-    /// The torn-write contract on [crate::Blob] allows any subset of a write's bytes to land.
+    /// The crash model on [crate::Blob] allows any subset of a write's bytes to land.
     /// This models the adversarial subset for a partial-page rewrite: the trailing CRC record
     /// persists while the payload bytes ahead of it do not.
     #[derive(Clone)]

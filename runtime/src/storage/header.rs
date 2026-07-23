@@ -207,7 +207,7 @@ stability_scope!(BETA {
         /// which can only have begun persisting once the full prelude did; and everything
         /// past the prefix must be zero.
         ///
-        /// The prefix shape is a model, not a filesystem guarantee: the torn-write contract on
+        /// The prefix shape is a model, not a filesystem guarantee: the crash model on
         /// [crate::Blob] allows any subset of a write's bytes to persist. A file that is not a
         /// canonical prefix (a lost byte followed by persisted ones, or a CRC that does not
         /// match its own prelude) stays loudly corrupt rather than healing, trading recovery

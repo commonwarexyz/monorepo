@@ -697,12 +697,18 @@ stability_scope!(BETA {
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
     ///
-    /// # Torn writes
+    /// # Durability
     ///
-    /// A write interrupted by a crash before it is synced may be partially applied: any subset
-    /// of its bytes may hold the new value, with the rest holding their old values. No byte
-    /// ever holds anything other than its old or new value, and bytes outside the written
-    /// range are unaffected.
+    /// While the system stays up, writes are exact: a completed write is fully visible to
+    /// subsequent reads, and a write that returns an error has applied some prefix of its
+    /// bytes and left the rest untouched.
+    ///
+    /// Durability is decided only by sync. A crash discards visibility: any subset of the
+    /// bytes written since the last completed sync may persist, within a single write and
+    /// across writes alike, with every byte holding either its old or its new value, never
+    /// anything else. Completion order does not carry across a crash: bytes from a later
+    /// write may persist while bytes from an earlier unsynced one do not. Bytes outside
+    /// written ranges are unaffected in all cases.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read `len` bytes at `offset` into caller-provided buffer(s).
