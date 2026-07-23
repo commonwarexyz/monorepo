@@ -596,6 +596,18 @@ async fn try_launch_instances(
                 }))
                 .build(),
         )
+        .tag_specifications(
+            TagSpecification::builder()
+                .resource_type(ResourceType::Volume)
+                .set_tags(Some(deployer_tags(tag, owner)))
+                .build(),
+        )
+        .tag_specifications(
+            TagSpecification::builder()
+                .resource_type(ResourceType::NetworkInterface)
+                .set_tags(Some(deployer_tags(tag, owner)))
+                .build(),
+        )
         .block_device_mappings(
             BlockDeviceMapping::builder()
                 .device_name("/dev/sda1")
