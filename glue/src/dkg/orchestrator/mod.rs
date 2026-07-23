@@ -83,6 +83,7 @@ mod tests {
         types::{EpochInfo, EpochOutcome, Payload},
     };
     use commonware_actor::Feedback;
+    use commonware_codec::RangeCfg;
     use commonware_consensus::{
         Heightable, Reporter, Reporters,
         marshal::{self, Start as MarshalStart, resolver::p2p as marshal_resolver},
@@ -419,6 +420,7 @@ mod tests {
                     partition_prefix: partition_prefix.clone(),
                     max_participants: NZU32!(16),
                     max_supported_mode: max_supported_mode(),
+                    directory_codec_config: (),
                 },
                 state_sync,
             )
@@ -1038,6 +1040,7 @@ mod tests {
                     partition_prefix: partition_prefix.clone(),
                     max_participants: NZU32!(16),
                     max_supported_mode: max_supported_mode(),
+                    directory_codec_config: RangeCfg::new(0..=16),
                 },
                 Some(StateSync {
                     info: info.clone(),

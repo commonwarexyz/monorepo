@@ -300,35 +300,86 @@ mod tests {
         let decoded =
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(NZU32!(4), crate::dkg::tests::max_supported_mode()),
+                &(
+                    NZU32!(4),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::exact(4),
+                ),
             )
             .expect("decode addressed epoch info");
         assert_eq!(decoded, info);
     }
 
     #[test]
-    fn addressed_epoch_info_accepts_outcome_independent_directory() {
-        let mut info = addressed_info(1);
-        info.directory = addresses(&keys(4));
+    fn addressed_epoch_info_roundtrips_disjoint_participant_sets() {
+        let dealers = keys(4);
+        let players = Set::from_iter_dedup(
+            (4..8).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
+        );
+        let next_players = Set::from_iter_dedup(
+            (8..12).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
+        );
+        let peers = Set::from_iter_dedup(
+            dealers
+                .iter()
+                .chain(players.iter())
+                .chain(next_players.iter())
+                .cloned(),
+        );
+        let (output, _) =
+            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, dealers)
+                .expect("trusted deal");
+        let info = EpochInfo {
+            outcome: EpochOutcome::Success,
+            epoch: Epoch::new(2),
+            output,
+            players,
+            next_players,
+            directory: addresses(&peers),
+        };
+
         let decoded =
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
+                &(
+                    NZU32!(4),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::exact(12),
+                ),
             )
-            .expect("decode directory covering both possible dealer sets");
+            .expect("decode addressed epoch info");
         assert_eq!(decoded, info);
     }
 
     #[test]
-    fn addressed_epoch_info_rejects_oversized_directory() {
-        // The outcome-independent directory is bounded by four participant
-        // sets, so a fifth entry exceeds max_participants = 1.
+    fn addressed_epoch_info_rejects_extra_directory_peer() {
         let mut info = addressed_info(1);
-        info.directory = addresses(&keys(5));
+        info.directory = addresses(&keys(2));
         assert!(
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
+                &(
+                    NZU32!(1),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::new(0..=2),
+                ),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn addressed_epoch_info_rejects_missing_directory_peer() {
+        let mut info = addressed_info(1);
+        info.directory = addresses(&keys(0));
+        assert!(
+            EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
+                info.encode(),
+                &(
+                    NZU32!(1),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::new(0..=1),
+                ),
             )
             .is_err()
         );
@@ -454,8 +505,8 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = ()> {
     pub players: Set<P>,
     /// Players of the next epoch, tracked early for connectivity.
     pub next_players: Set<P>,
-    /// Transport directory covering this epoch's dealers, players, and next
-    /// players.
+    /// Transport directory containing exactly this epoch's dealers, players,
+    /// and next players.
     pub directory: D,
 }
 
@@ -493,26 +544,47 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for EpochInfo<V, P, D
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
-    /// Maximum number of participants and maximum supported sharing mode version.
-    type Cfg = (NonZeroU32, ModeVersion);
+    /// Maximum entries accepted in each participant set, maximum supported
+    /// sharing mode version, and directory codec configuration.
+    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
 
     fn read_cfg(
         buf: &mut impl Buf,
-        (max_participants, max_supported_mode): &Self::Cfg,
+        (max_participants, max_supported_mode, directory_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
+        let outcome = EpochOutcome::read(buf)?;
+        let epoch = Epoch::read(buf)?;
+        let output = Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
+        let players = Set::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=max_participants.get() as usize), ()),
+        )?;
+        let next_players = Set::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=max_participants.get() as usize), ()),
+        )?;
+        let peers = Set::from_iter_dedup(
+            output
+                .players()
+                .iter()
+                .chain(players.iter())
+                .chain(next_players.iter())
+                .cloned(),
+        );
+        let directory = D::read_cfg(buf, directory_cfg)?;
+        if !directory.matches(&peers) {
+            return Err(CodecError::Invalid(
+                "EpochInfo",
+                "directory does not match participants",
+            ));
+        }
         Ok(Self {
-            outcome: EpochOutcome::read(buf)?,
-            epoch: Epoch::read(buf)?,
-            output: Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
-            players: Set::read_cfg(
-                buf,
-                &(RangeCfg::new(0..=max_participants.get() as usize), ()),
-            )?,
-            next_players: Set::read_cfg(
-                buf,
-                &(RangeCfg::new(0..=max_participants.get() as usize), ()),
-            )?,
-            directory: D::read(buf, max_participants.get())?,
+            outcome,
+            epoch,
+            output,
+            players,
+            next_players,
+            directory,
         })
     }
 }
@@ -596,8 +668,9 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V
 }
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
-    /// Maximum number of participants and maximum supported sharing mode version.
-    type Cfg = (NonZeroU32, ModeVersion);
+    /// Maximum entries accepted in each participant set, maximum supported
+    /// sharing mode version, and directory codec configuration.
+    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {

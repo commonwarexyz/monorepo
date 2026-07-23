@@ -42,27 +42,19 @@ use thiserror::Error;
 /// state-sync entry activate peers from the artifact alone, before any
 /// application state exists.
 ///
-/// A directory MUST cover every peer of its epoch (dealers, players, and next
-/// players). Extra entries are allowed and ignored.
+/// A directory MUST contain exactly the peers of its epoch (dealers, players,
+/// and next players).
 pub trait Directory<P: PublicKey>:
-    Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Write + EncodeSize
+    Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Read + Write + EncodeSize
 {
-    /// Decodes a directory, bounding pre-allocation by `max_participants` per
-    /// participant role.
-    fn read(buf: &mut impl Buf, max_participants: u32) -> Result<Self, CodecError>;
-
-    /// Returns a peer from `peers` without reachability data, if any.
-    fn missing(&self, peers: &Set<P>) -> Option<P>;
+    /// Returns whether the directory contains exactly `peers`.
+    fn matches(&self, peers: &Set<P>) -> bool;
 }
 
 /// Key-only directory for transports that dial by public key alone.
 impl<P: PublicKey> Directory<P> for () {
-    fn read(_: &mut impl Buf, _: u32) -> Result<Self, CodecError> {
-        Ok(())
-    }
-
-    fn missing(&self, _: &Set<P>) -> Option<P> {
-        None
+    fn matches(&self, _: &Set<P>) -> bool {
+        true
     }
 }
 
@@ -106,19 +98,18 @@ impl<P: PublicKey> EncodeSize for Addresses<P> {
     }
 }
 
-impl<P: PublicKey> Directory<P> for Addresses<P> {
-    fn read(buf: &mut impl Buf, max_participants: u32) -> Result<Self, CodecError> {
-        // Artifact construction requests an outcome-independent superset of
-        // the three participant roles, including both possible dealer sets.
-        let max = (max_participants as usize).saturating_mul(4);
-        Ok(Self(Map::read_cfg(buf, &(RangeCfg::new(0..=max), (), ()))?))
-    }
+impl<P: PublicKey> Read for Addresses<P> {
+    type Cfg = RangeCfg<usize>;
 
-    fn missing(&self, peers: &Set<P>) -> Option<P> {
-        peers
-            .iter()
-            .find(|peer| self.0.get_value(peer).is_none())
-            .cloned()
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self(Map::read_cfg(buf, &(*cfg, (), ()))?))
+    }
+}
+
+impl<P: PublicKey> Directory<P> for Addresses<P> {
+    fn matches(&self, peers: &Set<P>) -> bool {
+        self.0.len() == peers.len()
+            && peers.iter().all(|peer| self.0.get_value(peer).is_some())
     }
 }
 
@@ -373,28 +364,28 @@ mod tests {
     }
 
     #[test]
-    fn key_only_directory_never_misses() {
+    fn key_only_directory_matches_any_peer_set() {
         let (peers, _) = peers();
-        assert_eq!(Directory::missing(&(), &peers.union()), None);
+        assert!(Directory::matches(&(), &peers.union()));
     }
 
     #[test]
-    fn addresses_reports_missing_peer() {
+    fn addresses_requires_exact_peer_set() {
         let (peers, keys) = peers();
         let directory =
             Addresses::from_iter([(keys[0].clone(), address(1)), (keys[1].clone(), address(2))]);
-        assert_eq!(directory.missing(&peers.primary), None);
-        assert_eq!(directory.missing(&peers.union()), Some(keys[2].clone()));
+        assert!(directory.matches(&peers.primary));
+        assert!(!directory.matches(&peers.union()));
+        assert!(!directory.matches(&Set::from_iter_dedup([keys[0].clone()])));
     }
 
     #[test]
-    fn addressable_mapping_preserves_roles_and_ignores_extras() {
+    fn addressable_mapping_preserves_roles() {
         let (peers, keys) = peers();
         let directory = Addresses::from_iter([
             (keys[0].clone(), address(1)),
             (keys[1].clone(), address(2)),
             (keys[2].clone(), address(3)),
-            (keys[3].clone(), address(4)),
         ]);
         let inner = TestManager::new(Feedback::Ok);
         let tracked = inner.addressable.clone();

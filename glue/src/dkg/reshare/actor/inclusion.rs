@@ -59,13 +59,12 @@ struct CachedArtifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     artifact: Option<Artifact<V, C, D>>,
 }
 
-// Provider-supplied values for the next epoch's artifact. The provider
-// contract requires both to remain stable for the epoch, so one lookup is
-// reused across competing final block proposals and verification attempts.
+// Provider-supplied participants for the next epoch's artifact. The provider
+// contract requires this value to remain stable for the epoch, so one lookup
+// is reused across competing final block proposals and verification attempts.
 #[derive(Clone)]
-struct Lookahead<P: PublicKey, D: Directory<P>> {
+struct Lookahead<P: PublicKey> {
     next_players: Set<P>,
-    directory: D,
 }
 
 struct PendingLogScan<'a, V: BlsVariant, P> {
@@ -105,12 +104,6 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
     }
     .validate_epoch_capacity::<V>(blocks_per_epoch, None)
     .expect("participants provider returned set exceeding epoch dealer-log capacity");
-}
-
-fn validate_directory<P: PublicKey, D: Directory<P>>(directory: &D, requested: &Set<P>) {
-    if let Some(peer) = directory.missing(requested) {
-        panic!("participants provider returned directory missing peer {peer:?}");
-    }
 }
 
 /// The final block is special because proposal and verification may run ahead
@@ -490,7 +483,7 @@ where
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         pending_logs: Option<&PendingLogs<V, C::PublicKey>>,
-        lookahead: &mut Option<Lookahead<C::PublicKey, B::Directory>>,
+        lookahead: &mut Option<Lookahead<C::PublicKey>>,
         artifact_cache: &mut Option<CachedArtifact<V, C, B::Directory>>,
     ) -> Option<Artifact<V, C, B::Directory>> {
         let current = store.current();
@@ -559,11 +552,11 @@ where
             }
         };
 
-        let future = if let Some(current) = &current {
+        let future = if current.is_some() {
             match lookahead {
                 Some(future) => future.clone(),
                 None => {
-                    // The provider contract requires these values to remain
+                    // The provider contract requires this value to remain
                     // stable for the epoch, so reuse one lookup across
                     // competing final block proposals and verification
                     // attempts.
@@ -576,48 +569,42 @@ where
                         self.max_participants,
                         self.blocks_per_epoch,
                     );
-                    // The next epoch's dealers depend on the ceremony outcome
-                    // (this epoch's players on success, its dealers on
-                    // failure), so request reachability for the superset to
-                    // keep the lookup outcome-independent.
-                    let requested = Set::from_iter_dedup(
-                        current
-                            .output
-                            .players()
-                            .iter()
-                            .chain(current.players.iter())
-                            .chain(current.next_players.iter())
-                            .chain(next_players.iter())
-                            .cloned(),
-                    );
-                    let directory = self
-                        .participants_provider
-                        .directory(epoch.next(), requested.clone())
-                        .await;
-                    validate_directory(&directory, &requested);
-                    let future = Lookahead {
-                        next_players,
-                        directory,
-                    };
+                    let future = Lookahead { next_players };
                     *lookahead = Some(future.clone());
                     future
                 }
             }
         } else {
             // DKG mode: the one-shot artifact names no next committee and
-            // reuses the ceremony's configured directory.
+            // uses the ceremony's configured directory.
             Lookahead {
                 next_players: Set::default(),
-                directory: self
-                    .dkg_directory()
-                    .expect("current epoch or DKG mode must provide directory"),
             }
         };
 
+        // The next epoch's dealers depend on the ceremony outcome (this
+        // epoch's players on success, its dealers on failure), so request the
+        // exact directory only after the outcome is known.
         let artifact = match outcome {
             Some((output, share)) => match current {
                 Some(current) => {
                     let next_epoch = epoch.next();
+                    let requested = Set::from_iter_dedup(
+                        output
+                            .players()
+                            .iter()
+                            .chain(current.next_players.iter())
+                            .chain(future.next_players.iter())
+                            .cloned(),
+                    );
+                    let directory = self
+                        .participants_provider
+                        .directory(next_epoch, requested.clone())
+                        .await;
+                    assert!(
+                        directory.matches(&requested),
+                        "participants provider returned directory that does not exactly match requested peers"
+                    );
                     Some(Artifact {
                         info: EpochInfo {
                             outcome: EpochOutcome::Success,
@@ -625,7 +612,7 @@ where
                             output,
                             players: current.next_players,
                             next_players: future.next_players,
-                            directory: future.directory,
+                            directory,
                         },
                         share,
                     })
@@ -635,6 +622,21 @@ where
                     // There is no next committee to prefetch because this
                     // one-shot chain terminates after epoch zero.
                     let share = share.expect("DKG participant must receive a share");
+                    let requested = Set::from_iter_dedup(
+                        output
+                            .players()
+                            .iter()
+                            .chain(players.iter())
+                            .chain(future.next_players.iter())
+                            .cloned(),
+                    );
+                    let directory = self
+                        .dkg_directory()
+                        .expect("DKG mode must provide directory");
+                    assert!(
+                        directory.matches(&requested),
+                        "configured DKG directory does not exactly match participants"
+                    );
                     Some(Artifact {
                         info: EpochInfo {
                             outcome: EpochOutcome::Success,
@@ -642,7 +644,7 @@ where
                             output,
                             players,
                             next_players: future.next_players,
-                            directory: future.directory,
+                            directory,
                         },
                         share: Some(share),
                     })
@@ -661,6 +663,23 @@ where
                 } else {
                     None
                 };
+                let requested = Set::from_iter_dedup(
+                    current
+                        .output
+                        .players()
+                        .iter()
+                        .chain(current.next_players.iter())
+                        .chain(future.next_players.iter())
+                        .cloned(),
+                );
+                let directory = self
+                    .participants_provider
+                    .directory(epoch.next(), requested.clone())
+                    .await;
+                assert!(
+                    directory.matches(&requested),
+                    "participants provider returned directory that does not exactly match requested peers"
+                );
                 Some(Artifact {
                     info: EpochInfo {
                         outcome: EpochOutcome::Failure,
@@ -668,7 +687,7 @@ where
                         output: current.output,
                         players: current.next_players,
                         next_players: future.next_players,
-                        directory: future.directory,
+                        directory,
                     },
                     share,
                 })
@@ -833,33 +852,6 @@ mod tests {
         // Four participants need a three-log dealer quorum, but a four-block
         // epoch only has one inclusion slot.
         validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(4));
-    }
-
-    #[test]
-    fn directory_accepts_full_coverage() {
-        use crate::dkg::network::Addresses;
-        use commonware_p2p::Address;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-        let directory = players()
-            .into_iter()
-            .enumerate()
-            .map(|(index, peer)| {
-                let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), index as u16 + 1);
-                (peer, Address::Symmetric(socket))
-            })
-            .collect::<Addresses<_>>();
-        validate_directory(&directory, &players());
-        validate_directory(&(), &players());
-    }
-
-    #[test]
-    #[should_panic(expected = "participants provider returned directory missing peer")]
-    fn directory_rejects_missing_peer() {
-        use crate::dkg::network::Addresses;
-
-        let directory = Addresses::from_iter([]);
-        validate_directory(&directory, &players());
     }
 
     #[test]

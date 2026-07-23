@@ -155,7 +155,7 @@ impl Read for Block {
             range: NonEmptyRange::read(buf)?,
             payload: Option::<Payload<MinPk, ed25519::PrivateKey>>::read_cfg(
                 buf,
-                &(MAX_PARTICIPANTS, max_supported_mode()),
+                &(MAX_PARTICIPANTS, max_supported_mode(), ()),
             )?,
         })
     }
@@ -903,6 +903,7 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
+                directory_codec_config: (),
             },
             state_sync,
         )

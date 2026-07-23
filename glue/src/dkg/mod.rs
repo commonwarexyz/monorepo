@@ -274,8 +274,8 @@ pub trait SecretStore: Send + Sync + 'static {
 /// instead of this provider.
 ///
 /// [`participants`](Self::participants) and [`directory`](Self::directory)
-/// must be deterministic at a given epoch across all honest nodes (see their
-/// documentation for the exact contracts).
+/// must be deterministic for the same inputs across all honest nodes (see
+/// their documentation for the exact contracts).
 pub trait ParticipantsProvider: Send + Sync + 'static {
     type PublicKey: PublicKey;
 
@@ -311,17 +311,18 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// Returns the transport directory embedded in the [`types::EpochInfo`]
     /// for `epoch`.
     ///
-    /// `peers` is the union of the epoch's dealers, players, and next players
-    /// (plus the previous committee, so the result is independent of the
-    /// ceremony outcome). The returned directory MUST cover every requested
-    /// peer; entries for unrequested peers are allowed and ignored.
+    /// `peers` is the union of the epoch's dealers, players, and next players.
+    /// It may contain up to three times the actor's configured
+    /// `max_participants` entries when those sets are disjoint. The returned
+    /// directory MUST contain exactly these peers. Missing or unrequested
+    /// entries are treated as a deterministic provider contract failure.
     ///
     /// This is consulted while building or verifying the final block of
     /// `epoch - 1`, under the same determinism and lock-in contract as
-    /// [`participants`](Self::participants): for a given `epoch`, every honest
-    /// node MUST return an identical value, and repeated calls MUST return the
-    /// same value. An update submitted during an epoch takes effect in a later
-    /// epoch's directory, never retroactively.
+    /// [`participants`](Self::participants): for a given `epoch` and `peers`,
+    /// every honest node MUST return an identical value, and repeated calls
+    /// MUST return the same value. An update submitted during an epoch takes
+    /// effect in a later epoch's directory, never retroactively.
     fn directory(
         &mut self,
         epoch: Epoch,

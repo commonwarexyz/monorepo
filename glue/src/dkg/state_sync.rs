@@ -30,11 +30,11 @@ use std::{fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
 const STATE_SYNC_SUFFIX: &str = "_dkg_state_sync";
-type EpochInfoCodecConfig = (NonZeroU32, ModeVersion);
+type EpochInfoCodecConfig<Dir> = (NonZeroU32, ModeVersion, <Dir as Read>::Cfg);
 
 /// Storage settings for a DKG state-sync recovery plan.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct Config<C = ()> {
     /// Stable node-wide partition prefix.
     pub partition_prefix: String,
 
@@ -43,6 +43,13 @@ pub struct Config {
 
     /// Maximum sharing mode version accepted in persisted epoch information.
     pub max_supported_mode: ModeVersion,
+
+    /// Codec configuration for persisted transport directories.
+    ///
+    /// Collection limits MUST accommodate the union of dealers, players, and
+    /// next players, which may contain up to three times
+    /// [`Self::max_participants`] distinct entries.
+    pub directory_codec_config: C,
 }
 
 /// Public material needed to start DKG actors in a state-synced epoch.
@@ -154,7 +161,7 @@ where
     V: Variant,
     Dir: Directory<S::PublicKey>,
 {
-    type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
+    type Cfg = (EpochInfoCodecConfig<Dir>, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(
         reader: &mut impl Buf,
@@ -214,7 +221,7 @@ where
     Pending {
         candidate: Option<StateSync<S, D, V, Dir>>,
         partition: String,
-        codec_config: EpochInfoCodecConfig,
+        codec_config: EpochInfoCodecConfig<Dir>,
     },
     Resolved(Option<StateSync<S, D, V, Dir>>),
 }
@@ -280,16 +287,20 @@ where
     /// persisted material has mismatched artifact and floor epochs.
     pub async fn init<E: Context>(
         context: E,
-        config: Config,
+        config: Config<Dir::Cfg>,
         provided: Option<StateSync<S, D, V, Dir>>,
     ) -> Self {
         if let Some(provided) = &provided {
             assert_epoch(provided);
         }
         let partition = format!("{}{STATE_SYNC_SUFFIX}", config.partition_prefix);
-        let codec_config = (config.max_participants, config.max_supported_mode);
+        let codec_config = (
+            config.max_participants,
+            config.max_supported_mode,
+            config.directory_codec_config,
+        );
         let mut store =
-            open_store::<E, S, D, V, Dir>(context, partition.clone(), codec_config).await;
+            open_store::<E, S, D, V, Dir>(context, partition.clone(), codec_config.clone()).await;
         if let Some(provided) = provided {
             store.put(STATE_SYNC_KEY, provided);
             store = store
@@ -331,7 +342,7 @@ where
                 candidate,
                 partition,
                 codec_config,
-            } => (candidate.clone(), partition.clone(), *codec_config),
+            } => (candidate.clone(), partition.clone(), codec_config.clone()),
         };
 
         let Some(candidate) = candidate else {
@@ -357,7 +368,7 @@ where
 async fn open_store<E, S, D, V, Dir>(
     context: E,
     partition: String,
-    epoch_info_codec_config: EpochInfoCodecConfig,
+    epoch_info_codec_config: EpochInfoCodecConfig<Dir>,
 ) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V, Dir>>
 where
     E: Context,
@@ -452,6 +463,7 @@ mod tests {
             partition_prefix: partition.into(),
             max_participants: NZU32!(16),
             max_supported_mode: crate::dkg::tests::max_supported_mode(),
+            directory_codec_config: (),
         }
     }
 
