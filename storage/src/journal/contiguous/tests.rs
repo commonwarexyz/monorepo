@@ -1432,7 +1432,7 @@ async fn test_start_sync_overlaps_work<F, Fut, J>(
     waiter.await.unwrap();
     assert!(pending.completions() >= 1);
 
-    // Mid-sync append is durable after the next commit.
+    // Mid-sync append is durable after the next sync.
     let handle;
     (journal, handle) = journal.start_sync().await.unwrap();
     handle.await.unwrap();
@@ -1506,8 +1506,8 @@ async fn test_start_sync_overlaps_predecessor_and_tail<F, Fut, J>(
     journal.destroy().await.unwrap();
 }
 
-/// A sync begun by `start_sync` that fails in flight surfaces the error through both the returned handle and the
-/// next durability operation.
+/// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+/// returned handle and the next durability operation.
 #[boxed]
 async fn test_start_sync_failure_propagates<F, Fut, J>(
     context: deterministic::Context,

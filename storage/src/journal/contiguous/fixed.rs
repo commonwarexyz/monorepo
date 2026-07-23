@@ -101,9 +101,9 @@
 //!
 //! - The watermark only takes values the barrier has held (never an in-flight size).
 //! - The barrier advances only on an observed sync success.
-//! - Operations that move blob state backward (rewind, clear) lower the barrier and durably
-//!   lower the watermark before touching blob state, draining any in-flight watermark write
-//!   that could exceed the surviving data.
+//! - Operations that move blob state backward (rewind, clear) durably lower the watermark
+//!   before touching blob state (draining any in-flight watermark write that could exceed
+//!   the surviving data), then lower the barrier.
 //!
 //! # Consistency
 //!
@@ -1093,8 +1093,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this barrier could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The barrier also covers unsynced
+        // durable, so pruning without this sync could leave a recovered journal whose
+        // surviving items no longer justify its boundary. The sync also covers unsynced
         // survivors above the boundary: removal may be interrupted, and recovery truncates at
         // the first torn item, so an unsynced survivor could discard every synced blob
         // behind it.
@@ -2090,7 +2090,7 @@ mod tests {
     /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
-    fn test_fixed_dropped_failed_commit_surfaces_after_rollover() {
+    fn test_fixed_dropped_failed_start_sync_surfaces_after_rollover() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));

@@ -293,7 +293,7 @@ pub(crate) mod test {
             pending.unblock();
             waiter.await.unwrap();
 
-            // The mid-sync batch is durable after the next commit.
+            // The mid-sync batch is durable after the next sync.
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
@@ -311,8 +311,8 @@ pub(crate) mod test {
         });
     }
 
-    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the returned handle
-    /// and the next durability operation.
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
     #[test_traced]
     fn test_start_sync_failure_propagates() {
         let executor = deterministic::Runner::default();

@@ -1550,8 +1550,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this barrier could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The barrier also covers unsynced
+        // durable, so pruning without this sync could leave a recovered journal whose
+        // surviving items no longer justify its boundary. The sync also covers unsynced
         // survivors above the boundary: removal may be interrupted, and recovery truncates at
         // the first torn item, so an unsynced survivor could discard every synced blob behind
         // it. Offsets entries for retained items must survive the same crash: recovery rebuilds
@@ -1596,13 +1596,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             offsets_journal.start_watermark_sync(size).await?;
         self.offsets = offsets_journal;
 
-        let journal_handle: SyncCompletion =
+        let journal_completion: SyncCompletion =
             async move { try_join(data, offsets).await.map(|_| ()) }
                 .boxed()
                 .shared();
-        self.barrier.record(self.bounds.end, journal_handle.clone());
+        self.barrier
+            .record(self.bounds.end, journal_completion.clone());
         let handle = Handle::from_future(async move {
-            journal_handle.await?;
+            journal_completion.await?;
             watermark_handle.await
         });
         Ok((self, handle))
@@ -2817,7 +2818,7 @@ mod tests {
     /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
-    fn test_variable_dropped_failed_commit_surfaces_after_rollover() {
+    fn test_variable_dropped_failed_start_sync_surfaces_after_rollover() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {

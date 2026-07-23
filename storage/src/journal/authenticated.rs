@@ -378,6 +378,8 @@ where
     /// Begin durably persisting the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// Also tries to advance the recovery watermarks to bound startup recovery. Use
+    /// [Self::sync] to guarantee no recovery is needed.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let (journal_handle, merkle_handle);
         ((self.journal, journal_handle), (self.merkle, merkle_handle)) = try_join!(
@@ -2187,7 +2189,7 @@ mod tests {
             pending.unblock();
             waiter.await.unwrap();
 
-            // The mid-sync append is durable after the next commit.
+            // The mid-sync append is durable after the next sync.
             (journal, _) = journal
                 .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
                 .await
@@ -2206,8 +2208,8 @@ mod tests {
         });
     }
 
-    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the returned handle
-    /// and the next durability operation.
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
     #[test_traced("INFO")]
     fn test_start_sync_failure_propagates() {
         let executor = deterministic::Runner::default();
