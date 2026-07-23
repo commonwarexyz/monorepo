@@ -853,7 +853,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn start_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
         self.metrics.start_sync_calls.inc();
         let data = self.start_data_sync().await;
-        let (journal, watermark) = self.start_watermark_sync(u64::MAX).await;
+        let size = self.durable_size.size();
+        let (journal, watermark) = self.start_watermark_sync(size).await;
         let handle = Handle::from_future(async move {
             data.await?;
             watermark.await

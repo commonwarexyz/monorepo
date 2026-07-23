@@ -77,7 +77,7 @@ struct State<B: Blob, K: Span> {
 enum Pending {
     /// The sync's shared completion, in flight or not yet observed.
     Sync(SyncCompletion),
-    /// The sync's writes failed, leaving the target blob's on-disk state unknown.
+    /// The sync failed, leaving the target blob's on-disk state unknown.
     Failed(RError),
 }
 
@@ -336,9 +336,16 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             Some(Pending::Sync(completion)) => completion.clone(),
             Some(Pending::Failed(err)) => return Err(err.clone()),
         };
-        completion.await?;
-        self.state.pending = None;
-        Ok(())
+        match completion.await {
+            Ok(()) => {
+                self.state.pending = None;
+                Ok(())
+            }
+            Err(err) => {
+                self.state.pending = Some(Pending::Failed(err.clone()));
+                Err(err)
+            }
+        }
     }
 
     /// See [Metadata::sync].
