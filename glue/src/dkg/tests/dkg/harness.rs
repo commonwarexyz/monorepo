@@ -488,6 +488,7 @@ pub(super) fn run_activation_failure_completes_empty() {
             },
         };
         assert!(completion.info.is_none());
+        context.sleep(Duration::from_millis(10)).await;
         handle.abort();
     });
 }

@@ -943,7 +943,7 @@ mod tests {
                 directory: directory.clone(),
             };
 
-            let genesis_digest = Sha256::hash(b"");
+            let genesis_digest = Sha256::hash(&[b""]);
             let genesis: AddressedBlock = mocks::MockBlock::new::<Sha256>(
                 mocks::TestContext {
                     round: Round::new(Epoch::zero(), View::zero()),
@@ -1019,7 +1019,7 @@ mod tests {
                     start: MarshalStart::Genesis(genesis),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
-                    view_retention_timeout: ViewDelta::new(8),
+                    view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
                     page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),

@@ -82,6 +82,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
             max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
             participants: participants.get(Epoch::zero()),
+            directory: (),
             blocks_per_epoch: BLOCKS_PER_EPOCH,
         },
     );
@@ -211,6 +212,7 @@ mod tests {
             next_players: Set::from_iter_dedup(
                 network.participants.iter().skip(1).take(2).cloned(),
             ),
+            directory: (),
         };
 
         let written =

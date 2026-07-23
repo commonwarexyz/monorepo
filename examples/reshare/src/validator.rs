@@ -175,6 +175,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         bootstrap: probe::Bootstrap {
             epoch: Epoch::zero(),
             participants: genesis_info.participants(),
+            directory: (),
         },
         verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
         genesis: genesis_info.clone(),

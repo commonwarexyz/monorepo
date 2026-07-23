@@ -140,6 +140,7 @@ fn trusted_bootstrap(network: &NetworkConfig) -> anyhow::Result<TrustedBootstrap
         output,
         players,
         next_players: participants.get(Epoch::new(1)),
+        directory: (),
     };
     Ok((genesis, shares))
 }

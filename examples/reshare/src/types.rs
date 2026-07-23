@@ -204,6 +204,7 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MinSig;
     type Signer = ed25519::PrivateKey;
+    type Directory = ();
 
     fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
         self.payload.clone()
@@ -303,10 +304,13 @@ impl Participants {
 
 impl ParticipantsProvider for Participants {
     type PublicKey = ed25519::PublicKey;
+    type Directory = ();
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         self.get(epoch)
     }
+
+    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {}
 }
 
 /// Reporter that logs every finalized block.
@@ -628,6 +632,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: (),
         };
 
         write_genesis(&path, &info).unwrap();
@@ -657,6 +662,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: (),
         };
 
         write_genesis(&path, &info).unwrap();

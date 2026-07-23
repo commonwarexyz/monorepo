@@ -6,8 +6,7 @@ use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use harness::{
     DkgEngine, good_link, run_activation_failure_completes_empty, run_closed_network_receiver,
-    run_plan,
-    run_restart_completion_state_is_fresh,
+    run_plan, run_restart_completion_state_is_fresh,
 };
 use properties::ExpectedOutcome;
 use std::time::Duration;
