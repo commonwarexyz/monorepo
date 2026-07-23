@@ -830,12 +830,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Begin durably persisting the data blobs.
-    pub(super) async fn start_data_sync(&mut self) -> Handle<()> {
+    pub(super) async fn start_data_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
         let handle = self.blobs.start_sync().await;
         let completion: SyncCompletion = handle.boxed().shared();
         self.durable_size
             .record(self.bounds.end, completion.clone());
-        Handle::from_future(completion)
+        (self, Handle::from_future(completion))
     }
 
     /// Begin raising the recovery watermark toward `size`, capped at the proven durable size.
@@ -850,11 +850,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::start_sync].
-    pub(crate) async fn start_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
+    pub(crate) async fn start_sync(self: Box<Self>) -> (Box<Self>, Handle<()>) {
         self.metrics.start_sync_calls.inc();
-        let data = self.start_data_sync().await;
-        let size = self.durable_size.size();
-        let (journal, watermark) = self.start_watermark_sync(size).await;
+        let (mut journal, data) = self.start_data_sync().await;
+        let size = journal.durable_size.size();
+        let (journal, watermark) = journal.start_watermark_sync(size).await;
         let handle = Handle::from_future(async move {
             data.await?;
             watermark.await
@@ -863,14 +863,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::commit].
-    pub(crate) async fn commit(&mut self) -> Result<(), Error> {
+    pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
         self.durable_size.mark_durable(size);
-        Ok(())
+        Ok(self)
     }
 
     /// See [Journal::sync].
@@ -1072,7 +1072,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::prune].
-    pub(crate) async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
+    pub(crate) async fn prune(
+        mut self: Box<Self>,
+        min_item_pos: u64,
+    ) -> Result<(Box<Self>, bool), Error> {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
@@ -1080,7 +1083,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
         if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok(false);
+            return Ok((self, false));
         }
 
         // Make all data durable before removing any: the prune target may be justified by an
@@ -1104,7 +1107,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.items_per_blob.get(),
         );
 
-        Ok(true)
+        Ok((self, true))
     }
 
     /// See [Journal::destroy].
@@ -1235,7 +1238,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// `sync()` to advance the watermark and to ensure that a crash after this call doesn't
     /// require any recovery.
     pub async fn commit(mut self) -> Result<Self, Error> {
-        self.0.commit().await?;
+        self.0 = self.0.commit().await?;
         Ok(self)
     }
 
@@ -1354,7 +1357,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(mut self, min_item_pos: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min_item_pos).await?;
+        let (inner, pruned) = self.0.prune(min_item_pos).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 

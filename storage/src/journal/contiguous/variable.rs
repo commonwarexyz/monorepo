@@ -1261,7 +1261,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
 
         // Initialize contiguous journal
-        let mut journal = Box::new(Self::init(context.child("journal"), cfg.clone()).await?);
+        let journal = Box::new(Self::init(context.child("journal"), cfg.clone()).await?);
 
         let size = journal.size();
 
@@ -1306,7 +1306,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 oldest_pos = bounds.start,
                 range.start, "pruning journal to sync range start"
             );
-            journal.prune(range.start).await?;
+            let (journal, _) = journal.prune(range.start).await?;
+            return Ok(journal);
         }
 
         Ok(journal)
@@ -1530,7 +1531,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::prune].
-    pub(crate) async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+    pub(crate) async fn prune(
+        mut self: Box<Self>,
+        min_position: u64,
+    ) -> Result<(Box<Self>, bool), Error> {
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
@@ -1540,7 +1544,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let min_blob = target_blob.min(tail_blob);
 
         if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok(false);
+            return Ok((self, false));
         }
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
@@ -1558,7 +1562,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // other durability path maintains.
         let data_sync = self.blobs.start_sync().await;
         data_sync.await?;
-        self.offsets.commit().await?;
+        self.offsets = self.offsets.commit().await?;
         self.durable_size.mark_durable(self.bounds.end);
 
         self.blobs.prune(min_blob).await?;
@@ -1571,24 +1575,25 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Prune data before offsets so a crash leaves offsets behind, which init repairs by
         // pruning offsets to match.
-        self.offsets.prune(new_boundary).await?;
+        let (offsets, _) = self.offsets.prune(new_boundary).await?;
+        self.offsets = offsets;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
             self.items_per_blob.get(),
         );
 
-        Ok(true)
+        Ok((self, true))
     }
 
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
         self.metrics.start_sync_calls.inc();
         let data = self.blobs.start_sync().await;
-        let offsets = self.offsets.start_data_sync().await;
+        let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
         let size = self.durable_size.size();
-        let (offsets_journal, watermark_handle) = self.offsets.start_watermark_sync(size).await;
+        let (offsets_journal, watermark_handle) = offsets_journal.start_watermark_sync(size).await;
         self.offsets = offsets_journal;
 
         let journal_handle: SyncCompletion =
@@ -1605,11 +1610,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::commit].
-    pub(crate) async fn commit(&mut self) -> Result<(), Error> {
+    pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         let handle = self.blobs.start_sync().await;
-        Ok(handle.await?)
+        handle.await?;
+        Ok(self)
     }
 
     /// See [Journal::sync].
@@ -1769,7 +1775,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             match offsets_start_blob.cmp(&oldest_blob) {
                 std::cmp::Ordering::Less => {
                     warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
-                    offsets.prune(data_oldest_pos).await?;
+                    let (pruned, _) = offsets.prune(data_oldest_pos).await?;
+                    offsets = pruned;
                 }
                 std::cmp::Ordering::Equal => {}
                 std::cmp::Ordering::Greater => {
@@ -2307,7 +2314,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn prune(mut self, min_position: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min_position).await?;
+        let (inner, pruned) = self.0.prune(min_position).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -2315,7 +2323,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it.
     pub async fn commit(mut self) -> Result<Self, Error> {
-        self.0.commit().await?;
+        self.0 = self.0.commit().await?;
         Ok(self)
     }
 
@@ -2480,8 +2488,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Test helper: Prune the internal offsets journal directly (simulates crash scenario).
-    pub(crate) async fn test_prune_offsets(&mut self, position: u64) -> Result<bool, Error> {
-        self.0.offsets.prune(position).await
+    pub(crate) async fn test_prune_offsets(mut self, position: u64) -> Result<(Self, bool), Error> {
+        let (offsets, pruned) = self.0.offsets.prune(position).await?;
+        self.0.offsets = offsets;
+        Ok((self, pruned))
     }
 
     /// Test helper: Rewind the internal offsets journal directly (simulates crash scenario).
@@ -4119,7 +4129,7 @@ mod tests {
             }
 
             // Prune offsets journal ahead of data blobs (impossible state)
-            variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
+            let (variable, _) = variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
             variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
 
             let variable = variable.sync().await.unwrap();
