@@ -43,6 +43,7 @@ use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use core::marker::PhantomData;
 use std::{
     collections::BTreeMap,
@@ -426,7 +427,7 @@ where
     /// Return the compact-sync target described by the current witness.
     ///
     /// This reflects the last durably persisted commit, which may lag behind live in-memory
-    /// mutations until [`Self::commit`] or [`Self::sync`] is called.
+    /// mutations until [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] is called.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
@@ -542,6 +543,31 @@ where
         Ok((self, start_loc..Location::new(batch.bounds.total_size)))
     }
 
+    /// Begin durably persisting the current db state to disk.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on reopen. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred work surface on the returned handle. A failed data sync also fails the
+    /// next durability operation.
+    #[tracing::instrument(
+        name = "qmdb.immutable.compact.db.start_sync",
+        level = "info",
+        skip_all
+    )]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let last_commit_metadata = self.last_commit_metadata.clone();
+        let inactivity_floor_loc = self.inactivity_floor_loc;
+        let handle;
+        (self.witness, handle) = self
+            .witness
+            .start_sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+                Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
+            })
+            .await?;
+        Ok((self, handle))
+    }
+
     /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
     /// reopen may need to replay the witness journal's tail to recover.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
@@ -585,10 +611,13 @@ where
     where
         F: Family,
     {
-        // Fast path: already durably at `target` with no uncommitted state.
+        // Fast path: already durably at `target` with no uncommitted state. A pipelined sync
+        // still in flight means the cached tip is not yet proven durable, so fall through to
+        // the store, which drains it.
         if self.size() == target
             && self.witness.with(|w| w.leaf_count()) == target
             && !self.witness.import_pending()
+            && !self.witness.sync_started()
         {
             return Ok(self);
         }
@@ -646,9 +675,13 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
+    use core::future::Future;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> =
@@ -683,6 +716,107 @@ mod tests {
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
+    }
+
+    /// A compact db over a delayed-sync storage backend.
+    type DelayedDb = Db<
+        mmr::Family,
+        DelayedSyncContext<deterministic::Context>,
+        Digest,
+        FixedEncoding<Digest>,
+        Sha256,
+        (),
+        Sequential,
+    >;
+
+    /// Open a [DelayedDb] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the bootstrap witness, so while syncs park the returned future
+    /// must be driven with `drive_pending_syncs` (or the mock unblocked first).
+    fn open_delayed_db(
+        context: &deterministic::Context,
+        label: &'static str,
+        partition: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        let witness_cfg = witness_config(partition, context);
+        let merkle = crate::merkle::compact::Merkle::new(Sequential);
+        let context = DelayedSyncContext {
+            inner: context.child(label),
+            pending: pending.clone(),
+        };
+        DelayedDb::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+    }
+
+    /// Apply a single-key batch writing `key -> value` with `metadata`.
+    async fn apply_set(db: DelayedDb, key: Digest, value: Digest, metadata: Digest) -> DelayedDb {
+        let floor = db.inactivity_floor_loc();
+        let batch = db
+            .new_batch()
+            .set(key, value)
+            .merkleize(&db, Some(metadata), floor)
+            .await;
+        let (db, _) = db.apply_batch(batch).unwrap();
+        db
+    }
+
+    /// State persisted via an awaited start_sync handle is recovered on reopen.
+    #[test_traced]
+    fn test_compact_start_sync_recovery() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "immutable-start-sync-recovery";
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", partition, &pending)
+                .await
+                .unwrap();
+            let metadata = Sha256::fill(9u8);
+            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), metadata).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get_metadata(), Some(metadata));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation, even when that operation has nothing
+    /// new to persist.
+    #[test_traced]
+    fn test_compact_start_sync_failure_propagates() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "immutable-start-sync-fail", &pending)
+                .await
+                .unwrap();
+            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Sha256::fill(9u8)).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+            // The witness entry was already appended, so this commit has nothing to stage.
+            // It must still observe the retained failure rather than no-op.
+            assert!(
+                db.commit().await.is_err(),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+        });
     }
 
     #[test_traced("INFO")]

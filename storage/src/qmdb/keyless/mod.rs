@@ -58,6 +58,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -472,6 +473,21 @@ where
         self.metrics.sync_calls.inc();
         self.journal = self.journal.sync().await?;
         Ok(self)
+    }
+
+    /// Begin durably persisting the journal state published by prior [`Keyless::apply_batch`]
+    /// calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// surface as described on [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.metrics.start_sync_calls.inc();
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        Ok((self, handle))
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.

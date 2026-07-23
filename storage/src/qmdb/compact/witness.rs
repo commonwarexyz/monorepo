@@ -10,8 +10,9 @@
 //! Entries are strictly increasing in committed leaf count (`proof.leaves`), so a leaf count
 //! uniquely identifies a rewind or prune target. The journal `commit` or `sync` after an append
 //! is the commit point: a crash before it drops the unsynced tail on reopen, recovering the
-//! previous commit. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip
-//! entry is never pruned.
+//! previous commit. For [`Store::start_sync`] the commit point is the completion of the returned
+//! handle. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is
+//! never pruned.
 
 use crate::{
     Context,
@@ -24,6 +25,7 @@ use crate::{
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use commonware_utils::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -133,6 +135,9 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     /// first persist replaces them with the cached witness and clears this flag. Mutations are
     /// serialized by ownership of the store, so `Relaxed` suffices.
     import_pending: AtomicBool,
+
+    /// Whether a pipelined journal sync from [`Self::start_sync`] may still be in flight.
+    sync_started: bool,
 }
 
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
@@ -142,6 +147,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(false),
+            sync_started: false,
         }
     }
 
@@ -157,6 +163,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(true),
+            sync_started: false,
         }
     }
 
@@ -173,9 +180,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, committing the journal
     /// so the entry survives a crash. Journal recovery may be required on reopen.
     ///
-    /// No-op if the cached witness already matches the Merkle (the witness is already durable).
-    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
-    /// frontier, and refreshes the cache.
+    /// If the cached witness already matches the Merkle, this only awaits any sync still in
+    /// flight from [`Self::start_sync`]. Otherwise appends a witness built from the unpruned
+    /// Merkle, prunes the Merkle to its frontier, and refreshes the cache.
     pub(crate) async fn commit<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -198,9 +205,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, syncing the journal and
     /// all of its metadata to minimize recovery work on reopen.
     ///
-    /// No-op if the cached witness already matches the Merkle (the witness is already durable).
-    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
-    /// frontier, and refreshes the cache.
+    /// If the cached witness already matches the Merkle, this only awaits any sync still in
+    /// flight from [`Self::start_sync`]. Otherwise appends a witness built from the unpruned
+    /// Merkle, prunes the Merkle to its frontier, and refreshes the cache.
     pub(crate) async fn sync<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -241,6 +248,15 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
         let Some(verified) = verified else {
+            // Nothing new to append, but a sync started by start_sync may still be in
+            // flight: drain it before reporting the tip durable.
+            if self.sync_started {
+                self.journal = match durability {
+                    Durability::Commit => self.journal.commit().await?,
+                    Durability::Sync => self.journal.sync().await?,
+                };
+                self.sync_started = false;
+            }
             return Ok(self);
         };
         (self.journal, _) = self.journal.append(&verified.witness).await?;
@@ -248,10 +264,50 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             Durability::Commit => self.journal.commit().await?,
             Durability::Sync => self.journal.sync().await?,
         };
+        self.sync_started = false;
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
         self.replace(verified);
         Ok(self)
+    }
+
+    /// Persist the current compact state as a new witness journal entry, starting the journal
+    /// sync instead of awaiting it.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on reopen. When nothing new must
+    /// be appended, the handle still proves the current tip durable and resurfaces any retained
+    /// sync failure.
+    pub(crate) async fn start_sync<H, S>(
+        mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+    ) -> Result<(Self, Handle<()>), Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        let verified;
+        (self, verified) = self
+            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+            .await?;
+        if let Some(verified) = verified {
+            (self.journal, _) = self.journal.append(&verified.witness).await?;
+            self.import_pending.store(false, Ordering::Relaxed);
+            merkle.prune_to_frontier();
+            self.replace(verified);
+        }
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        self.sync_started = true;
+        Ok((self, handle))
+    }
+
+    /// Whether a pipelined sync from [`Self::start_sync`] may still be in flight, leaving the
+    /// cached tip ahead of what a crash would recover.
+    pub(crate) const fn sync_started(&self) -> bool {
+        self.sync_started
     }
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.
@@ -322,6 +378,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             last_commit_floor,
         )?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
+        self.sync_started = false;
         self.replace(witness);
         Ok((self, op))
     }
@@ -342,6 +399,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .min(bounds.end - 1);
         (self.journal, _) = self.journal.prune(pos).await?;
         self.journal = self.journal.sync().await?;
+        self.sync_started = false;
         Ok(self)
     }
 
