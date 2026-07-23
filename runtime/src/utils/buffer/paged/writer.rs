@@ -45,7 +45,7 @@ use crate::{
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
     buffer::{
         SyncState,
-        paged::{CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE, CacheRef, Checksum, Slot},
+        paged::{CHECKSUM_SIZE, CacheRef, Checksum, Slot},
         tip::Buffer,
     },
 };
@@ -396,10 +396,13 @@ impl<B: Blob> Writer<B> {
     /// If `write_partial_page` is true, the partial page will be written to the blob as well along
     /// with a CRC record.
     ///
-    /// If `sync` is true and the flush emits a single write, that write is made durable
-    /// immediately: with [`Blob::write_at_sync`] when there are no earlier unsynced mutations, or
-    /// by writing it and syncing the blob when there are. Flushes split around a protected CRC use
-    /// plain writes so the caller can make them durable with one sync.
+    /// A flush emits one write covering whole physical pages. A previously committed partial
+    /// page is rewritten in full, resubmitting its committed prefix and protected CRC slot
+    /// byte-identically (see the module docs on checksum slots).
+    ///
+    /// If `sync` is true, that write is made durable immediately: with [`Blob::write_at_sync`]
+    /// when there are no earlier unsynced mutations, or by writing it and syncing the blob when
+    /// there are.
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush_internal(
@@ -409,7 +412,7 @@ impl<B: Blob> Writer<B> {
     ) -> Result<bool, Error> {
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
-        let (mut physical_pages, partial_page_state) = self.to_physical_pages(
+        let (physical_pages, partial_page_state) = self.to_physical_pages(
             &self.buffer,
             write_partial_page,
             self.partial_page_state.as_ref(),
@@ -459,9 +462,6 @@ impl<B: Blob> Writer<B> {
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
         let write_at_offset = self.current_page * physical_page_size as u64;
 
-        // Identify protected regions based on the OLD partial page state.
-        let protected_regions = Self::identify_protected_regions(self.partial_page_state.as_ref());
-
         // Update state before writing. This may appear to risk data loss if writes fail,
         // but write failures are fatal per this codebase's design: callers must not use
         // the blob after any mutable method returns an error.
@@ -471,102 +471,12 @@ impl<B: Blob> Writer<B> {
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
 
-        // Write the physical pages to the blob.
-        // If there are protected regions in the first page, we need to write around them.
-        match protected_regions {
-            Some((prefix_len, Slot::First)) => {
-                // Protected CRC is first: [page_size..page_size+6].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data in first page [prefix_len..page_size].
-                let has_first_write = prefix_len < page_size;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(page_size - prefix_len);
-                    let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        return Ok(sync);
-                    }
-                } else {
-                    // Skip the protected first page bytes when they are fully covered.
-                    let _ = physical_pages.split_to(page_size);
-                }
-
-                // Write 2: second CRC of first page + all remaining pages [page_size+6..end].
-                if physical_pages.len() > CHECKSUM_SLOT_SIZE {
-                    let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
-                    self.write_at_maybe_sync(
-                        write_at_offset + (page_size + CHECKSUM_SLOT_SIZE) as u64,
-                        physical_pages,
-                        sync && !has_first_write,
-                    )
-                    .await?;
-                    if !has_first_write {
-                        return Ok(sync);
-                    }
-                }
-
-                Ok(false)
-            }
-            Some((prefix_len, Slot::Second)) => {
-                // Protected CRC is second: [page_size+6..page_size+12].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data + first CRC of first page [prefix_len..page_size+6].
-                let first_crc_end = page_size + CHECKSUM_SLOT_SIZE;
-                let skip = physical_page_size - first_crc_end;
-                let has_first_write = prefix_len < first_crc_end;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(first_crc_end - prefix_len);
-                    let has_second_write = physical_pages.len() > skip;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        return Ok(sync);
-                    }
-                } else {
-                    // Skip the fully protected first segment when no bytes from it need update.
-                    let _ = physical_pages.split_to(first_crc_end);
-                }
-
-                // Write 2: all remaining pages (if any) [physical_page_size..end].
-                if physical_pages.len() > skip {
-                    let _ = physical_pages.split_to(skip);
-                    self.write_at_maybe_sync(
-                        write_at_offset + physical_page_size as u64,
-                        physical_pages,
-                        sync && !has_first_write,
-                    )
-                    .await?;
-                    if !has_first_write {
-                        return Ok(sync);
-                    }
-                }
-
-                Ok(false)
-            }
-            None => {
-                // No protected regions, write everything in one operation
-                self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
-                    .await?;
-                Ok(sync)
-            }
-        }
+        // Write the physical pages to the blob. A previously committed partial page is rewritten
+        // in full: its committed prefix and protected CRC slot are resubmitted byte-identically,
+        // so a torn write cannot change their durable bytes.
+        self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
+            .await?;
+        Ok(sync)
     }
 
     /// Returns the size of the blob.
@@ -649,23 +559,6 @@ impl<B: Blob> Writer<B> {
         self.view().read_into(buf, offset).await
     }
 
-    /// Return the first-page region that must be skipped to preserve a committed partial page.
-    ///
-    /// # Returns
-    ///
-    /// `None` if there's no existing partial page.
-    ///
-    /// `Some((prefix_len, protected_crc))` where:
-    /// - `prefix_len`: bytes `[0, prefix_len)` are committed logical data already covered by the
-    ///   protected CRC and do not need to be rewritten
-    /// - `protected_crc`: which CRC slot must not be overwritten by the next flush
-    fn identify_protected_regions(partial_page_state: Option<&Checksum>) -> Option<(usize, Slot)> {
-        let crc_record = partial_page_state?;
-        let (old_len, _) = crc_record.get_crc();
-        // The protected CRC is the authoritative (longer) slot.
-        Some((old_len as usize, crc_record.authoritative()))
-    }
-
     /// Prepare physical-page writes from buffered logical bytes.
     ///
     /// Each physical page contains one logical page plus CRC record. If the last page is not yet
@@ -741,7 +634,7 @@ impl<B: Blob> Writer<B> {
         write_buffer.append(padded.freeze());
 
         // Return the CRC record that matches what we wrote to disk, so that future flushes
-        // correctly identify which slot is protected.
+        // preserve the correct slot.
         (write_buffer, Some(crc_record))
     }
 
@@ -937,12 +830,11 @@ impl<B: Blob> Writer<B> {
 
     /// Flushes buffered data and makes all pending mutations durable.
     ///
-    /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there
-    /// are earlier unsynced mutations, or if the flush emits multiple physical writes,
-    /// durability is completed with [`Blob::sync`].
+    /// The flush's write can be persisted with [`Blob::write_at_sync`]. If there are earlier
+    /// unsynced mutations, durability is completed with [`Blob::sync`].
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Flush any buffered data, including any partial page.
-        // A single emitted write can be made durable directly during the flush.
+        // An emitted write is made durable directly during the flush.
         if self.flush_internal(true, true).await? {
             return Ok(());
         }
@@ -1181,7 +1073,10 @@ mod tests {
     use crate::{
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
-        buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
+        buffer::{
+            paged::{CHECKSUM_SLOT_LEN_SIZE, CHECKSUM_SLOT_SIZE},
+            tests::SyncTrackingBlob,
+        },
         deterministic,
         mocks::{DelayedSyncBlob, next_pending_sync},
         telemetry::metrics::Registry,
@@ -1965,8 +1860,8 @@ mod tests {
 
     #[test_traced("DEBUG")]
     fn test_append_owned_bypass_with_synced_partial_page() {
-        // A large owned append on top of a synced partial page must run the protected-CRC
-        // handling for the first page before writing the bulk directly.
+        // A large owned append on top of a synced partial page must rewrite the first page in
+        // full (preserving the old CRC slot) before writing the bulk directly.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context
@@ -1983,7 +1878,7 @@ mod tests {
             append.append(&all[..50]).await.unwrap();
             append.sync().await.unwrap();
 
-            // 450 more bytes: 53 fill the first page (protected CRC), 3 whole pages (309 bytes)
+            // 450 more bytes: 53 fill the first page (rewritten in full), 3 whole pages (309 bytes)
             // bypass the buffer, 88 remain in the tip.
             append
                 .append_owned(IoBuf::from(all[50..].to_vec()))
@@ -2008,7 +1903,7 @@ mod tests {
             assert_eq!(read_buf, &all[..50]);
 
             // Repeating the owned append after recovery and syncing makes everything durable,
-            // exercising the protected-CRC handling for the recovered partial page.
+            // exercising the full rewrite of the recovered partial page.
             append
                 .append_owned(IoBuf::from(all[50..].to_vec()))
                 .await
@@ -2741,15 +2636,15 @@ mod tests {
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
 
-            // The next sync still needs a full barrier because the append path flushed the full
-            // page before the final partial tip.
+            // With the earlier flush already durable, extending the partial page is one
+            // full-page rewrite fused with a range sync.
             append.append(b"tip").await.unwrap();
             append.sync().await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(writes, 4);
-            assert_eq!(full_syncs, 2);
-            assert_eq!(range_syncs, 0);
+            assert_eq!(writes, 3);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
@@ -2875,7 +2770,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_sync_batches_split_protected_writes_with_full_sync() {
+    fn test_sync_fuses_partial_page_rewrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
@@ -2885,29 +2780,75 @@ mod tests {
                 .unwrap();
             append.sync().await.unwrap();
 
-            // Establish a persisted partial page with one authoritative CRC slot.
+            // Establish a persisted partial page with the authoritative CRC in slot 0.
             append.append(b"abc").await.unwrap();
             append.sync().await.unwrap();
 
-            // Extending that partial page must write around the protected slot, so the two emitted
-            // writes are batched behind one full sync.
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            let slot0_offset = PAGE_SIZE.get() as u64;
+            let slot1_offset = slot0_offset + CHECKSUM_SLOT_SIZE as u64;
+            let slot0_before: Vec<u8> = blob
+                .read_at(slot0_offset, CHECKSUM_SLOT_SIZE)
+                .await
+                .unwrap()
+                .coalesce()
+                .freeze()
+                .into();
+
+            // Extending that partial page rewrites the whole physical page in one write fused
+            // with a range sync, resubmitting the protected slot 0 byte-identically and placing
+            // the new CRC in slot 1.
             append.append(b"de").await.unwrap();
             append.sync().await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(writes, 3);
-            assert_eq!(full_syncs, 2);
-            assert_eq!(range_syncs, 1);
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 2);
 
-            // On the next extension, the protected slot is the second CRC, so only the prefix
-            // write is needed.
+            let slot0_after: Vec<u8> = blob
+                .read_at(slot0_offset, CHECKSUM_SLOT_SIZE)
+                .await
+                .unwrap()
+                .coalesce()
+                .freeze()
+                .into();
+            assert_eq!(
+                slot0_before, slot0_after,
+                "protected slot must be resubmitted byte-identically"
+            );
+            let slot1_between: Vec<u8> = blob
+                .read_at(slot1_offset, CHECKSUM_SLOT_SIZE)
+                .await
+                .unwrap()
+                .coalesce()
+                .freeze()
+                .into();
+
+            // The next extension protects slot 1 and rewrites slot 0, again as one fused write.
             append.append(b"fg").await.unwrap();
             append.sync().await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(writes, 4);
-            assert_eq!(full_syncs, 2);
-            assert_eq!(range_syncs, 2);
+            assert_eq!(writes, 3);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 3);
+
+            let slot1_after: Vec<u8> = blob
+                .read_at(slot1_offset, CHECKSUM_SLOT_SIZE)
+                .await
+                .unwrap()
+                .coalesce()
+                .freeze()
+                .into();
+            assert_eq!(
+                slot1_between, slot1_after,
+                "protected slot must be resubmitted byte-identically"
+            );
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
@@ -3171,69 +3112,6 @@ mod tests {
     /// Format: [len_hi=0, len_lo=0, 0xDE, 0xAD, 0xBE, 0xEF]
     const DUMMY_MARKER: [u8; 6] = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
 
-    #[test]
-    fn test_identify_protected_regions_equal_lengths() {
-        // When lengths are equal, the first CRC should be protected (tie-breaking rule).
-        let record = Checksum {
-            len1: 50,
-            crc1: 0xAAAAAAAA,
-            len2: 50,
-            crc2: 0xBBBBBBBB,
-        };
-
-        let result =
-            Writer::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
-        assert!(result.is_some());
-        let (prefix_len, protected_crc) = result.unwrap();
-        assert_eq!(prefix_len, 50);
-        assert!(
-            matches!(protected_crc, Slot::First),
-            "First CRC should be protected when lengths are equal"
-        );
-    }
-
-    #[test]
-    fn test_identify_protected_regions_len1_larger() {
-        // When len1 > len2, the first CRC should be protected.
-        let record = Checksum {
-            len1: 100,
-            crc1: 0xAAAAAAAA,
-            len2: 50,
-            crc2: 0xBBBBBBBB,
-        };
-
-        let result =
-            Writer::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
-        assert!(result.is_some());
-        let (prefix_len, protected_crc) = result.unwrap();
-        assert_eq!(prefix_len, 100);
-        assert!(
-            matches!(protected_crc, Slot::First),
-            "First CRC should be protected when len1 > len2"
-        );
-    }
-
-    #[test]
-    fn test_identify_protected_regions_len2_larger() {
-        // When len2 > len1, the second CRC should be protected.
-        let record = Checksum {
-            len1: 50,
-            crc1: 0xAAAAAAAA,
-            len2: 100,
-            crc2: 0xBBBBBBBB,
-        };
-
-        let result =
-            Writer::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
-        assert!(result.is_some());
-        let (prefix_len, protected_crc) = result.unwrap();
-        assert_eq!(prefix_len, 100);
-        assert!(
-            matches!(protected_crc, Slot::Second),
-            "Second CRC should be protected when len2 > len1"
-        );
-    }
-
     /// Test that `to_physical_pages` emits full pages zero-copy while still materializing the
     /// trailing partial page into one padded physical page.
     #[test_traced("DEBUG")]
@@ -3330,11 +3208,11 @@ mod tests {
         });
     }
 
-    /// Test that slot 1 is NOT overwritten when it's the protected slot.
+    /// Test that slot 1's durable bytes are unchanged when it's the protected slot.
     ///
     /// Strategy: After extending twice (so slot 1 becomes authoritative with larger len),
     /// mangle the non-authoritative slot 0. Then extend again - slot 0 should be overwritten
-    /// with the new CRC, while slot 1 (protected) should remain untouched.
+    /// with the new CRC, while slot 1 (protected) is resubmitted byte-identically.
     #[test_traced("DEBUG")]
     fn test_crc_slot1_protected() {
         let executor = deterministic::Runner::default();
@@ -3456,11 +3334,11 @@ mod tests {
         });
     }
 
-    /// Test that slot 0 is NOT overwritten when it's the protected slot.
+    /// Test that slot 0's durable bytes are unchanged when it's the protected slot.
     ///
     /// Strategy: After extending three times (slot 0 becomes authoritative again with largest len),
     /// mangle the non-authoritative slot 1. Then extend again - slot 1 should be overwritten
-    /// with the new CRC, while slot 0 (protected) should remain untouched.
+    /// with the new CRC, while slot 0 (protected) is resubmitted byte-identically.
     #[test_traced("DEBUG")]
     fn test_crc_slot0_protected() {
         let executor = deterministic::Runner::default();
@@ -3594,13 +3472,14 @@ mod tests {
         });
     }
 
-    /// Test that the data prefix is NOT overwritten when extending a partial page.
+    /// Test that the data prefix content is preserved when extending a partial page: the
+    /// rewrite resubmits the committed prefix byte-identically.
     ///
     /// Strategy: Write data, then mangle the padding area (between data end and CRC start).
     /// After extending, the original data should be unchanged but the mangled padding
     /// should be overwritten with new data.
     #[test_traced("DEBUG")]
-    fn test_data_prefix_not_overwritten() {
+    fn test_data_prefix_preserved_when_extending() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -4550,7 +4429,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
                 .unwrap();
-            let faulty_blob = PartialWriteBlob::new(blob.clone(), 5, 3);
+            let faulty_blob = PartialWriteBlob::new(blob.clone(), 4, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
             let mut append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
@@ -4562,11 +4441,11 @@ mod tests {
 
             append.append(&data[48..50]).await.unwrap();
             append.sync().await.unwrap();
-            assert_eq!(write_count.load(Ordering::SeqCst), 3);
+            assert_eq!(write_count.load(Ordering::SeqCst), 2);
 
             append.append(&data[50..]).await.unwrap();
             append.sync().await.unwrap();
-            assert_eq!(write_count.load(Ordering::SeqCst), 4);
+            assert_eq!(write_count.load(Ordering::SeqCst), 3);
 
             // Corrupt the newer authoritative slot. The older slot still covers the shrink target.
             // `resize()` first syncs the live buffer, which writes a valid fallback slot but leaves
@@ -4582,7 +4461,7 @@ mod tests {
                 append.resize(45).await.is_err(),
                 "phase-1 partial write should fail"
             );
-            assert_eq!(write_count.load(Ordering::SeqCst), 5);
+            assert_eq!(write_count.load(Ordering::SeqCst), 4);
             assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
             drop(append);
 

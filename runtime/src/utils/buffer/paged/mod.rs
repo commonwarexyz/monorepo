@@ -27,8 +27,11 @@
 //! physical pages that straddle storage-page boundaries amplify cold random reads, so
 //! [CacheRef::new] logs a warning when configured with one.
 //!
-//! Two checksums are stored so that partial pages can be re-written without overwriting a valid
-//! checksum for its previously committed contents. A checksum over a page is computed over the
+//! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
+//! for its previously committed contents. Each rewrite covers the whole physical page: the new
+//! checksum lands in the alternate slot, while the committed prefix and its protected checksum
+//! are resubmitted byte-identically, leaving their durable bytes unchanged even if the write
+//! tears. A checksum over a page is computed over the
 //! first [0,len) bytes in the page, with all other bytes in the page ignored. Ordinary partial-page
 //! payload writes 0-pad the range [len, page_size), but recovery does not depend on bytes outside
 //! [0,len). A checksum with length 0 is never considered valid. If both checksums are valid for the
@@ -258,8 +261,9 @@ impl Slot {
 /// Describes a CRC record stored at the end of a page.
 ///
 /// The CRC accompanied by the larger length is the one that should be treated as authoritative for
-/// the page. Two checksums are stored so that partial pages can be written without overwriting a
-/// valid checksum for a previously committed partial page.
+/// the page. Two checksums are stored so that rewriting a partial page never changes the durable
+/// bytes of the checksum covering its previously committed contents. The new checksum lands in
+/// the other slot and the protected slot is resubmitted byte-identically.
 #[derive(Clone)]
 struct Checksum {
     len1: u16,
