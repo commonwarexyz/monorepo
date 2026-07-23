@@ -593,7 +593,7 @@ where
         if self.size() == target
             && self.witness.with(|w| w.leaf_count()) == target
             && !self.witness.import_pending()
-            && !self.witness.sync_started()
+            && !self.witness.has_pending_sync()
         {
             return Ok(self);
         }
@@ -981,6 +981,35 @@ mod tests {
                 db.sync().await.is_err(),
                 "sync absorbed the metadata failure after a commit-level drain"
             );
+        });
+    }
+
+    /// Once a start_sync handle completes successfully, a commit and a rewind to the current
+    /// size have nothing left to prove and touch no storage.
+    #[test_traced]
+    fn test_compact_start_sync_proven_skips_journal() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-proven", &pending)
+                .await
+                .unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+
+            let starts_before = pending.starts();
+            let db = db.commit().await.unwrap();
+            let size = db.size();
+            let db = db.rewind(size).await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "a proven pipelined sync still triggered journal work"
+            );
+            db.destroy().await.unwrap();
         });
     }
 

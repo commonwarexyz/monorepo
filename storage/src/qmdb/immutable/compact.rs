@@ -617,7 +617,7 @@ where
         if self.size() == target
             && self.witness.with(|w| w.leaf_count()) == target
             && !self.witness.import_pending()
-            && !self.witness.sync_started()
+            && !self.witness.has_pending_sync()
         {
             return Ok(self);
         }

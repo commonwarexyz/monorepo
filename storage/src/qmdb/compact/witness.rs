@@ -15,7 +15,7 @@
 //! never pruned.
 
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::contiguous::{Contiguous, variable},
     merkle::{
         self, Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, compact,
@@ -27,6 +27,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use commonware_utils::sync::RwLock;
+use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A single durably persisted witness: a complete snapshot of one synced commit.
@@ -136,9 +137,9 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     /// serialized by ownership of the store, so `Relaxed` suffices.
     import_pending: AtomicBool,
 
-    /// Whether the journal may hold work from [`Self::start_sync`] not yet proven by a full
+    /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
     /// journal sync.
-    sync_started: bool,
+    pending_sync: Option<SyncCompletion>,
 }
 
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
@@ -148,7 +149,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(false),
-            sync_started: false,
+            pending_sync: None,
         }
     }
 
@@ -164,7 +165,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(true),
-            sync_started: false,
+            pending_sync: None,
         }
     }
 
@@ -249,15 +250,21 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
         let Some(verified) = verified else {
-            // Nothing new to append, but a sync started by start_sync may still be in
-            // flight: drain it before reporting the tip durable.
-            if self.sync_started {
-                self.journal = match durability {
-                    Durability::Commit => self.journal.commit().await?,
-                    Durability::Sync => self.journal.sync().await?,
-                };
-                if matches!(durability, Durability::Sync) {
-                    self.sync_started = false;
+            // Nothing new to append, so only the sync pipelined by start_sync needs
+            // settling. Its success provides only commit-level durability, so a full
+            // sync still runs.
+            match durability {
+                Durability::Commit => {
+                    if let Some(pending) = self.pending_sync.clone()
+                        && pending.await.is_err()
+                    {
+                        self.journal = self.journal.commit().await?;
+                    }
+                }
+                Durability::Sync => {
+                    if self.pending_sync.take().is_some() {
+                        self.journal = self.journal.sync().await?;
+                    }
                 }
             }
             return Ok(self);
@@ -265,11 +272,12 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         (self.journal, _) = self.journal.append(&verified.witness).await?;
         self.journal = match durability {
             Durability::Commit => self.journal.commit().await?,
-            Durability::Sync => self.journal.sync().await?,
+            Durability::Sync => {
+                let journal = self.journal.sync().await?;
+                self.pending_sync = None;
+                journal
+            }
         };
-        if matches!(durability, Durability::Sync) {
-            self.sync_started = false;
-        }
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
         self.replace(verified);
@@ -305,14 +313,19 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         }
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
-        self.sync_started = true;
-        Ok((self, handle))
+        let completion: SyncCompletion = handle.boxed().shared();
+        self.pending_sync = Some(completion.clone());
+        Ok((self, Handle::from_future(completion)))
     }
 
-    /// Whether a pipelined sync from [`Self::start_sync`] may still be in flight, leaving the
-    /// cached tip ahead of what a crash would recover.
-    pub(crate) const fn sync_started(&self) -> bool {
-        self.sync_started
+    /// Whether a sync pipelined by [`Self::start_sync`] is still pending, i.e. has not
+    /// provably succeeded.
+    ///
+    /// Peeks the completion without blocking, so an in-flight sync counts as pending.
+    pub(crate) fn has_pending_sync(&self) -> bool {
+        self.pending_sync
+            .as_ref()
+            .is_some_and(|pending| !matches!(pending.peek(), Some(Ok(()))))
     }
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.
@@ -383,7 +396,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             last_commit_floor,
         )?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
-        self.sync_started = false;
+        self.pending_sync = None;
         self.replace(witness);
         Ok((self, op))
     }
@@ -404,7 +417,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .min(bounds.end - 1);
         (self.journal, _) = self.journal.prune(pos).await?;
         self.journal = self.journal.sync().await?;
-        self.sync_started = false;
+        self.pending_sync = None;
         Ok(self)
     }
 
