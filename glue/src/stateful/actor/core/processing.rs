@@ -95,10 +95,7 @@ where
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         // No message and nothing to prune: wait on the mailbox,
-                        // driving flush completions while idle. Racing the
-                        // pool inside this future (instead of in a sibling
-                        // select arm) means a message popped above can never
-                        // be dropped by a competing ready arm.
+                        // driving flush completions while idle.
                         None => {
                             let mailbox = &mut self.mailbox;
                             let pool = &mut syncs;
@@ -186,8 +183,9 @@ where
                         let Some(Applied { barrier, prune }) =
                             self.processor.finalize(&self.context, block.as_ref()).await
                         else {
-                            // Duplicate report: the block is already reflected
-                            // in the startup-aligned durable state.
+                            // Duplicate report: marshal redelivers a processed
+                            // height only after a restart, where startup aligned
+                            // the databases to durable state.
                             acknowledgement.acknowledge();
                             return;
                         };
@@ -199,7 +197,9 @@ where
                         // completes, so marshal's processed floor never runs
                         // ahead of flushed database state (the startup rewind
                         // contract), without blocking the loop on the flush.
-                        // Marshal's ack window bounds the flush backlog.
+                        // Marshal's ack window bounds the flush backlog. On
+                        // runtime teardown the acknowledgement is dropped
+                        // instead: marshal redelivers the block after restart.
                         syncs.push(async move {
                             if barrier.durable().await {
                                 acknowledgement.acknowledge();

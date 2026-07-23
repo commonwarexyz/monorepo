@@ -398,9 +398,8 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        // The floor may be justified by a buffered commit. Commit so the justification
-        // survives the prune.
-        self.journal = self.journal.commit().await?;
+        // Recovery reads only the last retained operation, so the boundary needs no
+        // durable justification before pruning.
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();
         Ok(self)

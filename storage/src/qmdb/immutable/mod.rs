@@ -518,9 +518,12 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        // The floor may be justified by a buffered commit. Commit so the justification
-        // survives the prune.
-        self.journal = self.journal.commit().await?;
+        // Recovery rebuilds the snapshot by replaying the log from the recovered floor,
+        // which trails the current floor while its commit is unflushed. Commit first so
+        // replay never starts below the pruned boundary.
+        if self.journal.barrier() <= *self.last_commit_loc {
+            self.journal = self.journal.commit().await?;
+        }
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();
         Ok(self)
