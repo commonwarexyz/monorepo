@@ -193,6 +193,7 @@ where
                             height = block.height().get(),
                             "applied finalized database batch"
                         );
+
                         // Acknowledge marshal only once the batch's flush
                         // completes, so marshal's processed floor never runs
                         // ahead of flushed database state (the startup rewind

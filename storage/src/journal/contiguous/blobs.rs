@@ -299,6 +299,7 @@ impl<E: Context> Writable<E> {
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+
         // In-flight syncs live only on the tail and the blob sealed at the last rollover.
         // The tail always survives a prune, and removing other blobs cannot affect an
         // in-flight sync on it, so only a sync on the sealed predecessor must be waited
