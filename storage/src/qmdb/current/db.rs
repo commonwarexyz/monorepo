@@ -878,6 +878,7 @@ where
     /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
     /// durability.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
+    #[boxed]
     pub async fn apply_batch(
         mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,

@@ -1599,7 +1599,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             .record(self.bounds.end, journal_handle.clone());
         Handle::from_future(async move {
             let result = journal_handle.await;
-            // Watermark sync is best effort.
             let _ = watermark_handle.await;
             result
         })

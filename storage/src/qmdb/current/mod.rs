@@ -1685,14 +1685,14 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let (db, _) = Box::pin(db.apply_batch(merkleized)).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .write(c.clone(), Some(vc.clone()))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let (db, _) = Box::pin(db.apply_batch(merkleized)).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // All three keys are live.

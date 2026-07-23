@@ -856,7 +856,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let watermark = self.start_watermark_sync(u64::MAX).await;
         Handle::from_future(async move {
             let result = data.await;
-            // Watermark sync is best effort.
             let _ = watermark.await;
             result
         })
