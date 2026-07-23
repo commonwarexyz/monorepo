@@ -140,20 +140,6 @@ impl<B: Blob> Writer<B> {
             .await
     }
 
-    /// Write bytes to the underlying blob, optionally making them durable.
-    async fn write_at_maybe_sync(
-        &mut self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-        sync: bool,
-    ) -> Result<(), Error> {
-        if sync {
-            self.write_at_sync(offset, bufs).await
-        } else {
-            self.write_at(offset, bufs).await
-        }
-    }
-
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
     /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
     /// `capacity`. Rewinds the blob if necessary so it only contains checksum-validated data.
@@ -474,8 +460,11 @@ impl<B: Blob> Writer<B> {
         // Write the physical pages to the blob. A previously committed partial page is rewritten
         // in full: its committed prefix and protected CRC slot are resubmitted byte-identically,
         // so a torn write cannot change their durable bytes.
-        self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
-            .await?;
+        if sync {
+            self.write_at_sync(write_at_offset, physical_pages).await?;
+        } else {
+            self.write_at(write_at_offset, physical_pages).await?;
+        }
         Ok(sync)
     }
 
