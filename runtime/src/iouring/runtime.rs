@@ -382,19 +382,23 @@ impl Executor {
     /// Store the current task's waker in a registered alarm, so the alarm
     /// always wakes the task that most recently polled its sleeper.
     ///
+    /// Returns true when the alarm already fired: a foreign poll can pass its
+    /// deadline check just before the deadline and lose the race to the
+    /// origin worker popping the alarm, so an emptied slot under an open
+    /// queue means the deadline elapsed and the sleep is complete
+    /// (cancellation cannot produce it: dropping the sleeper consumes it).
+    ///
     /// Panics if this worker already tore down: the alarm was discarded, so
     /// the sleep fails loudly in the polling task instead of hanging it.
-    fn refresh_alarm(&self, state: &AlarmState, waker: &Waker) {
+    fn refresh_alarm(&self, state: &AlarmState, waker: &Waker) -> bool {
         let sleeping = self.sleeping.lock();
         assert!(sleeping.is_some(), "sleep outlived its io_uring worker");
         let mut slot = state.waker.lock();
-        match &mut *slot {
-            Some(current) => current.clone_from(waker),
-            // Firing pops the alarm before this sleeper's deadline check can
-            // reach a pending re-poll, and cancellation consumes the sleeper,
-            // so an empty slot under an open queue is unreachable.
-            None => unreachable!("registered alarm lost its waker before its deadline"),
-        }
+        let Some(current) = slot.as_mut() else {
+            return true;
+        };
+        current.clone_from(waker);
+        false
     }
 
     /// Cancel a registered alarm: release its waker (and the task resources
@@ -1499,7 +1503,13 @@ impl Future for Sleeper {
             // also fails loudly (instead of returning `Pending` with no alarm
             // left to fire) when the re-poll is the teardown wake of a worker
             // that discarded this sleeper's alarm.
-            Some(state) => executor.refresh_alarm(state, cx.waker()),
+            Some(state) => {
+                // The alarm may fire between the deadline check above and the
+                // refresh: the sleep is complete.
+                if executor.refresh_alarm(state, cx.waker()) {
+                    return Poll::Ready(());
+                }
+            }
         }
         Poll::Pending
     }
@@ -1988,6 +1998,26 @@ mod tests {
             let (len, cancelled) = alarms(&executor);
             assert_eq!(len - cancelled, baseline, "cancelled sleeps retained");
             assert!(cancelled * 2 <= len, "tombstones exceed compaction bound");
+        });
+    }
+
+    /// A sleeper whose alarm fires between its deadline check and its waker
+    /// refresh (a foreign poll racing the origin worker at the deadline) must
+    /// resolve, not panic: an emptied slot under an open queue means the
+    /// alarm completed.
+    #[test]
+    fn test_sleep_refresh_after_fire_resolves() {
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+            let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(sleep.as_mut()).is_pending());
+
+            // Fire every registered alarm as the worker loop would at its
+            // deadline, emptying the sleeper's waker slot while the queue
+            // stays open (the interleaving a racing foreign poll observes).
+            executor.wake_ready_sleepers(Instant::now() + Duration::from_secs(7200));
+
+            assert!(futures::poll!(sleep.as_mut()).is_ready());
         });
     }
 
