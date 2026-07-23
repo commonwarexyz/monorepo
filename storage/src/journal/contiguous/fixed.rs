@@ -87,10 +87,11 @@
 //! # Watermark advancement
 //!
 //! `sync()` advances the watermark to the current size after completing the data sync.
-//! `start_sync()` also advances it, best effort, without ordering anything: the journal tracks
-//! its *durable size* — the highest size whose sync it has observed complete — and the watermark
+//! `start_sync()` also advances it, without ordering anything: the journal tracks its
+//! *durable size* — the highest size whose sync it has observed complete — and the watermark
 //! only ever takes that value. Writing an already-proven value is safe at any time, even while a
-//! data sync is in flight. The invariants:
+//! data sync is in flight. A failed advance fails the returned handle and, because the
+//! checkpoint store retains the failure, every later checkpoint write. The invariants:
 //!
 //! - The watermark only takes values the durable size has held (never an in-flight size).
 //! - The durable size advances only on an observed sync success.
@@ -835,18 +836,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Begin raising the recovery watermark toward `size`, capped at the proven durable size.
     pub(super) async fn start_watermark_sync(&mut self, size: u64) -> Handle<()> {
         let size = size.min(self.durable_size.size());
-        match self.checkpoint.start_watermark_sync(size).await {
-            Ok(handle) => Handle::from_future(async move {
-                if let Err(err) = handle.await {
-                    warn!(?err, "watermark advance failed");
-                }
-                Ok(())
-            }),
-            Err(err) => {
-                warn!(?err, "failed to start watermark advance");
-                Handle::ready(Ok(()))
-            }
-        }
+        self.checkpoint.start_watermark_sync(size).await
     }
 
     /// In-place [Journal::start_sync].
@@ -855,9 +845,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let data = self.start_data_sync().await;
         let watermark = self.start_watermark_sync(u64::MAX).await;
         Handle::from_future(async move {
-            let result = data.await;
-            let _ = watermark.await;
-            result
+            data.await?;
+            watermark.await
         })
     }
 
@@ -1935,17 +1924,17 @@ mod tests {
             journal.append(&4).await.unwrap();
             journal.commit().await.unwrap();
 
-            // The advance's inline metadata writes fail: the journal handle must still
-            // resolve Ok (the advance is best effort) and the journal must stay usable.
+            // The advance's inline metadata writes fail: the failure surfaces on the
+            // journal handle even though the data is durable.
             faults.arm();
             let h2 = journal.start_sync().await;
-            h2.await.unwrap();
+            assert!(h2.await.is_err());
             faults.disarm();
+
+            // The checkpoint store retained the failure: commit (which does not write the
+            // checkpoint) still succeeds, and the next operation that does fails.
             journal.append(&5).await.unwrap();
             journal.commit().await.unwrap();
-
-            // The metadata store retained the failure, so the next operation that must
-            // write the checkpoint fails.
             assert!(Box::new(journal).sync().await.is_err());
         });
     }
@@ -1971,14 +1960,14 @@ mod tests {
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
-            // Only the advance's metadata fsync is in flight: failing it must not fail the
-            // journal handle (the advance is best effort).
+            // Only the advance's metadata fsync is in flight: its failure surfaces on the
+            // journal handle even though the data is durable.
             let h2 = journal.start_sync().await;
             fail_pending_syncs(&pending);
-            h2.await.unwrap();
+            assert!(h2.await.is_err());
 
-            // The journal stays usable, but the metadata store retained the failure: the
-            // next operation that must write the checkpoint fails.
+            // The checkpoint store retained the failure: commit (which does not write the
+            // checkpoint) still succeeds, and the next operation that does fails.
             journal.append(&4).await.unwrap();
             drive_pending_syncs(&pending, journal.commit())
                 .await

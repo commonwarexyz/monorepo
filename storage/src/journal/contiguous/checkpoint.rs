@@ -112,15 +112,12 @@ impl<E: Context> Checkpoint<E> {
     /// A failed advance leaves the raised value staged: later advances at or below it are
     /// ignored, and the retained failure resurfaces on the next durable checkpoint write.
     /// Invariant: all items below `watermark` are durable.
-    pub(super) async fn start_watermark_sync(
-        &mut self,
-        watermark: u64,
-    ) -> Result<Handle<()>, Error> {
+    pub(super) async fn start_watermark_sync(&mut self, watermark: u64) -> Handle<()> {
         if matches!(self.watermark(), Some(current) if current >= watermark) {
-            return Ok(Handle::ready(Ok(())));
+            return Handle::ready(Ok(()));
         }
         self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
-        Ok(self.metadata.start_sync().await?)
+        self.metadata.start_sync().await
     }
 
     /// Lower the watermark to at most `limit`, returning whether it changed. Called before

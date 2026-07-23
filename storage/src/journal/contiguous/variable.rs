@@ -1598,9 +1598,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.durable_size
             .record(self.bounds.end, journal_handle.clone());
         Handle::from_future(async move {
-            let result = journal_handle.await;
-            let _ = watermark_handle.await;
-            result
+            journal_handle.await?;
+            watermark_handle.await
         })
     }
 

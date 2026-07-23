@@ -323,32 +323,35 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
     }
 
     /// Wait for an in-flight sync started by [Metadata::start_sync], surfacing its failure.
-    async fn wait_for_pending(&mut self) -> Result<(), Error> {
+    async fn wait_for_pending(&mut self) -> Result<(), RError> {
         let Some(pending) = &self.state.pending else {
             return Ok(());
         };
         // A failure is retained so every later sync keeps failing: the failed copy's on-disk
         // state is unknown, and a write to the other (only durable) copy could destroy both.
-        pending.clone().await.map_err(Error::Runtime)?;
+        pending.clone().await?;
         self.state.pending = None;
         Ok(())
     }
 
     /// See [Metadata::sync].
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync_inner(false).await?;
+        self.sync_inner(false).await.map_err(Error::Runtime)?;
         Ok(())
     }
 
     /// See [Metadata::start_sync].
-    async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        self.sync_inner(true).await
+    async fn start_sync(&mut self) -> Handle<()> {
+        match self.sync_inner(true).await {
+            Ok(handle) => handle,
+            Err(err) => Handle::ready(Err(err)),
+        }
     }
 
     /// Shared implementation of [Self::sync] and [Self::start_sync]. When `pipelined`, the final
     /// blob sync is only started, recorded as pending, and observable through the returned
     /// [Handle]. Otherwise it completes before returning and the handle is already resolved.
-    async fn sync_inner(&mut self, pipelined: bool) -> Result<Handle<()>, Error> {
+    async fn sync_inner(&mut self, pipelined: bool) -> Result<Handle<()>, RError> {
         self.wait_for_pending().await?;
         match self.write_next_version(pipelined).await {
             Ok(handle) => Ok(handle),
@@ -357,7 +360,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 // retain the failure: a later sync would otherwise write the other (only
                 // durable) copy and could destroy both.
                 self.state.pending = Some(ready(Err(err.clone())).boxed().shared());
-                Err(Error::Runtime(err))
+                Err(err)
             }
         }
     }
@@ -668,12 +671,12 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Atomically begin committing the current state of [Metadata], returning a completion handle.
     ///
-    /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. At most one
-    /// sync is in flight: a second call first waits for the first, surfacing its failure. The
-    /// handle is a detached observer — dropping it neither cancels the sync nor loses a failure,
-    /// which resurfaces on every later sync (a failed sync leaves the store unusable, matching
-    /// [Self::sync]).
-    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+    /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. Failures
+    /// surface only on the handle: a call that fails to start its sync returns an already-failed
+    /// handle. At most one sync is in flight: a second call first waits for the first. The handle
+    /// is a detached observer — dropping it neither cancels the sync nor loses a failure. Any
+    /// failure leaves the store unusable: every later sync fails, matching [Self::sync].
+    pub async fn start_sync(&mut self) -> Handle<()> {
         self.0.start_sync().await
     }
 
