@@ -40,7 +40,7 @@ use crate::{
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::View,
+    types::{Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     PublicKey, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -144,7 +144,10 @@ impl<P: PublicKey> Connectivity<P> {
     async fn remove_edge(&self, from: usize, to: usize) {
         match self
             .oracle
-            .remove_link(self.participants[from].clone(), self.participants[to].clone())
+            .remove_link(
+                self.participants[from].clone(),
+                self.participants[to].clone(),
+            )
             .await
         {
             Ok(()) | Err(SimError::LinkMissing) => {}
@@ -212,7 +215,7 @@ async fn restart_durable<P: Simplex>(
         participants,
         scheme,
         validator,
-        P::Elector::default(),
+        P::elector(P::effective_term_length(input.term_length)),
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -292,7 +295,11 @@ fn finalize_votes<P: Simplex>(reporters: &[ChaosReporter<P>]) -> Vec<(u64, Sha25
 /// Run the full safety suite over the honest reporters. The Byzantine set is
 /// EMPTY: every node is honest and restarts are durable, so any conflicting
 /// finalization, equivocation, fault evidence, or invalid report is a finding.
-fn check_safety<P: Simplex>(checker: &mut Checker, reporters: &[ChaosReporter<P>], n: usize) {
+fn check_safety<P: Simplex>(
+    checker: &mut Checker,
+    reporters: &[ChaosReporter<P>],
+    term_length: TermLength,
+) {
     // The finalize-vote uniqueness check reads the append-only `finalizes` map.
     // The harness reports individual finalize votes to the reporter directly
     // (no `AttributableReporter` wrapper), so this map is populated for every
@@ -304,9 +311,15 @@ fn check_safety<P: Simplex>(checker: &mut Checker, reporters: &[ChaosReporter<P>
         reporter.assert_no_faults();
     }
     invariants::check_no_invalid_reports(reporters);
-    invariants::check_vote_invariants_with_byzantine(&HashSet::new(), reporters);
-    let states = invariants::extract(reporters.to_vec(), n);
-    invariants::check::<P>(n as u32, states);
+    invariants::check_vote_invariants_with_byzantine(
+        &HashSet::new(),
+        P::elector(term_length),
+        Epoch::new(crate::EPOCH),
+        term_length,
+        reporters,
+    );
+    let states = invariants::extract(reporters);
+    invariants::check::<P>(term_length, states);
 }
 
 /// Enact one action, then wait a bounded observation window (a finalization
@@ -329,13 +342,22 @@ async fn paced_enact<P: Simplex>(
     conditions: &[Condition],
     checker: &mut Checker,
     reporters: &[ChaosReporter<P>],
-    n: usize,
 ) -> StepBoundary
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
-    enact(action, managed, net, context, oracle, participants, relay, input).await;
+    enact(
+        action,
+        managed,
+        net,
+        context,
+        oracle,
+        participants,
+        relay,
+        input,
+    )
+    .await;
 
     // The live set is the current healthy nodes, over a fresh drain, so a
     // just-killed node's stale events cannot close the step.
@@ -350,7 +372,11 @@ where
     let deadline = context.current() + CHAOS_STEP_TIMEOUT;
     let boundary = wait_for_step_boundary(context, clock, &live, baseline, deadline).await;
 
-    check_safety::<P>(checker, reporters, n);
+    check_safety::<P>(
+        checker,
+        reporters,
+        P::effective_term_length(input.term_length),
+    );
     boundary
 }
 
@@ -395,11 +421,12 @@ where
         // rebuild through them; the connectivity controller gets its own clone.
         let (mut oracle, participants, schemes, mut registrations) =
             crate::setup_network::<P>(&mut context, &input).await;
-        crate::print_fuzz_input(crate::Mode::Chaos, &input);
+        crate::print_fuzz_input::<P>(crate::Mode::Chaos, &input);
 
         let n = input.configuration.n as usize;
         let quorum = bounds::quorum(input.configuration.n) as usize;
         let required_containers = input.required_containers;
+        let term_length = P::effective_term_length(input.term_length);
         let relay = Arc::new(relay::Relay::new());
 
         let mut managed: Vec<ManagedValidator<P>> = Vec::with_capacity(n);
@@ -415,7 +442,7 @@ where
                 &participants,
                 schemes[i].clone(),
                 validator,
-                P::Elector::default(),
+                P::elector(term_length),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -430,11 +457,8 @@ where
             ));
         }
 
-        let mut net = Connectivity::new(
-            oracle.clone(),
-            participants.clone(),
-            crate::default_link(),
-        );
+        let mut net =
+            Connectivity::new(oracle.clone(), participants.clone(), crate::default_link());
         let reporters: Vec<ChaosReporter<P>> = managed.iter().map(|m| m.reporter()).collect();
 
         // Persistent finalization clock: subscribe ONCE per reporter and keep
@@ -483,7 +507,6 @@ where
                 &schedule.conditions(),
                 &mut checker,
                 &reporters,
-                n,
             )
             .await;
 
@@ -519,7 +542,6 @@ where
                 &schedule.conditions(),
                 &mut checker,
                 &reporters,
-                n,
             )
             .await;
         }
@@ -532,7 +554,7 @@ where
         // root future returning first. Not a liveness assertion.
         context.sleep(CHAOS_FINISH_SETTLE).await;
         clock.drain();
-        check_safety::<P>(&mut checker, &reporters, n);
+        check_safety::<P>(&mut checker, &reporters, term_length);
     });
 }
 
@@ -558,6 +580,7 @@ mod tests {
             required_containers: 2,
             degraded_network: false,
             configuration: N4F0C4,
+            term_length: TermLength::ONE,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),

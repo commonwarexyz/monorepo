@@ -3381,9 +3381,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::MalloryContainer => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
         })),
-        Mode::Chaos => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            chaos::runner::run::<P>(input)
-        })),
+        Mode::Chaos => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| chaos::runner::run::<P>(input)))
+        }
     };
     match run_result {
         Ok(()) => {

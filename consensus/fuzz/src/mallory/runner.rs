@@ -38,7 +38,7 @@ use crate::{
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::{Epoch, TermLength, View},
+    types::{Epoch, View},
 };
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -557,7 +557,7 @@ async fn restart<P: Simplex>(
             participants,
             scheme,
             validator,
-            P::elector(TermLength::ONE),
+            P::elector(P::effective_term_length(input.term_length)),
             relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -757,6 +757,7 @@ fn run_inner<P: Simplex>(
         let config = input.configuration;
         let n = config.n as usize;
         let required_containers = input.required_containers;
+        let term_length = P::effective_term_length(input.term_length);
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
 
@@ -831,8 +832,8 @@ fn run_inner<P: Simplex>(
             // multiplexer is the single owner of those single-consumer mailboxes and
             // spawns the INITIAL profile's actor; nothing is pushed to `managed`. The
             // Equivocator shares the honest nodes' relay and leader schedule (built
-            // internally as `P::elector(TermLength::ONE)`, the same config the honest
-            // validators build with); the other roles ignore both.
+            // from the same term length the honest validators build with); the
+            // other roles ignore both.
             if byz && i == BYZANTINE_IDX {
                 multiplexer = Some(multiplexer::RoleMultiplexer::new(
                     &context,
@@ -841,6 +842,7 @@ fn run_inner<P: Simplex>(
                     oracle.clone(),
                     relay.clone(),
                     required_containers,
+                    term_length,
                     role,
                     channels,
                 ));
@@ -900,7 +902,7 @@ fn run_inner<P: Simplex>(
                     &participants,
                     scheme,
                     validator,
-                    P::elector(TermLength::ONE),
+                    P::elector(term_length),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -1525,13 +1527,13 @@ fn run_inner<P: Simplex>(
         observers.extend(managed.iter().map(|m| m.reporter()));
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
-            P::elector(TermLength::ONE),
+            P::elector(term_length),
             Epoch::new(crate::EPOCH),
-            TermLength::ONE,
+            term_length,
             &observers,
         );
         let states = invariants::extract(reporters);
-        invariants::check::<P>(TermLength::ONE, states);
+        invariants::check::<P>(term_length, states);
     });
 }
 
@@ -1542,7 +1544,7 @@ mod tests {
         CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
         strategy::StrategyChoice, utils::Partition,
     };
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
     use std::num::NonZeroUsize;
 
     /// Episode length the ignored integration tests run. Short (versus the
