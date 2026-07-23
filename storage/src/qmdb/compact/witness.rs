@@ -318,10 +318,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok((self, Handle::from_future(completion)))
     }
 
-    /// Whether a sync pipelined by [`Self::start_sync`] is still pending, i.e. has not
-    /// provably succeeded.
-    ///
-    /// Peeks the completion without blocking, so an in-flight sync counts as pending.
+    /// Whether a sync pipelined by [`Self::start_sync`] is still pending.
     pub(crate) fn has_pending_sync(&self) -> bool {
         self.pending_sync
             .as_ref()

@@ -480,8 +480,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
-    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
-    /// surface as described on [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    /// guarantee none is needed. A new sync waits for the prior sync before starting.
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();
