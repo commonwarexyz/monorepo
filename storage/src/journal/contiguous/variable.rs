@@ -2593,7 +2593,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
             };
-            let mut journal = Inner::<_, u64>::init(context, cfg).await.unwrap();
+            let mut journal = Box::new(Inner::<_, u64>::init(context, cfg).await.unwrap());
 
             journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
@@ -2602,7 +2602,7 @@ mod tests {
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
-            let handle = journal.start_sync().await;
+            let (journal, handle) = journal.start_sync().await;
             assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
@@ -2633,11 +2633,11 @@ mod tests {
                     cfg.clone(),
                 )
             };
-            let mut journal = make(pending.clone()).await.unwrap();
+            let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
             // Nothing proven while the first sync is parked: the anchor must not move.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let h1 = journal.start_sync().await;
+            let (mut journal, h1) = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 0);
 
             release_pending_syncs(&pending);
@@ -2646,7 +2646,7 @@ mod tests {
             // The first sync is jointly proven (data and offsets), so the next call advances
             // the offsets watermark to its size, one interval behind the tip.
             journal.append(&4).await.unwrap();
-            let h2 = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 3);
             drive_pending_syncs(&pending, h2).await.unwrap();
 
@@ -2677,20 +2677,22 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
             };
-            let mut journal = Inner::<_, u64>::init(
-                DelayedSyncContext {
-                    inner: context.child("journal"),
-                    pending: pending.clone(),
-                },
-                cfg,
-            )
-            .await
-            .unwrap();
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
 
             // Fail the data sync but let the offsets sync land: offsets durability alone must
             // not advance the anchor, which would point recovery past the surviving data.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let h1 = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await;
             let data = next_pending_sync(&pending);
             release_pending_syncs(&pending);
             data.release
@@ -2700,7 +2702,7 @@ mod tests {
                 .unwrap();
             assert!(h1.await.is_err());
 
-            let h2 = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 0);
             assert!(h2.await.is_err());
         });
@@ -2742,7 +2744,7 @@ mod tests {
                 .await
                 .unwrap();
             journal.append(&9).await.unwrap();
-            let h1 = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await;
             let data = next_pending_sync(&pending);
             release_pending_syncs(&pending);
             data.release
@@ -2752,7 +2754,7 @@ mod tests {
                 .unwrap();
             assert!(h1.await.is_err());
 
-            let h2 = journal.start_sync().await;
+            let (journal, h2) = journal.start_sync().await;
             assert_eq!(journal.offsets.recovery_watermark(), 2);
             assert!(h2.await.is_err());
         });
@@ -2771,24 +2773,26 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
             };
-            let mut journal = Inner::<_, u64>::init(
-                DelayedSyncContext {
-                    inner: context.child("journal"),
-                    pending: pending.clone(),
-                },
-                cfg,
-            )
-            .await
-            .unwrap();
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let h1 = journal.start_sync().await;
+            let (mut journal, h1) = journal.start_sync().await;
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
             // Only the advance's offsets-checkpoint fsync is in flight: its failure surfaces
             // on the journal handle even though the data is durable.
-            let h2 = journal.start_sync().await;
+            let (mut journal, h2) = journal.start_sync().await;
             fail_pending_syncs(&pending);
             assert!(h2.await.is_err());
 
@@ -2798,7 +2802,6 @@ mod tests {
             drive_pending_syncs(&pending, journal.commit())
                 .await
                 .unwrap();
-            let journal = Box::new(journal);
             assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
         });
     }
@@ -2816,15 +2819,17 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
             };
-            let mut journal = Inner::<_, u64>::init(
-                DelayedSyncContext {
-                    inner: context.child("journal"),
-                    pending: pending.clone(),
-                },
-                cfg,
-            )
-            .await
-            .unwrap();
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
 
             journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
@@ -2857,9 +2862,11 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
             };
-            let mut journal = Inner::<_, u64>::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(context.child("journal"), cfg)
+                    .await
+                    .unwrap(),
+            );
 
             // Buffer an item, then fail the flush inside start_sync, dropping the returned
             // handle unobserved.
@@ -2868,7 +2875,8 @@ mod tests {
                 write_rate: Some(1.0),
                 ..Default::default()
             };
-            drop(journal.start_sync().await);
+            let (mut journal, handle) = journal.start_sync().await;
+            drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
             // Appending through the blob boundary must surface the retained failure.
