@@ -684,11 +684,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     /// Atomically begin committing the current state of [Metadata], returning a completion handle.
     ///
     /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. Failures
-    /// surface only on the handle: a call that fails to start its sync returns an already-failed
-    /// handle. At most one sync is in flight: a new call first waits for the prior sync. The
-    /// handle is a detached observer, so dropping it neither cancels the sync nor loses a
-    /// failure. Any failure leaves the store unusable: every later sync fails, matching
-    /// [Self::sync].
+    /// surface only on the handle and leave the store unusable: every later sync fails. At most
+    /// one sync is in flight: a new call first waits for the prior sync. Dropping the handle
+    /// neither cancels the sync nor loses a failure.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {
         let handle = self.0.start_sync().await;
         (self, handle)

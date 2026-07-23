@@ -86,18 +86,23 @@
 //!
 //! # Watermark advancement
 //!
-//! `sync()` advances the watermark to the current size after completing the data sync.
-//! `start_sync()` also advances it, without ordering anything: the journal tracks its
-//! *durable size* (the highest size whose sync it has observed complete) and the watermark
-//! only ever takes that value. Writing an already-proven value is safe at any time, even while a
-//! data sync is in flight. A failed advance fails the returned handle and, because the
-//! checkpoint store retains the failure, every later checkpoint write. The invariants:
+//! The watermark must never exceed what is durably on disk. `sync()` completes its data sync
+//! before writing the watermark, so it can advance it to the current size. `start_sync()`
+//! returns before its data sync completes, so it advances the watermark using an older proof:
+//! the journal's *durable size*, the highest size whose sync it has already observed complete.
+//! A durable value is safe to write at any time, so the watermark write needs no ordering
+//! against the in-flight data sync.
+//!
+//! A failed advance fails the returned handle. The checkpoint store retains the failure, so
+//! every later checkpoint write fails too.
+//!
+//! The invariants:
 //!
 //! - The watermark only takes values the durable size has held (never an in-flight size).
 //! - The durable size advances only on an observed sync success.
 //! - Operations that move blob state backward (rewind, clear) lower the durable size and
-//!   durably lower the watermark first, draining any in-flight watermark write that could
-//!   exceed the surviving data.
+//!   durably lower the watermark before touching blob state, draining any in-flight watermark
+//!   write that could exceed the surviving data.
 //!
 //! # Consistency
 //!
