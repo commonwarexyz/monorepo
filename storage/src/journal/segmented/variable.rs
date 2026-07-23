@@ -628,6 +628,29 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                             }
                             // Buffer still has data - continue to try decoding
                         }
+                        Err(err) if matches!(err, commonware_runtime::Error::InvalidChecksum) => {
+                            // A torn page in the unsynced tail. A synced page cannot tear, so
+                            // this is unacknowledged data past the last durable sync; repair it
+                            // by truncating to the last well-formed item (like trailing bytes)
+                            // rather than failing, so a torn flush never wedges recovery.
+                            warn!(
+                                blob = current.section,
+                                bad_offset = current.offset,
+                                new_size = current.valid_offset,
+                                "torn page detected: truncating"
+                            );
+                            let (section, valid_offset) = (current.section, current.valid_offset);
+                            self.repairing = true;
+                            let repaired =
+                                repair_blob(&mut self.journal, section, valid_offset).await;
+                            self.repairing = false;
+                            if let Err(err) = repaired {
+                                self.sections.pop_front();
+                                return self.fail(err);
+                            }
+                            self.sections.pop_front();
+                            continue;
+                        }
                         Err(err) => {
                             self.sections.pop_front();
                             return self.fail(err.into());
@@ -700,6 +723,26 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                         bad_offset = current.offset,
                         new_size = current.valid_offset,
                         "incomplete item at end: truncating"
+                    );
+                    let (section, valid_offset) = (current.section, current.valid_offset);
+                    self.repairing = true;
+                    let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
+                    self.repairing = false;
+                    if let Err(err) = repaired {
+                        self.sections.pop_front();
+                        return self.fail(err);
+                    }
+                    self.sections.pop_front();
+                    continue;
+                }
+                Err(err) if matches!(err, commonware_runtime::Error::InvalidChecksum) => {
+                    // A torn page in the unsynced tail (see the header-decode path above):
+                    // truncate to the last well-formed item rather than failing.
+                    warn!(
+                        blob = current.section,
+                        bad_offset = current.offset,
+                        new_size = current.valid_offset,
+                        "torn page detected: truncating"
                     );
                     let (section, valid_offset) = (current.section, current.valid_offset);
                     self.repairing = true;
@@ -1885,6 +1928,105 @@ mod tests {
             assert_eq!(items[0].1, 1);
             assert_eq!(items[1].0, 2);
             assert_eq!(items[1].1, 5);
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_replay_repairs_torn_interior_page() {
+        // A torn flush can leave an interior page invalid while a later page survives. The
+        // per-section backward scan at init sizes the section out to that valid island, so
+        // replay meets the hole mid-stream. It must repair by truncating to the last
+        // well-formed item (a synced page cannot tear, so the hole is unacknowledged tail
+        // data) rather than failing, which would deterministically wedge recovery.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Fill one section with enough items to span many physical pages.
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            let count: i32 = 1000;
+            for i in 0..count {
+                (journal, _, _) = journal.append(1, &i).await.expect("failed to append");
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            let (_, section_size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            drop(journal);
+
+            // The section must span several pages so an interior page can be torn while a
+            // later page survives as the valid island.
+            assert!(
+                section_size > 4 * PAGE_SIZE.get() as u64,
+                "test needs several pages, got {section_size}"
+            );
+
+            // Corrupt an interior page, leaving later pages intact so init's backward scan
+            // still sizes the section past the hole. PAGE_SIZE + 100 lands inside the second
+            // physical page regardless of the checksum-record size.
+            let (blob, _) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            blob.write_at_sync(PAGE_SIZE.get() as u64 + 100, vec![0xFFu8; 16])
+                .await
+                .expect("failed to corrupt interior page");
+            drop(blob);
+
+            // Reopen and replay: must repair to the valid prefix, never yield an error.
+            let mut journal = Journal::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+            let mut items = Vec::<i32>::new();
+            {
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
+                while let Some(result) = replay.next().await {
+                    let (_, _, _, item) = result.expect("replay must repair a torn page, not fail");
+                    items.push(item);
+                }
+                journal = replay.finish().expect("failed to finish replay");
+            }
+
+            // Recovered a non-empty contiguous prefix, strictly shorter than everything
+            // appended (the torn page and the valid island past it are dropped).
+            assert!(!items.is_empty(), "expected a recovered prefix");
+            assert!(
+                (items.len() as i32) < count,
+                "torn tail must be dropped, recovered {} of {count}",
+                items.len()
+            );
+            for (i, item) in items.iter().enumerate() {
+                assert_eq!(*item, i as i32, "prefix must match appended order");
+            }
+
+            // The journal is usable after repair: append, sync, reopen, and read back.
+            (journal, _, _) = journal
+                .append(2, &777)
+                .await
+                .expect("failed to append after repair");
+            journal = journal
+                .sync_all()
+                .await
+                .expect("failed to sync after repair");
+            drop(journal);
+
+            let journal: Journal<_, i32> = Journal::init(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to reopen after repair");
+            assert_eq!(journal.get(2, 0).await.expect("failed to get"), 777);
+            journal.destroy().await.expect("failed to destroy");
         });
     }
 
