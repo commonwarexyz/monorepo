@@ -1672,7 +1672,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Commit a page-aligned prefix, then flush a multi-page tail without syncing it.
+            // Commit a page-aligned prefix, then stage a multi-page tail.
             let mut journal = init_journal::<_, Digest>(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1691,11 +1691,14 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            let replay = journal
-                .replay(0, 0, NZUsize!(1024))
+            // Materialize the candidate tail so the test can construct the on-disk state of
+            // an arbitrarily torn unacknowledged flush. The corruption below represents the
+            // missing interior write while preserving the later valid island.
+            journal = journal
+                .sync_all()
                 .await
-                .expect("failed to flush unsynced tail");
-            drop(replay);
+                .expect("failed to materialize candidate tail");
+            drop(journal);
             let (_, section_size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await

@@ -1945,7 +1945,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Commit a prefix, then flush a multi-page tail without syncing it.
+            // Commit a prefix, then stage a multi-page tail.
             let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1958,11 +1958,14 @@ mod tests {
             for i in synced_count..count {
                 (journal, _, _) = journal.append(1, &i).await.expect("failed to append");
             }
-            let replay = journal
-                .replay(0, 0, NZUsize!(1024))
+            // Materialize the candidate tail so the test can construct the on-disk state of
+            // an arbitrarily torn unacknowledged flush. The corruption below represents the
+            // missing interior write while preserving the later valid island.
+            journal = journal
+                .sync_all()
                 .await
-                .expect("failed to flush unsynced tail");
-            drop(replay);
+                .expect("failed to materialize candidate tail");
+            drop(journal);
             let (_, section_size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
