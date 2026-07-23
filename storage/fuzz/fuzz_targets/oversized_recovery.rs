@@ -188,10 +188,17 @@ fn fuzz(input: FuzzInput) {
         let cfg = test_cfg(&context);
 
         // Phase 1: Create valid data
-        let mut oversized: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.child("initial"), cfg.clone(), None)
-                .await
-                .expect("Failed to init");
+        let mut replay = Oversized::<_, TestEntry, TestValue>::init(
+            context.child("initial"),
+            cfg.clone(),
+            NZUsize!(512),
+        )
+        .await
+        .expect("Failed to init");
+        while let Some(result) = replay.next().await {
+            result.expect("Failed to replay");
+        }
+        let mut oversized = replay.finish().expect("Failed to finish replay");
 
         let mut entry_id = 0u64;
         for (section_idx, &count) in input.entries_per_section.iter().enumerate() {
@@ -304,18 +311,30 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Phase 3: Recovery - this should not panic
-        let mut recovered: Oversized<_, TestEntry, TestValue> =
-            match Oversized::init(context.child("recovered"), cfg.clone(), None).await {
-                Ok(recovered) => recovered,
-                // Existing-byte overwrites in the paged index can invalidate fixed-journal
-                // integrity checks before oversized recovery has a chance to inspect entries.
-                Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if index_page_integrity_may_be_invalidated =>
-                {
-                    return;
-                }
-                Err(err) => panic!("Unexpected recovery failure: {err:?}"),
-            };
+        let recovery = async {
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init(
+                context.child("recovered"),
+                cfg.clone(),
+                NZUsize!(512),
+            )
+            .await?;
+            while let Some(result) = replay.next().await {
+                result?;
+            }
+            replay.finish()
+        }
+        .await;
+        let mut recovered: Oversized<_, TestEntry, TestValue> = match recovery {
+            Ok(recovered) => recovered,
+            // Existing-byte overwrites in the paged index can invalidate fixed-journal
+            // integrity checks before oversized recovery has a chance to inspect entries.
+            Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
+                if index_page_integrity_may_be_invalidated =>
+            {
+                return;
+            }
+            Err(err) => panic!("Unexpected recovery failure: {err:?}"),
+        };
 
         // Phase 4: Verify get operations don't panic
         // Note: Value checksums are verified lazily on read, not during recovery.

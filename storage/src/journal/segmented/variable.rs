@@ -39,16 +39,13 @@
 //!
 //! # Recovery and Replay
 //!
-//! [Journal::init] opens existing section blobs but does not fully validate their pages or item
-//! framing. Recovery is performed by [Journal::replay] as it reads each section. Replay treats
-//! the first invalid page, incomplete length prefix, or incomplete item in a section as that
-//! section's new end, truncates to the last fully decoded item, and makes the repair durable.
+//! [Journal::init] opens existing section blobs and returns a [Replay] that performs recovery as it
+//! reads each section. Replay treats the first invalid page, incomplete length prefix, or
+//! incomplete item in a section as that section's new end, truncates to the last fully decoded
+//! item, and makes the repair durable.
 //!
-//! A reopened journal must therefore be replayed before it is read or mutated. Start recovery at
-//! section and offset `0` unless a separately validated durable checkpoint proves that an earlier
-//! prefix can be skipped. Drain [Replay::next] until it returns `None`, then call [Replay::finish]
-//! to obtain the recovered journal. Dropping a replay early, ignoring an error, or starting after
-//! unverified data does not complete recovery.
+//! Drain [Replay::next] until it returns `None`, then call [Replay::finish] to obtain the recovered
+//! journal. Dropping the replay early or ignoring an error prevents construction of a [Journal].
 //!
 //! # Compression
 //!
@@ -69,14 +66,18 @@
 //!     // Create a page cache
 //!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
 //!
-//!     // Create a journal
-//!     let journal = Journal::init(context, Config {
+//!     // Create and recover a journal
+//!     let mut replay = Journal::init(context, Config {
 //!         partition: "partition".into(),
 //!         compression: None,
 //!         codec_config: (),
 //!         page_cache,
 //!         write_buffer: NZUsize!(1024 * 1024),
-//!     }).await.unwrap();
+//!     }, NZUsize!(1024 * 1024)).await.unwrap();
+//!     while let Some(item) = replay.next().await {
+//!         item.unwrap();
+//!     }
+//!     let journal = replay.finish().unwrap();
 //!
 //!     // Append data to the journal
 //!     let (journal, _, _) = journal.append(1, &128).await.unwrap();
@@ -143,7 +144,7 @@ struct Inner<E: Storage + Metrics, V: Codec> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
-    /// See [Journal::init].
+    /// Open the journal's backing storage without performing recovery.
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
@@ -373,10 +374,8 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item).
 ///
-/// [Journal::init] only opens the backing blobs. It does not verify every page or frame. That
-/// work is performed by [Journal::replay], so callers reopening a journal must fully drain replay
-/// and call [Replay::finish] before using the returned journal. Recovery should begin at `(0, 0)`
-/// unless an independently durable checkpoint validates the skipped prefix.
+/// [Journal::init] returns a [Replay] rather than a journal. A [Journal] can only be obtained after
+/// that replay has been drained and [Replay::finish] succeeds.
 ///
 /// Replay repairs page checksum failures and incomplete trailing frame data. Other runtime and
 /// codec errors are returned and make [Replay::finish] fail. Without a durable watermark, replay
@@ -400,18 +399,17 @@ impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
-    /// Initialize a new `Journal` instance.
+    /// Initialize a journal and begin recovery from its first item.
     ///
-    /// All backing blobs are opened but not fully read or validated during initialization.
-    ///
-    /// # Recovery
-    ///
-    /// After reopening an existing journal, call [Journal::replay] from section and offset `0`,
-    /// drain it until [Replay::next] returns `None`, and call [Replay::finish] before using the
-    /// journal. A non-zero replay start is suitable for recovery only when a separately
-    /// validated durable checkpoint covers the skipped prefix.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    /// The returned [Replay] must be drained until [Replay::next] returns `None`, then passed to
+    /// [Replay::finish] to obtain a usable [Journal].
+    pub async fn init(
+        context: E,
+        cfg: Config<V::Cfg>,
+        buffer: NonZeroUsize,
+    ) -> Result<Replay<E, V>, Error> {
+        let journal = Self(Box::new(Inner::init(context, cfg).await?));
+        journal.replay(0, 0, buffer).await
     }
 
     /// Consumes the journal and returns an owned [Replay] reader over all items starting
@@ -883,6 +881,18 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
+    async fn init_journal<E, V>(context: E, cfg: Config<V::Cfg>) -> Result<Journal<E, V>, Error>
+    where
+        E: Storage + Metrics,
+        V: CodecShared,
+    {
+        let mut replay = Journal::init(context, cfg, NZUsize!(1024)).await?;
+        while let Some(result) = replay.next().await {
+            result?;
+        }
+        replay.finish()
+    }
+
     #[test_traced]
     fn test_journal_append_and_read() {
         // Initialize the deterministic context
@@ -900,7 +910,7 @@ mod tests {
             };
             let index = 1u64;
             let data = 10;
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -917,7 +927,7 @@ mod tests {
             // Drop and re-open the journal to simulate a restart
             journal = journal.sync(index).await.expect("Failed to sync journal");
             drop(journal);
-            let journal = Journal::<_, i32>::init(context.child("second"), cfg)
+            let journal = init_journal::<_, i32>(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -962,7 +972,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -983,7 +993,7 @@ mod tests {
 
             // Drop and re-open the journal to simulate a restart
             drop(journal);
-            let mut journal = Journal::init(context.child("second"), cfg)
+            let mut journal = init_journal(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1034,7 +1044,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1069,7 +1079,7 @@ mod tests {
 
             // Drop and re-open the journal to simulate a restart
             drop(journal);
-            let mut journal = Journal::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1129,7 +1139,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1242,7 +1252,7 @@ mod tests {
 
             // First session: create and prune
             {
-                let mut journal = Journal::init(context.child("first"), cfg.clone())
+                let mut journal = init_journal(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to initialize journal");
 
@@ -1259,7 +1269,7 @@ mod tests {
 
             // Second session: verify oldest_retained_section is reset
             {
-                let journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
+                let journal = init_journal::<_, i32>(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to re-initialize journal");
 
@@ -1312,7 +1322,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Attempt to initialize the journal
-            let result = Journal::<_, u64>::init(context, cfg).await;
+            let result = init_journal::<_, u64>(context, cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));
@@ -1352,15 +1362,11 @@ mod tests {
                 .expect("Failed to write incomplete data");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let mut replay = Journal::<_, u64>::init(context, cfg, NZUsize!(1024))
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = replay.next().await {
                 match result {
@@ -1383,15 +1389,11 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let journal = Journal::<_, i32>::init(context.child("storage"), cfg)
+            let replay = Journal::<_, i32>::init(context.child("storage"), cfg, NZUsize!(1024))
                 .await
                 .expect("Failed to initialize journal");
 
             // An empty journal's reader is exhausted from the start
-            let replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("Failed to replay");
             let journal = replay.finish().expect("failed to finish replay");
             journal.destroy().await.expect("Failed to destroy");
         });
@@ -1408,16 +1410,16 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg)
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
             (journal, _, _) = journal.append(1, &7i32).await.expect("Failed to append");
             journal = journal.sync(1).await.expect("Failed to sync");
+            drop(journal);
 
-            let replay = journal
-                .replay(0, 0, NZUsize!(1024))
+            let replay = Journal::<_, i32>::init(context.child("reopen"), cfg, NZUsize!(1024))
                 .await
-                .expect("Failed to replay");
+                .expect("Failed to re-initialize journal");
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });
     }
@@ -1442,7 +1444,7 @@ mod tests {
                 UInt(item.encode_size() as u32).encode_size() + item.encode_size();
             assert_eq!(item_record_size, PAGE_SIZE.get() as usize - 1);
 
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
             (journal, _, _) = journal
@@ -1457,18 +1459,14 @@ mod tests {
             journal = journal.sync(section).await.expect("Failed to sync journal");
             drop(journal);
 
-            let journal = Journal::init(context.child("second"), cfg)
-                .await
-                .expect("Failed to re-initialize journal");
+            let mut replay =
+                Journal::<_, [u8; 1021]>::init(context.child("second"), cfg, NZUsize!(1024))
+                    .await
+                    .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 resize_rate: Some(1.0),
                 ..Default::default()
             };
-
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
 
             let first = replay
                 .next()
@@ -1504,7 +1502,7 @@ mod tests {
             // boundary so repair must issue a physical resize, which the fault fails.
             let section = 1u64;
             let item = [10u8; 1021];
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
             (journal, _, _) = journal
@@ -1519,18 +1517,15 @@ mod tests {
             journal = journal.sync(section).await.expect("Failed to sync journal");
             drop(journal);
 
-            let journal = Journal::<_, [u8; 1021]>::init(context.child("second"), cfg)
-                .await
-                .expect("Failed to re-initialize journal");
+            let mut replay =
+                Journal::<_, [u8; 1021]>::init(context.child("second"), cfg, NZUsize!(1024))
+                    .await
+                    .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 resize_rate: Some(1.0),
                 ..Default::default()
             };
 
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
             let _ = replay
                 .next()
                 .await
@@ -1560,7 +1555,7 @@ mod tests {
             // boundary so repair must issue a physical resize (and its sync).
             let section = 1u64;
             let item = [10u8; 1021];
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
             (journal, _, _) = journal
@@ -1581,13 +1576,9 @@ mod tests {
                 inner: context.child("second"),
                 pending: pending.clone(),
             };
-            let journal = Journal::<_, [u8; 1021]>::init(gated, cfg.clone())
+            let mut replay = Journal::<_, [u8; 1021]>::init(gated, cfg.clone(), NZUsize!(1024))
                 .await
                 .expect("Failed to re-initialize journal");
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
             let _ = replay
                 .next()
                 .await
@@ -1613,13 +1604,10 @@ mod tests {
             drop(replay);
 
             // Re-initialization repairs from durable state
-            let journal = Journal::<_, [u8; 1021]>::init(context.child("third"), cfg)
-                .await
-                .expect("Failed to re-initialize journal");
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
+            let mut replay =
+                Journal::<_, [u8; 1021]>::init(context.child("third"), cfg, NZUsize!(1024))
+                    .await
+                    .expect("Failed to re-initialize journal");
             let first = replay
                 .next()
                 .await
@@ -1667,7 +1655,7 @@ mod tests {
                 .expect("Failed to write incomplete item");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let journal = init_journal(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1724,17 +1712,13 @@ mod tests {
                 .expect("Failed to write item without checksum");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let mut replay = Journal::<_, u64>::init(context, cfg, NZUsize!(1024))
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
             //
             // This will truncate the leftover bytes from our manual write.
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("unable to setup replay");
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = replay.next().await {
                 match result {
@@ -1785,26 +1769,21 @@ mod tests {
                 .expect("Failed to write item with bad checksum");
 
             // Initialize the journal
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("Failed to initialize journal");
+            let mut replay =
+                Journal::<_, u64>::init(context.child("storage"), cfg.clone(), NZUsize!(1024))
+                    .await
+                    .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                let mut items = Vec::<(u64, u64)>::new();
-                while let Some(result) = replay.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
+            let mut items = Vec::<(u64, u64)>::new();
+            while let Some(result) = replay.next().await {
+                match result {
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
-                journal = replay.finish().expect("failed to finish replay");
-                assert!(items.is_empty());
             }
+            let journal = replay.finish().expect("failed to finish replay");
+            assert!(items.is_empty());
             drop(journal);
 
             // Confirm blob is expected length
@@ -1833,7 +1812,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1865,25 +1844,20 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.child("second"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let mut replay =
+                Journal::<_, u32>::init(context.child("second"), cfg.clone(), NZUsize!(1024))
+                    .await
+                    .expect("Failed to re-initialize journal");
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                while let Some(result) = replay.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
+            while let Some(result) = replay.next().await {
+                match result {
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
-                journal = replay.finish().expect("failed to finish replay");
             }
+            let journal = replay.finish().expect("failed to finish replay");
             drop(journal);
 
             // Verify that replay stopped after corruption detected (the second blob).
@@ -1899,25 +1873,20 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             // Attempt to replay journal after truncation
-            let mut journal = Journal::init(context.child("third"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let mut replay =
+                Journal::<_, u32>::init(context.child("third"), cfg.clone(), NZUsize!(1024))
+                    .await
+                    .expect("Failed to re-initialize journal");
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                while let Some(result) = replay.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
+            while let Some(result) = replay.next().await {
+                match result {
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
-                journal = replay.finish().expect("failed to finish replay");
             }
+            let mut journal = replay.finish().expect("failed to finish replay");
 
             // Verify that only non-corrupted items were replayed
             assert_eq!(items.len(), 1);
@@ -1936,22 +1905,17 @@ mod tests {
             drop(journal);
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let mut replay =
+                Journal::<_, u32>::init(context.child("storage"), cfg.clone(), NZUsize!(1024))
+                    .await
+                    .expect("Failed to re-initialize journal");
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
-                    .await
-                    .expect("unable to setup replay");
-                while let Some(result) = replay.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {err}"),
-                    }
+            while let Some(result) = replay.next().await {
+                match result {
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
 
@@ -1982,7 +1946,7 @@ mod tests {
             };
 
             // Commit a prefix, then flush a multi-page tail without syncing it.
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             let synced_count: i32 = 200;
@@ -2024,23 +1988,21 @@ mod tests {
             drop(blob);
 
             // Reopen and replay: must repair to the valid prefix, never yield an error.
-            let mut journal = Journal::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+            let mut replay = Journal::<_, i32>::init(
+                context.child("second"),
+                cfg.clone(),
+                // Prefetch the whole section so the invalid page shares a batch with valid
+                // pages preceding it.
+                NZUsize!(1024 * 1024),
+            )
+            .await
+            .expect("failed to re-initialize journal");
             let mut items = Vec::<i32>::new();
-            {
-                let mut replay = journal
-                    // Prefetch the whole section so the invalid page shares a batch with
-                    // valid pages preceding it.
-                    .replay(0, 0, NZUsize!(1024 * 1024))
-                    .await
-                    .expect("unable to setup replay");
-                while let Some(result) = replay.next().await {
-                    let (_, _, _, item) = result.expect("replay must repair a torn page, not fail");
-                    items.push(item);
-                }
-                journal = replay.finish().expect("failed to finish replay");
+            while let Some(result) = replay.next().await {
+                let (_, _, _, item) = result.expect("replay must repair a torn page, not fail");
+                items.push(item);
             }
+            let mut journal = replay.finish().expect("failed to finish replay");
 
             // The acknowledged prefix survives intact, while the torn page and the valid
             // island past it are dropped.
@@ -2069,7 +2031,7 @@ mod tests {
                 .expect("failed to sync after repair");
             drop(journal);
 
-            let journal: Journal<_, i32> = Journal::init(context.child("third"), cfg.clone())
+            let journal: Journal<_, i32> = init_journal(context.child("third"), cfg.clone())
                 .await
                 .expect("failed to reopen after repair");
             assert_eq!(journal.get(2, 0).await.expect("failed to get"), 777);
@@ -2094,7 +2056,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2125,7 +2087,7 @@ mod tests {
                 .expect("Failed to add extra data");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.child("second"), cfg)
+            let journal = init_journal(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2157,7 +2119,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut journal = init_journal(context, cfg).await.unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).unwrap();
@@ -2210,7 +2172,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut journal = init_journal(context, cfg).await.unwrap();
 
             // Append to the maximal section. `section + 1` has no representable successor.
             let offset;
@@ -2240,7 +2202,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context, cfg).await.unwrap();
+            let mut journal = init_journal(context, cfg).await.unwrap();
 
             // Check size of non-existent section
             let size = journal.size(1).unwrap();
@@ -2294,7 +2256,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2321,7 +2283,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, u8>::init(context.child("second"), cfg)
+            let journal = init_journal::<_, u8>(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2355,7 +2317,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2418,7 +2380,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2468,7 +2430,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2511,7 +2473,7 @@ mod tests {
             };
 
             // Create sections 1-5 with data
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for section in 1u64..=5 {
@@ -2526,7 +2488,7 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let mut journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, i32>(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2571,7 +2533,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2617,7 +2579,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2646,7 +2608,7 @@ mod tests {
             // The first thing encountered will be the trailing corrupt bytes
             let start_offset = valid_logical_size;
             {
-                let journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
+                let journal = init_journal::<_, i32>(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
 
@@ -2687,7 +2649,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
+            let mut journal = init_journal(context.child("storage"), cfg).await.unwrap();
             (journal, _, _) = journal.append(1, &7i32).await.unwrap();
 
             // A failed replay consumes the journal
@@ -2711,7 +2673,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2744,7 +2706,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = Journal::<_, LargeItem>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, LargeItem>(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2792,7 +2754,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2825,7 +2787,7 @@ mod tests {
             // Everything survives a sync and reopen.
             journal = journal.sync(1).await.expect("Failed to sync");
             drop(journal);
-            let mut journal = Journal::<_, LargeItem>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, LargeItem>(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2868,7 +2830,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2908,7 +2870,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, i32>(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2988,7 +2950,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -3016,7 +2978,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, i32>(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -3081,7 +3043,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -3110,7 +3072,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = Journal::<_, ExactItem>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, ExactItem>(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -3161,7 +3123,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
             let mut journal: Journal<_, [u8; 128]> =
-                Journal::init(context.child("first"), cfg.clone())
+                init_journal(context.child("first"), cfg.clone())
                     .await
                     .expect("Failed to initialize journal");
 
@@ -3192,7 +3154,7 @@ mod tests {
             // Drop and reopen to test replay
             drop(journal);
             let mut journal: Journal<_, [u8; 128]> =
-                Journal::init(context.child("second"), cfg.clone())
+                init_journal(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to re-initialize journal");
 
@@ -3232,7 +3194,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal: Journal<_, u64> = Journal::init(context.child("journal"), cfg.clone())
+            let mut journal: Journal<_, u64> = init_journal(context.child("journal"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 

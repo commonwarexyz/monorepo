@@ -670,14 +670,31 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> = Oversized::init(
-            context.child("oversized"),
-            oversized_cfg,
-            checkpoint
-                .filter(|checkpoint| !checkpoint.is_empty())
-                .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size)),
-        )
-        .await?;
+        let oversized_checkpoint = checkpoint
+            .filter(|checkpoint| !checkpoint.is_empty())
+            .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size));
+        let oversized: Oversized<E, Record<K>, V> = match oversized_checkpoint {
+            Some(checkpoint) => {
+                Oversized::init_from_checkpoint(
+                    context.child("oversized"),
+                    oversized_cfg,
+                    checkpoint,
+                )
+                .await?
+            }
+            None => {
+                let mut replay = Oversized::init(
+                    context.child("oversized"),
+                    oversized_cfg,
+                    config.table_replay_buffer,
+                )
+                .await?;
+                while let Some(result) = replay.next().await {
+                    result?;
+                }
+                replay.finish()?
+            }
+        };
 
         // Open table blob
         let (table, table_len) = context

@@ -3,7 +3,7 @@ use crate::{
     archive::{Error, Identifier},
     index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
-        Config as OversizedConfig, Oversized, Record as OversizedRecord,
+        Config as OversizedConfig, Oversized, Record as OversizedRecord, Replay as OversizedReplay,
     },
     rmap::RMap,
 };
@@ -185,8 +185,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
+        let mut replay: OversizedReplay<E, Record<K>, V> =
+            Oversized::init(context.child("oversized"), oversized_cfg, cfg.replay_buffer).await?;
 
         // Initialize keys and replay index journal (no values read!)
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
@@ -195,7 +195,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let mut intervals = RMap::new();
         let oversized = {
             debug!("initializing archive from index journal");
-            let mut replay = oversized.replay(0, 0, cfg.replay_buffer).await?;
             while let Some(result) = replay.next().await {
                 let (_section, position, entry) = result?;
 

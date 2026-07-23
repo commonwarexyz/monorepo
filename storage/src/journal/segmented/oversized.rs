@@ -26,7 +26,7 @@
 //! - Glob value without index entry (orphan - acceptable but cleaned up)
 //! - Glob sections without corresponding index sections (orphan sections - removed)
 //!
-//! During initialization, crash recovery is performed:
+//! Before infer-mode initialization returns its [Replay], crash recovery is performed:
 //! 1. Each section's last valid entry is found by scanning backwards: an entry is valid
 //!    only if its glob reference is in bounds (`value_offset + value_size <= glob_size`)
 //!    and its value's checksum verifies
@@ -44,13 +44,12 @@
 //! so neither a dropped index entry nor the stale bytes it referenced can survive a
 //! crash once later appends may reuse the freed offsets.
 //!
-//! When a checkpoint is provided at init, recovery restores exactly the checkpointed
-//! state instead of inferring one: sections below the checkpoint are verified complete
-//! (their last entry must end exactly at the glob's size, without reading values) and
-//! adopted unchanged, the checkpointed section is durably truncated to the committed
-//! size, and everything after it is removed. Committed damage the checkpoint covers
-//! fails init rather than being repaired, and value checksums below the checkpoint are
-//! still verified lazily at read.
+//! [Oversized::init_from_checkpoint] restores exactly the checkpointed state instead of inferring
+//! one: sections below the checkpoint are verified complete (their last entry must end exactly at
+//! the glob's size, without reading values) and adopted unchanged, the checkpointed section is
+//! durably truncated to the committed size, and everything after it is removed. Committed damage
+//! the checkpoint covers fails init rather than being repaired, and value checksums below the
+//! checkpoint are still verified lazily at read.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
@@ -105,7 +104,8 @@ pub struct Config<C> {
 /// Segmented journal for entries with oversized values.
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
-/// Provides coordinated operations and crash recovery.
+/// Provides coordinated operations and crash recovery. [Oversized::init] returns a [Replay];
+/// [Oversized::init_from_checkpoint] is the only constructor that returns a journal directly.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. [Oversized::replay] consumes the journal into an owned [Replay]
@@ -131,31 +131,47 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
     Oversized<E, I, V>
 {
-    /// Initialize with crash recovery.
+    /// Initialize without a checkpoint and begin replay recovery.
     ///
-    /// `checkpoint` is the durable state recovery restores, as `(section, index size)`.
-    /// When set, recovery keeps exactly this state: sections below `section` are
-    /// verified complete and adopted unchanged, `section` is truncated to `index size`,
-    /// and everything after it is removed. Anything the checkpoint covers that is
-    /// missing or inconsistent fails init with [Error::Corruption]. Callers must only
-    /// provide a checkpoint that was durably synced before it was published (see
-    /// [crate::freezer::Freezer]).
-    ///
-    /// When `None`, recovery infers the durable state instead: it finds each section's
-    /// last valid entry (in bounds of the glob, checksum-verified) and rewinds the
-    /// index journal to exclude the entries beyond it.
+    /// Recovery first reconciles the tail of each index section with its value section, then
+    /// returns a [Replay] that verifies and repairs the index journal. Drain the replay and call
+    /// [Replay::finish] to obtain a usable [Oversized].
     pub async fn init(
         context: E,
         cfg: Config<V::Cfg>,
-        checkpoint: Option<(u64, u64)>,
+        buffer: NonZeroUsize,
+    ) -> Result<Replay<E, I, V>, Error> {
+        let oversized = Self::open(context, cfg).await?.repair().await?;
+        oversized.replay(0, 0, buffer).await
+    }
+
+    /// Initialize by restoring a separately published durable checkpoint.
+    ///
+    /// `checkpoint` is `(section, index size)`. Recovery keeps exactly this state: sections below
+    /// `section` are verified complete and adopted unchanged, `section` is truncated to
+    /// `index_size`, and everything after it is removed. Anything the checkpoint covers that is
+    /// missing or inconsistent fails with [Error::Corruption]. Callers must only provide a
+    /// checkpoint that was durably synced before it was published (see [crate::freezer::Freezer]).
+    pub async fn init_from_checkpoint(
+        context: E,
+        cfg: Config<V::Cfg>,
+        checkpoint: (u64, u64),
     ) -> Result<Self, Error> {
-        // Initialize both journals
+        let (section, index_size) = checkpoint;
+        Self::open(context, cfg)
+            .await?
+            .restore(section, index_size)
+            .await
+    }
+
+    /// Open the index and value journals without reconciling them.
+    async fn open(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
-        let index = FixedJournal::init(context.child("index"), index_cfg).await?;
+        let index = FixedJournal::open(context.child("index"), index_cfg).await?;
 
         let value_cfg = GlobConfig {
             partition: cfg.value_partition,
@@ -165,15 +181,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         };
         let values = Glob::init(context.child("values"), value_cfg).await?;
 
-        let oversized = Self { index, values };
-
-        // Perform crash recovery
-        let oversized = match checkpoint {
-            Some((section, index_size)) => oversized.restore(section, index_size).await?,
-            None => oversized.repair().await?,
-        };
-
-        Ok(oversized)
+        Ok(Self { index, values })
     }
 
     /// Perform crash recovery by validating index entries against glob contents.
@@ -669,7 +677,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 ///
 /// Yields `(section, position, entry)` in order. Dropping the reader before it is exhausted
 /// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an exhausted
-/// reader to get the journal back.
+/// reader to obtain the journal.
 pub struct Replay<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
     values: Glob<E, V>,
@@ -712,6 +720,27 @@ mod tests {
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
         offset + u64::from(size)
+    }
+
+    async fn init_oversized<E, I, V>(
+        context: E,
+        cfg: Config<V::Cfg>,
+        checkpoint: Option<(u64, u64)>,
+    ) -> Result<Oversized<E, I, V>, Error>
+    where
+        E: BufferPooler + Storage + Metrics,
+        I: Record + Send + Sync,
+        V: CodecShared,
+    {
+        if let Some(checkpoint) = checkpoint {
+            return Oversized::init_from_checkpoint(context, cfg, checkpoint).await;
+        }
+
+        let mut replay = Oversized::init(context, cfg, NZUsize!(1024)).await?;
+        while let Some(result) = replay.next().await {
+            result?;
+        }
+        replay.finish()
     }
 
     /// Test index entry that stores a u64 id and references a value.
@@ -792,7 +821,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -830,7 +859,7 @@ mod tests {
 
             // Create and populate oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -863,7 +892,7 @@ mod tests {
 
             // Reinitialize - should recover and rewind index
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -896,7 +925,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -912,7 +941,7 @@ mod tests {
 
             // Reopen and verify
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -936,7 +965,7 @@ mod tests {
             let cfg = test_cfg(&context);
 
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -963,7 +992,7 @@ mod tests {
 
             // Only the synced sections survive the unclean drop, with both index and value durable.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
             for &(section, position, offset, size, value) in &located {
@@ -1011,7 +1040,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1039,7 +1068,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert_eq!(
@@ -1058,7 +1087,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1074,7 +1103,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("second"), test_cfg(&context), None)
+                    init_oversized(context.child("second"), test_cfg(&context), None)
                         .await
                         .expect("Failed to reinit");
                 assert_eq!(
@@ -1097,7 +1126,7 @@ mod tests {
         // entry 1, now range-valid over entry 2's bytes.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg(&context), None)
+                init_oversized(context.child("third"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert_adopted_entries_consistent(&oversized).await;
@@ -1111,7 +1140,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1129,7 +1158,7 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg(&context), None)
+                init_oversized(faulty_values, test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert!(
@@ -1142,7 +1171,7 @@ mod tests {
         // must not be adopted at recovery.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg(&context), None)
+                init_oversized(context.child("third"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert_eq!(oversized.size(1).expect("size"), 0);
@@ -1157,7 +1186,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1185,7 +1214,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("second"), test_cfg(&context), None)
+                    init_oversized(context.child("second"), test_cfg(&context), None)
                         .await
                         .expect("Failed to reinit");
                 (oversized, _, _, _) = oversized
@@ -1199,7 +1228,7 @@ mod tests {
         // adopted referencing entry 2's still-durable frame.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg(&context), None)
+                init_oversized(context.child("third"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert_adopted_entries_consistent(&oversized).await;
@@ -1213,7 +1242,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // Two fully durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1241,7 +1270,7 @@ mod tests {
         // state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -1263,7 +1292,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1277,7 +1306,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -1296,7 +1325,7 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg(&context), None)
+                init_oversized(faulty_values, test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1312,7 +1341,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert_eq!(
@@ -1333,7 +1362,7 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg(&context), None)
+                init_oversized(faulty_values, test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1349,7 +1378,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             assert_eq!(
@@ -1366,7 +1395,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1383,7 +1412,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -1399,7 +1428,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1432,7 +1461,7 @@ mod tests {
         // Entry 2's range fits within the glob, so only the checksum check can reject it.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context), None)
+                init_oversized(context.child("second"), test_cfg(&context), None)
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -1467,7 +1496,7 @@ mod tests {
 
             // Create five durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
             for i in 1..=5u8 {
@@ -1512,7 +1541,7 @@ mod tests {
             // Recovery scans past the invalid tail values and the torn page (surfaced
             // as a checksum failure, not a generic read error) to the last valid pair.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -1529,7 +1558,7 @@ mod tests {
             // One committed entry, then torn state beyond the checkpoint: entries in
             // section 1 and 2 whose index becomes durable ahead of their values.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1555,7 +1584,7 @@ mod tests {
         // Restore truncates to the checkpoint without validating the discarded state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
+            let oversized: Oversized<_, TestEntry, TestValue> = init_oversized(
                 context.child("second"),
                 test_cfg(&context),
                 Some((1, chunk)),
@@ -1575,7 +1604,7 @@ mod tests {
         executor.start(|context| async move {
             // Two committed sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1603,7 +1632,7 @@ mod tests {
             // repaired, so the failure persists across restarts.
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             for instance in ["second", "third"] {
-                let result: Result<Oversized<_, TestEntry, TestValue>, Error> = Oversized::init(
+                let result: Result<Oversized<_, TestEntry, TestValue>, Error> = init_oversized(
                     context.child(instance),
                     test_cfg(&context),
                     Some((2, chunk)),
@@ -1620,7 +1649,7 @@ mod tests {
         executor.start(|context| async move {
             // Two committed sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context), None)
+                init_oversized(context.child("first"), test_cfg(&context), None)
                     .await
                     .expect("Failed to init");
             let (offset, size);
@@ -1646,7 +1675,7 @@ mod tests {
             // Restore adopts the section without probing its values: the corruption
             // surfaces at read on exactly the affected entry.
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
+            let oversized: Oversized<_, TestEntry, TestValue> = init_oversized(
                 context.child("second"),
                 test_cfg(&context),
                 Some((2, chunk)),
@@ -1675,15 +1704,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(context, cfg, None)
+            let replay = Oversized::<_, TestEntry, TestValue>::init(context, cfg, NZUsize!(1024))
                 .await
                 .expect("Failed to init");
 
             // An empty journal's reader is exhausted from the start
-            let replay = oversized
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("Failed to replay");
             let oversized = replay.finish().expect("failed to finish replay");
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -1695,7 +1720,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -1703,11 +1728,15 @@ mod tests {
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
 
-            let replay = oversized
-                .replay(0, 0, NZUsize!(1024))
-                .await
-                .expect("Failed to replay");
+            let replay = Oversized::<_, TestEntry, TestValue>::init(
+                context.child("second"),
+                cfg,
+                NZUsize!(1024),
+            )
+            .await
+            .expect("Failed to re-init");
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });
     }
@@ -1718,7 +1747,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -1762,7 +1791,7 @@ mod tests {
 
             // Create oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -1778,7 +1807,7 @@ mod tests {
 
             // Reinitialize - recovery should handle the empty/non-existent section 1
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -1798,7 +1827,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -1825,7 +1854,7 @@ mod tests {
 
             // Reinitialize - should recover and rewind index to 0
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -1863,7 +1892,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -1931,7 +1960,7 @@ mod tests {
 
             // Reinitialize
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -1978,7 +2007,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2012,7 +2041,7 @@ mod tests {
 
             // Reinitialize - should detect page corruption and truncate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2055,7 +2084,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2075,7 +2104,7 @@ mod tests {
 
             // Reinitialize with no corruption - should be fast
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2102,7 +2131,7 @@ mod tests {
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2126,7 +2155,7 @@ mod tests {
 
             // Reinitialize
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2145,7 +2174,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2179,7 +2208,7 @@ mod tests {
 
             // Reinitialize
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2220,7 +2249,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2243,7 +2272,7 @@ mod tests {
 
             // Reinitialize - glob size will be 0, all entries invalid
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2264,7 +2293,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2294,7 +2323,7 @@ mod tests {
 
             // Reinitialize
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2335,7 +2364,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2369,7 +2398,7 @@ mod tests {
             // Reinitialize - should recover gracefully with warning
             // Index section 1 will be rewound to 0 entries
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2392,7 +2421,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2416,7 +2445,7 @@ mod tests {
             // Reinitialize - should handle gracefully
             // Section 2 is gone from index, orphan data in glob is acceptable
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2439,7 +2468,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2482,7 +2511,7 @@ mod tests {
 
             // Reinitialize - should rewind index to match glob
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2522,7 +2551,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2559,7 +2588,7 @@ mod tests {
 
             // Reinitialize - glob has orphan data from entry 3
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2611,7 +2640,7 @@ mod tests {
 
             // Reinitialize after adding data on top of orphan glob data
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg, None)
+                init_oversized(context.child("third"), cfg, None)
                     .await
                     .expect("Failed to reinit after append");
 
@@ -2660,7 +2689,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2690,7 +2719,7 @@ mod tests {
 
             // Reinitialize - should handle partial entry gracefully
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2734,7 +2763,7 @@ mod tests {
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2758,7 +2787,7 @@ mod tests {
 
             // Reinitialize - should handle gracefully (rewind to 0)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2811,7 +2840,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2845,7 +2874,7 @@ mod tests {
 
             // Reinitialize - recovery should succeed (glob has orphan data)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2879,7 +2908,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2910,7 +2939,7 @@ mod tests {
 
             // Reinitialize - recovery should detect index entries pointing beyond glob
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -2951,7 +2980,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -2993,7 +3022,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -3030,7 +3059,7 @@ mod tests {
 
             // Create and populate with sections 1 and 2
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3065,7 +3094,7 @@ mod tests {
 
             // Reinitialize - should detect and remove the orphan section
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3088,7 +3117,7 @@ mod tests {
 
             // Create and populate with only section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3124,7 +3153,7 @@ mod tests {
 
             // Reinitialize - should detect and remove all orphan sections
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3167,7 +3196,7 @@ mod tests {
 
             // Initialize oversized - should remove all orphan value sections
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3187,7 +3216,7 @@ mod tests {
 
             // Create and populate with section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3224,7 +3253,7 @@ mod tests {
 
             // Reinitialize - should remove orphan sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3261,7 +3290,7 @@ mod tests {
             drop(oversized);
 
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg, None)
+                init_oversized(context.child("third"), cfg, None)
                     .await
                     .expect("Failed to reinit after append");
 
@@ -3282,7 +3311,7 @@ mod tests {
 
             // Create and populate with sections 1, 2, 3 (no orphans)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3299,7 +3328,7 @@ mod tests {
 
             // Reinitialize - no orphan cleanup needed
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3322,7 +3351,7 @@ mod tests {
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3364,7 +3393,7 @@ mod tests {
 
             // Reinitialize - should handle empty index section and remove orphan value section
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3388,7 +3417,7 @@ mod tests {
 
             // Create index with sections 1, 3, 5 (gaps)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3426,7 +3455,7 @@ mod tests {
 
             // Reinitialize - should remove orphan sections 2, 4, 6
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg, None)
+                init_oversized(context.child("second"), cfg, None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3455,7 +3484,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3501,7 +3530,7 @@ mod tests {
 
             // Reinitialize - should truncate the trailing garbage
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3557,7 +3586,7 @@ mod tests {
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3607,7 +3636,7 @@ mod tests {
             // Reinitialize - recovery should detect the invalid entry
             // (offset + size would overflow, and even with saturating_add it exceeds glob_size)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3642,7 +3671,7 @@ mod tests {
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3677,7 +3706,7 @@ mod tests {
 
             // First restart - recovery should handle empty section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3721,7 +3750,7 @@ mod tests {
 
             // Second restart - verify persistence
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg.clone(), None)
+                init_oversized(context.child("third"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit again");
 
@@ -3745,7 +3774,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -3775,7 +3804,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -3810,7 +3839,7 @@ mod tests {
 
             // Create and populate with large section numbers
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3840,7 +3869,7 @@ mod tests {
 
             // Reinitialize - should recover without overflow panics
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -3883,7 +3912,7 @@ mod tests {
 
             // Phase 1: Create valid data with 5 entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -3931,7 +3960,7 @@ mod tests {
             // Phase 4: Second recovery attempt should handle the inconsistent state
             // Index has 4 entries, but glob only supports 3.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit after nested crash");
 
@@ -3978,7 +4007,7 @@ mod tests {
 
             // Phase 1: Create valid data in section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone(), None)
+                init_oversized(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4022,7 +4051,7 @@ mod tests {
 
             // Phase 4: Recovery should complete the cleanup
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone(), None)
+                init_oversized(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit");
 
@@ -4059,7 +4088,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -4090,7 +4119,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 
@@ -4114,7 +4143,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(context, cfg, None)
+            let oversized: Oversized<_, TestEntry, TestValue> = init_oversized(context, cfg, None)
                 .await
                 .expect("Failed to init");
 
@@ -4131,7 +4160,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(context, cfg, None)
+            let oversized: Oversized<_, TestEntry, TestValue> = init_oversized(context, cfg, None)
                 .await
                 .expect("Failed to init");
 
@@ -4149,7 +4178,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg, None)
+                init_oversized(context, cfg, None)
                     .await
                     .expect("Failed to init");
 

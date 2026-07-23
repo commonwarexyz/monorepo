@@ -5,11 +5,11 @@
 //!
 //! # Recovery
 //!
-//! The [fixed] and [variable] journals perform journal-level recovery during replay, not
-//! initialization. After reopening either journal, callers must replay it from the beginning
-//! (or from a separately validated durable checkpoint), drain the replay completely, and call
-//! its `finish` method before reading or mutating the recovered journal. See each implementation's
-//! recovery documentation for details.
+//! The [fixed] and [variable] journal constructors return replay readers rather than usable
+//! journals. Drain the replay completely and call its `finish` method to obtain a journal that can
+//! be read or mutated. Composite journals may instead expose an explicit constructor that restores
+//! a separately validated durable checkpoint. See each implementation's recovery documentation
+//! for details.
 
 pub mod fixed;
 pub mod glob;

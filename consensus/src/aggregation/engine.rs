@@ -26,7 +26,9 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_storage::journal::segmented::variable::{
+    Config as JConfig, Journal, Replay as JournalReplay,
+};
 use commonware_utils::{
     N3f1, PrioritySet,
     futures::{Pool as FuturesPool, rebind},
@@ -249,10 +251,14 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::init(self.context.child("journal"), journal_cfg)
-            .await
-            .expect("init failed");
-        let (journal, unverified_heights) = self.replay(journal).await;
+        let replay = Journal::init(
+            self.context.child("journal"),
+            journal_cfg,
+            self.journal_replay_buffer,
+        )
+        .await
+        .expect("init failed");
+        let (journal, unverified_heights) = self.replay(replay).await;
         self.journal = Some(journal);
 
         // Request digests for unverified heights
@@ -827,15 +833,11 @@ impl<
     /// Returns the journal and a list of unverified pending heights that need digest requests.
     async fn replay(
         &mut self,
-        journal: Journal<E, Activity<P::Scheme, D>>,
+        mut replay: JournalReplay<E, Activity<P::Scheme, D>>,
     ) -> (Journal<E, Activity<P::Scheme, D>>, Vec<Height>) {
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
-        let mut replay = journal
-            .replay(0, 0, self.journal_replay_buffer)
-            .await
-            .expect("replay failed");
         while let Some(msg) = replay.next().await {
             let (_, _, _, activity) = msg.expect("replay failed");
             match activity {

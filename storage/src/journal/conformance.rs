@@ -162,8 +162,16 @@ impl StorageWorkload for SegmentedFixedWorkload {
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
         };
-        let mut journal =
-            segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
+        let mut replay = segmented_fixed::Journal::<_, u64>::init(
+            context.child("journal"),
+            config,
+            WRITE_BUFFER,
+        )
+        .await?;
+        while let Some(result) = replay.next().await {
+            result?;
+        }
+        let mut journal = replay.finish()?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![0u64; items_count];
@@ -230,9 +238,16 @@ impl StorageWorkload for SegmentedVariableWorkload {
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal =
-            segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                .await?;
+        let mut replay = segmented_variable::Journal::<_, Vec<u8>>::init(
+            context.child("journal"),
+            config,
+            WRITE_BUFFER,
+        )
+        .await?;
+        while let Some(result) = replay.next().await {
+            result?;
+        }
+        let mut journal = replay.finish()?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
@@ -317,12 +332,16 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
+        let mut replay = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
             context.child("journal"),
             config,
-            None,
+            WRITE_BUFFER,
         )
         .await?;
+        while let Some(result) = replay.next().await {
+            result?;
+        }
+        let mut journal = replay.finish()?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

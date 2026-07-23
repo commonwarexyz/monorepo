@@ -329,7 +329,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest>,
     {
-        let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+        let mut replay = Journal::<_, Artifact<S, Sha256Digest>>::init(
             context.child("journal"),
             JConfig {
                 partition,
@@ -338,9 +338,16 @@ mod tests {
                 page_cache,
                 write_buffer: NZUsize!(1024 * 1024),
             },
+            NZUsize!(1024 * 1024),
         )
         .await
         .expect("unable to initialize voter journal");
+        while let Some(result) = replay.next().await {
+            result.expect("unable to replay voter journal");
+        }
+        let mut journal = replay
+            .finish()
+            .expect("unable to finish voter journal replay");
         for artifact in artifacts {
             assert_eq!(artifact.view(), view);
             (journal, _, _) = journal
