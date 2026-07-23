@@ -325,26 +325,33 @@ mod tests {
                 partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
+            let faults = WriteFaults::default();
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-                DelayedSyncContext {
-                    inner: context.child("first"),
-                    pending: pending.clone(),
+                WriteFaultContext {
+                    inner: DelayedSyncContext {
+                        inner: context.child("first"),
+                        pending: pending.clone(),
+                    },
+                    faults: faults.clone(),
                 },
                 cfg,
             )
             .await
             .unwrap();
 
-            // Park the first sync, then start a second: it must wait for the first before
-            // writing the copy the first left as last-known-durable.
+            // Park the first sync, then start a second: until the first sync's fsync completes,
+            // its target copy's on-disk state is unknown, so the second sync must not write a
+            // single byte to the other (only durable) copy.
             let key = U64::new(1);
             metadata.put(key.clone(), vec![3]);
             let (mut metadata, handle) = metadata.start_sync().await;
             metadata.put(key.clone(), vec![4]);
+            let writes_before = faults.writes();
             let mut second = Box::pin(metadata.sync());
             for _ in 0..8 {
                 assert!((&mut second).now_or_never().is_none());
             }
+            assert_eq!(faults.writes(), writes_before, "second sync must not write");
             assert_eq!(
                 pending.starts(),
                 1,
