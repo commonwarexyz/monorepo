@@ -587,9 +587,8 @@ where
     where
         F: Family,
     {
-        // Fast path: already durably at `target` with no uncommitted state. A pipelined sync
-        // still in flight means the cached tip is not yet proven durable, so fall through to
-        // the store, which drains it.
+        // Fast path: already durably at `target` with no uncommitted state. A tip whose
+        // pipelined sync is still in flight is not yet proven durable and falls through.
         if self.size() == target
             && self.witness.with(|w| w.leaf_count()) == target
             && !self.witness.import_pending()
