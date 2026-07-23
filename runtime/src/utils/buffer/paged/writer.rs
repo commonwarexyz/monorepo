@@ -4066,7 +4066,9 @@ mod tests {
             );
             drop(append);
 
-            // Also verify that reading via Replay fails the same way.
+            // Replay exposes the checksum-valid fallback prefix before reporting the invalid
+            // non-last-page layout. This lets recovery consumers retain valid items preceding
+            // the bad page boundary.
             let (blob, size) = context
                 .open("test_partition", b"non_last_page")
                 .await
@@ -4076,13 +4078,15 @@ mod tests {
                 .unwrap();
             let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
 
-            // Try to fill pages - should fail on CRC validation.
-            let result = replay.ensure(1).await;
-            assert!(
-                result.is_err(),
-                "Reading from corrupted non-last page via Replay should fail, but got: {:?}",
-                result
-            );
+            assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(replay.remaining(), 10);
+            let expected: Vec<u8> = (1..=10).collect();
+            assert_eq!(replay.chunk(), expected.as_slice());
+            replay.advance(10);
+            assert!(matches!(
+                replay.ensure(1).await,
+                Err(Error::InvalidChecksum)
+            ));
         });
     }
 

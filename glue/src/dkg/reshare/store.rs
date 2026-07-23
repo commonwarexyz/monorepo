@@ -180,7 +180,7 @@ where
         mut secret_store: SS,
     ) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
-        let events = Journal::init(
+        let mut replay = Journal::init(
             context.child("events"),
             JournalConfig {
                 partition: format!("{partition_prefix}_events"),
@@ -189,6 +189,7 @@ where
                 page_cache,
                 write_buffer: WRITE_BUFFER,
             },
+            READ_BUFFER,
         )
         .await
         .expect("failed to initialize reshare event journal");
@@ -200,11 +201,6 @@ where
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
-            let mut replay = events
-                .replay(0, 0, READ_BUFFER)
-                .await
-                .expect("failed to replay reshare events");
-
             while let Some(result) = replay.next().await {
                 let (section, _, _, event) = result.expect("failed to read reshare event");
                 let epoch = Epoch::new(section);
