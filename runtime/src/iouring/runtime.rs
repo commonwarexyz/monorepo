@@ -308,6 +308,10 @@ struct Shared {
     /// final teardown from a non-worker thread must not create a thread
     /// nobody joins.
     workers: Mutex<Option<Vec<std::thread::JoinHandle<()>>>>,
+    /// Whether this runtime ever spawned a worker thread. Monotone: set (for
+    /// an accepted spawn) before the worker thread is launched, never
+    /// cleared, so any worker observing its own teardown sees it set.
+    spawned_workers: AtomicBool,
 }
 
 /// Runtime state shared by every [Context] on one worker thread.
@@ -564,19 +568,14 @@ impl Worker {
             std::process::abort();
         }
 
-        // Assert no context escaped the runtime. Once other workers exist the
-        // count legitimately races: their tasks may hold this worker's
-        // contexts (or sleep futures) and drop them only when their own
-        // teardown observes the abort cascade, so the check applies only to
-        // single-worker runs. A worker's own registration keeps the registry
-        // non-empty for its whole life, so a non-empty registry is exactly
-        // "another worker may still hold a reference".
-        let multi_worker = executor
-            .shared
-            .workers
-            .lock()
-            .as_ref()
-            .is_none_or(|workers| !workers.is_empty());
+        // Assert no context escaped the runtime. The check is meaningful only
+        // for runtimes that never spawned another worker: once one exists,
+        // the count legitimately races (another worker's tasks may hold this
+        // worker's contexts or sleep futures and drop them only when their
+        // own teardown observes the abort cascade, possibly after the join
+        // loop has already drained the registry), so a monotone flag gates
+        // the check rather than any point-in-time registry state.
+        let multi_worker = executor.shared.spawned_workers.load(Ordering::Relaxed);
         assert!(
             multi_worker || Arc::weak_count(&executor) == 0,
             "executor still has weak references"
@@ -658,6 +657,7 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             storage_lock: Arc::new(Mutex::new(())),
             workers: Mutex::new(Some(Vec::new())),
+            spawned_workers: AtomicBool::new(false),
         });
         let worker = Worker::new(Arc::clone(&shared));
 
@@ -1146,6 +1146,10 @@ impl Context {
         // [Error::Closed].
         let mut workers = shared.workers.lock();
         if let Some(list) = workers.as_mut() {
+            // Mark the runtime multi-worker before the thread exists so the
+            // new worker (and any worker it makes reachable) can never reach
+            // its own teardown check ahead of the flag.
+            shared.spawned_workers.store(true, Ordering::Relaxed);
             list.push(utils::thread::spawn(shared.cfg.thread_stack_size, body));
         }
         drop(workers);
@@ -1727,6 +1731,57 @@ mod tests {
                     });
             // Return while the dedicated task still holds a root context.
             context.sleep(Duration::from_millis(20)).await;
+        });
+    }
+
+    /// A dedicated worker may reach its teardown check while the root is
+    /// already joining the worker batch (registry drained) and a sibling
+    /// worker still holds one of its contexts: the escape check must key on
+    /// whether this runtime ever spawned a worker, not on point-in-time
+    /// registry state.
+    #[test]
+    fn test_dedicated_teardown_during_join_with_held_context() {
+        /// Sleeps before releasing its contents, delaying a future's drop (and
+        /// so its worker's teardown) by a controlled margin.
+        struct SlowRelease(Option<Context>, Duration);
+        impl Drop for SlowRelease {
+            fn drop(&mut self) {
+                std::thread::sleep(self.1);
+                self.0.take();
+            }
+        }
+
+        Runner::default().start(|context| async move {
+            let (send, recv) = oneshot::channel();
+            let _origin = context
+                .child("origin")
+                .dedicated()
+                .spawn(move |context| async move {
+                    // Hand a context of this worker to the sibling, then delay
+                    // this worker's own teardown well past the root's
+                    // join-batch take via a slow-dropping guard.
+                    let _ = send.send(context.child("shared"));
+                    let _slow = SlowRelease(None, Duration::from_millis(300));
+                    loop {
+                        context.sleep(Duration::from_secs(1)).await;
+                    }
+                });
+            // The guard is a closure capture (not constructed in the async
+            // body) so its slow drop runs on the holder worker even when the
+            // abort cascade wins the race to the task's first poll.
+            let held = SlowRelease(Some(recv.await.unwrap()), Duration::from_millis(600));
+            let _holder = context
+                .child("holder")
+                .dedicated()
+                .spawn(move |context| async move {
+                    // Hold the origin worker's context past its teardown.
+                    let _held = held;
+                    loop {
+                        context.sleep(Duration::from_secs(1)).await;
+                    }
+                });
+            // Return immediately: both workers tear down through the abort
+            // cascade while the root drains and joins.
         });
     }
 
