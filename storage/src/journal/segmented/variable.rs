@@ -589,8 +589,6 @@ pub struct Replay<E: Storage + Metrics, V: Codec> {
     sections: VecDeque<SectionReplay<E::Blob>>,
     finished: bool,
     errored: bool,
-    /// Set while a tail repair is in flight. Still set on the next call only when a
-    /// dropped [Replay::next] future interrupted the repair.
     repairing: bool,
 }
 

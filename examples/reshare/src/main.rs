@@ -69,7 +69,7 @@ fn main() {
         match cli.command {
             Command::Dkg(args) => dkg::run(context, args).await,
             Command::Setup(args) => setup::run(args),
-            Command::Validator(args) => Box::pin(validator::run(context, args)).await,
+            Command::Validator(args) => validator::run(context, args).await,
         }
     });
 }
