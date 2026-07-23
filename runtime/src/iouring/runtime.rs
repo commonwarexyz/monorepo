@@ -1187,6 +1187,11 @@ impl Context {
     /// its ring. Panics on the worker thread outside the task itself (e.g.
     /// ring creation failure) resolve the handle with [Error::Closed] and
     /// are resumed when the runtime joins its workers at teardown.
+    ///
+    /// Mandatory supervision holds on every exit path: the [Publisher] guard
+    /// aborts the consumed context's node before the handle can resolve, so
+    /// contexts derived from it before the spawn cannot spawn afterwards
+    /// (mirroring the inline path's [Handle::init] wrapper).
     fn spawn_worker<F, Fut, T>(
         self,
         f: F,
@@ -1218,6 +1223,10 @@ impl Context {
         if let Some(aborter) = handle.aborter() {
             parent.register(aborter);
         }
+        let publisher = Publisher {
+            parent,
+            sender: Some(sender),
+        };
 
         // Run the worker until the task completes or teardown aborts it.
         let thread_shared = Arc::clone(&shared);
@@ -1240,13 +1249,14 @@ impl Context {
                     Err(panic) => Ok(Err(panic)),
                 };
                 match result {
-                    Ok(Ok(value)) => {
-                        let _ = sender.send(Ok(value));
-                    }
+                    Ok(Ok(value)) => publisher.publish(Ok(value)),
                     Ok(Err(panic)) => {
                         panicker.notify(panic);
-                        let _ = sender.send(Err(Error::Exited));
+                        publisher.publish(Err(Error::Exited));
                     }
+                    // Dropping the publisher (at the end of this block)
+                    // aborts the node and resolves the handle with
+                    // [Error::Closed].
                     Err(Aborted) => {}
                 }
                 metric.finish();
@@ -1258,8 +1268,8 @@ impl Context {
         // registered worker before returning, so a spawn racing final
         // teardown from a non-worker thread must not create a thread nobody
         // joins. When the registry is already closed, dropping `body` (and
-        // the result sender inside it) resolves the handle with
-        // [Error::Closed].
+        // the publisher inside it) closes the node and resolves the handle
+        // with [Error::Closed].
         let mut workers = shared.workers.lock();
         if let Some(list) = workers.as_mut() {
             // Mark the runtime multi-worker before the thread exists so the
@@ -1271,6 +1281,39 @@ impl Context {
         drop(workers);
 
         handle
+    }
+}
+
+/// Owns a dedicated task's result sender behind the mandatory-supervision
+/// guarantee: the consumed context's node is aborted before the handle can
+/// resolve, on every exit path.
+///
+/// [Self::publish] aborts and then sends. Dropping the guard instead (task
+/// aborted, or a worker-infrastructure panic such as ring creation failure)
+/// aborts in the drop body and only then releases the sender field, so the
+/// handle resolves with [Error::Closed] strictly after the node closed.
+struct Publisher<T> {
+    /// The consumed context's supervision node.
+    parent: Arc<Tree>,
+    /// The handle's result channel; `None` once published.
+    sender: Option<oneshot::Sender<Result<T, Error>>>,
+}
+
+impl<T> Publisher<T> {
+    /// Abort the consumed node, then resolve the handle with `result`.
+    fn publish(mut self, result: Result<T, Error>) {
+        self.parent.abort();
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+impl<T> Drop for Publisher<T> {
+    fn drop(&mut self) {
+        // Idempotent after `publish`; on unpublished paths this runs before
+        // the sender field drops, preserving abort-before-resolution.
+        self.parent.abort();
     }
 }
 
@@ -1761,6 +1804,64 @@ mod tests {
             assert!(start.elapsed() < Duration::from_millis(150));
 
             assert_eq!(blocking.await.unwrap(), 42);
+        });
+    }
+
+    /// Completion of a dedicated task must abort the consumed context's node
+    /// before the handle resolves (as the inline path does): contexts derived
+    /// from it before the spawn cannot spawn afterwards.
+    #[test]
+    fn test_dedicated_completion_closes_parent() {
+        Runner::default().start(|context| async move {
+            let worker_context = context.child("worker");
+            let saved = worker_context.child("saved");
+            worker_context
+                .dedicated()
+                .spawn(|_| async {})
+                .await
+                .unwrap();
+            let orphan = saved.spawn(|_| async {});
+            assert!(matches!(orphan.await, Err(Error::Closed)));
+        });
+    }
+
+    /// Aborting a dedicated task closes the consumed context's node as well.
+    #[test]
+    fn test_dedicated_abort_closes_parent() {
+        Runner::default().start(|context| async move {
+            let worker_context = context.child("worker");
+            let saved = worker_context.child("saved");
+            let handle = worker_context.dedicated().spawn(|context| async move {
+                loop {
+                    context.sleep(Duration::from_secs(1)).await;
+                }
+            });
+            context.sleep(Duration::from_millis(50)).await;
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            let orphan = saved.spawn(|_| async {});
+            assert!(matches!(orphan.await, Err(Error::Closed)));
+        });
+    }
+
+    /// A handle resolution observed from another worker happens strictly
+    /// after the completed task's node closed: post-await spawns from saved
+    /// sibling contexts are rejected on any worker.
+    #[test]
+    fn test_inline_completion_closes_parent_across_workers() {
+        Runner::default().start(|context| async move {
+            let task_context = context.child("task");
+            let saved = task_context.child("saved");
+            let handle = task_context.spawn(|_| async {});
+            let checker = context
+                .child("checker")
+                .dedicated()
+                .spawn(move |_| async move {
+                    handle.await.unwrap();
+                    let orphan = saved.spawn(|_| async {});
+                    matches!(orphan.await, Err(Error::Closed))
+                });
+            assert!(checker.await.unwrap());
         });
     }
 

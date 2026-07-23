@@ -107,6 +107,13 @@ where
             let result =
                 Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
 
+            // Mark the task as aborted and abort all descendants before
+            // publishing the result: a handle awaited on another worker can
+            // resume as soon as the send lands, and spawns it then issues
+            // from contexts derived from the consumed one must observe the
+            // closure.
+            tree.abort();
+
             // Handle result
             match result {
                 Ok(Ok(result)) => {
@@ -118,9 +125,6 @@ where
                 }
                 Err(Aborted) => {}
             }
-
-            // Mark the task as aborted and abort all descendants.
-            tree.abort();
 
             // Finish the metric.
             metric_handle.finish();
