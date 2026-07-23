@@ -156,7 +156,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
-    /// See [Archive::pruned].
+    /// Returns true when `index` is below the prune floor.
     const fn pruned(&self, index: u64) -> bool {
         match self.oldest_allowed {
             Some(oldest_allowed) => index < oldest_allowed,
@@ -349,7 +349,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.indices.contains_key(&index)
     }
 
-    // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
     async fn put_internal(
         mut self: Box<Self>,
         index: u64,

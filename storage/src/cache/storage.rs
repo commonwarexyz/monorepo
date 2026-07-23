@@ -180,8 +180,6 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Cache::prune].
-    //
-    // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
     async fn prune(mut self: Box<Self>, min: u64) -> Result<Box<Self>, Error> {
         // Update `min` to reflect section mask
         let min = self.section(min);

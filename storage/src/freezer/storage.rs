@@ -813,8 +813,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 
     /// See [Freezer::put].
-    //
-    // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
     async fn put(mut self: Box<Self>, key: K, value: V) -> Result<(Box<Self>, Cursor), Error> {
         self.puts.inc();
 

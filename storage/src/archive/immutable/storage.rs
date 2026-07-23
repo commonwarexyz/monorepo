@@ -234,8 +234,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [crate::archive::Archive::put].
-    //
-    // Takes `Box<Self>` so consuming child moves reuse the handle's allocation.
     async fn put(mut self: Box<Self>, index: u64, key: K, data: V) -> Result<Box<Self>, Error> {
         // Ignore duplicates
         if self.ordinal.has(index) {
