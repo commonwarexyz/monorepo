@@ -2786,7 +2786,7 @@ mod tests {
             );
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await;
             release_pending_syncs(&pending);
             h1.await.unwrap();
 

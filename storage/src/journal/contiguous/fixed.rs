@@ -1976,7 +1976,7 @@ mod tests {
             );
 
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await;
+            let (journal, h1) = journal.start_sync().await;
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
@@ -2116,9 +2116,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let mut journal = Inner::<_, u64>::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(context.child("journal"), cfg)
+                    .await
+                    .unwrap(),
+            );
 
             // Buffer an item, then fail the flush inside start_sync, dropping the returned
             // handle unobserved.
