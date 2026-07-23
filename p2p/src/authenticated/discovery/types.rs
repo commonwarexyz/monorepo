@@ -1,7 +1,4 @@
-use crate::{
-    Ingress,
-    authenticated::data::{DATA_PREFIX, Data},
-};
+use crate::{Ingress, authenticated::data::Data};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg, varint::UInt,
 };
@@ -24,6 +21,8 @@ pub enum Error {
     SynchronyBound,
 }
 
+/// Prefix byte used to identify a [Payload] with variant Data.
+const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX;
 /// Prefix byte used to identify a [Payload] with variant Greeting.
 const GREETING_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant BitVec.

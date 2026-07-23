@@ -1,7 +1,9 @@
-use crate::authenticated::data::{DATA_PREFIX, Data};
+use crate::authenticated::data::Data;
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_runtime::{Buf, BufMut};
 
+/// Prefix that identifies the message as a Data message.
+pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX;
 /// Prefix that identifies the message as a Ping message.
 pub const PING_PREFIX: u8 = 1;
 
