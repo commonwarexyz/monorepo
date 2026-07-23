@@ -792,6 +792,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
+    use futures::{FutureExt as _, pin_mut};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type UnorderedFixedDb =
@@ -969,6 +970,128 @@ mod tests {
             }
 
             release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, sync)
+                .await
+                .expect("flush must succeed once released");
+        });
+    }
+
+    /// `prune` of a durably justified target must complete without waiting on
+    /// a newer in-flight flush (the storage fast path).
+    #[test]
+    fn prune_skips_barrier_for_durable_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let config = fixed_config("unordered-fixed-prune-fast", &delayed);
+            let db = drive_pending_syncs(
+                &pending,
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+            )
+            .await
+            .unwrap();
+            let db = Shared::new("test", db);
+
+            // Finalize batch A and complete its flush: A's target is durably justified.
+            let key = Sha256::hash(&[b"key"]);
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(Sha256::hash(&[b"a"])));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let (database, sync_a) =
+                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, sync_a)
+                .await
+                .expect("flush must succeed once released");
+            let target_a = <DelayedFixedDb as ManagedDb<_>>::sync_target(&database);
+            slot.put(database);
+
+            // Finalize batch B with its flush parked.
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(Sha256::hash(&[b"b"])));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let (database, sync_b) =
+                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
+
+            // Prune to A's durably justified target: must complete without
+            // starting a sync or waiting on B's parked flush.
+            let starts_before = pending.starts();
+            let database = <DelayedFixedDb as ManagedDb<_>>::prune(database, &target_a)
+                .await
+                .unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "durably justified prune must not start a sync",
+            );
+            slot.put(database);
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, sync_b)
+                .await
+                .expect("flush must succeed once released");
+        });
+    }
+
+    /// `prune` must not complete while a finalize flush is still parked: its
+    /// internal commit serializes behind the in-flight sync chain (the impl
+    /// side of [`DatabaseSet::prune`]'s contract).
+    #[test]
+    fn prune_waits_for_pending_finalize_flush() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let config = fixed_config("unordered-fixed-prune-barrier", &delayed);
+            let db = drive_pending_syncs(
+                &pending,
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+            )
+            .await
+            .unwrap();
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let db = Shared::new("test", db);
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(value));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                .await
+                .unwrap();
+
+            let target = <DelayedFixedDb as ManagedDb<_>>::sync_target(&database);
+            let prune = <DelayedFixedDb as ManagedDb<_>>::prune(database, &target);
+            pin_mut!(prune);
+            assert!(
+                prune.as_mut().now_or_never().is_none(),
+                "prune must wait for the parked flush",
+            );
+
+            release_pending_syncs(&pending);
+            let database = drive_pending_syncs(&pending, prune).await.unwrap();
+            slot.put(database);
             drive_pending_syncs(&pending, sync)
                 .await
                 .expect("flush must succeed once released");

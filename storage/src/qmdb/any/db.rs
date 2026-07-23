@@ -87,6 +87,13 @@ pub struct Db<
     /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
 
+    /// The highest inactivity floor declared by a commit proven durable in the log.
+    pub(crate) durable_floor: Location<F>,
+
+    /// Commits appended but not yet proven durable, oldest first, as
+    /// `(commit location, declared inactivity floor)` pairs.
+    pub(crate) pending_commits: std::collections::VecDeque<(Location<F>, Location<F>)>,
+
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
@@ -440,16 +447,44 @@ where
             ));
         }
 
+        // The prune target must be justified by a durable commit: recovery then lands on a
+        // commit whose floor covers everything pruned. Commit first only when no durable
+        // commit justifies the target yet.
+        self.advance_durable_floor();
+        if self.durable_floor < prune_loc {
+            self.log = self.log.commit().await?;
+            self.mark_commits_durable();
+        }
         let boundary;
         (self.log, boundary) = self.log.prune(prune_loc).await?;
         Ok((self, boundary))
+    }
+
+    /// Advance [Self::durable_floor] past every commit the log has proven durable.
+    pub(crate) fn advance_durable_floor(&mut self) {
+        let barrier = Location::new(self.log.barrier());
+        while let Some((commit_loc, floor)) = self.pending_commits.front().copied() {
+            if commit_loc >= barrier {
+                break;
+            }
+            self.durable_floor = floor;
+            self.pending_commits.pop_front();
+        }
+    }
+
+    /// Record that every appended commit is proven durable.
+    pub(crate) fn mark_commits_durable(&mut self) {
+        self.pending_commits.clear();
+        self.durable_floor = self.inactivity_floor_loc;
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
-    /// uncommitted operations are not guaranteed to survive.
+    /// uncommitted operations are not guaranteed to survive. When a durable commit already
+    /// justifies `prune_loc`, pruning skips its internal durability pass. Otherwise it first
+    /// makes the log durable.
     #[tracing::instrument(
         name = "qmdb.any.db.prune",
         level = "info",
@@ -694,6 +729,8 @@ where
             ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
+        self.pending_commits.clear();
+        self.durable_floor = Location::new(0);
         self.root = self
             .log
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
@@ -823,6 +860,8 @@ where
             inactivity_floor_loc,
             snapshot: index,
             last_commit_loc,
+            durable_floor: inactivity_floor_loc,
+            pending_commits: std::collections::VecDeque::new(),
             active_keys,
             bitmap,
             metrics,
@@ -848,6 +887,7 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
+        self.mark_commits_durable();
         Ok(self)
     }
 
@@ -895,6 +935,7 @@ where
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;
+        self.mark_commits_durable();
         Ok(self)
     }
 

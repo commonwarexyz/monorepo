@@ -299,8 +299,17 @@ impl<E: Context> Writable<E> {
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
-        self.drain_tail_predecessor_sync().await?;
-        self.drain_tail_sync().await?;
+        // In-flight syncs live only on the tail and the blob sealed at the last rollover.
+        // The tail always survives a prune, and removing other blobs cannot affect an
+        // in-flight sync on it, so only a sync on the sealed predecessor must be waited
+        // out, and only when its blob is about to be removed. Completed failures still
+        // surface in every case.
+        if min_blob == self.tail_blob_index() {
+            self.drain_tail_predecessor_sync().await?;
+        } else {
+            self.observe_tail_predecessor_sync()?;
+        }
+        self.observe_tail_sync()?;
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
@@ -417,6 +426,30 @@ impl<E: Context> Writable<E> {
         };
         tail.await?;
         self.tail_sync = None;
+        Ok(())
+    }
+
+    /// Surface a completed predecessor sync's failure without waiting on one in flight.
+    /// Clear only on success.
+    fn observe_tail_predecessor_sync(&mut self) -> Result<(), Error> {
+        if let Some(predecessor) = &self.tail_predecessor_sync
+            && let Some(result) = predecessor.clone().now_or_never()
+        {
+            result?;
+            self.tail_predecessor_sync = None;
+        }
+        Ok(())
+    }
+
+    /// Surface a completed tail sync's failure without waiting on one in flight.
+    /// Clear only on success.
+    fn observe_tail_sync(&mut self) -> Result<(), Error> {
+        if let Some(tail) = &self.tail_sync
+            && let Some(result) = tail.clone().now_or_never()
+        {
+            result?;
+            self.tail_sync = None;
+        }
         Ok(())
     }
 

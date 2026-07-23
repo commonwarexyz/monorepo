@@ -358,6 +358,12 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Databases that do not retain pruneable operation history can rely on
     /// the default no-op. This call makes changes durable and ensures they
     /// will be present on startup without replay.
+    ///
+    /// Implementations must never discard history a restart would need to
+    /// recover unflushed state. Pruning waits on in-flight flushes unless the
+    /// pruned range is already durably justified. In QMDB, a durable commit at
+    /// or above the target justifies it, and the prune otherwise serializes
+    /// behind the journal's in-flight sync chain.
     fn prune(
         self,
         _target: &Self::SyncTarget,
@@ -382,9 +388,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 ///
 /// Holds one [`ManagedDb::finalize`] handle per database in the set. Deferred
 /// flush failures surface only here, so every barrier must be awaited via
-/// [`durable`](Self::durable), typically on a futures pool. Every outstanding
-/// barrier must also resolve before [`DatabaseSet::prune`] runs (see its
-/// contract).
+/// [`durable`](Self::durable), typically on a futures pool.
 #[must_use = "deferred flush failures surface only here; await `durable`"]
 pub struct Barrier {
     syncs: Vec<(&'static str, Option<usize>, Handle<()>)>,
@@ -476,13 +480,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Prune each database to the provided per-database targets.
     ///
     /// This call makes changes durable and ensures they will be present on
-    /// startup without replay.
-    ///
-    /// Callers must first observe every outstanding [`Barrier`] from
-    /// [`finalize`](Self::finalize): pruning discards the history a restart
-    /// would need to recover unflushed state, so deferred flush failures must
-    /// surface (fatally) before it runs. Waiting outside the write lock also
-    /// keeps reads live while the flush backlog drains.
+    /// startup without replay. It never discards history a restart would need
+    /// to replay unflushed state: each [`ManagedDb::prune`] waits on in-flight
+    /// flushes unless the pruned range is already durably justified.
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.

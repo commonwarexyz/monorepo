@@ -18,7 +18,7 @@ use crate::{
     journal::{
         Error as JError,
         contiguous::{
-            Contiguous, Many,
+            Contiguous, Many, Mutable,
             fixed::{Config as JConfig, Journal},
         },
     },
@@ -199,6 +199,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return the total number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
         self.mem.leaves()
+    }
+
+    /// The node position below which every node is proven durable.
+    pub(crate) fn barrier(&mut self) -> Position<F> {
+        Position::new(self.journal.barrier())
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -707,7 +712,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self = self.sync().await?;
+        // Once the barrier covers the prune position, retained nodes below it survive a
+        // crash and nodes above it are rebuilt by replaying the retained portion of the
+        // backing journal, so the flush is skipped.
+        if self.barrier() < pos {
+            self = self.sync().await?;
+        }
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.

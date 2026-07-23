@@ -102,10 +102,10 @@ pub(super) struct Prune<T> {
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
     ///
-    /// Callers must first observe every outstanding [`Barrier`] from
-    /// [`Processor::finalize`] (see [`DatabaseSet::prune`]): marshal must not
-    /// discard blocks a restart would need to replay state that is not yet
-    /// flushed.
+    /// Database pruning never discards state a restart would need (see
+    /// [`DatabaseSet::prune`]), and the durable commit justifying its target
+    /// sits at or above the oldest retained block, so the marshal prune that
+    /// follows retains every block a restart could replay.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,

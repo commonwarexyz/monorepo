@@ -551,11 +551,15 @@ where
         }
 
         // The sync boundary may be advanced by applied-but-uncommitted operations, and the
-        // pruning metadata persisted below durably records it. Commit the log first so
-        // recovery can replay to that boundary: otherwise a crash before the log prune
-        // recovers the older durable floor alongside newer pruning metadata and fails to
-        // initialize the bitmap.
-        self.any.log = self.any.log.commit().await?;
+        // pruning metadata persisted below durably records it. A durable commit must declare
+        // a floor covering that boundary before it is recorded: otherwise a crash recovers
+        // the older durable floor alongside newer pruning metadata and fails to initialize
+        // the bitmap. Commit first only when no durable commit covers the boundary yet.
+        self.any.advance_durable_floor();
+        if self.any.durable_floor < sync_boundary {
+            self.any.log = self.any.log.commit().await?;
+            self.any.mark_commits_durable();
+        }
 
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
@@ -1571,6 +1575,64 @@ mod tests {
             assert_eq!(db.inactivity_floor_loc(), floor);
             assert_eq!(db.root(), root);
             assert!(db.any.bitmap.pruned_bits() > *durable_floor);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune whose bitmap boundary is covered by the log's durable frontier but not by
+    /// any durable commit's floor must still commit before durably recording pruning
+    /// metadata: recovery otherwise lands on the older floor below the recorded boundary
+    /// and the database can never reopen. An op-frontier gate takes the fast path here, so
+    /// this pins the durable-floor gate.
+    #[test_traced]
+    fn test_current_prune_commits_when_boundary_exceeds_durable_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("prune-floor-gate", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Establish a durable state, then apply (but do not sync) a small batch that
+            // advances the floor past the next bitmap chunk boundary while staying below
+            // the durable op frontier.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+            let durable_floor = db.inactivity_floor_loc();
+            let mut batch = db.new_batch();
+            for idx in 0..300u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                let value = Sha256::hash(&[&(idx + 2048).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
+            let boundary = db.sync_boundary();
+            assert!(boundary > durable_floor);
+            assert!(
+                *boundary <= crate::journal::contiguous::Mutable::barrier(&mut db.any.log),
+                "the boundary must sit below the durable op frontier",
+            );
+
+            let db = db.prune(boundary).await.unwrap();
+            let bounds = db.bounds();
+            let floor = db.inactivity_floor_loc();
+            let root = db.root();
+            drop(db);
+
+            // Reopening must recover the post-batch floor: the prune committed the batch
+            // whose floor justifies the durably recorded bitmap boundary.
+            let db = MmrDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>("prune-floor-gate", &ctx),
+            )
+            .await
+            .expect("prune must commit the floor before recording pruning metadata");
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.root(), root);
+            assert!(db.any.bitmap.pruned_bits() >= *boundary);
             db.destroy().await.unwrap();
         });
     }

@@ -216,12 +216,10 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
-                    // Durability barrier: every deferred flush must complete
-                    // before pruning discards the history a restart would need
-                    // to replay unflushed state (see `DatabaseSet::prune`).
-                    while !syncs.is_empty() {
-                        syncs.next_completed().await;
-                    }
+                    // Flushes may still be pending: database pruning waits on
+                    // them only when the prune target is not yet durably
+                    // justified (see `DatabaseSet::prune`), and marshal
+                    // pruning follows it.
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
@@ -295,6 +293,10 @@ mod tests {
     }
 
     /// Database whose finalize flush completes only when the test releases it.
+    ///
+    /// Its `prune` records immediately, eliding the impl-side barrier real
+    /// databases provide (pruning waits for pending flushes, pinned in
+    /// `stateful::db::any` tests), so the actor's own scheduling is exposed.
     struct GatedFlushDb {
         control: FlushControl,
     }
@@ -417,86 +419,106 @@ mod tests {
         }
     }
 
+    /// Spawn a [`Processing`] loop over a [`GatedFlushDb`], returning its
+    /// mailbox, the flush controls, and a guard keeping the (never-started)
+    /// marshal actor's mailbox open.
+    async fn spawn_processing(
+        context: &deterministic::Context,
+        prefix: &str,
+        prune_config: Option<PruneConfig>,
+    ) -> (
+        Mailbox<deterministic::Context, GatedApp>,
+        FlushControl,
+        Box<dyn std::any::Any>,
+    ) {
+        let mut signing = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing, b"gated", 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+        let (marshal_actor, marshal, _height) =
+            MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                    start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                    partition_prefix: format!("{prefix}-marshal"),
+                    mailbox_size: NZUsize!(8),
+                    view_retention: ViewDelta::new(1),
+                    prunable_items_per_section: NZU64!(4),
+                    page_cache,
+                    replay_buffer: NZUsize!(64),
+                    key_write_buffer: NZUsize!(64),
+                    value_write_buffer: NZUsize!(64),
+                    block_codec_config: (),
+                    max_repair: NZUsize!(1),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+
+        let control = FlushControl::default();
+        let databases = Shared::new(
+            "test",
+            GatedFlushDb {
+                control: control.clone(),
+            },
+        );
+        let processor = Processor::new(
+            GatedApp,
+            databases,
+            anchor(0, 0),
+            StatefulMetrics::new(context),
+            prune_config,
+        );
+        let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let processing = Processing {
+            context: ContextCell::new(context.child("processing")),
+            mailbox: receiver,
+            provider: (),
+            marshal,
+            processor,
+            skip_finalized_until: None,
+        };
+        context.child("loop").spawn(move |_| processing.start());
+        (Mailbox::new(sender), control, Box::new(marshal_actor))
+    }
+
     /// The loop keeps applying finalized blocks while earlier flushes are
     /// still pending, acknowledges each block only once its flush completes
     /// (so marshal's floor never runs ahead of flushed state), and runs a
-    /// deferred prune only after every pending flush completes (the
-    /// durability barrier).
+    /// deferred prune without waiting on pending flushes (database pruning
+    /// itself provides that barrier).
     #[test]
-    fn prune_waits_for_pending_finalize_flushes() {
+    fn acks_wait_for_flushes_while_prune_runs() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
-            let mut signing = context.child("signing");
-            let fixture = scheme_mocks::fixture(&mut signing, b"gated-prune", 1);
-            let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-            let finalizations_by_height = immutable::Archive::init(
-                context.child("finalizations_by_height"),
-                archive_config(page_cache.clone(), "gated-prune-finalizations"),
-            )
-            .await
-            .expect("failed to initialize finalizations archive");
-            let finalized_blocks = immutable::Archive::init(
-                context.child("finalized_blocks"),
-                archive_config(page_cache.clone(), "gated-prune-blocks"),
-            )
-            .await
-            .expect("failed to initialize blocks archive");
-            let (_marshal_actor, marshal, _height) =
-                MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-                    context.child("marshal"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    marshal::Config {
-                        provider,
-                        epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                        start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                        partition_prefix: "gated-prune-marshal".to_string(),
-                        mailbox_size: NZUsize!(8),
-                        view_retention: ViewDelta::new(1),
-                        prunable_items_per_section: NZU64!(4),
-                        page_cache,
-                        replay_buffer: NZUsize!(64),
-                        key_write_buffer: NZUsize!(64),
-                        value_write_buffer: NZUsize!(64),
-                        block_codec_config: (),
-                        max_repair: NZUsize!(1),
-                        max_pending_acks: NZUsize!(1),
-                        strategy: Sequential,
-                    },
-                )
-                .await;
-
-            let control = FlushControl::default();
-            let databases = Shared::new(
-                "test",
-                GatedFlushDb {
-                    control: control.clone(),
-                },
-            );
-            let processor = Processor::new(
-                GatedApp,
-                databases,
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
+            let (mut mailbox, control, _marshal) = spawn_processing(
+                &context,
+                "gated-prune",
                 Some(PruneConfig {
                     max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,
                     retained_qmdb_blocks: 0,
                 }),
-            );
-            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
-            let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
-                mailbox: receiver,
-                provider: (),
-                marshal,
-                processor,
-                skip_finalized_until: None,
-            };
-            let _processing = context.child("loop").spawn(move |_| processing.start());
+            )
+            .await;
 
             // Apply blocks 1 and 2 without releasing any flush: the loop must
             // stay live (both blocks applied) while no acknowledgement fires.
@@ -518,12 +540,16 @@ mod tests {
                 "acknowledgements must wait for pending flushes",
             );
 
-            // Block 2 filled the retention window and queued the deferred
-            // prune, which must stall on the durability barrier.
-            context.sleep(Duration::from_millis(100)).await;
+            // Block 2 filled the retention window: the deferred prune runs
+            // once the mailbox idles, without waiting on the parked flushes,
+            // and targets the oldest retained sync target.
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
             assert!(
-                control.pruned.lock().is_empty(),
-                "prune must wait for pending finalize flushes",
+                poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
+                "acknowledgements must keep waiting for pending flushes",
             );
 
             // Releasing block 1's flush releases only its acknowledgement.
@@ -534,20 +560,86 @@ mod tests {
                 poll!(&mut waiter2).is_pending(),
                 "block 2 must stay unacknowledged while its flush is pending",
             );
-            assert!(
-                control.pruned.lock().is_empty(),
-                "prune must wait for every pending flush",
-            );
 
-            // Releasing block 2's flush releases its acknowledgement and the
-            // prune, which targets the oldest retained sync target.
+            // Releasing block 2's flush releases its acknowledgement.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
-            while control.pruned.lock().is_empty() {
+        });
+    }
+
+    /// While parked idle with a flush pending, a released flush must fire its
+    /// acknowledgement, a simultaneously reported block must not be lost to
+    /// the completion (the historical lost-message shape), and a flush that
+    /// never completes must leave its block unacknowledged.
+    #[test]
+    fn idle_acks_follow_flush_outcome() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal) =
+                spawn_processing(&context, "gated-idle", None).await;
+
+            // Park the loop idle with block 1's flush pending.
+            let (acknowledgement, mut waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(control.pruned.lock().clone(), vec![1]);
+            assert!(poll!(&mut waiter1).is_pending());
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Release the flush and report block 2 in the same scheduling
+            // window: the completion must fire block 1's acknowledgement
+            // without displacing the new message.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(2, 2)),
+                acknowledgement,
+            ));
+            waiter1.await.expect("block 1 acknowledgement");
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Dropping block 2's release resolves its flush as shutdown; the
+            // acknowledgement must be withheld so marshal's floor cannot pass
+            // unflushed state.
+            drop(control.flushes.lock().remove(0));
+            assert!(
+                waiter2.await.is_err(),
+                "unflushed block must not be acknowledged",
+            );
+        });
+    }
+
+    /// A flush failure must panic the processing loop with the database
+    /// identified (the fatal policy), rather than acknowledging the block.
+    #[test]
+    #[should_panic(expected = "database finalize flush failed (type")]
+    fn flush_failure_panics_processing() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal) =
+                spawn_processing(&context, "gated-failure", None).await;
+
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Err(RuntimeError::WriteFailed));
+
+            // The pooled flush future panics when the loop next polls it.
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+            }
         });
     }
 

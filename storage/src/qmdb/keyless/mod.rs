@@ -398,6 +398,9 @@ where
                 self.inactivity_floor_loc,
             ));
         }
+        // The floor may be justified by a buffered commit. Commit so the justification
+        // survives the prune.
+        self.journal = self.journal.commit().await?;
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();
         Ok(self)

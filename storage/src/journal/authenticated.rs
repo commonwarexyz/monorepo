@@ -583,6 +583,12 @@ where
 
     /// Prune both the Merkle structure and journal to the given location.
     ///
+    /// Callers must ensure `prune_loc` is justified by durable data: after any crash,
+    /// recovery must never need the pruned items to explain the retained ones (e.g. a
+    /// commit record declaring the boundary is already durable, or is made durable by
+    /// committing before pruning). Each component syncs before removing anything only
+    /// when its own barrier has not yet covered the boundary.
+    ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
     #[boxed]
@@ -601,16 +607,15 @@ where
             return Ok((self, boundary, false));
         }
 
-        // Sync the Merkle structure before pruning the journal, otherwise its last element could
-        // end up behind the journal's first element after a crash, and there would be no way to
-        // replay the items between the structure's last element and the journal's first element.
-        // Commit the journal alongside: the prune target may be justified by a buffered append
-        // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
-        (self.journal, self.merkle) = try_join!(
-            self.journal.commit().map_err(Error::Journal),
-            self.merkle.sync().map_err(Error::Merkle)
-        )?;
-
+        // Sync the Merkle structure before pruning the journal, otherwise its last element
+        // could end up behind the journal's first element after a crash, and there would be
+        // no way to replay the items between the structure's last element and the journal's
+        // first element. Every node for leaves below `prune_loc` sits below that leaf's
+        // position, so a Merkle barrier at or past it cannot fall behind the boundary and
+        // the sync is skipped. The backing journal defends its own barrier inside `prune`.
+        if self.merkle.barrier() < F::location_to_position(prune_loc) {
+            self.merkle = self.merkle.sync().await?;
+        }
         let journal_pruned;
         (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
@@ -990,6 +995,10 @@ where
         Ok((journal, pruned))
     }
 
+    fn barrier(&mut self) -> u64 {
+        self.journal.barrier()
+    }
+
     async fn rewind(self, size: u64) -> Result<Self, JournalError> {
         Self::rewind(self, size).await.map_err(Self::map_error)
     }
@@ -1053,7 +1062,7 @@ mod tests {
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            next_pending_sync,
+            next_pending_sync, release_pending_syncs,
         },
         reschedule,
     };
@@ -2205,6 +2214,113 @@ mod tests {
                 .unwrap();
             assert_eq!(journal.size(), 6);
             assert_eq!(journal.root(0).unwrap(), root);
+        });
+    }
+
+    /// With the barrier covering the target, `prune` completes without starting (or
+    /// waiting on) any sync, even while a newer sync is still in flight.
+    #[test_traced("INFO")]
+    fn test_prune_skips_sync_when_barrier_covers_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            // Build two durably synced blobs, driving the parked rollover syncs.
+            let journal = drive_pending_syncs(&pending, async {
+                let mut journal =
+                    open_delayed_journal(&context, "first", "prune_barrier_fast", &pending)
+                        .await
+                        .unwrap();
+                for i in 0..13 {
+                    (journal, _) = journal
+                        .append(&create_operation::<mmr::Family>(i))
+                        .await
+                        .unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal.sync().await.unwrap()
+            })
+            .await;
+            let mut journal = journal;
+
+            // Park a newer sync covering fresh appends.
+            for i in 14..17 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+            (journal, _) = journal
+                .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                .await
+                .unwrap();
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+
+            // The barrier covers the boundary, so the prune must neither start a new sync
+            // nor wait on the parked one.
+            let starts_before = pending.starts();
+            let (journal, boundary) = journal.prune(Location::new(7)).await.unwrap();
+            assert_eq!(*boundary, 7);
+            assert_eq!(pending.starts(), starts_before);
+            assert_eq!(journal.bounds().start, 7);
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            drop(journal);
+
+            // The pruned boundary and the released appends both survive reopen.
+            let open = open_delayed_journal(&context, "second", "prune_barrier_fast", &pending);
+            let journal = drive_pending_syncs(&pending, open).await.unwrap();
+            assert_eq!(journal.bounds(), 7..18);
+        });
+    }
+
+    /// With the barrier behind the boundary, `prune` performs its durability pass.
+    #[test_traced("INFO")]
+    fn test_prune_syncs_when_barrier_behind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            // Appends drive only the parked rollover syncs, so nothing beyond recovery has
+            // been proven durable when the prune begins.
+            let journal = drive_pending_syncs(&pending, async {
+                let mut journal =
+                    open_delayed_journal(&context, "first", "prune_barrier_slow", &pending)
+                        .await
+                        .unwrap();
+                for i in 0..13 {
+                    (journal, _) = journal
+                        .append(&create_operation::<mmr::Family>(i))
+                        .await
+                        .unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal
+            })
+            .await;
+
+            // Nothing beyond recovery is durable, so the prune must run the durability pass.
+            let starts_before = pending.starts();
+            let prune = journal.prune(Location::new(7));
+            let (journal, boundary) = drive_pending_syncs(&pending, prune).await.unwrap();
+            assert_eq!(*boundary, 7);
+            assert!(
+                pending.starts() > starts_before,
+                "fallback must run the durability pass",
+            );
+            assert_eq!(journal.bounds().start, 7);
+            drop(journal);
+
+            // The pruned boundary and the appends its pass covered survive reopen.
+            let open = open_delayed_journal(&context, "second", "prune_barrier_slow", &pending);
+            let journal = drive_pending_syncs(&pending, open).await.unwrap();
+            assert_eq!(journal.bounds(), 7..14);
         });
     }
 

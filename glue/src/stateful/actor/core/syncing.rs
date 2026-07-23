@@ -265,9 +265,8 @@ where
                         .expect("sync handoff block cannot be a duplicate");
 
                     // The processing loop's flush pool does not exist yet, so
-                    // observe the deferred flush inline. Acknowledging and
-                    // pruning only once durable preserves the startup rewind
-                    // contract and the pre-prune durability barrier.
+                    // observe the deferred flush inline. Acknowledging only
+                    // once durable preserves the startup rewind contract.
                     if !barrier.durable().await {
                         // Runtime shutdown before the flush completed: marshal
                         // redelivers the block on the next startup.
