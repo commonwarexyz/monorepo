@@ -4,11 +4,7 @@ use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
-};
+use tokio::{fs, io::AsyncReadExt, sync::Mutex};
 
 #[cfg(not(unix))]
 mod fallback;
@@ -58,8 +54,8 @@ pub struct Storage {
     pool: BufferPool,
 }
 
-/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-async fn resolve_header(
+/// Reads a blob's leading bytes and classifies its header (see [super::header::classify_header]).
+async fn classify_header(
     file: &mut fs::File,
     raw_len: u64,
     versions: &RangeInclusive<u16>,
@@ -70,7 +66,7 @@ async fn resolve_header(
     file.read_exact(&mut raw)
         .await
         .map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
+    super::header::classify_header(&raw, raw_len, versions, partition, name)
 }
 
 impl Storage {
@@ -97,8 +93,8 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, u16), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock. The guard is owned so the creation path can move it
-        // into a task that outlives a dropped open future.
+        // Acquire the filesystem lock. The guard is owned so the creation path can move it into
+        // a task that outlives a dropped open future (see the creation arm).
         let guard = self.lock.clone().lock_owned().await;
 
         // Construct the full path
@@ -128,70 +124,79 @@ impl crate::Storage for Storage {
         // Set the maximum buffer size
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(&mut file, raw_len, &versions, partition, name).await?;
-        let (file, guard, (logical_size, blob_version, data_offset)) = match existing {
-            Some(resolved) => (file, guard, resolved),
+        // Existing blobs have their committed header read. New and uncommitted blobs reserve the
+        // V1 header region; its prelude, directory entries, and CRC are committed by the first
+        // durability request, not at open (creation performs no fsync).
+        let existing = classify_header(&mut file, raw_len, &versions, partition, name).await?;
+        let (file, guard, logical_size, blob_version, data_offset, pending_header) = match existing
+        {
+            Some((size, version, data_offset)) => (file, guard, size, version, data_offset, None),
             None => {
-                // Run creation to completion on a task that owns the filesystem lock:
-                // dropping the open future must not abandon the sequence half-done (a
-                // straggling truncate could clobber a successor's blob) or leave a later
-                // open trusting a header whose syncs never ran. The task hands the lock
-                // back so the open holds it until the blob is returned, like the reopen
-                // path.
-                let parent = parent.to_path_buf();
-                let storage_directory = self.cfg.storage_directory.clone();
+                let (header, blob_version) = Header::prepare(&versions);
+                let data_offset = super::Layout::V1.data_offset();
+
+                // Reserve the header region on a task that owns the filesystem lock: set_len is
+                // backed by spawn_blocking and outlives a dropped open future, so a cancelled
+                // open must not release the lock while a straggling truncate could still clobber
+                // a successor's blob. The task hands the lock back so the open holds it until the
+                // blob is returned. Nothing durable is written; the header commits on first sync.
                 let err_partition = partition.to_string();
                 let err_name = hex(name);
                 let creation = tokio::task::spawn(async move {
-                    // Sync the directories before writing the header so a parseable
-                    // header always implies durable directory entries (an open that
-                    // parses a header never re-runs these). The storage directory is
-                    // synced unconditionally: the partition directory existing in the
-                    // namespace does not imply its entry is durable. (Windows has no
-                    // notion of syncing a directory entry; see
-                    // https://github.com/commonwarexyz/monorepo/issues/2026.)
-                    #[cfg(unix)]
-                    {
-                        sync_dir(&parent).await?;
-                        sync_dir(&storage_directory).await?;
-                    }
-                    #[cfg(not(unix))]
-                    let _ = (parent, storage_directory);
-
-                    // Truncate to zero before writing, per the [Header::create] contract.
-                    let (region, blob_version) = Header::create(&versions);
-                    let data_offset = region.len() as u64;
                     file.set_len(0).await.map_err(|e| {
                         Error::BlobResizeFailed(err_partition.clone(), err_name.clone(), e.into())
                     })?;
-                    file.rewind().await.map_err(|_| Error::WriteFailed)?;
-                    file.write_all(&region)
+                    file.set_len(data_offset)
                         .await
-                        .map_err(|_| Error::WriteFailed)?;
-                    file.sync_all()
-                        .await
-                        .map_err(|e| Error::BlobSyncFailed(err_partition, err_name, e.into()))?;
-
-                    Ok::<_, Error>((file, guard, (0, blob_version, data_offset)))
+                        .map_err(|e| Error::BlobResizeFailed(err_partition, err_name, e.into()))?;
+                    Ok::<_, Error>((file, guard))
                 });
-                match creation.await {
+                let (file, guard) = match creation.await {
                     Ok(result) => result?,
                     Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                     Err(_) => return Err(Error::Closed),
-                }
+                };
+
+                (file, guard, 0, blob_version, data_offset, Some(header))
             }
         };
 
-        // Convert to a blocking std::fs::File
+        // Construct the blob while still holding the filesystem lock. On Unix the pending
+        // creation carries the directories the first commit must make durable; Windows has
+        // no directory-sync notion (https://github.com/commonwarexyz/monorepo/issues/2026).
         #[cfg(unix)]
-        let file = file.into_std().await;
-
-        // Construct the blob while still holding the filesystem lock.
-        let blob = Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset);
-        drop(guard);
-        Ok((blob, logical_size, blob_version))
+        {
+            let file = file.into_std().await;
+            let blob = Self::Blob::new(
+                partition.into(),
+                name,
+                file,
+                self.pool.clone(),
+                data_offset,
+                pending_header.map(|header| {
+                    (
+                        header,
+                        parent.to_path_buf(),
+                        self.cfg.storage_directory.clone(),
+                    )
+                }),
+            );
+            drop(guard);
+            Ok((blob, logical_size, blob_version))
+        }
+        #[cfg(not(unix))]
+        {
+            let blob = Self::Blob::new(
+                partition.into(),
+                name,
+                file,
+                self.pool.clone(),
+                data_offset,
+                pending_header,
+            );
+            drop(guard);
+            Ok((blob, logical_size, blob_version))
+        }
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -492,12 +497,12 @@ mod tests {
         let path = storage_directory.join("partition").join(hex(b"torn"));
         let region = std::fs::read(&path).unwrap();
 
-        // Simulate torn creations (the full state enumeration lives in the
-        // Layout::interrupted_creation unit tables): a file truncated mid-CRC and the same
-        // prefix at a persisted full length.
-        let mut torn_content = vec![0u8; region.len()];
-        torn_content[..10].copy_from_slice(&region[..10]);
-        let states = [region[..10].to_vec(), torn_content];
+        // Simulate deferred-creation torn states (the full enumeration lives in the
+        // Header::uncommitted_v1 unit tables): a reserved zero region, and a durable prelude
+        // whose CRC commit record was never written.
+        let mut prelude_only = region.clone();
+        prelude_only[8..12].fill(0);
+        let states = [vec![0u8; region.len()], prelude_only];
         for state in states {
             std::fs::write(&path, &state).unwrap();
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
@@ -731,14 +736,19 @@ mod tests {
             assert_eq!(size, 0, "recovered blob should be empty");
             drop(blob);
 
-            // The recovered blob is a valid header-only file and reopens cleanly.
+            // The recovered blob reserves an uncommitted header region (all zeros): under
+            // deferred creation the prelude and CRC are written only by the first durability
+            // request, so the magic is absent until then. It still reopens cleanly.
             let raw = std::fs::read(&path).unwrap();
             assert_eq!(
                 raw.len(),
                 Layout::V1.data_offset() as usize,
-                "recovered blob should be header-only"
+                "recovered blob should reserve the header region"
             );
-            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V1.magic());
+            assert!(
+                raw.iter().all(|&byte| byte == 0),
+                "reserved region is uncommitted until the first durability request"
+            );
             storage
                 .open("partition", name.as_bytes())
                 .await

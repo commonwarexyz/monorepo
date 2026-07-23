@@ -1,3 +1,4 @@
+use super::super::PendingHeader;
 use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
@@ -6,13 +7,24 @@ use std::{
     fs::File,
     io::IoSlice,
     os::{fd::AsRawFd, unix::fs::FileExt},
+    path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::task;
+use tokio::{sync::Mutex, task};
 
 // Cap iovec batch size: larger iovecs reduce syscall count but increase
 // per-write kernel setup overhead.
 const IOVEC_BATCH_SIZE: usize = 32;
+
+/// A new blob's uncommitted creation: everything the first durability request needs to run the
+/// deferred two-phase commit (the withheld header bytes and the directories whose entries it
+/// must make durable). Held by the blob until that commit completes; while present, every
+/// durability request routes through the commit path.
+struct PendingCommit {
+    header: PendingHeader,
+    partition_directory: PathBuf,
+    storage_directory: PathBuf,
+}
 
 #[derive(Clone)]
 pub struct Blob {
@@ -22,15 +34,18 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// First-durability header commit, shared by cloned handles.
+    pending_commit: Arc<Mutex<Option<Arc<PendingCommit>>>>,
 }
 
 impl Blob {
-    pub fn new(
+    pub(super) fn new(
         partition: String,
         name: &[u8],
         file: File,
         pool: BufferPool,
         data_offset: u64,
+        pending: Option<(PendingHeader, PathBuf, PathBuf)>,
     ) -> Self {
         Self {
             partition,
@@ -38,7 +53,85 @@ impl Blob {
             file: Arc::new(file),
             pool,
             data_offset,
+            pending_commit: Arc::new(Mutex::new(pending.map(
+                |(header, partition_directory, storage_directory)| {
+                    Arc::new(PendingCommit {
+                        header,
+                        partition_directory,
+                        storage_directory,
+                    })
+                },
+            ))),
         }
+    }
+
+    fn sync_dir(path: &Path) -> Result<(), Error> {
+        let dir = File::open(path).map_err(|e| {
+            Error::BlobOpenFailed(
+                path.to_string_lossy().into_owned(),
+                "directory".into(),
+                e.into(),
+            )
+        })?;
+        dir.sync_all().map_err(|e| {
+            Error::BlobSyncFailed(
+                path.to_string_lossy().into_owned(),
+                "directory".into(),
+                e.into(),
+            )
+        })
+    }
+
+    /// Runs a pending first commit's two-phase I/O: publishes the prelude and makes it, all
+    /// prior user writes, the file length, and both directory entries durable, then issues the
+    /// CRC commit record and makes it durable in turn. Must run under the creation gate.
+    fn commit_inner(
+        file: &File,
+        partition: &str,
+        name: &[u8],
+        pending: &PendingCommit,
+    ) -> Result<(), Error> {
+        // Phase 1: publish the prelude and make it, all prior user writes, and both directory
+        // entries durable before the CRC can be issued.
+        Self::write_single_at(file, 0, pending.header.prelude())?;
+        Self::sync_inner(file, partition, name)?;
+        Self::sync_dir(&pending.partition_directory)?;
+        Self::sync_dir(&pending.storage_directory)?;
+
+        // Phase 2: the CRC is the commit record. Once it is durable, the preceding barriers are
+        // known to have completed.
+        Self::write_single_at(
+            file,
+            PendingHeader::CHECKSUM_OFFSET,
+            pending.header.checksum(),
+        )?;
+        Self::sync_inner(file, partition, name)
+    }
+
+    /// Completes this blob's pending first commit, if any, returning whether one was performed.
+    /// The commit runs on a detached task so a dropped caller cannot split its two-phase I/O;
+    /// concurrent clones serialize on the pending lock, and the loser sees no pending commit.
+    async fn commit_pending(&self) -> Result<bool, Error> {
+        let blob = self.clone();
+        task::spawn(async move { blob.commit_pending_inner().await })
+            .await
+            .map_err(|_| Error::WriteFailed)?
+    }
+
+    async fn commit_pending_inner(&self) -> Result<bool, Error> {
+        let mut pending = self.pending_commit.lock().await;
+        let Some(commit) = pending.as_ref().cloned() else {
+            return Ok(false);
+        };
+
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        task::spawn_blocking(move || Self::commit_inner(&file, &partition, &name, &commit))
+            .await
+            .map_err(|_| Error::WriteFailed)??;
+        *pending = None;
+        Ok(true)
     }
 
     fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
@@ -172,6 +265,16 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
+        // While a first commit is pending, a non-empty write_at_sync serves as that commit:
+        // route through write_at + sync so the two-phase commit runs (the RWF_SYNC fast path
+        // syncs only the file, not the header commit or directory entries).
+        if self.pending_commit.lock().await.is_some() {
+            if !bufs.has_remaining() {
+                return Ok(());
+            }
+            crate::Blob::write_at(self, offset, bufs).await?;
+            return crate::Blob::sync(self).await;
+        }
         let file = self.file.clone();
         let offset = offset
             .checked_add(self.data_offset)
@@ -217,6 +320,9 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        if self.commit_pending().await? {
+            return Ok(());
+        }
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
@@ -230,11 +336,9 @@ impl crate::Blob for Blob {
 
     async fn start_sync(&self) -> Handle<()> {
         let (tx, rx) = oneshot::channel();
-        let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        task::spawn_blocking(move || {
-            let result = Self::sync_inner(&file, &partition, &name);
+        let blob = self.clone();
+        tokio::spawn(async move {
+            let result = crate::Blob::sync(&blob).await;
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)

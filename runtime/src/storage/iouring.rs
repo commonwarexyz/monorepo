@@ -20,7 +20,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::Header;
+use super::{Header, PendingHeader};
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
     iouring::{self},
@@ -31,14 +31,14 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, Read, Seek, SeekFrom, Write},
+    io::{Error as IoError, Read, Seek, SeekFrom},
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-fn resolve_header(
+/// Reads a blob's leading bytes and classifies its header (see [super::header::classify_header]).
+fn classify_header(
     file: &mut File,
     raw_len: u64,
     versions: &RangeInclusive<u16>,
@@ -49,7 +49,7 @@ fn resolve_header(
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
+    super::header::classify_header(&raw, raw_len, versions, partition, name)
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -130,8 +130,8 @@ impl crate::Storage for Storage {
     ) -> Result<(Blob, u64, u16), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        // Serialize opens against each other and against removal for the duration of this open.
+        let _namespace = self.lock.lock();
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -153,32 +153,29 @@ impl crate::Storage for Storage {
 
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
-        let (logical_len, blob_version, data_offset) = match existing {
-            Some(resolved) => resolved,
+        // Existing blobs have their committed header read. New and uncommitted blobs reserve the
+        // V1 header region; its prelude, directory entries, and CRC are committed by the first
+        // durability request, not at open (creation performs no fsync).
+        let existing = classify_header(&mut file, raw_len, &versions, partition, name)?;
+        let (logical_len, blob_version, data_offset, pending_header) = match existing {
+            Some((size, version, data_offset)) => (size, version, data_offset, None),
             None => {
-                // Sync the directories before writing the header so a parseable header
-                // always implies durable directory entries (an open that parses a header
-                // never re-runs these). The storage directory is synced unconditionally:
-                // the partition directory existing in the namespace does not imply its
-                // entry is durable.
-                sync_dir(parent)?;
-                sync_dir(&self.storage_directory)?;
+                let (header, blob_version) = Header::prepare(&versions);
+                let data_offset = super::Layout::V1.data_offset();
 
-                // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&versions);
-                let data_offset = region.len() as u64;
+                // Reserve the header region without writing or syncing it. Opening a blob
+                // another handle's uncommitted creation still holds is undefined behavior.
                 file.set_len(0)
                     .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|_| Error::WriteFailed)?;
-                file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                file.sync_all()
-                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
+                file.set_len(data_offset)
+                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
 
-                (0, blob_version, data_offset)
+                (
+                    0,
+                    blob_version,
+                    data_offset,
+                    Some((header, parent.to_path_buf(), self.storage_directory.clone())),
+                )
             }
         };
 
@@ -189,6 +186,7 @@ impl crate::Storage for Storage {
             self.io_handle.clone(),
             self.pool.clone(),
             data_offset,
+            pending_header,
         );
         Ok((blob, logical_len, blob_version))
     }
@@ -266,6 +264,18 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// First-durability header commit, shared by cloned handles.
+    pending_commit: Arc<tokio::sync::Mutex<Option<Arc<PendingCommit>>>>,
+}
+
+/// A new blob's uncommitted creation: everything the first durability request needs to run the
+/// deferred two-phase commit (the withheld header bytes and the directories whose entries it
+/// must make durable). Held by the blob until that commit completes; while present, every
+/// durability request routes through the commit path.
+struct PendingCommit {
+    header: PendingHeader,
+    partition_directory: PathBuf,
+    storage_directory: PathBuf,
 }
 
 impl Clone for Blob {
@@ -277,6 +287,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            pending_commit: self.pending_commit.clone(),
         }
     }
 }
@@ -290,6 +301,7 @@ impl Blob {
         io_handle: iouring::Handle,
         pool: BufferPool,
         data_offset: u64,
+        pending: Option<(PendingHeader, PathBuf, PathBuf)>,
     ) -> Self {
         Self {
             partition,
@@ -298,7 +310,74 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            pending_commit: Arc::new(tokio::sync::Mutex::new(pending.map(
+                |(header, partition_directory, storage_directory)| {
+                    Arc::new(PendingCommit {
+                        header,
+                        partition_directory,
+                        storage_directory,
+                    })
+                },
+            ))),
         }
+    }
+
+    fn sync_error(&self, error: Error) -> Error {
+        match error {
+            Error::Io(error) => {
+                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error)
+            }
+            error => error,
+        }
+    }
+
+    /// Completes this blob's pending first commit, if any, returning whether one was performed.
+    /// The commit runs on a detached task so a dropped caller cannot split its two-phase I/O;
+    /// concurrent clones serialize on the pending lock, and the loser sees no pending commit.
+    async fn commit_pending(&self) -> Result<bool, Error> {
+        let blob = self.clone();
+        tokio::spawn(async move { blob.commit_pending_inner().await })
+            .await
+            .map_err(|_| Error::WriteFailed)?
+    }
+
+    async fn commit_pending_inner(&self) -> Result<bool, Error> {
+        let mut pending = self.pending_commit.lock().await;
+        let Some(commit) = pending.as_ref().cloned() else {
+            return Ok(false);
+        };
+
+        // Phase 1: publish the prelude and make it, all prior user writes, and both directory
+        // entries durable before the CRC can be issued.
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                0,
+                commit.header.prelude().to_vec().into(),
+            )
+            .await?;
+        self.io_handle
+            .sync(self.file.clone())
+            .await
+            .map_err(|error| self.sync_error(error))?;
+        sync_dir(&commit.partition_directory)?;
+        sync_dir(&commit.storage_directory)?;
+
+        // Phase 2: the CRC is the commit record. Once it is durable, the preceding barriers are
+        // known to have completed.
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                PendingHeader::CHECKSUM_OFFSET,
+                commit.header.checksum().to_vec().into(),
+            )
+            .await?;
+        self.io_handle
+            .sync(self.file.clone())
+            .await
+            .map_err(|error| self.sync_error(error))?;
+        *pending = None;
+        Ok(true)
     }
 }
 
@@ -372,6 +451,16 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
+        // While a first commit is pending, a non-empty write_at_sync serves as that commit:
+        // route through write_at + sync so the two-phase commit runs (the fused write_at_sync
+        // fast path syncs only the file, not the header commit or directory entries).
+        if self.pending_commit.lock().await.is_some() {
+            if !bufs.has_remaining() {
+                return Ok(());
+            }
+            crate::Blob::write_at(self, offset, bufs).await?;
+            return crate::Blob::sync(self).await;
+        }
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
@@ -400,16 +489,22 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        if self.commit_pending().await? {
+            return Ok(());
+        }
         self.io_handle
             .sync(self.file.clone())
             .await
-            .map_err(|err| match err {
-                Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
-                err => err,
-            })
+            .map_err(|err| self.sync_error(err))
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        match self.commit_pending().await {
+            Ok(true) => return Handle::ready(Ok(())),
+            Err(error) => return Handle::ready(Err(error)),
+            Ok(false) => {}
+        }
+
         let partition = self.partition.clone();
         let name = self.name.clone();
         let receiver = self.io_handle.start_sync(self.file.clone()).await;
@@ -692,14 +787,19 @@ mod tests {
             assert_eq!(size, 0, "recovered blob should be empty");
             drop(blob);
 
-            // The recovered blob is a valid header-only file and reopens cleanly.
+            // The recovered blob reserves an uncommitted header region (all zeros): under
+            // deferred creation the prelude and CRC are written only by the first durability
+            // request, so the magic is absent until then. It still reopens cleanly.
             let raw = std::fs::read(&path).unwrap();
             assert_eq!(
                 raw.len(),
                 Layout::V1.data_offset() as usize,
-                "recovered blob should be header-only"
+                "recovered blob should reserve the header region"
             );
-            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V1.magic());
+            assert!(
+                raw.iter().all(|&byte| byte == 0),
+                "reserved region is uncommitted until the first durability request"
+            );
             storage
                 .open("partition", name.as_bytes())
                 .await
@@ -1021,6 +1121,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
+            None,
         );
 
         // Read and write should fail through their wrapper-specific error enums
@@ -1080,6 +1181,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
+            None,
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1119,6 +1221,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
+            None,
         );
         let err = blob
             .start_sync()
@@ -1162,6 +1265,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
+            None,
         );
         let err = blob
             .resize(0)
@@ -1200,6 +1304,7 @@ mod tests {
             submitter.clone(),
             pool,
             Layout::V0.data_offset(),
+            None,
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob
@@ -1238,19 +1343,25 @@ mod tests {
         let path = storage_directory.join("partition").join(hex(b"torn"));
         let region = std::fs::read(&path).unwrap();
 
-        // Simulate a torn creation: a prefix of the canonical header region (the full
-        // state enumeration lives in the Layout::interrupted_creation unit tables).
-        let states = [region[..10].to_vec()];
+        // Simulate deferred-creation torn states (the full enumeration lives in the
+        // Header::uncommitted_v1 unit tables): a reserved zero region, and a durable prelude
+        // whose CRC commit record was never written.
+        let mut prelude_only = region.clone();
+        prelude_only[8..12].fill(0);
+        let states = [vec![0u8; region.len()], prelude_only];
         for state in states {
             std::fs::write(&path, &state).unwrap();
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
             assert_eq!(size, 0);
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 
-            // The healed blob round-trips through a reopen.
+            // The healed blob round-trips through a reopen with its data intact.
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
-            assert_eq!(size, 0);
+            assert_eq!(size, 4);
+            let read = blob.read_at(0, 4).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
             drop(blob);
         }
 

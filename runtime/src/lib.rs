@@ -629,9 +629,20 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists). On
-        /// platforms without directory sync (e.g. Windows), the durability of the blob's
-        /// name is best-effort.
+        /// # Durability
+        ///
+        /// An already-existing blob is returned durable. A newly created blob is not: its
+        /// existence (and its name) become durable only once its first durability request
+        /// completes — [`Blob::sync`], a non-empty [`Blob::write_at_sync`], or the handle
+        /// returned by [`Blob::start_sync`]. A blob created and then dropped without such a
+        /// request may not survive a crash. On platforms without directory sync (e.g.
+        /// Windows), name durability is best-effort even after the first sync.
+        ///
+        /// An uncommitted creation is indistinguishable on disk from one interrupted by a
+        /// crash, so opening such a blob recreates it, resetting it to empty. Opening a name
+        /// while another live handle holds an unsynced creation of it is therefore undefined
+        /// behavior: the recreate discards the earlier handle's writes, and syncing that handle
+        /// afterward may certify data the recreate has already discarded.
         ///
         /// # Versions
         ///
@@ -743,6 +754,10 @@ stability_scope!(BETA {
         /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
         /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
         /// durable.
+        ///
+        /// The one exception is the first non-empty request on a newly created blob: it also
+        /// commits the deferred creation, which as a side effect makes the blob's prior
+        /// writes, length, and name durable. An empty request is a no-op and never commits.
         fn write_at_sync(
             &self,
             offset: u64,
@@ -756,6 +771,9 @@ stability_scope!(BETA {
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Ensure all pending data is durably persisted.
+        ///
+        /// On a newly created blob, this also commits the deferred creation, making the
+        /// blob's existence and name durable.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.

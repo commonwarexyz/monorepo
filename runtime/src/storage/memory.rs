@@ -1,18 +1,18 @@
-use super::Header;
+use super::{Header, PendingHeader};
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, deterministic::AuditHasher};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
-/// Resolves a blob's header from its full contents (see [super::header::resolve]).
-fn resolve_header(
+/// Classifies a blob's header from its full contents (see [super::header::classify_header]).
+fn classify_header(
     content: &[u8],
     versions: &RangeInclusive<u16>,
     partition: &str,
     name: &[u8],
 ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
     let raw = &content[..Header::resolve_len(content.len() as u64)];
-    super::header::resolve(raw, content.len() as u64, versions, partition, name)
+    super::header::classify_header(raw, content.len() as u64, versions, partition, name)
 }
 
 /// In-memory storage implementation for the commonware runtime.
@@ -68,25 +68,38 @@ impl crate::Storage for Storage {
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
 
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(content, &versions, partition, name)?;
-        let (logical_size, blob_version, data_offset) = existing.unwrap_or_else(|| {
-            let (region, blob_version) = Header::create(&versions);
-            let data_offset = region.len() as u64;
-            content.clear();
-            content.extend_from_slice(&region);
-            (0, blob_version, data_offset)
-        });
+        // Existing blobs have their committed header read. New and uncommitted blobs reserve the
+        // V1 header region; the first durability request publishes and commits it. Opening an
+        // uncommitted blob another handle still holds is undefined behavior (see
+        // [crate::Storage::open_versioned]), so no cross-open coordination is performed here.
+        let existing = classify_header(content, &versions, partition, name)?;
+        let (logical_size, blob_version, data_offset, pending_header) = match existing {
+            Some((size, version, data_offset)) => (size, version, data_offset, None),
+            None => {
+                let (header, blob_version) = Header::prepare(&versions);
+                let data_offset = super::Layout::V1.data_offset();
+                content.clear();
+                content.resize(data_offset as usize, 0);
+                (
+                    0,
+                    blob_version,
+                    data_offset,
+                    Some(Arc::new(PendingCreation { header })),
+                )
+            }
+        };
+        let content = content.clone();
+        drop(partitions);
 
         Ok((
             Blob::new(
                 self.partitions.clone(),
                 partition.into(),
                 name,
-                content.clone(),
+                content,
                 self.pool.clone(),
                 data_offset,
+                pending_header,
             ),
             logical_size,
             blob_version,
@@ -132,6 +145,13 @@ impl crate::Storage for Storage {
 
 type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
 
+/// A new blob's uncommitted creation: the withheld header bytes the first durability request
+/// must publish. Held by the blob until that commit completes; while present, every durability
+/// request routes through the commit path.
+struct PendingCreation {
+    header: PendingHeader,
+}
+
 #[derive(Clone)]
 pub struct Blob {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
@@ -141,6 +161,8 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// The uncommitted creation, published by the first durability request; shared by clones.
+    pending_header: Arc<Mutex<Option<Arc<PendingCreation>>>>,
 }
 
 impl Blob {
@@ -151,6 +173,7 @@ impl Blob {
         content: Vec<u8>,
         pool: BufferPool,
         data_offset: u64,
+        pending_header: Option<Arc<PendingCreation>>,
     ) -> Self {
         Self {
             partitions,
@@ -159,7 +182,29 @@ impl Blob {
             content: Arc::new(RwLock::new(content)),
             pool,
             data_offset,
+            pending_header: Arc::new(Mutex::new(pending_header)),
         }
+    }
+
+    /// Runs the deferred header commit if this blob is still uncommitted, returning whether it
+    /// committed (in which case the contents are already published).
+    /// Runs the deferred header commit if this blob is still uncommitted, returning whether it
+    /// committed. The pending lock is held throughout so concurrent clones serialize: the loser
+    /// observes `None` and falls through to a plain sync.
+    fn commit_header(&self) -> Result<bool, crate::Error> {
+        let mut pending = self.pending_header.lock();
+        let Some(creation) = pending.clone() else {
+            return Ok(false);
+        };
+        {
+            let mut content = self.content.write();
+            let checksum_offset = PendingHeader::CHECKSUM_OFFSET as usize;
+            content[..Header::PRELUDE_SIZE].copy_from_slice(creation.header.prelude());
+            content[checksum_offset..Header::PARSE_LEN].copy_from_slice(creation.header.checksum());
+        }
+        self.sync_inner()?;
+        *pending = None;
+        Ok(true)
     }
 
     fn sync_inner(&self) -> Result<(), crate::Error> {
@@ -257,6 +302,9 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
+        if self.commit_header()? {
+            return Ok(());
+        }
         self.sync_inner()
     }
 
@@ -413,11 +461,13 @@ mod tests {
     async fn test_blob_torn_creation_recovers() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
-        // region (the full state enumeration lives in the Layout::interrupted_creation
-        // unit tables)
-        let (region, _) = Header::create(&(0..=0));
-        let states = [region[..10].to_vec()];
+        // Manually insert deferred-creation torn states: creation reserves a zero region and
+        // commits the prelude and CRC only on the first durability request, so a torn creation
+        // is a zero-or-partial region (the full enumeration is in the Header::uncommitted_v1
+        // unit tables).
+        let (mut prelude_only, _) = Header::create(&(0..=0));
+        prelude_only[8..12].fill(0); // prelude durable, CRC unwritten
+        let states = [vec![0u8; Layout::V1.data_offset() as usize], prelude_only];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();
             {
@@ -464,24 +514,5 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("header padding"))
         );
-    }
-
-    #[tokio::test]
-    async fn test_blob_zero_payload_with_lost_crc_stays_corrupt() {
-        let storage = Storage::new(test_pool());
-
-        // A synced V1 blob whose payload is all zeros, with the header's CRC bytes
-        // rotted away: the file extends past the header region, so healing it would
-        // erase the payload.
-        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, &[0u8; 100]);
-        raw[8..12].fill(0);
-        {
-            let mut partitions = storage.partitions.lock();
-            let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(b"rotted".to_vec(), raw);
-        }
-
-        let result = storage.open("partition", b"rotted").await;
-        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
     }
 }
