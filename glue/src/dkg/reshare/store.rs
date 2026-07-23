@@ -43,7 +43,6 @@ use commonware_storage::journal::{
     segmented::variable::{Config as JournalConfig, Journal},
 };
 use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind};
-use futures::StreamExt;
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -181,7 +180,7 @@ where
         mut secret_store: SS,
     ) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
-        let mut events = Journal::init(
+        let events = Journal::init(
             context.child("events"),
             JournalConfig {
                 partition: format!("{partition_prefix}_events"),
@@ -200,12 +199,11 @@ where
         let current = None;
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
-        {
-            let replay = events
+        let events = {
+            let mut replay = events
                 .replay(0, 0, READ_BUFFER)
                 .await
                 .expect("failed to replay reshare events");
-            futures::pin_mut!(replay);
 
             while let Some(result) = replay.next().await {
                 let (section, _, _, event) = result.expect("failed to read reshare event");
@@ -226,7 +224,8 @@ where
                     }
                 }
             }
-        }
+            replay.finish().expect("failed to replay reshare events")
+        };
 
         Self {
             secret_store,

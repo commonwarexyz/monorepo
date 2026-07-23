@@ -13,7 +13,6 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
-use futures::{StreamExt, pin_mut};
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
@@ -186,7 +185,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let mut oversized: Oversized<E, Record<K>, V> =
+        let oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
 
         // Initialize keys and replay index journal (no values read!)
@@ -194,11 +193,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
-        {
+        let oversized = {
             debug!("initializing archive from index journal");
-            let stream = oversized.replay(0, 0, cfg.replay_buffer).await?;
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
+            let mut replay = oversized.replay(0, 0, cfg.replay_buffer).await?;
+            while let Some(result) = replay.next().await {
                 let (_section, position, entry) = result?;
 
                 // Store index location (position in index journal)
@@ -218,7 +216,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 intervals.insert(entry.index);
             }
             debug!("archive initialized");
-        }
+            replay.finish()?
+        };
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");

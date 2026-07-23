@@ -519,6 +519,11 @@ mod tests {
             // Prune sections < 3
             let (glob, _) = glob.prune(3).await.expect("Failed to prune");
 
+            // The public accessor mirrors the guard
+            assert!(glob.pruned(1));
+            assert!(glob.pruned(2));
+            assert!(!glob.pruned(3));
+
             // Sections 1 and 2 should be gone
             assert!(glob.get(1, 0, 8).await.is_err());
             assert!(glob.get(2, 0, 8).await.is_err());

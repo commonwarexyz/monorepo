@@ -53,13 +53,13 @@
 //! still verified lazily at read.
 
 use super::{
-    fixed::{Config as FixedConfig, Journal as FixedJournal},
+    fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
-use futures::{future::try_join, stream::Stream};
+use futures::future::try_join;
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -108,10 +108,10 @@ pub struct Config<C> {
 /// Provides coordinated operations and crash recovery.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle. [Oversized::replay] borrows the journal instead but is not
-/// read-only (it flushes buffered pages), so an error from the call or the yielded stream is
-/// equally fatal: stop using the journal. Mutations on pruned sections fail with
-/// [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the handle.
+/// future) destroys the handle. [Oversized::replay] consumes the journal into an owned [Replay]
+/// reader, which returns it via [Replay::finish] once exhausted. Mutations on pruned sections
+/// fail with [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the
+/// handle.
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
@@ -475,18 +475,25 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         self.values.get(section, offset, size).await
     }
 
-    /// Replay index entries starting from given section.
+    /// Consumes the journal and returns an owned [Replay] reader over index entries
+    /// starting from `start_position` in `start_section`.
     ///
-    /// Returns a stream of `(section, position, entry)` tuples.
+    /// Setup flushes the index journal's buffered pages so the reader observes every
+    /// accepted write.
     pub async fn replay(
-        &mut self,
+        self,
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, I), Error>> + Send + '_, Error> {
-        self.index
+    ) -> Result<Replay<E, I, V>, Error> {
+        let index = self
+            .index
             .replay(start_section, start_position, buffer)
-            .await
+            .await?;
+        Ok(Replay {
+            index,
+            values: self.values,
+        })
     }
 
     /// Sync both journals for the given `sections`.
@@ -655,6 +662,38 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         try_join(self.index.destroy(), self.values.destroy())
             .await
             .map(|_| ())
+    }
+}
+
+/// Owned replay reader over an [Oversized]'s index entries.
+///
+/// Yields `(section, position, entry)` in order. Dropping the reader before it is exhausted
+/// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an exhausted
+/// reader to get the journal back.
+pub struct Replay<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
+    index: FixedReplay<E, I>,
+    values: Glob<E, V>,
+}
+
+impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
+    /// Returns the next `(section, position, entry)`, or `None` once every section is
+    /// exhausted.
+    ///
+    /// An error ends the section that produced it, and iteration continues with the
+    /// next section.
+    pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
+        self.index.next().await
+    }
+
+    /// Returns the journal.
+    ///
+    /// Fails when the reader was not fully drained or yielded an error: the journal is
+    /// destroyed and recovery is re-initialization.
+    pub fn finish(self) -> Result<Oversized<E, I, V>, Error> {
+        Ok(Oversized {
+            index: self.index.finish()?,
+            values: self.values,
+        })
     }
 }
 
@@ -1632,6 +1671,48 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_oversized_replay_empty_finishes_immediately() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(context, cfg, None)
+                .await
+                .expect("Failed to init");
+
+            // An empty journal's reader is exhausted from the start
+            let replay = oversized
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("Failed to replay");
+            let oversized = replay.finish().expect("failed to finish replay");
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_replay_finish_before_drain_fails() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg, None)
+                    .await
+                    .expect("Failed to init");
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+
+            let replay = oversized
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("Failed to replay");
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1654,6 +1735,11 @@ mod tests {
 
             // Prune sections < 3
             (oversized, _) = oversized.prune(3).await.expect("Failed to prune");
+
+            // The public accessor mirrors the guard
+            assert!(oversized.pruned(1));
+            assert!(oversized.pruned(2));
+            assert!(!oversized.pruned(3));
 
             // Sections 1, 2 should be gone
             assert!(oversized.get(1, 0).await.is_err());

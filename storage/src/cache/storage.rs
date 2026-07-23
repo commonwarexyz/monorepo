@@ -8,7 +8,6 @@ use commonware_runtime::{
     Buf, BufMut, Metrics, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use futures::{StreamExt, pin_mut};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -84,7 +83,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     /// See [Cache::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
-        let mut journal = Journal::<E, Record<V>>::init(
+        let journal = Journal::<E, Record<V>>::init(
             context.child("journal"),
             JConfig {
                 partition: cfg.partition,
@@ -99,11 +98,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut intervals = RMap::new();
-        {
+        let journal = {
             debug!("initializing cache");
-            let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
+            let mut replay = journal.replay(0, 0, cfg.replay_buffer).await?;
+            while let Some(result) = replay.next().await {
                 // Extract key from record
                 let (_, offset, _, data) = result?;
 
@@ -114,7 +112,8 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
                 intervals.insert(data.index);
             }
             debug!(items = indices.len(), "cache initialized");
-        }
+            replay.finish()?
+        };
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");

@@ -32,11 +32,7 @@ use commonware_utils::{
     futures::{Pool as FuturesPool, rebind},
     ordered::Quorum,
 };
-use futures::{
-    StreamExt,
-    future::{self, Either},
-    pin_mut,
-};
+use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     cmp::max,
@@ -253,10 +249,10 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let mut journal = Journal::init(self.context.child("journal"), journal_cfg)
+        let journal = Journal::init(self.context.child("journal"), journal_cfg)
             .await
             .expect("init failed");
-        let unverified_heights = self.replay(&mut journal).await;
+        let (journal, unverified_heights) = self.replay(journal).await;
         self.journal = Some(journal);
 
         // Request digests for unverified heights
@@ -828,17 +824,19 @@ impl<
     }
 
     /// Replays the journal, updating the state of the engine.
-    /// Returns a list of unverified pending heights that need digest requests.
-    async fn replay(&mut self, journal: &mut Journal<E, Activity<P::Scheme, D>>) -> Vec<Height> {
+    /// Returns the journal and a list of unverified pending heights that need digest requests.
+    async fn replay(
+        &mut self,
+        journal: Journal<E, Activity<P::Scheme, D>>,
+    ) -> (Journal<E, Activity<P::Scheme, D>>, Vec<Height>) {
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
-        let stream = journal
+        let mut replay = journal
             .replay(0, 0, self.journal_replay_buffer)
             .await
             .expect("replay failed");
-        pin_mut!(stream);
-        while let Some(msg) = stream.next().await {
+        while let Some(msg) = replay.next().await {
             let (_, _, _, activity) = msg.expect("replay failed");
             match activity {
                 Activity::Tip(height) => {
@@ -942,7 +940,7 @@ impl<
         }
         info!(tip = %self.tip, %next, ?unverified, "replayed journal");
 
-        unverified
+        (replay.finish().expect("replay failed"), unverified)
     }
 
     /// Appends an activity to the journal.

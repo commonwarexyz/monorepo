@@ -18,6 +18,7 @@ use rand_core::Rng;
 use std::{
     cmp::max,
     collections::BTreeMap,
+    future::Future,
     num::{NonZero, NonZeroUsize},
     time::Duration,
 };
@@ -194,32 +195,40 @@ where
         self
     }
 
-    /// Take the cache for the given epoch out of the map, initializing it if it doesn't
-    /// exist. The caller must reinsert the cache after mutating its archives.
+    /// Runs `op` on the cache for `epoch`, initializing the epoch if it doesn't exist and
+    /// reinserting the cache `op` returns.
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
-    /// and this will return `None`.
-    async fn take_or_init_epoch(mut self, epoch: Epoch) -> (Self, Option<Cache<R, V, S>>) {
-        // If the cache exists, return it
-        if let Some(cache) = self.caches.remove(&epoch) {
-            return (self, Some(cache));
-        }
+    /// and this will return `None` without running `op`.
+    async fn with_epoch<T, Fut>(
+        mut self,
+        epoch: Epoch,
+        op: impl FnOnce(Cache<R, V, S>) -> Fut,
+    ) -> (Self, Option<T>)
+    where
+        Fut: Future<Output = (Cache<R, V, S>, T)>,
+    {
+        let cache = if let Some(cache) = self.caches.remove(&epoch) {
+            cache
+        } else {
+            // If the epoch is less than the epoch floor, then it has already been pruned
+            let (floor, ceiling) = self.get_metadata();
+            if epoch < floor {
+                return (self, None);
+            }
 
-        // If the epoch is less than the epoch floor, then it has already been pruned
-        let (floor, ceiling) = self.get_metadata();
-        if epoch < floor {
-            return (self, None);
-        }
+            // Update the metadata (metadata-first is safe; init is idempotent)
+            if epoch > ceiling {
+                self = self.set_metadata(floor, epoch).await;
+            }
 
-        // Update the metadata (metadata-first is safe; init is idempotent)
-        if epoch > ceiling {
-            self = self.set_metadata(floor, epoch).await;
-        }
-
-        // Initialize and return the epoch
-        self.init_epoch(epoch).await;
-        let cache = self.caches.remove(&epoch); // Should always be Some
-        (self, cache)
+            // Initialize the epoch
+            self.init_epoch(epoch).await;
+            self.caches.remove(&epoch).expect("epoch just initialized")
+        };
+        let (cache, out) = op(cache).await;
+        self.caches.insert(epoch, cache);
+        (self, Some(out))
     }
 
     /// Helper to initialize the cache for a given epoch.
@@ -323,37 +332,36 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: V::StoredBlock,
     ) -> (Self, Handle<()>) {
-        let epoch = round.epoch();
-        let cache;
-        (self, cache) = self.take_or_init_epoch(epoch).await;
-        let Some(mut cache) = cache else {
-            return (self, Handle::ready(Ok(())));
-        };
         let view = round.view().get();
-
-        // Deduplicate against this view only: the same digest may legitimately
-        // be stored again at a later view (boundary re-proposal), and each view
-        // needs its own copy to survive per-view retention pruning.
-        let exists = match cache.verified_blocks.has_at(view, &digest).await {
-            Ok(exists) => exists,
-            Err(e) => panic!("failed to check verified blocks: {e}"),
-        };
         let handle;
-        if exists {
-            (cache.verified_blocks, handle) = Self::handle_start_result(
-                cache.verified_blocks.start_sync().await,
-                round,
-                "verified",
-            );
-        } else {
-            let result = cache
-                .verified_blocks
-                .put_multi_start_sync(view, digest, block)
-                .await;
-            (cache.verified_blocks, handle) = Self::handle_start_result(result, round, "verified");
-        }
-        self.caches.insert(epoch, cache);
-        (self, handle)
+        (self, handle) = self
+            .with_epoch(round.epoch(), |mut cache| async move {
+                // Deduplicate against this view only: the same digest may legitimately
+                // be stored again at a later view (boundary re-proposal), and each view
+                // needs its own copy to survive per-view retention pruning.
+                let exists = match cache.verified_blocks.has_at(view, &digest).await {
+                    Ok(exists) => exists,
+                    Err(e) => panic!("failed to check verified blocks: {e}"),
+                };
+                let handle;
+                if exists {
+                    (cache.verified_blocks, handle) = Self::handle_start_result(
+                        cache.verified_blocks.start_sync().await,
+                        round,
+                        "verified",
+                    );
+                } else {
+                    let result = cache
+                        .verified_blocks
+                        .put_multi_start_sync(view, digest, block)
+                        .await;
+                    (cache.verified_blocks, handle) =
+                        Self::handle_start_result(result, round, "verified");
+                }
+                (cache, handle)
+            })
+            .await;
+        (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
     /// Add a certified block to the height-indexed archive.
@@ -364,27 +372,25 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: V::StoredBlock,
     ) -> Self {
-        let cache;
-        (self, cache) = self.take_or_init_epoch(epoch).await;
-        let Some(mut cache) = cache else {
-            return self;
-        };
-
-        // A digest determines its height, so scoping the dedup to this height
-        // is exact and avoids fetching values.
-        let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
-            Ok(exists) => exists,
-            Err(e) => panic!("failed to check certified block: {e}"),
-        };
-        if !exists {
-            cache.certified_blocks = cache
-                .certified_blocks
-                .put_multi_sync(height.get(), digest, block)
-                .await
-                .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
-            debug!(%height, "cached certified block");
-        }
-        self.caches.insert(epoch, cache);
+        (self, _) = self
+            .with_epoch(epoch, |mut cache| async move {
+                // A digest determines its height, so scoping the dedup to this height
+                // is exact and avoids fetching values.
+                let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
+                    Ok(exists) => exists,
+                    Err(e) => panic!("failed to check certified block: {e}"),
+                };
+                if !exists {
+                    cache.certified_blocks = cache
+                        .certified_blocks
+                        .put_multi_sync(height.get(), digest, block)
+                        .await
+                        .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
+                    debug!(%height, "cached certified block");
+                }
+                (cache, ())
+            })
+            .await;
         self
     }
 
@@ -395,22 +401,21 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: V::StoredBlock,
     ) -> (Self, Handle<()>) {
-        let epoch = round.epoch();
-        let cache;
-        (self, cache) = self.take_or_init_epoch(epoch).await;
-        let Some(mut cache) = cache else {
-            return (self, Handle::ready(Ok(())));
-        };
-
         let view = round.view().get();
-        let result = cache
-            .notarized_blocks
-            .put_start_sync(view, digest, block)
-            .await;
         let handle;
-        (cache.notarized_blocks, handle) = Self::handle_start_result(result, round, "notarized");
-        self.caches.insert(epoch, cache);
-        (self, handle)
+        (self, handle) = self
+            .with_epoch(round.epoch(), |mut cache| async move {
+                let result = cache
+                    .notarized_blocks
+                    .put_start_sync(view, digest, block)
+                    .await;
+                let handle;
+                (cache.notarized_blocks, handle) =
+                    Self::handle_start_result(result, round, "notarized");
+                (cache, handle)
+            })
+            .await;
+        (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
     /// Returns a handle covering every write accepted by the round's verified-block
@@ -457,22 +462,21 @@ where
         digest: <V::Block as Digestible>::Digest,
         notarization: Notarization<S, V::Commitment>,
     ) -> (Self, Handle<()>) {
-        let epoch = round.epoch();
-        let cache;
-        (self, cache) = self.take_or_init_epoch(epoch).await;
-        let Some(mut cache) = cache else {
-            return (self, Handle::ready(Ok(())));
-        };
-
         let view = round.view().get();
-        let result = cache
-            .notarizations
-            .put_start_sync(view, digest, notarization)
-            .await;
         let handle;
-        (cache.notarizations, handle) = Self::handle_start_result(result, round, "notarization");
-        self.caches.insert(epoch, cache);
-        (self, handle)
+        (self, handle) = self
+            .with_epoch(round.epoch(), |mut cache| async move {
+                let result = cache
+                    .notarizations
+                    .put_start_sync(view, digest, notarization)
+                    .await;
+                let handle;
+                (cache.notarizations, handle) =
+                    Self::handle_start_result(result, round, "notarization");
+                (cache, handle)
+            })
+            .await;
+        (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
     /// Add a finalization to the prunable archive.
@@ -487,21 +491,18 @@ where
         digest: <V::Block as Digestible>::Digest,
         finalization: Finalization<S, V::Commitment>,
     ) -> Self {
-        let epoch = round.epoch();
-        let cache;
-        (self, cache) = self.take_or_init_epoch(epoch).await;
-        let Some(mut cache) = cache else {
-            return self;
-        };
-
         let view = round.view().get();
-        cache.finalizations = cache
-            .finalizations
-            .put_sync(view, digest, finalization)
-            .await
-            .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
-        debug!(?round, "cached finalization");
-        self.caches.insert(epoch, cache);
+        (self, _) = self
+            .with_epoch(round.epoch(), |mut cache| async move {
+                cache.finalizations = cache
+                    .finalizations
+                    .put_sync(view, digest, finalization)
+                    .await
+                    .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
+                debug!(?round, "cached finalization");
+                (cache, ())
+            })
+            .await;
         self
     }
 

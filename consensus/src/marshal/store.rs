@@ -49,25 +49,6 @@ pub trait Certificates: Send + Sync + Sized + 'static {
         finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Buffer a finalization certificate and start syncing the resulting write.
-    ///
-    /// If the finalization already exists (making the put a no-op), the returned handle still
-    /// reports the durability of all previously accepted writes, including the original write
-    /// if its sync is still in flight.
-    fn put_start_sync(
-        self,
-        height: Height,
-        digest: Self::BlockDigest,
-        finalization: Finalization<Self::Scheme, Self::Commitment>,
-    ) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
-        async move {
-            self.put(height, digest, finalization)
-                .await?
-                .start_sync()
-                .await
-        }
-    }
-
     /// Flush all buffered writes to durable storage.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
@@ -152,18 +133,6 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ///
     /// * `block`: The finalized block, which provides its `height()` and `digest()`.
     fn put(self, block: Self::Block) -> impl Future<Output = Result<Self, Self::Error>> + Send;
-
-    /// Buffer a finalized block and start syncing the resulting write.
-    ///
-    /// If the block already exists (making the put a no-op), the returned handle still reports
-    /// the durability of all previously accepted writes, including the original write if its
-    /// sync is still in flight.
-    fn put_start_sync(
-        self,
-        block: Self::Block,
-    ) -> impl Future<Output = Result<(Self, Handle<()>), Self::Error>> + Send {
-        async move { self.put(block).await?.start_sync().await }
-    }
 
     /// Flush all buffered writes to durable storage.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;

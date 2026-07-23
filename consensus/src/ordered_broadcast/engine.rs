@@ -41,11 +41,7 @@ use commonware_utils::{
     futures::{Pool as FuturesPool, rebind_entry},
     ordered::Quorum,
 };
-use futures::{
-    StreamExt,
-    future::{self, Either},
-    pin_mut,
-};
+use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -1044,7 +1040,7 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let mut journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
+        let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
                 .child("journal")
                 .with_attribute("sequencer", sequencer),
@@ -1054,21 +1050,20 @@ impl<
         .expect("unable to init journal");
 
         // Replay journal
-        {
+        let journal = {
             debug!(?sequencer, "journal replay begin");
 
-            // Prepare the stream
-            let stream = journal
+            // Prepare the reader
+            let mut replay = journal
                 .replay(0, 0, self.journal_replay_buffer)
                 .await
                 .expect("unable to replay journal");
-            pin_mut!(stream);
 
-            // Read from the stream, which may be in arbitrary order.
+            // Read from the reader, which may be in arbitrary order.
             // Remember the highest node height
             let mut tip: Option<Node<C::PublicKey, P::Scheme, D>> = None;
             let mut num_items = 0;
-            while let Some(msg) = stream.next().await {
+            while let Some(msg) = replay.next().await {
                 let (_, _, _, node) = msg.expect("unable to read from journal");
                 num_items += 1;
                 let height = node.chunk.height;
@@ -1092,7 +1087,8 @@ impl<
             }
 
             debug!(?sequencer, ?num_items, "journal replay end");
-        }
+            replay.finish().expect("unable to replay journal")
+        };
 
         // Store journal
         self.journals.insert(sequencer.clone(), journal);

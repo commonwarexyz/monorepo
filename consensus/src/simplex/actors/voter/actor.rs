@@ -38,7 +38,6 @@ use commonware_utils::{
     futures::{AbortablePool, rebind},
 };
 use core::{future::Future, panic};
-use futures::{StreamExt, pin_mut};
 use rand_core::CryptoRng;
 use std::{
     num::NonZeroUsize,
@@ -950,7 +949,7 @@ impl<
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
         // Initialize journal
-        let mut journal = Journal::<_, Artifact<S, D>>::init(
+        let journal = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -986,13 +985,13 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
-        self = async {
-            let stream = journal
+        let replayed;
+        (self, replayed) = async {
+            let mut replay = journal
                 .replay(0, 0, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
-            pin_mut!(stream);
-            while let Some(artifact) = stream.next().await {
+            while let Some(artifact) = replay.next().await {
                 // Dropping our own nullify votes at or below the floor is safe
                 // for the same-term finalize gate: the floor finalization
                 // covers any such vote (it lies between the vote and any later
@@ -1055,11 +1054,11 @@ impl<
                 // If this is not the case (cluster-wide shutdown), we will recover
                 // when timing out.
             }
-            self
+            (self, replay.finish().expect("unable to replay journal"))
         }
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
-        self.journal = Some(journal);
+        self.journal = Some(replayed);
 
         // Log current view after recovery
         let end = self.context.current();

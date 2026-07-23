@@ -1555,6 +1555,13 @@ mod tests {
                 .expect("Failed to put_multi_start_sync below floor");
             handle.await.expect("handle must resolve");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
+
+            // put_multi_sync below the prune floor skips the sync
+            let archive = archive
+                .put_multi_sync(2, test_key("ddd"), 42)
+                .await
+                .expect("Failed to put_multi_sync below floor");
+            assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
         });
     }
 }
