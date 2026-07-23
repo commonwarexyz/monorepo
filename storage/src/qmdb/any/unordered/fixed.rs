@@ -311,7 +311,7 @@ pub(crate) mod test {
         });
     }
 
-    /// A commit whose in-flight sync fails surfaces the error through both the returned handle
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the returned handle
     /// and the next durability operation.
     #[test_traced]
     fn test_start_sync_failure_propagates() {

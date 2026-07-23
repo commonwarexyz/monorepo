@@ -798,7 +798,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup.
-    /// Bitmap metadata is only persisted by [Self::sync]. A new sync waits for the prior sync
+    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for the prior sync
     /// before starting. Failures of the deferred durability work surface on the returned
     /// handle. A failed data sync also fails the next durability operation. A failed
     /// recovery-watermark or merkle-node sync is not observed by [Self::commit] and resurfaces

@@ -1506,7 +1506,7 @@ async fn test_start_sync_overlaps_predecessor_and_tail<F, Fut, J>(
     journal.destroy().await.unwrap();
 }
 
-/// A commit whose in-flight sync fails surfaces the error through both the returned handle and the
+/// A sync begun by `start_sync` that fails in flight surfaces the error through both the returned handle and the
 /// next durability operation.
 #[boxed]
 async fn test_start_sync_failure_propagates<F, Fut, J>(

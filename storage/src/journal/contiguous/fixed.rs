@@ -395,7 +395,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ) -> Self {
         Self {
             blobs,
-            durable_size: DurableSize::new(checkpoint.watermark().unwrap_or(bounds.start)),
+            durable_size: DurableSize::new(
+                checkpoint
+                    .watermark()
+                    .expect("recovery watermark must exist after init"),
+            ),
             checkpoint,
             bounds,
             items_per_blob,
@@ -1242,9 +1246,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// At most one data sync and one watermark sync are in flight at a time: this call waits
     /// for the prior call's syncs before starting new ones. It does not wait for a pending
-    /// rollover fsync:
-    /// the returned handle joins it, so an earlier call's handle may still be pending when
-    /// this call returns. Reads always proceed while the returned handle is pending, and
+    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
+    /// pending when this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
     /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {

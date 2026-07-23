@@ -29,7 +29,7 @@
 //! # Durability
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
-//! advances the recovery watermark to bound startup recovery. `sync()` makes applied state
+//! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
 //! durable and guarantees no recovery is needed on startup after a crash.
 //!
 //! # Ownership

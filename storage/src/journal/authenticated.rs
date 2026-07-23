@@ -1049,7 +1049,10 @@ mod tests {
         BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
+            next_pending_sync,
+        },
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -2203,7 +2206,7 @@ mod tests {
         });
     }
 
-    /// A commit whose in-flight sync fails surfaces the error through both the returned handle
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the returned handle
     /// and the next durability operation.
     #[test_traced("INFO")]
     fn test_start_sync_failure_propagates() {
@@ -2245,6 +2248,54 @@ mod tests {
                 starts_before,
                 "the surfaced error is the retained failure, not a fresh sync's"
             );
+        });
+    }
+
+    /// A merkle-only sync failure fails the joined handle even though the operation log's own
+    /// sync succeeded.
+    #[test_traced("INFO")]
+    fn test_start_sync_merkle_failure_fails_handle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_journal(&context, "first", "merkle_fail", &pending);
+            let mut journal = drive_pending_syncs(&pending, open).await.unwrap();
+            for i in 0..4 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+
+            // Prove the appends durable, then dirty only the merkle journal: commit syncs the
+            // operation log but merely flushes merkle nodes.
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            for i in 4..6 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+            journal = drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+
+            // The operation log's data is already durable, so its only parked sync is the
+            // watermark advance: release it, then fail the merkle journal's syncs.
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            let ops_watermark = next_pending_sync(&pending);
+            ops_watermark.release.send(Ok(())).unwrap();
+            fail_pending_syncs(&pending);
+            assert!(
+                handle.await.is_err(),
+                "a merkle-only failure surfaces on the joined handle"
+            );
+
+            // The merkle journal retained the failure: the next sync resurfaces it.
+            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
         });
     }
 

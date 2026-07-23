@@ -413,8 +413,8 @@ struct Inner<E: Context, V: Codec> {
 
     /// The size proven durable for both the data and offsets journals. The offsets watermark
     /// (this journal's recovery anchor) only ever takes this joint value: a size proven for one
-    /// journal alone could anchor replay past the other's surviving data, turning init's cheap
-    /// repair into a full rebuild from the offsets start.
+    /// journal alone could exceed the other's surviving data after a crash, and init rejects a
+    /// watermark beyond surviving data as corruption.
     durable_size: DurableSize,
 }
 
@@ -2328,9 +2328,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// At most one data sync and one watermark sync are in flight at a time: this call waits
     /// for the prior call's syncs before starting new ones. It does not wait for a pending
-    /// rollover fsync:
-    /// the returned handle joins it, so an earlier call's handle may still be pending when
-    /// this call returns. Reads always proceed while the returned handle is pending, and
+    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
+    /// pending when this call returns. Reads always proceed while the returned handle is pending, and
     /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
     /// the in-flight fsync). Dropping the handle does not cancel the sync.
     pub async fn start_sync(mut self) -> (Self, Handle<()>) {
