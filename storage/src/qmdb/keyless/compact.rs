@@ -411,8 +411,9 @@ where
 
     /// Return the compact-sync target described by the current witness.
     ///
-    /// This reflects the last durably persisted commit, which may lag behind live in-memory
-    /// mutations until [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] is called.
+    /// This reflects the last persisted commit, which may lag behind live in-memory mutations
+    /// until [`Self::commit`] or [`Self::sync`] is called, or a [`Self::start_sync`] handle
+    /// completes.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
