@@ -597,7 +597,8 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section.
+    /// next section. The exception is [Error::ReplayInterrupted], which ends the
+    /// replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
         // A dropped future can interrupt a repair, leaving the section's writer with
         // in-memory state that no longer matches the blob. Fail the replay rather than
