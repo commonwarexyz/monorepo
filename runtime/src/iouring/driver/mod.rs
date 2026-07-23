@@ -15,7 +15,7 @@ pub(crate) mod waker;
 use waker::{HALF_SUBMISSION_SEQUENCE_DOMAIN, WAKE_USER_DATA, Waker};
 pub(crate) mod spinner;
 use super::RingConfig;
-use crate::telemetry::metrics::{Gauge, Register, raw};
+use crate::telemetry::metrics::{Gauge, GaugeValue, Register, raw};
 use io_uring::{
     IoUring,
     cqueue::Entry as CqueueEntry,
@@ -25,7 +25,6 @@ use io_uring::{
 };
 use spinner::Spinner;
 use std::{
-    sync::Arc,
     task::Waker as TaskWaker,
     time::{Duration, Instant},
 };
@@ -46,25 +45,63 @@ pub(crate) struct Metrics {
     /// generated internally by the io_uring event loop.
     /// This is updated in the main loop and at shutdown drain exit, so it may
     /// temporarily vary from the exact in-flight count between update points.
-    pending_operations: Gauge,
+    pending_operations: PendingOperations,
 }
 
 impl Metrics {
     pub(crate) fn new(registry: &mut impl Register) -> Self {
         Self {
-            pending_operations: registry.register(
-                "pending_operations",
-                "Number of active logical requests in the io_uring loop",
-                raw::Gauge::default(),
-            ),
+            pending_operations: PendingOperations {
+                gauge: registry.register(
+                    "pending_operations",
+                    "Number of active logical requests in the io_uring loop",
+                    raw::Gauge::default(),
+                ),
+                reported: 0,
+            },
         }
+    }
+}
+
+/// One driver's contribution to the runtime-wide pending-operations gauge.
+///
+/// Every worker's driver registers the same gauge (the registry dedups by
+/// name and attributes), so absolute `set`s from different workers would
+/// overwrite one another. Each driver instead applies the delta since its
+/// last report, which sums correctly across workers.
+#[derive(Debug)]
+struct PendingOperations {
+    gauge: Gauge,
+    /// The count this driver last folded into the shared gauge.
+    reported: GaugeValue,
+}
+
+impl PendingOperations {
+    /// Fold this driver's current pending count into the shared gauge.
+    fn report(&mut self, pending: usize) {
+        let pending = pending as GaugeValue;
+        if pending > self.reported {
+            self.gauge.inc_by(pending - self.reported);
+        } else if pending < self.reported {
+            self.gauge.dec_by(self.reported - pending);
+        }
+        self.reported = pending;
+    }
+}
+
+impl Drop for PendingOperations {
+    fn drop(&mut self) {
+        // Remove this driver's contribution: the drain can exit with parked
+        // terminal results (escaped tickets) still counted, and a destroyed
+        // ring must not leave the shared gauge permanently inflated.
+        self.report(0);
     }
 }
 
 /// io_uring event loop state.
 pub(crate) struct IoUringLoop {
     cfg: RingConfig,
-    metrics: Arc<Metrics>,
+    metrics: Metrics,
     /// Ops op state, also reachable from the front-ends' op futures.
     handle: Handle,
     timeout_wheel: TimeoutWheel,
@@ -147,7 +184,7 @@ impl IoUringLoop {
             MAX_RING_SIZE
         );
         let size = cfg.size as usize;
-        let metrics = Arc::new(Metrics::new(registry));
+        let metrics = Metrics::new(registry);
         let waker = Waker::new().expect("unable to create wake eventfd");
         let timeout_wheel = TimeoutWheel::new(
             cfg.max_request_timeout,
@@ -215,7 +252,7 @@ impl IoUringLoop {
                 let fill_result = self.fill_submission_queue(ops, ring);
 
                 // Update pending operations metric.
-                self.metrics.pending_operations.set(ops.waiters.len() as _);
+                self.metrics.pending_operations.report(ops.waiters.len());
 
                 (fill_result, ops.waiters.pending() == 0)
             });
@@ -669,7 +706,7 @@ impl IoUringLoop {
 
         let handle = self.handle.clone();
         handle.with(|ops| {
-            self.metrics.pending_operations.set(ops.waiters.len() as _);
+            self.metrics.pending_operations.report(ops.waiters.len());
         });
     }
 
@@ -826,6 +863,7 @@ pub(crate) mod testing {
     use std::{
         future::Future,
         pin::{Pin, pin},
+        sync::Arc,
         task::{Context, Poll},
     };
 
@@ -946,6 +984,7 @@ mod tests {
             fd::{FromRawFd, IntoRawFd, OwnedFd},
             unix::net::UnixStream,
         },
+        sync::Arc,
         task::Poll,
         time::{Duration, Instant},
     };
@@ -1337,6 +1376,58 @@ mod tests {
         unsafe { buf_b.set_len(read_b) };
         assert_eq!(buf_a.as_ref(), &[1]);
         assert_eq!(buf_b.as_ref(), &[2]);
+    }
+
+    #[test]
+    fn test_pending_operations_aggregates_across_drivers() {
+        // Every worker's driver registers the same pending-operations gauge
+        // (the registry dedups by name): drivers must fold deltas into it
+        // rather than set absolute values, and a destroyed driver must remove
+        // its own contribution — including parked terminal results (escaped
+        // tickets), which survive the drain and keep `waiters.len()` nonzero
+        // at its exit.
+        let mut registry = Registry::default();
+        // Registration dedup hands back the same gauge the drivers share.
+        let gauge: crate::telemetry::metrics::Gauge = Register::register(
+            &mut registry,
+            "pending_operations",
+            "Number of active logical requests in the io_uring loop",
+            raw::Gauge::default(),
+        );
+        let (mut driver_a, handle_a) = Driver::new(RingConfig::default(), &mut registry).unwrap();
+        let (mut driver_b, _handle_b) = Driver::new(RingConfig::default(), &mut registry).unwrap();
+
+        // Admit a sync whose ticket is never awaited: its terminal result
+        // parks in driver A's slab (a socket fd fails fsync, which is still a
+        // parked result).
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        // SAFETY: `into_raw_fd` transfers ownership of the socket fd into
+        // `File`.
+        let file = unsafe { std::fs::File::from_raw_fd(socket.into_raw_fd()) };
+        let mut admit = Box::pin(handle_a.start_sync(Arc::new(file)));
+        let noop = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&noop);
+        let Poll::Ready(ticket) = admit.as_mut().poll(&mut cx) else {
+            panic!("admission should not park on an empty slab");
+        };
+
+        // Driver A reports its pending op; an idle driver B turn must not
+        // clobber that contribution.
+        driver_a.turn();
+        assert_eq!(gauge.get(), 1);
+        driver_b.turn();
+        assert_eq!(gauge.get(), 1);
+
+        // Close and drain A: the parked result survives the drain, but
+        // destroying the driver removes its contribution from the shared
+        // gauge.
+        for waker in driver_a.close() {
+            waker.wake();
+        }
+        driver_a.drain();
+        assert_eq!(gauge.get(), 0);
+
+        drop(ticket);
     }
 
     #[test]
