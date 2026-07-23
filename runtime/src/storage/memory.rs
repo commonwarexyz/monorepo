@@ -1,9 +1,19 @@
 use super::Header;
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, deterministic::AuditHasher};
-use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
+
+/// Resolves a blob's header from its full contents (see [super::header::resolve]).
+fn resolve_header(
+    content: &[u8],
+    versions: &RangeInclusive<u16>,
+    partition: &str,
+    name: &[u8],
+) -> Result<Option<(u64, u16, u64)>, crate::Error> {
+    let raw = &content[..Header::resolve_len(content.len() as u64)];
+    super::header::resolve(raw, content.len() as u64, versions, partition, name)
+}
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
@@ -58,20 +68,16 @@ impl crate::Storage for Storage {
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
 
-        let raw_len = content.len() as u64;
-        let (blob_version, logical_len) = if Header::missing(raw_len) {
-            // New or corrupted blob - truncate and write default header with latest version
-            let (header, blob_version) = Header::new(&versions);
+        // Handle header: existing blobs have their header read; new blobs and blobs left torn
+        // by an interrupted creation get a fresh header written.
+        let existing = resolve_header(content, &versions, partition, name)?;
+        let (logical_size, blob_version, data_offset) = existing.unwrap_or_else(|| {
+            let (region, blob_version) = Header::create(&versions);
+            let data_offset = region.len() as u64;
             content.clear();
-            content.extend_from_slice(&header.encode());
-            (blob_version, 0)
-        } else {
-            // Existing blob - read and validate header
-            let mut header_bytes = [0u8; Header::SIZE];
-            header_bytes.copy_from_slice(&content[..Header::SIZE]);
-            Header::from(header_bytes, raw_len, &versions)
-                .map_err(|e| e.into_error(partition, name))?
-        };
+            content.extend_from_slice(&region);
+            (0, blob_version, data_offset)
+        });
 
         Ok((
             Blob::new(
@@ -80,8 +86,9 @@ impl crate::Storage for Storage {
                 name,
                 content.clone(),
                 self.pool.clone(),
+                data_offset,
             ),
-            logical_len,
+            logical_size,
             blob_version,
         ))
     }
@@ -132,6 +139,8 @@ pub struct Blob {
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
     pool: BufferPool,
+    /// Physical offset where logical offset 0 begins (the size of the header region).
+    data_offset: u64,
 }
 
 impl Blob {
@@ -141,6 +150,7 @@ impl Blob {
         name: &[u8],
         content: Vec<u8>,
         pool: BufferPool,
+        data_offset: u64,
     ) -> Self {
         Self {
             partitions,
@@ -148,6 +158,7 @@ impl Blob {
             name: name.into(),
             content: Arc::new(RwLock::new(content)),
             pool,
+            data_offset,
         }
     }
 
@@ -186,7 +197,7 @@ impl crate::Blob for Blob {
         // SAFETY: `len` bytes are filled via copy_from_slice below.
         unsafe { bufs.set_len(len) };
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(crate::Error::OffsetOverflow)?;
         let offset: usize = offset
             .try_into()
@@ -207,7 +218,7 @@ impl crate::Blob for Blob {
     ) -> Result<(), crate::Error> {
         let buf = bufs.into().coalesce();
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(crate::Error::OffsetOverflow)?;
         let offset: usize = offset
             .try_into()
@@ -237,7 +248,7 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
         let len = len
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(crate::Error::OffsetOverflow)?;
         let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write();
@@ -258,7 +269,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _, storage::tests::run_storage_tests,
+        Blob, BufferPoolConfig, Storage as _,
+        storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
 
@@ -277,23 +289,24 @@ mod tests {
     async fn test_blob_header_handling() {
         let storage = Storage::new(test_pool());
 
-        // New blob returns logical size 0
+        // New blob (V1 by default) returns logical size 0
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0, "new blob should have logical size 0");
 
-        // Verify raw storage has 8 bytes (header only)
+        // Verify raw storage has one header page
+        let data_offset = Layout::V1.data_offset() as usize;
         {
             let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(
                 raw_content.len(),
-                Header::SIZE,
-                "raw storage should have 8-byte header"
+                data_offset,
+                "raw storage should have a full header page"
             );
         }
 
-        // Write at logical offset 0 stores at raw offset 8
+        // Write at logical offset 0 stores at the data offset
         let data = b"hello world";
         blob.write_at(0, data).await.unwrap();
         blob.sync().await.unwrap();
@@ -303,14 +316,40 @@ mod tests {
             let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
-            assert_eq!(raw_content.len(), Header::SIZE + data.len());
-            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
-            assert_eq!(&raw_content[Header::SIZE..], data);
+            assert_eq!(raw_content.len(), data_offset + data.len());
+            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V1.magic());
+            assert_eq!(&raw_content[data_offset..], data);
         }
 
-        // Read at logical offset 0 returns data from raw offset 8
+        // Read at logical offset 0 returns data from the data offset
         let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
+
+        // A legacy V0 blob (fabricated raw: creation is always V1) places data immediately
+        // after the 8-byte header and stays fully readable and writable.
+        {
+            let mut partitions = storage.partitions.lock();
+            let partition = partitions.get_mut("partition").unwrap();
+            let raw = crate::storage::header::tests::v0_blob_bytes(0, data);
+            partition.insert(b"v0".to_vec(), raw);
+        }
+        let (blob, size, _) = storage
+            .open_versioned("partition", b"v0", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, data.len() as u64);
+        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(read_buf.coalesce(), data);
+        blob.write_at(data.len() as u64, b"!").await.unwrap();
+        blob.sync().await.unwrap();
+        {
+            let partitions = storage.partitions.lock();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"v0".to_vec()).unwrap();
+            assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len() + 1);
+            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V0.magic());
+            assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
+        }
 
         // Corrupted blob recovery (0 < raw_size < 8)
         {
@@ -319,18 +358,18 @@ mod tests {
             partition.insert(b"corrupted".to_vec(), vec![0u8; 2]);
         }
 
-        // Opening should truncate and write fresh header
+        // Opening should truncate and write a fresh header page
         let (_blob, size) = storage.open("partition", b"corrupted").await.unwrap();
         assert_eq!(size, 0, "corrupted blob should return logical size 0");
 
-        // Verify raw storage now has proper 8-byte header
+        // Verify raw storage now has a proper header page
         {
             let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"corrupted".to_vec()).unwrap();
             assert_eq!(
                 raw_content.len(),
-                Header::SIZE,
+                data_offset,
                 "corrupted blob should be reset to header-only"
             );
         }
@@ -340,11 +379,12 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage = Storage::new(test_pool());
 
-        // Manually insert a blob with invalid magic bytes
+        // Manually insert a blob whose magic bytes are foreign (not a prefix of any
+        // canonical header, so not a torn creation)
         {
             let mut partitions = storage.partitions.lock();
             let partition = partitions.entry("partition".into()).or_default();
-            partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE]);
+            partition.insert(b"bad_magic".to_vec(), b"XXXXXXXX".to_vec());
         }
 
         // Opening should fail with corrupt error
@@ -367,5 +407,81 @@ mod tests {
         blob_b.sync().await.unwrap();
 
         assert_ne!(storage_a.audit(), storage_b.audit());
+    }
+
+    #[tokio::test]
+    async fn test_blob_torn_creation_recovers() {
+        let storage = Storage::new(test_pool());
+
+        // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
+        // region (the full state enumeration lives in the Layout::interrupted_creation
+        // unit tables)
+        let (region, _) = Header::create(&(0..=0));
+        let states = [region[..10].to_vec()];
+        for (i, state) in states.into_iter().enumerate() {
+            let name = format!("torn_{i}").into_bytes();
+            {
+                let mut partitions = storage.partitions.lock();
+                let partition = partitions.entry("partition".into()).or_default();
+                partition.insert(name.clone(), state);
+            }
+
+            // Opening recreates the blob as new
+            let (blob, size, _) = storage
+                .open_versioned("partition", &name, 0..=0)
+                .await
+                .unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            // The healed blob round-trips through a reopen with its data intact.
+            let (blob, size, _) = storage
+                .open_versioned("partition", &name, 0..=0)
+                .await
+                .unwrap();
+            assert_eq!(size, 4);
+            let read = blob.read_at(0, 4).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            drop(blob);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blob_v1_rejects_nonzero_header_padding() {
+        let storage = Storage::new(test_pool());
+
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, b"payload");
+        raw[Header::PARSE_LEN] = 0xFF;
+        {
+            let mut partitions = storage.partitions.lock();
+            let partition = partitions.entry("partition".into()).or_default();
+            partition.insert(b"dirty_padding".to_vec(), raw);
+        }
+
+        let result = storage.open("partition", b"dirty_padding").await;
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("header padding"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_blob_zero_payload_with_lost_crc_stays_corrupt() {
+        let storage = Storage::new(test_pool());
+
+        // A synced V1 blob whose payload is all zeros, with the header's CRC bytes
+        // rotted away: the file extends past the header region, so healing it would
+        // erase the payload.
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, &[0u8; 100]);
+        raw[8..12].fill(0);
+        {
+            let mut partitions = storage.partitions.lock();
+            let partition = partitions.entry("partition".into()).or_default();
+            partition.insert(b"rotted".to_vec(), raw);
+        }
+
+        let result = storage.open("partition", b"rotted").await;
+        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
     }
 }

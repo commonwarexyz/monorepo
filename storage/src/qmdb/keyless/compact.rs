@@ -1255,9 +1255,9 @@ mod tests {
 
             // Simulate a crash between an import's journal clear and its entry append: the
             // journal is empty but its size is nonzero.
-            let mut journal = open_witness_journal(context.child("clear"), partition).await;
+            let journal = open_witness_journal(context.child("clear"), partition).await;
             let size = journal.size();
-            journal.clear_to_size(size.max(1)).await.unwrap();
+            let journal = journal.clear_to_size(size.max(1)).await.unwrap();
             drop(journal);
 
             // Reopen must fail rather than bootstrap a fresh db.

@@ -229,7 +229,7 @@ where
             .await?;
 
     let metrics = db::Metrics::new(context);
-    let mut current_db = db::Db {
+    let current_db = db::Db {
         any,
         grafted_tree: Arc::new(grafted_tree),
         metadata,
@@ -242,7 +242,7 @@ where
     current_db.update_metrics();
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    current_db.sync_metadata().await?;
+    let current_db = current_db.sync_metadata().await?;
 
     Ok(current_db)
 }

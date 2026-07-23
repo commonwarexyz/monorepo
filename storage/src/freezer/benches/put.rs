@@ -20,10 +20,10 @@ fn bench_put(c: &mut Criterion) {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let mut store = init(ctx.child("storage"), None).await;
+                    let store = init(ctx.child("storage"), None).await;
 
                     let start = Instant::now();
-                    append_random(&mut store, items).await;
+                    let (store, _) = append_random(store, items).await;
                     total += start.elapsed();
 
                     store.destroy().await.unwrap();

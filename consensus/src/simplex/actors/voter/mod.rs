@@ -343,7 +343,7 @@ mod tests {
         .expect("unable to initialize voter journal");
         for artifact in artifacts {
             assert_eq!(artifact.view(), view);
-            journal
+            (journal, _, _) = journal
                 .append(view.get(), &artifact)
                 .await
                 .expect("unable to append voter journal artifact");

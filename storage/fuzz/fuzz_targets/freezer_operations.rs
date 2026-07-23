@@ -76,7 +76,7 @@ fn fuzz(input: FuzzInput) {
             match op {
                 Op::Put { key, value } => {
                     let k = vec_to_key(&key);
-                    freezer.put(k.clone(), value).await.unwrap();
+                    (freezer, _) = freezer.put(k.clone(), value).await.unwrap();
                     expected_state.insert(k, value);
                 }
                 Op::Get { key } => {
@@ -85,7 +85,7 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(res, expected_state.get(&k).cloned());
                 }
                 Op::Sync => {
-                    freezer.sync().await.unwrap();
+                    (freezer, _) = freezer.sync().await.unwrap();
                 }
                 Op::Close => {
                     freezer.close().await.unwrap();

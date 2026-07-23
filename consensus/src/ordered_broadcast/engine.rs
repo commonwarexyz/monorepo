@@ -36,12 +36,12 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
-use futures::{
-    StreamExt,
-    future::{self, Either},
-    pin_mut,
+use commonware_utils::{
+    channel::oneshot,
+    futures::{Pool as FuturesPool, rebind_entry},
+    ordered::Quorum,
 };
+use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -301,8 +301,12 @@ impl<
 
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
-        if let Some(ref signer) = self.sequencer_signer {
-            self.journal_prepare(&signer.public_key()).await;
+        if let Some(me) = self
+            .sequencer_signer
+            .as_ref()
+            .map(|signer| signer.public_key())
+        {
+            self = self.journal_prepare(&me).await;
             if let Err(err) = self.rebroadcast(&mut node_sender) {
                 // Rebroadcasting may return a non-critical error, so log the error and continue.
                 info!(?err, "initial rebroadcast failed");
@@ -371,13 +375,7 @@ impl<
                 };
 
                 // Propose the chunk
-                if let Err(err) = self
-                    .propose(context.clone(), payload, &mut node_sender)
-                    .await
-                {
-                    warn!(?err, ?context, "propose new failed");
-                    continue;
-                }
+                self = self.propose(context, payload, &mut node_sender).await;
             },
 
             // Handle incoming nodes
@@ -409,7 +407,7 @@ impl<
                 };
 
                 // Initialize journal for sequencer if it does not exist
-                self.journal_prepare(&sender).await;
+                self = self.journal_prepare(&sender).await;
 
                 // Handle the parent certificate
                 if let Some(parent_chunk) = result {
@@ -425,7 +423,7 @@ impl<
                 //
                 // Note, this node may be a duplicate. If it is, we will attempt to verify it and vote
                 // on it again (our original vote may have been lost).
-                self.handle_node(&node).await;
+                self = self.handle_node(&node).await;
                 debug!(?sender, height = %node.chunk.height, "node");
                 guard.set(Status::Success);
             },
@@ -483,12 +481,9 @@ impl<
                         timer.observe(self.context.as_ref());
                         debug!(?context, "verified");
                         self.metrics.verify.inc(Status::Success);
-                        if let Err(err) = self
+                        self = self
                             .handle_app_verified(&context, &payload, &mut ack_sender)
-                            .await
-                        {
-                            debug!(?err, ?context, ?payload, "verified handle failed");
-                        }
+                            .await;
                     }
                 }
             },
@@ -496,7 +491,7 @@ impl<
 
         // Sync and drop all journals, regardless of how we exit the loop
         self.pending_verifies.cancel_all();
-        while let Some((_, mut journal)) = self.journals.pop_first() {
+        while let Some((_, journal)) = self.journals.pop_first() {
             journal.sync_all().await.expect("unable to sync journal");
         }
     }
@@ -510,27 +505,30 @@ impl<
     /// This is called when the automaton has verified a payload.
     /// The chunk will be signed if it matches the current tip.
     async fn handle_app_verified(
-        &mut self,
+        mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
         ack_sender: &mut WrappedSender<
             impl Sender<PublicKey = C::PublicKey>,
             Ack<C::PublicKey, P::Scheme, D>,
         >,
-    ) -> Result<(), Error> {
+    ) -> Self {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
-            return Err(Error::AppVerifiedNoTip);
+            debug!(?context, ?payload, "verified chunk has no tip");
+            return self;
         };
 
         // Return early if the height does not match
         if tip.chunk.height != context.height {
-            return Err(Error::AppVerifiedHeightMismatch);
+            debug!(?context, ?payload, tip_height = %tip.chunk.height, "verified height does not match tip");
+            return self;
         }
 
         // Return early if the payload does not match
         if tip.chunk.payload != *payload {
-            return Err(Error::AppVerifiedPayloadMismatch);
+            debug!(?context, ?payload, tip_payload = ?tip.chunk.payload, "verified payload does not match tip");
+            return self;
         }
 
         // Emit the activity
@@ -540,18 +538,21 @@ impl<
         )));
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators_provider.scheme(self.epoch) else {
-            return Err(Error::UnknownScheme(self.epoch));
+        let epoch = self.epoch;
+        let Some(scheme) = self.validators_provider.scheme(epoch) else {
+            debug!(%epoch, "no validator scheme for epoch");
+            return self;
         };
 
         // Construct vote (if a validator)
-        let Some(ack) = Ack::sign(scheme.as_ref(), tip.chunk.clone(), self.epoch) else {
-            return Err(Error::NotSigner(self.epoch));
+        let Some(ack) = Ack::sign(scheme.as_ref(), tip.chunk.clone(), epoch) else {
+            debug!(%epoch, "cannot ack: not a signer");
+            return self;
         };
 
         // Sync the journal to prevent ever acking two conflicting chunks at
         // the same height, even if the node crashes and restarts.
-        self.journal_sync(&context.sequencer, context.height).await;
+        self = self.journal_sync(&context.sequencer, context.height).await;
 
         // The recipients are all the validators in the epoch and the sequencer.
         // The sequencer may or may not be a validator.
@@ -565,12 +566,15 @@ impl<
         };
 
         // Handle the ack internally
-        self.handle_ack(&ack)?;
+        if let Err(err) = self.handle_ack(&ack) {
+            debug!(?err, ?context, "failed to handle own ack");
+            return self;
+        }
 
         // Send the ack to the network
         ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
 
-        Ok(())
+        self
     }
 
     /// Handles a certificate, either received from a `Node` from the network or generated locally.
@@ -633,7 +637,7 @@ impl<
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
-    async fn handle_node(&mut self, node: &Node<C::PublicKey, P::Scheme, D>) {
+    async fn handle_node(mut self, node: &Node<C::PublicKey, P::Scheme, D>) -> Self {
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
@@ -649,8 +653,10 @@ impl<
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if
             // the node crashes and restarts.
-            self.journal_append(node.clone()).await;
-            self.journal_sync(&node.chunk.sequencer, node.chunk.height)
+            self = self
+                .journal_append(node.clone())
+                .await
+                .journal_sync(&node.chunk.sequencer, node.chunk.height)
                 .await;
         }
 
@@ -672,6 +678,8 @@ impl<
                 result,
             }
         });
+
+        self
     }
 
     ////////////////////////////////////////
@@ -708,31 +716,37 @@ impl<
 
     /// Propose a new chunk to the network.
     ///
-    /// The result is returned to the caller via the provided channel.
     /// The proposal is only successful if the parent Chunk and certificate are known.
     async fn propose(
-        &mut self,
+        mut self,
         context: Context<C::PublicKey>,
         payload: D,
         node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
-    ) -> Result<(), Error> {
+    ) -> Self {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
-        let signer = self
-            .sequencer_signer
-            .as_mut()
-            .ok_or(Error::IAmNotASequencer(self.epoch))?;
+        let epoch = self.epoch;
+        let Some(signer) = self.sequencer_signer.as_mut() else {
+            warn!(%epoch, "propose failed: not a sequencer");
+            return self;
+        };
         let me = signer.public_key();
 
         // Error-check context sequencer
         if context.sequencer != me {
-            return Err(Error::ContextSequencer);
+            warn!(?context, "propose failed: context sequencer is not me");
+            return self;
         }
 
         // Error-check that I am a sequencer in the current epoch
-        self.sequencers_provider
-            .sequencers(self.epoch)
+        if self
+            .sequencers_provider
+            .sequencers(epoch)
             .and_then(|s| s.position(&me))
-            .ok_or(Error::IAmNotASequencer(self.epoch))?;
+            .is_none()
+        {
+            warn!(%epoch, "propose failed: not a sequencer in the current epoch");
+            return self;
+        }
 
         // Get parent Chunk and certificate
         let mut height = Height::zero();
@@ -742,7 +756,8 @@ impl<
             let Some((epoch, certificate)) =
                 self.ack_manager.get_certificate(&me, tip.chunk.height)
             else {
-                return Err(Error::MissingCertificate);
+                warn!(?context, "propose failed: missing certificate for tip");
+                return self;
             };
 
             // Update height and parent
@@ -752,31 +767,35 @@ impl<
 
         // Error-check context height
         if context.height != height {
-            return Err(Error::ContextHeight);
+            warn!(?context, expected = %height, "propose failed: height mismatch");
+            return self;
         }
 
         // Construct new node
         let node = Node::sign(signer, height, payload, parent);
 
-        // Deal with the chunk as if it were received over the network
-        self.handle_node(&node).await;
-
-        // Sync the journal to prevent ever proposing two conflicting chunks
-        // at the same height, even if the node crashes and restarts
-        self.journal_sync(&me, height).await;
+        // Deal with the chunk as if it were received over the network, syncing the journal
+        // to prevent ever proposing two conflicting chunks at the same height (even if the
+        // node crashes and restarts).
+        self = self
+            .handle_node(&node)
+            .await
+            .journal_sync(&me, height)
+            .await;
 
         // Record the start time of the proposal
         self.propose_timer = Some(self.metrics.e2e_duration.timer(self.context.as_ref()));
 
         // Broadcast to network
         if let Err(err) = self.broadcast(node, node_sender, self.epoch) {
+            warn!(?err, "propose failed: broadcast");
             guard.set(Status::Failure);
-            return Err(err);
+            return self;
         };
 
         // Return success
         guard.set(Status::Success);
-        Ok(())
+        self
     }
 
     /// Attempt to rebroadcast the highest-height chunk of this sequencer to all validators.
@@ -1007,10 +1026,10 @@ impl<
     /// Ensures the journal exists and is initialized for the given sequencer.
     /// If the journal does not exist, it is created and replayed.
     /// Else, no action is taken.
-    async fn journal_prepare(&mut self, sequencer: &C::PublicKey) {
+    async fn journal_prepare(mut self, sequencer: &C::PublicKey) -> Self {
         // Return early if the journal already exists
         if self.journals.contains_key(sequencer) {
-            return;
+            return self;
         }
 
         // Initialize journal
@@ -1021,7 +1040,7 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let mut journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
+        let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
                 .child("journal")
                 .with_attribute("sequencer", sequencer),
@@ -1031,21 +1050,20 @@ impl<
         .expect("unable to init journal");
 
         // Replay journal
-        {
+        let journal = {
             debug!(?sequencer, "journal replay begin");
 
-            // Prepare the stream
-            let stream = journal
+            // Prepare the reader
+            let mut replay = journal
                 .replay(0, 0, self.journal_replay_buffer)
                 .await
                 .expect("unable to replay journal");
-            pin_mut!(stream);
 
-            // Read from the stream, which may be in arbitrary order.
+            // Read from the reader, which may be in arbitrary order.
             // Remember the highest node height
             let mut tip: Option<Node<C::PublicKey, P::Scheme, D>> = None;
             let mut num_items = 0;
-            while let Some(msg) = stream.next().await {
+            while let Some(msg) = replay.next().await {
                 let (_, _, _, node) = msg.expect("unable to read from journal");
                 num_items += 1;
                 let height = node.chunk.height;
@@ -1069,40 +1087,37 @@ impl<
             }
 
             debug!(?sequencer, ?num_items, "journal replay end");
-        }
+            replay.finish().expect("unable to replay journal")
+        };
 
         // Store journal
         self.journals.insert(sequencer.clone(), journal);
+
+        self
     }
 
     /// Write a `Node` to the appropriate journal, which contains the tip `Chunk` for the sequencer.
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: Node<C::PublicKey, P::Scheme, D>) {
+    async fn journal_append(mut self, node: Node<C::PublicKey, P::Scheme, D>) -> Self {
         let section = self.get_journal_section(node.chunk.height);
-        self.journals
-            .get_mut(&node.chunk.sequencer)
-            .expect("journal does not exist")
-            .append(section, &node)
-            .await
-            .expect("unable to append to journal");
+        rebind_entry(&mut self.journals, &node.chunk.sequencer, |journal| {
+            journal.append(section, &node)
+        })
+        .await
+        .expect("unable to append to journal");
+        self
     }
 
     /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
-    async fn journal_sync(&mut self, sequencer: &C::PublicKey, height: Height) {
+    async fn journal_sync(mut self, sequencer: &C::PublicKey, height: Height) -> Self {
         let section = self.get_journal_section(height);
-
-        // Get journal
-        let journal = self
-            .journals
-            .get_mut(sequencer)
-            .expect("journal does not exist");
-
-        // Sync journal
-        journal.sync(section).await.expect("unable to sync journal");
-
-        // Prune journal, ignoring errors
-        let _ = journal.prune(section).await;
+        rebind_entry(&mut self.journals, sequencer, |journal| async move {
+            journal.sync(section).await?.prune(section).await
+        })
+        .await
+        .expect("unable to sync and prune journal");
+        self
     }
 }
