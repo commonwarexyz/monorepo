@@ -1943,7 +1943,7 @@ mod tests {
             let (mut journal, h1) = journal.start_sync().await;
             h1.await.unwrap();
             journal.append(&4).await.unwrap();
-            journal.commit().await.unwrap();
+            let mut journal = journal.commit().await.unwrap();
 
             // The advance's inline metadata writes fail: the failure surfaces on the
             // journal handle even though the data is durable.
@@ -1955,7 +1955,7 @@ mod tests {
             // The checkpoint store retained the failure: commit (which does not write the
             // checkpoint) still succeeds, and the next operation that does fails.
             journal.append(&5).await.unwrap();
-            journal.commit().await.unwrap();
+            let journal = journal.commit().await.unwrap();
             assert!(journal.sync().await.is_err());
 
             // The failed advance and sync never compromised the data: a reopen recovers it all.
@@ -1997,12 +1997,12 @@ mod tests {
             // An advance at or below the staged value is skipped, so the next handle succeeds:
             // the retained failure resurfaces only on the next checkpoint write.
             journal.append(&4).await.unwrap();
-            let (mut journal, h3) = journal.start_sync().await;
+            let (journal, h3) = journal.start_sync().await;
             drive_pending_syncs(&pending, h3).await.unwrap();
 
             // The checkpoint store retained the failure: commit (which does not write the
             // checkpoint) still succeeds, and the next operation that does fails.
-            drive_pending_syncs(&pending, journal.commit())
+            let journal = drive_pending_syncs(&pending, journal.commit())
                 .await
                 .unwrap();
             assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
@@ -2078,40 +2078,6 @@ mod tests {
 
             pending.unblock();
             handle.await.unwrap();
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_dropped_commit_keeps_predecessor_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            let cfg = test_cfg(&context, NZU64!(3));
-            let mut journal = Box::new(
-                Inner::<_, u64>::init(
-                    DelayedSyncContext {
-                        inner: context.child("journal"),
-                        pending: pending.clone(),
-                    },
-                    cfg,
-                )
-                .await
-                .unwrap(),
-            );
-
-            journal
-                .append_many(Many::Flat(&[1, 2, 3, 4]))
-                .await
-                .unwrap();
-            assert!(journal.blobs.has_tail_predecessor_sync());
-
-            assert!(journal.commit().now_or_never().is_none());
-            assert!(journal.blobs.has_tail_predecessor_sync());
-
-            pending.unblock();
-            journal.commit().await.unwrap();
-            assert!(journal.blobs.has_tail_predecessor_sync());
             journal.destroy().await.unwrap();
         });
     }

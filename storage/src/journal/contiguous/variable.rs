@@ -2807,51 +2807,10 @@ mod tests {
             // The checkpoint store retained the failure: commit (which does not write the
             // checkpoint) still succeeds, and the next operation that does fails.
             journal.append(&4).await.unwrap();
-            drive_pending_syncs(&pending, journal.commit())
+            let journal = drive_pending_syncs(&pending, journal.commit())
                 .await
                 .unwrap();
             assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
-        });
-    }
-
-    #[test]
-    fn test_dropped_commit_keeps_predecessor_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            let cfg = Config {
-                partition: "variable-dropped-commit-predecessor".into(),
-                items_per_section: NZU64!(3),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(2048),
-            };
-            let mut journal = Box::new(
-                Inner::<_, u64>::init(
-                    DelayedSyncContext {
-                        inner: context.child("journal"),
-                        pending: pending.clone(),
-                    },
-                    cfg,
-                )
-                .await
-                .unwrap(),
-            );
-
-            journal
-                .append_many(Many::Flat(&[1, 2, 3, 4]))
-                .await
-                .unwrap();
-            assert!(journal.blobs.has_tail_predecessor_sync());
-
-            assert!(journal.commit().now_or_never().is_none());
-            assert!(journal.blobs.has_tail_predecessor_sync());
-
-            pending.unblock();
-            journal.commit().await.unwrap();
-            assert!(journal.blobs.has_tail_predecessor_sync());
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -4129,7 +4088,7 @@ mod tests {
             }
 
             // Prune offsets journal ahead of data blobs (impossible state)
-            let (variable, _) = variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
+            let (mut variable, _) = variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
             variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
 
             let variable = variable.sync().await.unwrap();
