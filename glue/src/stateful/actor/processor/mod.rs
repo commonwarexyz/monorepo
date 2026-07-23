@@ -16,7 +16,7 @@
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
 //!   committed databases and start flushing them (durability is reported via
-//!   [`Durability`]), then prune all pending entries at or below the
+//!   [`Barrier`]), then prune all pending entries at or below the
 //!   finalized round.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
@@ -26,7 +26,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, DatabaseSet, Durability},
+    db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -82,15 +82,14 @@ pub(super) enum PrepareBatchesError {
     Cancelled,
 }
 
-/// Finalization result for a finalized block report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FinalizeStatus {
-    /// The finalized digest was already processed.
-    Duplicate,
+/// State applied for a newly finalized block.
+pub(super) struct Applied<T> {
+    /// Deferred flush for the applied batch, which must be observed
+    /// (see [`Barrier`]).
+    pub(super) barrier: Barrier,
 
-    /// The finalized state was applied, its flush was started, and
-    /// in-memory forks were pruned.
-    Applied { height: Height },
+    /// Prune made due by this finalization.
+    pub(super) prune: DeferredPrune<T>,
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -103,7 +102,7 @@ pub(super) struct Prune<T> {
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
     ///
-    /// Callers must first observe every outstanding [`Durability`] from
+    /// Callers must first observe every outstanding [`Barrier`] from
     /// [`Processor::finalize`] (see [`DatabaseSet::prune`]): marshal must not
     /// discard blocks a restart would need to replay state that is not yet
     /// flushed.
@@ -703,18 +702,13 @@ where
 
     /// Apply finalized state, start persisting it, and prune dead in-memory forks.
     ///
-    /// The returned [`Durability`] resolves once the finalized batch is
-    /// flushed and must be observed (see [`Durability`]). It is absent only
-    /// for duplicate reports.
+    /// Returns [`None`] when the block was already processed (a duplicate
+    /// report).
     pub(super) async fn finalize(
         &mut self,
         context: &E,
         block: &A::Block,
-    ) -> (
-        FinalizeStatus,
-        DeferredPrune<PendingSyncTargets<A, E>>,
-        Option<Durability>,
-    ) {
+    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -728,7 +722,7 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return (FinalizeStatus::Duplicate, None, None);
+            return None;
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
@@ -761,7 +755,7 @@ where
             }
         };
 
-        let durability = self.databases.finalize(batch).await;
+        let barrier = self.databases.finalize(batch).await;
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -775,7 +769,7 @@ where
         };
         timer.observe(context);
 
-        (FinalizeStatus::Applied { height }, prune, Some(durability))
+        Some(Applied { barrier, prune })
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -933,8 +927,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        FinalizeStatus, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel,
-        fetch_ancestor,
+        Applied, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel, fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1487,40 +1480,37 @@ mod tests {
 
         /// Finalize `block` and wait for its deferred flush, restoring the
         /// blocking-durability semantics the assertions below rely on.
+        /// Returns whether the block was newly applied (`false` for a
+        /// duplicate report).
         #[boxed]
-        async fn finalize(&mut self, block: Block) -> FinalizeStatus {
-            let (status, _, durability) = self
+        async fn finalize(&mut self, block: Block) -> bool {
+            let Some(Applied { barrier, .. }) = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await;
-            if let Some(durability) = durability {
-                assert!(durability.durable().await, "finalize flush must complete");
-            }
-            status
+                .await
+            else {
+                return false;
+            };
+            assert!(barrier.durable().await, "finalize flush must complete");
+            true
         }
 
         #[boxed]
         async fn finalize_with_prune(
             &mut self,
             block: Block,
-        ) -> (
-            FinalizeStatus,
-            Option<
-                Prune<
-                    <DbSet<deterministic::Context> as DatabaseSet<
-                        deterministic::Context,
-                    >>::SyncTargets,
-                >,
+        ) -> Option<
+            Prune<
+                <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
-        ){
-            let (status, prune, durability) = self
+        > {
+            let Applied { barrier, prune } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await;
-            if let Some(durability) = durability {
-                assert!(durability.durable().await, "finalize flush must complete");
-            }
-            (status, prune)
+                .await
+                .expect("finalized block must apply");
+            assert!(barrier.durable().await, "finalize flush must complete");
+            prune
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1749,13 +1739,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let (status, prune) = harness.finalize_with_prune(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            let prune = harness.finalize_with_prune(block1).await;
             assert_eq!(
                 prune, None,
                 "pruning should wait for the full retention window",
@@ -1775,12 +1759,8 @@ mod tests {
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
 
-            let status = harness.finalize(winner.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(2)
-                },
+            assert!(
+                harness.finalize(winner.clone()).await,
                 "finalization should persist winner state",
             );
             assert!(
@@ -1811,12 +1791,8 @@ mod tests {
                     .contains_key(&loser_child.digest())
             );
 
-            let status = harness.finalize(winner.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(2)
-                },
+            assert!(
+                harness.finalize(winner.clone()).await,
                 "finalization should persist winner state",
             );
             assert!(
@@ -1839,13 +1815,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
@@ -1879,13 +1849,7 @@ mod tests {
             let mut parent = genesis;
             for view in 1..=5 {
                 let block = harness.stage_pending_child(&parent, View::new(view)).await;
-                let status = harness.finalize(block.clone()).await;
-                assert_eq!(
-                    status,
-                    FinalizeStatus::Applied {
-                        height: Height::new(view),
-                    }
-                );
+                assert!(harness.finalize(block.clone()).await);
                 parent = block.clone();
                 chain.push(block);
             }
@@ -1918,13 +1882,7 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let mut block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -1955,13 +1913,7 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let gap_height = Height::new(3);
             let gap_view = View::new(3);
@@ -2017,13 +1969,7 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            let status = harness.finalize(canonical).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1),
-                }
-            );
+            assert!(harness.finalize(canonical).await);
 
             assert!(
                 !harness.is_canonical_processed(&conflicting),
@@ -2042,13 +1988,7 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            let status = harness.finalize(canonical).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1),
-                }
-            );
+            assert!(harness.finalize(canonical).await);
 
             let _ = harness.finalize(conflicting).await;
         });
@@ -2061,13 +2001,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1).await);
             assert_eq!(harness.counter_value().await, Some(1));
             assert_eq!(
                 harness
@@ -2088,20 +2022,8 @@ mod tests {
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
 
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
-            let status = harness.finalize(block2).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(2)
-                }
-            );
+            assert!(harness.finalize(block1).await);
+            assert!(harness.finalize(block2).await);
             assert_eq!(
                 finalized_values.lock().clone(),
                 vec![1, 2],
@@ -2118,13 +2040,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             finalized_values.lock().clear();
             harness
@@ -2170,13 +2086,7 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -2205,13 +2115,7 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Applied {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();

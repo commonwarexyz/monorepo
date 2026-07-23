@@ -3,7 +3,7 @@ use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
-        processor::{FinalizeStatus, Processor},
+        processor::{Applied, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -259,18 +259,15 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune, durability) = processor
+                    let Applied { barrier, prune } = processor
                         .finalize(self.context.as_present(), block.as_ref())
-                        .await;
+                        .await
+                        .expect("sync handoff block cannot be a duplicate");
                     // The processing loop's flush pool does not exist yet, so
                     // observe the deferred flush inline. Acknowledging and
                     // pruning only once durable preserves the startup rewind
                     // contract and the pre-prune durability barrier.
-                    let durable = match durability {
-                        Some(durability) => durability.durable().await,
-                        None => true,
-                    };
-                    if !durable {
+                    if !barrier.durable().await {
                         // Runtime shutdown before the flush completed: marshal
                         // redelivers the block on the next startup.
                         return;
@@ -278,12 +275,10 @@ where
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }
-                    if let FinalizeStatus::Applied { height } = status {
-                        debug!(
-                            height = height.get(),
-                            "persisted finalized database batch during sync handoff"
-                        );
-                    }
+                    debug!(
+                        height = block.height().get(),
+                        "persisted finalized database batch during sync handoff"
+                    );
                     acknowledgement.acknowledge();
                 }
             }

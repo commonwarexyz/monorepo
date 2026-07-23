@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input,
     actor::{
         core::mailbox::Message,
-        processor::{FinalizeStatus, Processor},
+        processor::{Applied, Processor},
     },
 };
 use commonware_actor::mailbox as actor_mailbox;
@@ -23,13 +23,11 @@ use rand_core::Rng;
 use std::sync::mpsc::TryRecvError;
 use tracing::{Instrument as _, debug, info_span};
 
-/// A single unit of work for the processing loop: a mailbox message to handle,
-/// a deferred prune to run while the mailbox is idle, or a finalize flush
-/// completion observed while idle.
+/// A single unit of work for the processing loop: either a mailbox message to
+/// handle or a deferred prune to run while the mailbox is idle.
 enum Step<M, P> {
     Message(M),
     Prune(P),
-    Flushed(bool),
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -70,15 +68,11 @@ where
     pub async fn start(mut self) {
         let mut pending_prune = None;
 
-        // Observe deferred finalize flushes without blocking the mailbox on a
-        // sync, releasing each block's marshal acknowledgement once its flush
-        // completes. Flush failures surface only through these futures
-        // (panicking inside `Durability::durable`), so every one must be
-        // driven here. `flushes_durable` turns false only when the runtime
-        // shut down before a flush completed, after which pruning must not
-        // run.
-        let mut syncs = Pool::<bool>::default();
-        let mut flushes_durable = true;
+        // Deferred finalize flushes, each releasing its block's marshal
+        // acknowledgement once the flush completes. Flush failures surface
+        // only through these futures (panicking inside `Barrier::durable`),
+        // so every one must be driven here.
+        let mut syncs = Pool::<()>::default();
         select_loop! {
             self.context,
             on_start => {
@@ -92,7 +86,7 @@ where
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         // No message and nothing to prune: wait on the mailbox,
-                        // observing flush completions while idle. Racing the
+                        // driving flush completions while idle. Racing the
                         // pool inside this future (instead of in a sibling
                         // select arm) means a message popped above can never
                         // be dropped by a competing ready arm.
@@ -100,9 +94,13 @@ where
                             let mailbox = &mut self.mailbox;
                             let pool = &mut syncs;
                             Either::Right(async move {
-                                select! {
-                                    message = mailbox.recv() => message.map(Step::Message),
-                                    durable = pool.next_completed() => Some(Step::Flushed(durable)),
+                                loop {
+                                    select! {
+                                        message = mailbox.recv() => {
+                                            break message.map(Step::Message);
+                                        },
+                                        _ = pool.next_completed() => {},
+                                    }
                                 }
                             })
                         }
@@ -168,46 +166,42 @@ where
                     acknowledgement,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
-                    let (prune, pending_ack) = async {
+                    async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                             self.processor
                                 .notify_finalized(self.context.as_present(), block.as_ref())
                                 .await;
                             acknowledgement.acknowledge();
-                            return (None, None);
+                            return;
                         }
-                        let (status, prune, durability) =
-                            self.processor.finalize(&self.context, block.as_ref()).await;
-                        if let FinalizeStatus::Applied { height } = status {
-                            debug!(height = height.get(), "applied finalized database batch");
-                        }
-                        let Some(durability) = durability else {
+                        let Some(Applied { barrier, prune }) =
+                            self.processor.finalize(&self.context, block.as_ref()).await
+                        else {
                             // Duplicate report: the block is already reflected
                             // in the startup-aligned durable state.
                             acknowledgement.acknowledge();
-                            return (prune, None);
+                            return;
                         };
-                        (prune, Some((durability, acknowledgement)))
-                    }
-                    .instrument(process)
-                    .await;
-                    if let Some((durability, acknowledgement)) = pending_ack {
+                        debug!(
+                            height = block.height().get(),
+                            "applied finalized database batch"
+                        );
                         // Acknowledge marshal only once the batch's flush
                         // completes, so marshal's processed floor never runs
                         // ahead of flushed database state (the startup rewind
                         // contract), without blocking the loop on the flush.
                         // Marshal's ack window bounds the flush backlog.
                         syncs.push(async move {
-                            let durable = durability.durable().await;
-                            if durable {
+                            if barrier.durable().await {
                                 acknowledgement.acknowledge();
                             }
-                            durable
                         });
+                        if let Some(prune) = prune {
+                            pending_prune = Some(prune);
+                        }
                     }
-                    if let Some(prune) = prune {
-                        pending_prune = Some(prune);
-                    }
+                    .instrument(process)
+                    .await;
                 }
                 Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
@@ -217,18 +211,11 @@ where
                     // before pruning discards the history a restart would need
                     // to replay unflushed state (see `DatabaseSet::prune`).
                     while !syncs.is_empty() {
-                        flushes_durable &= syncs.next_completed().await;
+                        syncs.next_completed().await;
                     }
-                    if flushes_durable {
-                        prune
-                            .run(self.processor.databases_mut(), &self.marshal)
-                            .await;
-                    } else {
-                        debug!("skipping prune: runtime shutdown before finalize flush completed");
-                    }
-                }
-                Step::Flushed(durable) => {
-                    flushes_durable &= durable;
+                    prune
+                        .run(self.processor.databases_mut(), &self.marshal)
+                        .await;
                 }
             },
         }

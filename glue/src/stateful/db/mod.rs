@@ -9,7 +9,7 @@
 //! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
 //! 3. Finalization: apply the sealed batch and start persisting it via
-//!    [`ManagedDb::finalize`], observing durability via [`Durability`].
+//!    [`ManagedDb::finalize`], observing durability via [`Barrier`].
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -378,19 +378,19 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
-/// Deferred durability for batches applied by [`DatabaseSet::finalize`].
+/// Durability barrier for batches applied by [`DatabaseSet::finalize`].
 ///
 /// Holds one [`ManagedDb::finalize`] handle per database in the set. Deferred
-/// flush failures surface only here, so every instance must be awaited via
+/// flush failures surface only here, so every barrier must be awaited via
 /// [`durable`](Self::durable), typically on a futures pool. Every outstanding
-/// instance must also resolve before [`DatabaseSet::prune`] runs (see its
+/// barrier must also resolve before [`DatabaseSet::prune`] runs (see its
 /// contract).
 #[must_use = "deferred flush failures surface only here; await `durable`"]
-pub struct Durability {
+pub struct Barrier {
     syncs: Vec<(&'static str, Option<usize>, Handle<()>)>,
 }
 
-impl Durability {
+impl Barrier {
     /// Resolves `true` once every deferred flush is durable.
     ///
     /// A flush failure panics: the databases already advanced past the
@@ -466,19 +466,19 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// begin persisting it.
     ///
     /// Returns once every database reflects its batch. The returned
-    /// [`Durability`] resolves once every deferred flush completes and must be
-    /// observed (see [`Durability`]).
+    /// [`Barrier`] resolves once every deferred flush completes and must be
+    /// observed (see [`Barrier`]).
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.
-    fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = Durability> + Send;
+    fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = Barrier> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
     /// This call makes changes durable and ensures they will be present on
     /// startup without replay.
     ///
-    /// Callers must first observe every outstanding [`Durability`] from
+    /// Callers must first observe every outstanding [`Barrier`] from
     /// [`finalize`](Self::finalize): pruning discards the history a restart
     /// would need to recover unflushed state, so deferred flush failures must
     /// surface (fatally) before it runs. Waiting outside the write lock also
@@ -662,11 +662,11 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
         T::matches_sync_target(batches, targets)
     }
 
-    async fn finalize(&self, batches: Self::Merkleized) -> Durability {
+    async fn finalize(&self, batches: Self::Merkleized) -> Barrier {
         let (slot, database) = self.write().await;
         let (database, handle) = finalize_or_panic(database, batches, None).await;
         slot.put(database);
-        Durability {
+        Barrier {
             syncs: vec![(core::any::type_name::<T>(), None, handle)],
         }
     }
@@ -897,7 +897,7 @@ macro_rules! impl_database_set {
                 $($T::matches_sync_target(&batches.$idx, &targets.$idx))&&+
             }
 
-            async fn finalize(&self, batches: Self::Merkleized) -> Durability {
+            async fn finalize(&self, batches: Self::Merkleized) -> Barrier {
                 let handles = join!($(
                     async {
                         let (slot, database) = self.$idx.write().await;
@@ -907,7 +907,7 @@ macro_rules! impl_database_set {
                         (core::any::type_name::<$T>(), Some($idx), handle)
                     },
                 )+);
-                Durability {
+                Barrier {
                     syncs: vec![$(handles.$idx,)+],
                 }
             }
@@ -1695,8 +1695,8 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
-        DatabaseSet, Durability, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb,
+        Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
+        CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb,
         StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
@@ -3479,9 +3479,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "database finalize flush failed (index 1, type db1)")]
-    fn durability_panics_on_flush_failure() {
+    fn barrier_panics_on_flush_failure() {
         deterministic::Runner::default().start(|_context| async move {
-            let durability = Durability {
+            let barrier = Barrier {
                 syncs: vec![
                     ("db0", Some(0), Handle::ready(Ok(()))),
                     (
@@ -3491,25 +3491,25 @@ mod tests {
                     ),
                 ],
             };
-            let _ = durability.durable().await;
+            let _ = barrier.durable().await;
         });
     }
 
     #[test]
-    fn durability_reports_shutdown_as_not_durable() {
+    fn barrier_reports_shutdown_as_not_durable() {
         deterministic::Runner::default().start(|_context| async move {
-            let durability = Durability {
+            let barrier = Barrier {
                 syncs: vec![
                     ("db0", Some(0), Handle::ready(Ok(()))),
                     ("db1", Some(1), Handle::ready(Err(RuntimeError::Closed))),
                 ],
             };
-            assert!(!durability.durable().await);
+            assert!(!barrier.durable().await);
 
-            let durability = Durability {
+            let barrier = Barrier {
                 syncs: vec![("db0", None, Handle::ready(Err(RuntimeError::Aborted)))],
             };
-            assert!(!durability.durable().await);
+            assert!(!barrier.durable().await);
         });
     }
 
