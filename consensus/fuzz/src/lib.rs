@@ -3103,6 +3103,7 @@ pub enum Mode {
     Byzzfuzz,
     MalloryContainer,
     Chaos,
+    ChaosTwins,
 }
 
 pub trait FuzzMode {
@@ -3322,6 +3323,18 @@ impl FuzzMode for Chaos {
     const MODE: Mode = Mode::Chaos;
 }
 
+/// **ChaosTwins** - a real N4F1C3 cluster with one Byzantine twin leader and
+/// three honest engines, one of which crash-stops and durably replays while the
+/// twin equivocates. Checks SAFETY throughout (the twin excluded as the
+/// Byzantine signer) and a bounded POST-RECOVERY LIVENESS target once the
+/// scripted prefix ends and the node rejoins. Reuses the twins split model,
+/// chaos's crash/restart, and byzzfuzz's liveness wait. Seeded solely from the
+/// input, so a saved input replays exactly. See `chaos::twins`.
+pub struct ChaosTwins;
+impl FuzzMode for ChaosTwins {
+    const MODE: Mode = Mode::ChaosTwins;
+}
+
 /// Install (once per process) a panic-hook chain that drains and prints the
 /// ByzzFuzz decision log when the `CONSENSUS_FUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
@@ -3408,7 +3421,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         install_byzzfuzz_panic_hook();
     } else if matches!(M::MODE, Mode::MalloryContainer) {
         install_mallory_panic_hook();
-    } else if matches!(M::MODE, Mode::Chaos) {
+    } else if matches!(M::MODE, Mode::Chaos | Mode::ChaosTwins) {
         install_chaos_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
@@ -3445,6 +3458,9 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::Chaos => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| chaos::runner::run::<P>(input)))
         }
+        Mode::ChaosTwins => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| chaos::twins::run::<P>(input)))
+        }
     };
     match run_result {
         Ok(()) => {
@@ -3457,8 +3473,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             if matches!(M::MODE, Mode::MalloryContainer) {
                 let _ = mallory::log::take();
             }
-            // And the separate chaos log.
-            if matches!(M::MODE, Mode::Chaos) {
+            // And the separate chaos log (shared by chaos and chaos-twins).
+            if matches!(M::MODE, Mode::Chaos | Mode::ChaosTwins) {
                 let _ = chaos::log::take();
             }
         }

@@ -498,6 +498,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_chaos_twins"
+path = "fuzz_targets/simplex_id_chaos_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_chaos_twins"
+path = "fuzz_targets/simplex_cert_mock_chaos_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ordered_broadcast_cert_mock"
 path = "fuzz_targets/ordered_broadcast_cert_mock.rs"
 test = false
