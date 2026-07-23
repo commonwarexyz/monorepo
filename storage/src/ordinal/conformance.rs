@@ -32,12 +32,12 @@ impl StorageWorkload for OrdinalWorkload {
             let index = i as u64 * 3 + (seed % 3);
             let mut value = [0; 32];
             context.fill(&mut value);
-            ordinal.put(index, FixedBytes::new(value)).await?;
+            ordinal = ordinal.put(index, FixedBytes::new(value)).await?;
         }
-        ordinal.sync().await?;
+        ordinal = ordinal.sync().await?;
 
         if items > 32 {
-            ordinal.prune(32).await?;
+            ordinal = ordinal.prune(32).await?;
             ordinal.sync().await?;
         }
 

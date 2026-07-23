@@ -6,13 +6,12 @@ use crate::{
     ordinal::{self, Ordinal},
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_macros::boxed;
 use commonware_runtime::{
     Buf, BufMut, BufferPooler,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
-use futures::join;
+use futures::{TryFutureExt as _, try_join};
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -86,8 +85,8 @@ impl EncodeSize for Record {
     }
 }
 
-/// An immutable key-value store for ordered data with a minimal memory footprint.
-pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
+/// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
+struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -106,9 +105,9 @@ pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
     syncs: Counter,
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
-    /// Initialize a new [Archive] with the given [Config].
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+    /// See [Archive::init].
+    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
         let metadata = Metadata::<E, U64, Record>::init(
             context.child("metadata"),
@@ -233,16 +232,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archive
-    for Archive<E, K, V>
-{
-    type Key = K;
-    type Value = V;
-
-    async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+    /// See [crate::archive::Archive::put].
+    async fn put(mut self: Box<Self>, index: u64, key: K, data: V) -> Result<Box<Self>, Error> {
         // Ignore duplicates
         if self.ordinal.has(index) {
-            return Ok(());
+            return Ok(self);
         }
 
         // Initialize section if it doesn't exist
@@ -265,14 +260,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         }
 
         // Put in table
-        let cursor = self.freezer.put(key, data).await?;
+        let cursor;
+        (self.freezer, cursor) = self.freezer.put(key, data).await?;
 
         // Put section and offset in ordinal
-        self.ordinal.put(index, cursor).await?;
+        self.ordinal = self.ordinal.put(index, cursor).await?;
 
-        Ok(())
+        Ok(self)
     }
 
+    /// See [crate::archive::Archive::get].
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         self.gets.inc();
 
@@ -282,6 +279,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         }
     }
 
+    /// See [crate::archive::Archive::has].
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
         self.has.inc();
 
@@ -291,49 +289,60 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         }
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    /// See [crate::archive::Archive::sync].
+    async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         self.syncs.inc();
 
         // Sync journal and ordinal
-        let (freezer_result, ordinal_result) = join!(self.freezer.sync(), self.ordinal.sync());
-        let checkpoint = freezer_result?;
-        ordinal_result?;
+        let ((freezer, checkpoint), ordinal) = try_join!(
+            self.freezer.sync().map_err(Error::from),
+            self.ordinal.sync().map_err(Error::from)
+        )?;
+        self.freezer = freezer;
+        self.ordinal = ordinal;
 
         // Publish the freezer checkpoint with a single metadata sync after the
         // freezer and ordinal state are durable.
         let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        self.metadata
+        self.metadata = self
+            .metadata
             .put_sync(freezer_key, Record::Freezer(checkpoint))
             .await?;
 
-        Ok(())
+        Ok(self)
     }
 
+    /// See [crate::archive::Archive::next_gap].
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.ordinal.next_gap(index)
     }
 
+    /// See [crate::archive::Archive::missing_items].
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
         self.ordinal.missing_items(index, max)
     }
 
+    /// See [crate::archive::Archive::ranges].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         self.ordinal.ranges()
     }
 
+    /// See [crate::archive::Archive::ranges_from].
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
         self.ordinal.ranges_from(from)
     }
 
+    /// See [crate::archive::Archive::first_index].
     fn first_index(&self) -> Option<u64> {
         self.ordinal.first_index()
     }
 
+    /// See [crate::archive::Archive::last_index].
     fn last_index(&self) -> Option<u64> {
         self.ordinal.last_index()
     }
 
-    #[boxed]
+    /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
         // Destroy ordinal
         self.ordinal.destroy().await?;
@@ -345,6 +354,81 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         self.metadata.destroy().await?;
 
         Ok(())
+    }
+}
+
+/// An immutable key-value store for ordered data with a minimal memory footprint.
+///
+/// Mutating functions consume the archive and return it only on success: an error (or a
+/// dropped future) destroys the handle.
+pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field("first_index", &self.0.first_index())
+            .field("last_index", &self.0.last_index())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
+    /// Initialize a new [Archive] with the given [Config].
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archive
+    for Archive<E, K, V>
+{
+    type Key = K;
+    type Value = V;
+
+    async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+        self.0 = self.0.put(index, key, data).await?;
+        Ok(self)
+    }
+
+    async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        self.0.get(identifier).await
+    }
+
+    async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+        self.0.has(identifier).await
+    }
+
+    async fn sync(mut self) -> Result<Self, Error> {
+        self.0 = self.0.sync().await?;
+        Ok(self)
+    }
+
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.0.next_gap(index)
+    }
+
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.0.missing_items(index, max)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.0.ranges()
+    }
+
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.0.ranges_from(from)
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        self.0.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.0.last_index()
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.0.destroy().await
     }
 }
 

@@ -66,10 +66,9 @@ where
         Self::init_sync(context, config.clone(), *range.start()..*range.end()).await
     }
 
-    async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
+    async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
         if Contiguous::bounds(&self).end <= *start {
-            self.clear_to_size(*start).await?;
-            Ok(self)
+            self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
             Ok(journal)
@@ -119,8 +118,7 @@ where
         // sync engine starts from the correct location.
         let bounds = journal.bounds();
         if bounds.is_empty() && bounds.start > *range.start() {
-            journal.clear_to_size(*range.start()).await?;
-            return Ok(journal);
+            return journal.clear_to_size(*range.start()).await;
         }
 
         if size > *range.end() {
@@ -128,7 +126,7 @@ where
         }
 
         if size <= *range.start() {
-            journal.clear_to_size(*range.start()).await?;
+            journal = journal.clear_to_size(*range.start()).await?;
         } else {
             (journal, _) = journal.prune(*range.start()).await?;
         }
@@ -136,10 +134,9 @@ where
         Ok(journal)
     }
 
-    async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
+    async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
         if Contiguous::bounds(&self).end <= *start {
-            self.clear_to_size(*start).await?;
-            Ok(self)
+            self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
             Ok(journal)

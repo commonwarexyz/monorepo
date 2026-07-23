@@ -1,4 +1,3 @@
-use super::Header;
 use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
@@ -18,15 +17,24 @@ pub struct Blob {
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
     pool: BufferPool,
+    /// Physical offset where logical offset 0 begins (the size of the header region).
+    data_offset: u64,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: fs::File, pool: BufferPool) -> Self {
+    pub fn new(
+        partition: String,
+        name: &[u8],
+        file: fs::File,
+        pool: BufferPool,
+        data_offset: u64,
+    ) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(Mutex::new(file)),
             pool,
+            data_offset,
         }
     }
 
@@ -34,9 +42,10 @@ impl Blob {
         file: &mut fs::File,
         offset: u64,
         bufs: &mut IoBufs,
+        data_offset: u64,
     ) -> Result<(), Error> {
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(data_offset)
             .ok_or(Error::OffsetOverflow)?;
         file.seek(SeekFrom::Start(offset))
             .await
@@ -76,7 +85,7 @@ impl crate::Blob for Blob {
         unsafe { bufs.set_len(len) };
         let mut file = self.file.lock().await;
         let offset = offset
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         file.seek(SeekFrom::Start(offset))
             .await
@@ -103,7 +112,7 @@ impl crate::Blob for Blob {
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let mut bufs = bufs.into();
         let mut file = self.file.lock().await;
-        Self::write_at_inner(&mut file, offset, &mut bufs).await
+        Self::write_at_inner(&mut file, offset, &mut bufs, self.data_offset).await
     }
 
     async fn write_at_sync(
@@ -117,14 +126,14 @@ impl crate::Blob for Blob {
         }
 
         let mut file = self.file.lock().await;
-        Self::write_at_inner(&mut file, offset, &mut bufs).await?;
+        Self::write_at_inner(&mut file, offset, &mut bufs, self.data_offset).await?;
         Self::sync_inner(&file, &self.partition, &self.name).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.lock().await;
         let len = len
-            .checked_add(Header::SIZE_U64)
+            .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         file.set_len(len).await.map_err(|e| {
             Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())

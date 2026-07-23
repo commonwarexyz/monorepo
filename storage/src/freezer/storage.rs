@@ -394,8 +394,8 @@ where
     }
 }
 
-/// Implementation of [Freezer].
-pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
+/// The freezer's state, boxed so the public [Freezer] handle stays pointer-sized.
+struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -433,7 +433,7 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     resizes: Counter,
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -630,10 +630,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
-    ///
-    /// Passing `None` or an empty [Checkpoint] deletes any existing freezer data and starts empty.
-    pub async fn init(
+    /// See [Freezer::init].
+    async fn init(
         context: E,
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,
@@ -814,9 +812,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Put a key-value pair into the [Freezer].
-    /// If the key already exists, the value is updated.
-    pub async fn put(&mut self, key: K, value: V) -> Result<Cursor, Error> {
+    /// See [Freezer::put].
+    async fn put(mut self: Box<Self>, key: K, value: V) -> Result<(Box<Self>, Cursor), Error> {
         self.puts.inc();
 
         // Update the section if needed
@@ -836,7 +833,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         );
 
         // Write value and key entry (glob first, then index)
-        let (position, value_offset, value_size) = self
+        let (position, value_offset, value_size);
+        (self.oversized, position, value_offset, value_size) = self
             .oversized
             .append(self.current_section, key_entry, &value)
             .await?;
@@ -892,7 +890,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             .await?;
         }
 
-        Ok(Cursor::new(self.current_section, value_offset, value_size))
+        let cursor = Cursor::new(self.current_section, value_offset, value_size);
+        Ok((self, cursor))
     }
 
     /// Get the value for a given [Cursor].
@@ -954,22 +953,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(Some(value))
     }
 
-    /// Get the value for a given [Identifier].
-    ///
-    /// If a [Cursor] is known for the required key, it
-    /// is much faster to use it than searching for a `key`.
-    pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
+    /// See [Freezer::get].
+    async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
             Identifier::Key(key) => self.get_key(key).await,
         }
     }
 
-    /// Check whether a value exists for a given key.
-    ///
-    /// Walks the same key index chain as [`Self::get`] with [`Identifier::Key`]
-    /// but never reads values.
-    pub async fn has(&self, key: &K) -> Result<bool, Error> {
+    /// See [Freezer::has].
+    async fn has(&self, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
         Ok(self.find_key(key).await?.is_some())
@@ -1072,18 +1065,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Sync all pending data in [Freezer].
-    ///
-    /// If the table needs to be resized, the resize will begin during this sync.
-    /// The resize operation is performed incrementally across multiple sync calls
-    /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
-    /// Each sync will process up to `table_resize_chunk_size` entries until the resize
-    /// is complete.
-    //
-    // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
-    pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
+    /// See [Freezer::sync].
+    async fn sync(mut self: Box<Self>) -> Result<(Box<Self>, Checkpoint), Error> {
         // Sync all modified sections for oversized journal
-        self.oversized.sync(&self.modified_sections).await?;
+        self.oversized = self.oversized.sync(&self.modified_sections).await?;
         self.modified_sections.clear();
 
         // Start a resize (if needed)
@@ -1104,29 +1089,30 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Get size from oversized
         let oversized_size = self.oversized.size(self.current_section)?;
 
-        Ok(Checkpoint {
+        let checkpoint = Checkpoint {
             epoch: stored_epoch,
             section: self.current_section,
             oversized_size,
             table_size: self.table_size,
-        })
+        };
+        Ok((self, checkpoint))
     }
 
-    /// Close the [Freezer] and return a [Checkpoint] for recovery.
-    pub async fn close(mut self) -> Result<Checkpoint, Error> {
+    /// See [Freezer::close].
+    async fn close(mut self: Box<Self>) -> Result<Checkpoint, Error> {
         // If we're mid-resize, complete it
         while self.resize_progress.is_some() {
             self.advance_resize().await?;
         }
 
         // Sync any pending updates before closing
-        let checkpoint = self.sync().await?;
+        let (_, checkpoint) = self.sync().await?;
 
         Ok(checkpoint)
     }
 
-    /// Close and remove any underlying blobs created by the [Freezer].
-    pub async fn destroy(self) -> Result<(), Error> {
+    /// See [Freezer::destroy].
+    async fn destroy(self) -> Result<(), Error> {
         // Destroy oversized journal
         self.oversized.destroy().await?;
 
@@ -1139,19 +1125,102 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         Ok(())
     }
+}
+
+/// Implementation of [Freezer].
+///
+/// Mutating functions consume the freezer and return it only on success: an error (or a dropped
+/// future) destroys the handle.
+pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Freezer<E, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Freezer")
+            .field("current_section", &self.0.current_section)
+            .field("next_epoch", &self.0.next_epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
+    /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
+    ///
+    /// Passing `None` or an empty [Checkpoint] deletes any existing freezer data and starts empty.
+    pub async fn init(
+        context: E,
+        config: Config<V::Cfg>,
+        checkpoint: Option<Checkpoint>,
+    ) -> Result<Self, Error> {
+        Ok(Self(Box::new(
+            Inner::init(context, config, checkpoint).await?,
+        )))
+    }
+
+    /// Put a key-value pair into the [Freezer].
+    /// If the key already exists, the value is updated.
+    pub async fn put(mut self, key: K, value: V) -> Result<(Self, Cursor), Error> {
+        let cursor;
+        (self.0, cursor) = self.0.put(key, value).await?;
+        Ok((self, cursor))
+    }
+
+    /// Get the value for a given [Identifier].
+    ///
+    /// If a [Cursor] is known for the required key, it
+    /// is much faster to use it than searching for a `key`.
+    pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
+        self.0.get(identifier).await
+    }
+
+    /// Check whether a value exists for a given key.
+    ///
+    /// Walks the same key index chain as [`Self::get`] with [`Identifier::Key`]
+    /// but never reads values.
+    pub async fn has(&self, key: &K) -> Result<bool, Error> {
+        self.0.has(key).await
+    }
+
+    /// Sync all pending data in [Freezer].
+    ///
+    /// If the table needs to be resized, the resize will begin during this sync.
+    /// The resize operation is performed incrementally across multiple sync calls
+    /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
+    /// Each sync will process up to `table_resize_chunk_size` entries until the resize
+    /// is complete.
+    pub async fn sync(mut self) -> Result<(Self, Checkpoint), Error> {
+        let checkpoint;
+        (self.0, checkpoint) = self.0.sync().await?;
+        Ok((self, checkpoint))
+    }
+
+    /// Close the [Freezer] and return a [Checkpoint] for recovery.
+    pub async fn close(self) -> Result<Checkpoint, Error> {
+        self.0.close().await
+    }
+
+    /// Close and remove any underlying blobs created by the [Freezer].
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.0.destroy().await
+    }
 
     /// Get the current progress of the resize operation.
     ///
     /// Returns `None` if the [Freezer] is not resizing.
     #[cfg(test)]
-    pub const fn resizing(&self) -> Option<u32> {
-        self.resize_progress
+    pub fn resizing(&self) -> Option<u32> {
+        self.0.resize_progress
     }
 
     /// Get the number of resizable entries.
     #[cfg(test)]
-    pub const fn resizable(&self) -> u32 {
-        self.resizable
+    pub fn resizable(&self) -> u32 {
+        self.0.resizable
+    }
+
+    /// Get the current size of the table.
+    #[cfg(test)]
+    pub fn table_size(&self) -> u32 {
+        self.0.table_size
     }
 }
 
@@ -1213,7 +1282,7 @@ mod tests {
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_freezer_futures_are_send(freezer: &mut TestFreezer, key: U64) {
+    fn assert_freezer_futures_are_send(freezer: TestFreezer, key: U64) {
         is_send(freezer.get(Identifier::Key(&key)));
         is_send(freezer.put(key, 0u64));
     }
@@ -1243,15 +1312,15 @@ mod tests {
                 table_replay_buffer: NZUsize!(64 * 1024),
                 codec_config: (),
             };
-            let mut freezer =
+            let freezer =
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone(), None)
                     .await
                     .unwrap();
 
             // Insert only 2 keys to different entries. With table_size=4, entries 2 and 3
             // should remain empty.
-            freezer.put(test_key("key0"), 0).await.unwrap();
-            freezer.put(test_key("key2"), 1).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key0"), 0).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key2"), 1).await.unwrap();
             freezer.close().await.unwrap();
 
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
@@ -1268,7 +1337,7 @@ mod tests {
                 let offset = entry_idx * Entry::FULL_SIZE;
                 let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
                 let (slot0, slot1) =
-                    Freezer::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
+                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
                 if slot0.is_empty() && slot1.is_empty() {
                     both_empty_count += 1;
                 }
@@ -1300,15 +1369,15 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(test_key("key0"), 42).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
 
@@ -1361,15 +1430,15 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(key.clone(), 42).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
 
                 assert_eq!(freezer.resizing(), Some(1));
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
@@ -1379,7 +1448,7 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
                     .await
                     .unwrap();
-            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.resizing(), None);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
@@ -1407,15 +1476,15 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(key.clone(), 42).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
 
@@ -1432,7 +1501,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
     }
@@ -1459,14 +1528,14 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
                 let checkpoint = freezer.close().await.unwrap();
                 assert_eq!(checkpoint.table_size, 2);
             }
@@ -1475,7 +1544,7 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
                     .await
                     .unwrap();
-            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.resizing(), None);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
@@ -1503,15 +1572,15 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(key.clone(), 42).await.unwrap();
-                let checkpoint = freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, checkpoint) = freezer.sync().await.unwrap();
 
                 assert_eq!(checkpoint.table_size, 4);
                 assert_eq!(freezer.resizing(), None);
@@ -1522,7 +1591,7 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
                     .await
                     .unwrap();
-            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
     }
@@ -1549,18 +1618,18 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             let stale_checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                let stale_checkpoint = freezer.sync().await.unwrap();
+                let (freezer, stale_checkpoint) = freezer.sync().await.unwrap();
                 assert_eq!(stale_checkpoint.table_size, 2);
 
-                freezer.put(key.clone(), 42).await.unwrap();
-                let checkpoint = freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, checkpoint) = freezer.sync().await.unwrap();
                 assert_eq!(checkpoint.table_size, 4);
                 assert_eq!(freezer.resizing(), None);
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
@@ -1575,7 +1644,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
     }
@@ -1638,16 +1707,16 @@ mod tests {
 
             // Create freezer with committed data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(test_key("key0"), 42).await.unwrap();
-                freezer.put(test_key("key1"), 43).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), 43).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
             assert!(checkpoint.oversized_size > 0);
@@ -1667,7 +1736,7 @@ mod tests {
             // Recovery restores the checkpointed state without probing committed
             // values, so init succeeds and the corruption surfaces at read on
             // exactly the affected key.
-            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                 context.child("second"),
                 cfg.clone(),
                 Some(checkpoint),
@@ -1690,8 +1759,8 @@ mod tests {
             );
 
             // The freezer remains usable
-            freezer.put(test_key("key2"), 44).await.unwrap();
-            freezer.sync().await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key2"), 44).await.unwrap();
+            let (freezer, _) = freezer.sync().await.unwrap();
             assert_eq!(
                 freezer
                     .get(Identifier::Key(&test_key("key2")))
@@ -1725,16 +1794,16 @@ mod tests {
 
             // Create freezer with committed data across multiple sections
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
                 )
                 .await
                 .unwrap();
-                freezer.put(test_key("key0"), 42).await.unwrap();
-                freezer.put(test_key("key1"), 43).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), 43).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
             assert!(checkpoint.section > 0);

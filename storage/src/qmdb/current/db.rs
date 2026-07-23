@@ -566,7 +566,7 @@ where
         // `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
-        self.sync_metadata().await?;
+        self = self.sync_metadata().await?;
 
         #[cfg(test)]
         if self.halt_before_prune_log {
@@ -700,7 +700,7 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
+    pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
@@ -722,9 +722,9 @@ where
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await?;
+        self.metadata = self.metadata.sync().await?;
 
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -828,7 +828,7 @@ where
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.sync_metadata().await?;
+        self = self.sync_metadata().await?;
         self.update_metrics();
         Ok(self)
     }

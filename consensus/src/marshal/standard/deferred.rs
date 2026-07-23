@@ -75,7 +75,7 @@ use crate::{
     marshal::{
         Update,
         application::{
-            gates::{self, Gates},
+            gates::{self, GateOutcome, Gates},
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
@@ -247,7 +247,7 @@ where
         block: Arc<B>,
         parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -305,7 +305,7 @@ where
                 // candidates may already be in the cache from the concurrent store above,
                 // so the gate verdict is the authority for consensus progress.
                 if let Some(application_valid) = gates::resolve(verdict, durable) {
-                    tx.send_lossy(application_valid);
+                    tx.send_lossy(GateOutcome::Ready(application_valid));
                 }
             }
             .instrument(span)
@@ -415,7 +415,7 @@ where
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
                     .await;
-                if let Ok(result) = verify_rx.await {
+                if let Ok(GateOutcome::Ready(result)) = verify_rx.await {
                     tx.send_lossy(result);
                 }
             }
@@ -433,7 +433,7 @@ where
         &mut self,
         round: Round,
         digest: B::Digest,
-        task: oneshot::Receiver<bool>,
+        task: oneshot::Receiver<GateOutcome>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` waits only on local broadcast delivery, so nudge a
         // round-bound notarized fetch that can unblock the existing waiter
@@ -441,8 +441,9 @@ where
         // digest is also the variant commitment.
         self.marshal.hint_notarized(round, digest);
 
-        // A completed gate is a live local verdict. After an unclean restart the
-        // in-memory task is gone, so recover via the embedded-context fetch path.
+        // A completed gate either carries an applicable local verdict or requests
+        // recovery. After an unclean restart the in-memory task is gone, which also
+        // recovers via the embedded-context fetch path.
         let mut marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
@@ -771,7 +772,15 @@ where
                     Decision::Complete(valid) => {
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
-                        task_tx.send_lossy(valid);
+                        //
+                        // A rejection is safe to publish as a gate verdict because the
+                        // precheck depends only on the block's height and the gate key's
+                        // epoch, never on the declared parent. A conflicting header for
+                        // the same `(round, digest)` cannot produce an honest
+                        // notarization: reading the digest as a re-proposal requires it
+                        // to be the recorded payload of an earlier view, so its embedded
+                        // context fails the mismatch check under any normal header.
+                        task_tx.send_lossy(GateOutcome::Ready(valid));
                         tx.send_lossy(valid);
                         return;
                     }
@@ -797,7 +806,7 @@ where
                         block_context = ?block.context(),
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
-                    task_tx.send_lossy(false);
+                    task_tx.send_lossy(GateOutcome::Recover);
                     tx.send_lossy(false);
                     return;
                 }
@@ -1687,6 +1696,204 @@ mod tests {
                 marshal2.get_block(&child_digest).await.is_some(),
                 "certify resolved true for the leader's own proposal so the block must be durable"
             );
+        });
+    }
+
+    /// Shared scenario for the proposal-parent equivocation tests.
+    ///
+    /// The local validator certified the view-1 block but only nullified view 2,
+    /// while the rest of the network notarized and certified the view-2 block.
+    /// The view-3 leader builds on the view-2 block and broadcasts it, so the
+    /// block is buffered locally but was never verified here. The equivocating
+    /// context names the certified view-1 block as parent, which this
+    /// validator's parent selection accepts (view 1 certified, view 2 nullified).
+    struct EquivocationFixture {
+        marshaled: Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher>,
+        round: Round,
+        digest: <B as Digestible>::Digest,
+        embedded_ctx: Ctx,
+        equivocating_ctx: Ctx,
+        _extra: <StandardHarness as TestHarness>::ValidatorExtra,
+    }
+
+    async fn equivocation_fixture(
+        context: &mut deterministic::Context,
+        app: MockVerifyingApp<B, S>,
+    ) -> EquivocationFixture {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let me = participants[0].clone();
+        let setup = StandardHarness::setup_validator(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let marshal = setup.mailbox;
+        let buffer = setup.extra;
+
+        let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+        let leader = participants[1].clone();
+
+        // The view-1 block: the parent this validator last certified.
+        let certified_round = Round::new(Epoch::zero(), View::new(1));
+        let certified_ctx = Ctx {
+            round: certified_round,
+            leader: default_leader(),
+            parent: (View::zero(), genesis.digest()),
+        };
+        let certified = B::new::<Sha256>(certified_ctx, genesis.digest(), Height::new(1), 100);
+        let certified_digest = certified.digest();
+        assert!(marshal.verified(certified_round, certified).await);
+
+        // The view-2 block: notarized by the network but only nullified here,
+        // so this validator never certified it.
+        let notarized_round = Round::new(Epoch::zero(), View::new(2));
+        let notarized_ctx = Ctx {
+            round: notarized_round,
+            leader: leader.clone(),
+            parent: (View::new(1), certified_digest),
+        };
+        let notarized = B::new::<Sha256>(notarized_ctx, certified_digest, Height::new(2), 200);
+        let notarized_digest = notarized.digest();
+        assert!(marshal.verified(notarized_round, notarized).await);
+
+        // The view-3 block builds on the view-2 block. The leader's broadcast
+        // delivered it into the local buffer without a local verification.
+        let round = Round::new(Epoch::zero(), View::new(3));
+        let embedded_ctx = Ctx {
+            round,
+            leader: leader.clone(),
+            parent: (View::new(2), notarized_digest),
+        };
+        let block = B::new::<Sha256>(embedded_ctx.clone(), notarized_digest, Height::new(3), 300);
+        let digest = block.digest();
+        assert!(
+            buffer
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), block)
+                .accepted(),
+            "buffer broadcast for the candidate should be accepted"
+        );
+
+        let equivocating_ctx = Ctx {
+            round,
+            leader,
+            parent: (View::new(1), certified_digest),
+        };
+
+        let marshaled = Deferred::new(
+            context.child("deferred"),
+            app,
+            marshal,
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
+        );
+        context.sleep(Duration::from_millis(10)).await;
+
+        EquivocationFixture {
+            marshaled,
+            round,
+            digest,
+            embedded_ctx,
+            equivocating_ctx,
+            _extra: buffer,
+        }
+    }
+
+    /// A leader can equivocate at the proposal layer: sign one proposal for a
+    /// digest declaring the notarized view-2 parent (sent to the validators
+    /// that certified view 2) and another declaring the certified view-1
+    /// parent (sent to a validator that only nullified view 2). Both pass
+    /// their recipients' parent selection and carry the same digest because
+    /// they name the same block.
+    ///
+    /// Refusing to notarize the mismatched proposal is correct. That refusal
+    /// must not outlive the proposal: once the honest notarization for
+    /// `(round, digest)` arrives, certification must judge the block against
+    /// its embedded context (defended by the notarizing quorum) and succeed.
+    /// Adopting the verdict computed under the equivocating context wedges
+    /// this validator in the view: the other honest validators have certified
+    /// and advanced, leaving too few validators to form either a nullification
+    /// or a finalization after the Byzantine validator stops participating.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut fixture = equivocation_fixture(&mut context, MockVerifyingApp::new()).await;
+
+            let verify_rx = fixture
+                .marshaled
+                .verify(fixture.equivocating_ctx.clone(), fixture.digest)
+                .await;
+            assert!(
+                !verify_rx.await.expect("verify result missing"),
+                "the equivocating proposal must not be notarized"
+            );
+
+            let certify_rx = fixture
+                .marshaled
+                .certify(fixture.round, fixture.digest)
+                .await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized digest must not adopt the verdict computed under the equivocating context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
+        });
+    }
+
+    /// Control for the equivocation tests: a live application rejection under
+    /// the matching context is a real verdict. Certification must keep
+    /// honoring it, because deferred voting means a notarization can exist
+    /// for an application-invalid block.
+    #[test_traced("WARN")]
+    fn test_certify_honors_application_rejection() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut fixture =
+                equivocation_fixture(&mut context, MockVerifyingApp::with_verify_result(false))
+                    .await;
+
+            let verify_rx = fixture
+                .marshaled
+                .verify(fixture.embedded_ctx.clone(), fixture.digest)
+                .await;
+            assert!(
+                verify_rx.await.expect("verify result missing"),
+                "optimistic verify accepts an available block with a matching context"
+            );
+
+            let certify_rx = fixture
+                .marshaled
+                .certify(fixture.round, fixture.digest)
+                .await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.expect("certify result missing"),
+                        "certify must propagate the application rejection"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
         });
     }
 }

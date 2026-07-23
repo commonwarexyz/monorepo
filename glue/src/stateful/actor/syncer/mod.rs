@@ -161,6 +161,9 @@ where
 }
 
 /// Durable state-sync metadata.
+///
+/// Mutating functions consume the metadata and return it only on success. Storage failures
+/// panic.
 pub(crate) struct StateSyncMetadata<E, S, C>
 where
     E: Context,
@@ -231,7 +234,7 @@ where
     ///
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from the same or a later consensus round.
-    pub(crate) async fn begin_sync(&mut self, floor: Finalization<S, C>) {
+    pub(crate) async fn begin_sync(mut self, floor: Finalization<S, C>) -> Self {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {
                 assert!(
@@ -251,10 +254,12 @@ where
             None => {}
         }
 
-        self.metadata
+        self.metadata = self
+            .metadata
             .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
             .await
             .expect("failed to set state sync state to in-progress");
+        self
     }
 
     /// Records that one-time state sync completed at the given height.
@@ -262,7 +267,7 @@ where
     /// Once this height is set, future startups skip peer state sync and initialize
     /// from the later of this height and marshal's processed height instead. This
     /// action is irreversible.
-    pub(crate) async fn set_complete(&mut self, height: Height) {
+    pub(crate) async fn set_complete(mut self, height: Height) -> Self {
         if let Some(SyncState::Complete(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
             assert!(
                 height >= *existing,
@@ -270,10 +275,12 @@ where
             );
         }
 
-        self.metadata
+        self.metadata = self
+            .metadata
             .put_sync(SYNC_STATE_KEY, SyncState::Complete(height))
             .await
             .expect("failed to set state sync state to complete");
+        self
     }
 }
 
@@ -334,7 +341,7 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-    mut sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
+    sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
 ) -> StartupResult<E, A>
 where
     E: Rng + Spawner + Context,
