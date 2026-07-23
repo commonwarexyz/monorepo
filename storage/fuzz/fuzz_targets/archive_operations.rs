@@ -90,6 +90,7 @@ fn fuzz(data: FuzzInput) {
                     // above the floor.
                     archive = archive.put(*index, key, value).await.expect("put failed");
                     let below_floor = oldest_allowed.is_some_and(|min| *index < min);
+
                     // Only add if not already written (Archive doesn't allow overwrites)
                     if !below_floor && !written_indices.contains(index) {
                         items.push((*index, *key_data, *value_data));

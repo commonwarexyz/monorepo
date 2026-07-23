@@ -739,6 +739,7 @@ impl<
                 return (self, None);
             }
         };
+
         // Sign the item
         let item = Item { height, digest };
         let Some(ack) = Ack::sign(&*scheme, epoch, item) else {

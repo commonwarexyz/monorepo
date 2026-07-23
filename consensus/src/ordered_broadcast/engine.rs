@@ -1117,16 +1117,11 @@ impl<
     /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
     async fn journal_sync(mut self, sequencer: &C::PublicKey, height: Height) -> Self {
         let section = self.get_journal_section(height);
-        rebind_entry(&mut self.journals, sequencer, |journal| {
-            journal.sync(section)
+        rebind_entry(&mut self.journals, sequencer, |journal| async move {
+            journal.sync(section).await?.prune(section).await
         })
         .await
-        .expect("unable to sync journal");
-        rebind_entry(&mut self.journals, sequencer, |journal| {
-            journal.prune(section)
-        })
-        .await
-        .expect("unable to prune journal");
+        .expect("unable to sync and prune journal");
         self
     }
 }

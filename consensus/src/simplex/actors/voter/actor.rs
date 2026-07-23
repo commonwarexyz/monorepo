@@ -277,10 +277,6 @@ impl<
         if !self.dirty {
             return self;
         }
-        assert!(
-            self.journal.is_some(),
-            "pending journal appends without a journal"
-        );
         let span = info_span!(
             "simplex.voter.journal.sync",
             epoch = self.state.epoch().traced(),
