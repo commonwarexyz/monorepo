@@ -1943,7 +1943,7 @@ mod tests {
             let (mut journal, h1) = journal.start_sync().await;
             h1.await.unwrap();
             journal.append(&4).await.unwrap();
-            let mut journal = journal.commit().await.unwrap();
+            let journal = journal.commit().await.unwrap();
 
             // The advance's inline metadata writes fail: the failure surfaces on the
             // journal handle even though the data is durable.
