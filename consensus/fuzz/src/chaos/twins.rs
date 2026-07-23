@@ -49,7 +49,7 @@
 //! that never reaches that gate within a bounded cap is skipped, never crashed
 //! in the wrong term.
 
-use super::{log, watch::Checker};
+use super::log;
 use crate::{
     ManagedValidator, N4F1C3, PublicKeyOf, build_validator_with_reporter, invariants,
     mallory::{
@@ -515,32 +515,30 @@ async fn restart_honest<P: Simplex>(
 /// Full safety suite over the honest managed reporters, with the Byzantine twin
 /// index `byz` excluded as the Byzantine signer. The twin's two summary
 /// reporters are observers only (a twin half may solely hold evidence against a
-/// correct signer); they are never fed to the honest-only audit suite or the
-/// payload-uniqueness check, which the twin legitimately violates for its own
-/// identity.
+/// correct signer); they are never fed to the honest-only audit suite, which the
+/// twin legitimately violates for its own identity.
 fn check_safety<P: Simplex>(
-    checker: &mut Checker,
     honest: &[HonestReporter<P>],
     twin_summaries: &[HonestSummary<P>],
     byz: usize,
     elector: TwinsElector<P>,
     term_length: TermLength,
 ) {
+    // Full audit-history suite over the RECORDING reporters: the append-only,
+    // full-proposal (parent-aware) conflict checks (`finalization_history` /
+    // `notarization_history` keep every certificate per round and compare the
+    // whole signed proposal, unlike the overwrite-per-view summary certificate
+    // maps and the payload-keyed vote maps) PLUS the certificate-graph basic
+    // suite. Sound across the durable restart because the run skips any input
+    // where the crash node cast an own nullify pre-crash (see `run`): the genesis
+    // floor replays the whole journal and re-emits journaled votes, so a pre-crash
+    // notarize-then-nullify would re-appear as a notarize after the nullify and
+    // trip the ordering-sensitive own-vote invariants on a replayed duplicate.
+    // With no pre-crash nullify, the replay re-emits only notarizations with no
+    // preceding nullify, so those invariants never false-positive.
+    invariants::check::<P>(term_length, honest);
+
     let honest_summaries = summaries(honest);
-
-    // Certificate-graph safety over extracted replica states. The append-only
-    // audit-history suite (`invariants::check` over the RECORDING reporters) is
-    // deliberately NOT run here: a durable restart replays the crashed node's
-    // journal and re-emits its votes, so a legal notarize-then-nullify sequence
-    // (common because the Byzantine leader forces timeouts) re-appears in the
-    // append-only log as a notarize AFTER the nullify and trips the
-    // ordering-sensitive own-vote invariants on a duplicate, not a real
-    // double-vote. The summary-map checks are keyed maps, idempotent under
-    // re-emission, and cover the real safety properties soundly across the
-    // restart: fork safety (no two payloads finalized per view), vote
-    // equivocation excluding the Byzantine twin, and leader agreement.
-    invariants::check::<P>(term_length, invariants::extract(honest_summaries.clone()));
-
     let mut observers = honest_summaries.clone();
     observers.extend(twin_summaries.iter().cloned());
     invariants::check_no_invalid_reports(&honest_summaries);
@@ -551,16 +549,6 @@ fn check_safety<P: Simplex>(
         term_length,
         &observers,
     );
-
-    let mut votes = Vec::new();
-    for reporter in &honest_summaries {
-        for (view, by_payload) in reporter.finalizes.lock().iter() {
-            for payload in by_payload.keys() {
-                votes.push((view.get(), *payload));
-            }
-        }
-    }
-    checker.observe(&votes);
 }
 
 /// The live honest set for the step boundary: honest managed nodes still
@@ -584,7 +572,6 @@ async fn paced_step<P: Simplex>(
     managed: &[HonestValidator<P>],
     honest: &[HonestReporter<P>],
     twin_summaries: &[HonestSummary<P>],
-    checker: &mut Checker,
     byz: usize,
     elector: &TwinsElector<P>,
     term_length: TermLength,
@@ -597,14 +584,7 @@ async fn paced_step<P: Simplex>(
     let baseline = clock.baseline(&live);
     let deadline = context.current() + CHAOS_TWINS_STEP_TIMEOUT;
     wait_for_step_boundary(context, clock, &live, baseline, deadline).await;
-    check_safety::<P>(
-        checker,
-        honest,
-        twin_summaries,
-        byz,
-        elector.clone(),
-        term_length,
-    );
+    check_safety::<P>(honest, twin_summaries, byz, elector.clone(), term_length);
 }
 
 /// Run one chaos-twins episode. Seeded solely from `FuzzRng::new(raw_bytes)`;
@@ -711,7 +691,6 @@ where
             clock.monitors.push((mv.idx(), monitor));
         }
 
-        let mut checker = Checker::new();
         let crash_slot = managed.iter().position(|mv| mv.idx() == crash).unwrap();
         let down_steps = context.random_range(1..=CHAOS_TWINS_DOWN_STEPS);
 
@@ -751,14 +730,7 @@ where
             let step_deadline = context.current() + CHAOS_TWINS_STEP_TIMEOUT;
             wait_for_step_boundary(&mut context, &mut clock, &only_crash, baseline, step_deadline)
                 .await;
-            check_safety::<P>(
-                &mut checker,
-                &honest,
-                &twin_summaries,
-                byz,
-                elector.clone(),
-                term_length,
-            );
+            check_safety::<P>(&honest, &twin_summaries, byz, elector.clone(), term_length);
         };
         // Confirm from the crash node's own leader map that the next term is
         // Byzantine-led before crashing; skip if not yet derived (never crash in
@@ -769,9 +741,23 @@ where
             .lock()
             .get(&target_view)
             .is_some_and(|leader| leader == &participants[byz]);
-        if !reached || !byz_leads_next {
+        // Skip if the crash node cast ANY own nullify pre-crash. A warm-up view
+        // can legally go Notarize -> timeout -> Nullify on this node while the
+        // other quorum identities still finalize it (which this node observes as
+        // `warmup_tip`). Restart uses a genesis floor and replays the whole
+        // journal, re-emitting that notarize AFTER the nullify in the append-only
+        // audit log, which would trip `own_nullify_is_terminal` on a replayed
+        // duplicate, not a real double-vote. Excluding this uncommon path keeps
+        // the audit suite a sound oracle here.
+        let crash_own_nullified = honest[crash_slot]
+            .inner()
+            .nullifies
+            .lock()
+            .values()
+            .any(|signers| signers.contains(&participants[crash]));
+        if !reached || !byz_leads_next || crash_own_nullified {
             log::push(format!(
-                "chaos-twins: warm-up tip not hit exactly (overshoot/cap) or byz-term entry not derived (byz={byz} crash={crash} warmup_tip={warmup_tip} crash_tip={}); skipping input",
+                "chaos-twins: skipping input (reached={reached} byz_leads_next={byz_leads_next} crash_own_nullified={crash_own_nullified} byz={byz} crash={crash} warmup_tip={warmup_tip} crash_tip={})",
                 clock.latest[crash],
             ));
             return;
@@ -782,8 +768,14 @@ where
         // Phase B: hold the outage across the Byzantine leader's term.
         for _ in 0..down_steps {
             paced_step::<P>(
-                &mut context, &mut clock, &managed, &honest, &twin_summaries, &mut checker, byz,
-                &elector, term_length,
+                &mut context,
+                &mut clock,
+                &managed,
+                &honest,
+                &twin_summaries,
+                byz,
+                &elector,
+                term_length,
             )
             .await;
         }
@@ -838,19 +830,18 @@ where
                 CHAOS_TWINS_LIVENESS_WINDOW,
             );
             paced_step::<P>(
-                &mut context, &mut clock, &managed, &honest, &twin_summaries, &mut checker, byz,
-                &elector, term_length,
+                &mut context,
+                &mut clock,
+                &managed,
+                &honest,
+                &twin_summaries,
+                byz,
+                &elector,
+                term_length,
             )
             .await;
         }
 
-        check_safety::<P>(
-            &mut checker,
-            &honest,
-            &twin_summaries,
-            byz,
-            elector.clone(),
-            term_length,
-        );
+        check_safety::<P>(&honest, &twin_summaries, byz, elector.clone(), term_length);
     });
 }

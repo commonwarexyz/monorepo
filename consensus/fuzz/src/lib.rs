@@ -958,8 +958,8 @@ where
 
 /// Spawn an honest validator instrumented with the fuzz-only append-only
 /// reporter and automaton history, dropping the task handles. A thin wrapper
-/// over [`build_recording_validator`], which owns the recording
-/// instrumentation.
+/// over [`build_validator_with_reporter`] with the [`RecordingReporter`] family,
+/// which owns the recording instrumentation.
 #[allow(clippy::too_many_arguments)]
 fn spawn_audited_validator<
     P,
