@@ -34,24 +34,6 @@ stability_scope!(BETA {
     }
 
     impl HeaderError {
-        /// Returns true if this parse failure could be the signature of a creation interrupted
-        /// before the header became durable, making the blob a candidate for
-        /// [Layout::interrupted_creation] classification.
-        ///
-        /// [HeaderError::VersionMismatch] is excluded: for V1 it fires only once the CRC has
-        /// validated and the full header region is present, so the header was completely
-        /// written and the failure is a genuine version disagreement. (A V0 version mismatch
-        /// is checked without a CRC, but V0 recovery is out of scope.)
-        pub(crate) const fn may_be_torn_creation(&self) -> bool {
-            matches!(
-                self,
-                Self::InvalidMagic { .. }
-                    | Self::UnsupportedRuntimeVersion { .. }
-                    | Self::InvalidChecksum
-                    | Self::Truncated { .. }
-            )
-        }
-
         /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
         pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
             match self {
@@ -190,67 +172,32 @@ stability_scope!(BETA {
             }
         }
 
-        /// Returns true if a blob's raw contents are consistent with the creation of a
-        /// blob with this layout that was interrupted before its header became durable.
-        ///
-        /// This runtime never creates [Layout::V0] blobs, so no contents qualify for V0 (a
-        /// pre-V1 writer's torn creation is a sub-prelude file, healed as new before any
-        /// parsing).
-        ///
-        /// [Layout::V1] creation writes the region with set_len(0) -> write -> sync, and
-        /// this classifier models the states it recovers as a prefix of the canonical
-        /// region, possibly followed by zeros (a persisted length without persisted bytes
-        /// reads as zeros). A file is accepted iff it fits within the region and equals a
-        /// canonical prefix followed by zeros: the magic and runtime version are fixed;
-        /// the blob version bytes continue the prefix with whatever value the writer
-        /// chose; the CRC bytes must be a prefix of the CRC over the preceding prelude,
-        /// which can only have begun persisting once the full prelude did; and everything
-        /// past the prefix must be zero.
-        ///
-        /// The prefix shape is a model, not a filesystem guarantee: device writeback before
-        /// the sync completes may persist bytes out of order. A file that is not a canonical
-        /// prefix (a lost byte followed by persisted ones, or a CRC that does not match its
-        /// own prelude) stays loudly corrupt rather than healing, trading recovery
-        /// coverage for avoiding broader acceptance that might erase nonzero data.
-        pub(crate) fn interrupted_creation(self, raw: &[u8]) -> bool {
-            match self {
-                Self::V0 => false,
-                Self::V1 => {
-                    // The file cannot extend past the region creation writes, and
-                    // everything past the parseable header must be zero padding.
-                    if raw.len() > self.data_offset() as usize {
-                        return false;
-                    }
-                    let head = &raw[..raw.len().min(Header::PARSE_LEN)];
-                    if raw[head.len()..].iter().any(|&byte| byte != 0) {
-                        return false;
-                    }
+    }
 
-                    // The written prefix ends after the last nonzero byte (trailing zeros
-                    // are indistinguishable from unwritten bytes).
-                    let written = head.iter().rposition(|&byte| byte != 0).map_or(0, |i| i + 1);
+    /// Bytes withheld until a new V1 blob's first durability request commits its header.
+    ///
+    /// Deferred creation reserves a zero header page and writes nothing durable. The first
+    /// durability request writes the prelude and makes the file and its directory entries
+    /// durable, then writes this CRC as the commit record: a complete valid CRC can only exist
+    /// after that barrier, so it proves the whole file is durable.
+    #[derive(Clone)]
+    pub(crate) struct PendingHeader {
+        prelude: [u8; Header::PRELUDE_SIZE],
+        checksum: [u8; Header::EXTENSION_SIZE],
+    }
 
-                    let mut canonical = [0u8; Header::PARSE_LEN];
-                    canonical[..4].copy_from_slice(&self.magic());
-                    canonical[4..6].copy_from_slice(&self.runtime_version().to_be_bytes());
-                    if written <= Header::PRELUDE_SIZE {
-                        // Torn at or before the CRC: the fixed bytes of the prefix must
-                        // match; the blob version bytes (6-7) are the writer's choice.
-                        head[..written.min(6)] == canonical[..written.min(6)]
-                    } else {
-                        // CRC bytes persisted, so the full prelude did too: it must be
-                        // canonical (with the writer's version), and the CRC bytes must be
-                        // a prefix of the CRC over it.
-                        if head[..6] != canonical[..6] {
-                            return false;
-                        }
-                        canonical[6..8].copy_from_slice(&head[6..8]);
-                        let crc = Crc32::checksum(&canonical[..Header::PRELUDE_SIZE]);
-                        canonical[8..12].copy_from_slice(&crc.to_be_bytes());
-                        head[8..written] == canonical[8..written]
-                    }
-                }
-            }
+    impl PendingHeader {
+        /// Offset of the commit CRC within the header region (immediately after the prelude).
+        pub(crate) const CHECKSUM_OFFSET: u64 = Header::PRELUDE_SIZE as u64;
+
+        /// The 8-byte prelude written in phase one of the commit.
+        pub(crate) const fn prelude(&self) -> &[u8; Header::PRELUDE_SIZE] {
+            &self.prelude
+        }
+
+        /// The 4-byte CRC written last, as the commit record.
+        pub(crate) const fn checksum(&self) -> &[u8; Header::EXTENSION_SIZE] {
+            &self.checksum
         }
     }
 
@@ -310,15 +257,10 @@ stability_scope!(BETA {
             }
         }
 
-        /// Creates the header region for a new blob using the latest version from the range and
-        /// the latest header layout. Returns (encoded header region, blob version); the data
-        /// offset is the region's length.
-        ///
-        /// Callers writing this region over an existing blob must truncate it to zero first, so
-        /// a torn write cannot splice old bytes into a fully valid header with a wrong version:
-        /// every partial state in the canonical-prefix model then remains classifiable as an
-        /// interrupted creation.
-        pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
+        /// Prepares the V1 prelude and its commit CRC for a new blob, without writing either to
+        /// storage. Returns the withheld bytes and the blob version stamped (the newest in the
+        /// range); the data offset is [Layout::V1]'s `data_offset`.
+        pub(crate) fn prepare(versions: &RangeInclusive<u16>) -> (PendingHeader, u16) {
             let layout = Layout::V1;
             let blob_version = *versions.end();
             let header = Self {
@@ -326,12 +268,86 @@ stability_scope!(BETA {
                 runtime_version: layout.runtime_version(),
                 blob_version,
             };
+            let encoded = header.encode();
+            let mut prelude = [0u8; Self::PRELUDE_SIZE];
+            prelude.copy_from_slice(encoded.as_ref());
+            let checksum = Crc32::checksum(&prelude).to_be_bytes();
+            assert_ne!(
+                checksum,
+                [0u8; Self::EXTENSION_SIZE],
+                "a zero V1 CRC is reserved for the uncommitted state"
+            );
+            (PendingHeader { prelude, checksum }, blob_version)
+        }
+
+        /// Constructs a committed V1 header region (prelude + CRC + zero padding) as it appears
+        /// on disk after a successful commit. Test-only: production creation reserves a zero
+        /// region via [Self::prepare] and commits it on the first durability request.
+        #[cfg(test)]
+        pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
+            let (pending, blob_version) = Self::prepare(versions);
             let mut region = Vec::with_capacity(Layout::V1.data_offset() as usize);
-            region.extend_from_slice(&header.encode());
-            let crc = Crc32::checksum(&region);
-            region.extend_from_slice(&crc.to_be_bytes());
-            region.resize(layout.data_offset() as usize, 0);
+            region.extend_from_slice(pending.prelude());
+            region.extend_from_slice(pending.checksum());
+            region.resize(Layout::V1.data_offset() as usize, 0);
             (region, blob_version)
+        }
+
+        /// Returns true if `raw` matches an uncommitted V1 creation: the header region is not yet
+        /// a complete valid CRC over a canonical prelude, so no first-durability commit has
+        /// certified it. Bytes past the header region are uncommitted user data (a crash after
+        /// data pages flushed but before the header committed) and are ignored.
+        ///
+        /// Before the commit the header region is zero. The commit writes the prelude, makes the
+        /// file durable, then writes the CRC last, so recovery accepts a zero-or-canonical
+        /// prelude while the CRC is absent, or a complete prelude followed by an incomplete
+        /// zero-or-canonical CRC. A complete valid CRC is committed (it could only follow the
+        /// durability barrier). Padding within the region must be zero.
+        fn uncommitted_v1(raw: &[u8]) -> bool {
+            let head = &raw[..raw.len().min(Self::PARSE_LEN)];
+            let padding_end = raw.len().min(Layout::V1.data_offset() as usize);
+            if raw[head.len()..padding_end].iter().any(|&byte| byte != 0) {
+                return false;
+            }
+
+            let mut canonical = [0u8; Self::PARSE_LEN];
+            canonical[..4].copy_from_slice(&Layout::V1.magic());
+            canonical[4..6].copy_from_slice(&Layout::V1.runtime_version().to_be_bytes());
+
+            let mut found_checksum = [0u8; Self::EXTENSION_SIZE];
+            if let Some(checksum) = head.get(Self::PRELUDE_SIZE..) {
+                found_checksum[..checksum.len()].copy_from_slice(checksum);
+            }
+            if found_checksum.iter().all(|&byte| byte == 0) {
+                // The CRC is not issued until the prelude and user bytes are durable. Before
+                // then each fixed prelude byte is either its new value or the original zero; the
+                // blob-version bytes are whatever value the creating caller selected.
+                return head[..head.len().min(6)]
+                    .iter()
+                    .zip(&canonical)
+                    .all(|(&found, &expected)| found == 0 || found == expected);
+            }
+
+            // A nonzero CRC byte is only issued after the reserved header page's length and the
+            // prelude are durable, so a shorter file carrying one cannot be an uncommitted
+            // creation.
+            if (raw.len() as u64) < Layout::V1.data_offset()
+                || head.len() < Self::PRELUDE_SIZE
+                || head[..6] != canonical[..6]
+            {
+                return false;
+            }
+            canonical[6..8].copy_from_slice(&head[6..8]);
+            let checksum = Crc32::checksum(&canonical[..Self::PRELUDE_SIZE]).to_be_bytes();
+            if found_checksum == checksum {
+                // A complete valid CRC is a commit record, not an uncommitted creation.
+                return false;
+            }
+            canonical[8..12].copy_from_slice(&checksum);
+            found_checksum
+                .iter()
+                .zip(&canonical[8..12])
+                .all(|(&found, &expected)| found == 0 || found == expected)
         }
 
         /// Parses and validates a blob's header from its leading bytes, returning the blob's
@@ -414,16 +430,20 @@ stability_scope!(BETA {
         }
     }
 
-    /// Resolves a blob's header from its leading bytes.
+    /// Classifies a blob's on-disk header region from its leading bytes, performing no I/O.
     ///
-    /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
-    /// `None` when the caller should (re)create the blob: the file is too short to hold a
-    /// header, or its contents are those of a [Layout::V1] creation interrupted
-    /// before its header became durable. Anything else fails as corrupt or unacceptable.
+    /// Returns `Some((logical_size, blob_version, data_offset))` for a committed header (a
+    /// complete valid CRC over a canonical prelude), `None` when the caller should reset and
+    /// recreate the blob (too short to hold a header, or an uncommitted V1 creation whose first
+    /// durability request never committed the CRC), and an error otherwise. A committed-looking
+    /// header whose CRC does not match is loud corruption the blob layer cannot adjudicate; the
+    /// contiguous journal recreates such a tail using its recovery watermark.
     ///
-    /// `raw` must hold the blob's first [Header::resolve_len] bytes, where `raw_len` is
-    /// the blob's raw on-disk length.
-    pub(crate) fn resolve(
+    /// `raw` must hold the blob's first [Header::resolve_len] bytes, where `raw_len` is the
+    /// blob's raw on-disk length. The full header region is required (not just the parse head):
+    /// uncommitted classification must observe any nonzero reserved-padding byte to reject a
+    /// foreign state, and cannot see bytes the caller did not read.
+    pub(crate) fn classify_header(
         raw: &[u8],
         raw_len: u64,
         versions: &RangeInclusive<u16>,
@@ -432,10 +452,10 @@ stability_scope!(BETA {
     ) -> Result<Option<(u64, u16, u64)>, crate::Error> {
         assert!(
             raw.len() >= Header::resolve_len(raw_len),
-            "caller must provide enough bytes to resolve the header region"
+            "caller must provide enough bytes to classify the header region"
         );
 
-        // Too short to hold any header: treat as new.
+        // Too short to hold any header: an uncommitted creation, recreate.
         if Header::missing(raw_len) {
             return Ok(None);
         }
@@ -445,17 +465,14 @@ stability_scope!(BETA {
             Err(err) => err,
         };
 
-        // Heal a V1 creation interrupted before its header became durable: the failure
-        // must be one a torn write can produce, and the contents must match the canonical
-        // creation prefix. Files longer than the creation region hold data and never heal.
-        if raw_len <= Layout::V1.data_offset()
-            && err.may_be_torn_creation()
-            && Layout::V1.interrupted_creation(raw)
-        {
+        // An uncommitted V1 creation (no complete valid CRC over a canonical prelude) recreates
+        // in place; anything else is loud corruption. `uncommitted_v1` clamps `raw` to the
+        // header region itself, ignoring any uncommitted user data past it.
+        if Header::uncommitted_v1(raw) {
             warn!(
                 partition,
                 name = %hex(name),
-                "recreating blob left torn by an interrupted creation"
+                "recreating uncommitted V1 blob"
             );
             return Ok(None);
         }
@@ -657,36 +674,6 @@ pub(crate) mod tests {
         ));
     }
 
-    /// Classification only triggers for parse failures a torn write can produce. A version
-    /// mismatch requires a validated CRC over a complete header region and stays loud.
-    #[test]
-    fn test_header_error_torn_creation_candidates() {
-        assert!(HeaderError::InvalidMagic { found: [0; 4] }.may_be_torn_creation());
-        assert!(
-            HeaderError::UnsupportedRuntimeVersion {
-                expected: 1,
-                found: 0
-            }
-            .may_be_torn_creation()
-        );
-        assert!(HeaderError::InvalidChecksum.may_be_torn_creation());
-        assert!(
-            HeaderError::Truncated {
-                required_len: Layout::V1.data_offset(),
-                raw_len: 100
-            }
-            .may_be_torn_creation()
-        );
-        assert!(!HeaderError::InvalidPadding.may_be_torn_creation());
-        assert!(
-            !HeaderError::VersionMismatch {
-                expected: 0..=0,
-                found: 1
-            }
-            .may_be_torn_creation()
-        );
-    }
-
     /// A magic with any byte zeroed by a torn write must be invalid, never another layout's
     /// magic: this is what lets an unparseable header safely identify a torn creation.
     #[test]
@@ -751,79 +738,94 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_header_interrupted_v1_creation_accepts_torn_states() {
+    fn test_header_uncommitted_v1_accepts_interrupted_commit_states() {
         let region = v1_blob_bytes(5, b"");
         let cases: &[(&str, Vec<u8>)] = &[
-            ("only sizes flushed", vec![0u8; region.len()]),
-            ("sub-prelude fragment", vec![0u8; 3]),
-            ("prefix of the magic", region[..2].to_vec()),
-            ("prefix ending in the version bytes", region[..8].to_vec()),
-            ("prefix ending mid-CRC", region[..10].to_vec()),
-            ("full region", region.clone()),
-            ("torn after the prelude, CRC unwritten", {
+            ("reserved header page", vec![0u8; region.len()]),
+            ("short zero region", vec![0u8; 3]),
+            ("arbitrary prelude subset", {
+                let mut raw = vec![0u8; region.len()];
+                for index in [0, 2, 5, 7] {
+                    raw[index] = region[index];
+                }
+                raw
+            }),
+            ("prelude durable, CRC unwritten", {
                 let mut raw = region.clone();
                 raw[8..12].fill(0);
                 raw
             }),
-            ("prefix with a persisted length", {
-                let mut raw = vec![0u8; region.len()];
-                raw[..10].copy_from_slice(&region[..10]);
+            ("arbitrary CRC subset", {
+                let mut raw = region.clone();
+                raw[8] = 0;
+                raw[10] = 0;
                 raw
             }),
-            (
-                "documented residual: V0 blob rotted into a canonical prefix",
-                {
-                    // The magics share the `CWI` brand, so a V0 blob whose surviving bytes
-                    // form a canonical V1 prefix (a default version stamp of 0, an all-zero
-                    // payload, and the tag byte lost) is byte-identical to a V1 creation
-                    // torn inside the magic, and heals. Its logical length is lost, but
-                    // every erased payload byte is zero. Any nonzero stamp, payload, or
-                    // non-prefix survivor stays loud (see the reject table).
-                    let mut raw = v0_blob_bytes(0, &[0u8; 100]);
-                    raw[3] = 0;
-                    raw
-                },
-            ),
+            ("uncommitted header with user data", {
+                let mut raw = vec![0u8; region.len()];
+                raw.extend_from_slice(b"unsynced data");
+                raw
+            }),
+            ("partial CRC with user data", {
+                let mut raw = region;
+                raw[9..12].fill(0);
+                raw.extend_from_slice(b"unsynced data");
+                raw
+            }),
+            ("documented residual: committed V1 with erased CRC", {
+                // Once all CRC bytes are lost, a committed V1 blob is byte-identical to an
+                // uncommitted one. This narrow corruption pattern is the cost of using zero
+                // as the precommit state without another on-disk marker.
+                let mut raw = v1_blob_bytes(5, b"durable data");
+                raw[8..12].fill(0);
+                raw
+            }),
+            ("deliberate no-guarantee: V0 with erased layout tag", {
+                // V0 recovery and corruption detection are best-effort. New blobs are always V1,
+                // but V0 remains readable; with its layout tag erased and an all-zero payload, a
+                // V0 blob can be byte-identical to an interrupted V1 prelude regardless of its
+                // opaque blob version, so it is recreated as an uncommitted V1 blob.
+                let mut raw = v0_blob_bytes(5, &[0u8; 100]);
+                raw[3] = 0;
+                raw
+            }),
         ];
         for (label, raw) in cases {
             assert!(
-                Layout::V1.interrupted_creation(raw),
-                "{label} should classify as an interrupted creation"
+                Header::uncommitted_v1(raw),
+                "{label} should classify as an uncommitted V1 blob"
             );
         }
     }
 
-    /// This runtime never creates V0 blobs, so no contents qualify as an interrupted V0
-    /// creation, including ones that heal under V1.
     #[test]
-    fn test_layout_v0_interrupted_creation_rejects_all() {
-        let (region, _) = Header::create(&(0..=0));
-        assert!(Layout::V1.interrupted_creation(&region[..10]));
-        assert!(!Layout::V0.interrupted_creation(&region[..10]));
-        assert!(!Layout::V0.interrupted_creation(&[]));
+    fn test_header_complete_v1_crc_is_committed() {
+        let raw = v1_blob_bytes(5, b"");
+        assert!(!Header::uncommitted_v1(&raw));
+        assert!(Header::parse(&raw, raw.len() as u64, &(5..=5)).is_ok());
     }
 
     #[test]
-    fn test_header_interrupted_v1_creation_rejects_foreign_bytes() {
+    fn test_header_uncommitted_v1_rejects_foreign_bytes() {
         let region = v1_blob_bytes(5, b"");
         let cases: &[(&str, Vec<u8>)] = &[
             ("non-canonical magic byte", {
-                let mut raw = region.clone();
+                let mut raw = vec![0u8; region.len()];
                 raw[0] = b'X';
                 raw
             }),
             ("non-canonical runtime version", {
-                let mut raw = region.clone();
+                let mut raw = vec![0u8; region.len()];
                 raw[4] = 0x02;
                 raw
             }),
-            ("magic byte lost with later bytes persisted", {
-                // Not a prefix: a write cannot persist byte 5 without byte 3.
+            ("short foreign bytes", vec![b'X', 0]),
+            ("CRC issued before the complete magic", {
                 let mut raw = region.clone();
                 raw[3] = 0;
                 raw
             }),
-            ("runtime version byte lost with later bytes persisted", {
+            ("CRC issued before the complete runtime version", {
                 let mut raw = region.clone();
                 raw[5] = 0;
                 raw
@@ -836,23 +838,9 @@ pub(crate) mod tests {
                 raw
             }),
             ("nonzero padding", {
-                let mut raw = region.clone();
-                raw[100] = 0xFF;
-                raw
-            }),
-            ("data past the header region", {
                 let mut raw = region;
-                raw.push(1);
-                raw
-            }),
-            ("rotted-magic V0 blob with its version stamp", {
-                // The nonzero version stamp makes byte 3 part of the written prefix, so
-                // the zeroed magic byte is non-canonical, not unwritten. Only a V0 blob
-                // whose surviving bytes form a canonical V1 prefix heals (see the accepts
-                // table).
-                let mut raw = v0_header(5).encode().to_vec();
-                raw[3] = 0;
-                raw.extend_from_slice(&[0u8; 100]);
+                raw[8..12].fill(0);
+                raw[100] = 0xFF;
                 raw
             }),
             ("rotted-magic V0 blob with payload", {
@@ -861,24 +849,32 @@ pub(crate) mod tests {
                 raw.extend_from_slice(&[0xAA, 0xBB]);
                 raw
             }),
-            (
-                "all zeros, one byte longer than the creation region",
-                vec![0u8; Layout::V1.data_offset() as usize + 1],
-            ),
-            ("zero payload past the header region, CRC lost", {
-                // A synced V1 blob whose payload is all zeros, with the CRC bytes rotted
-                // away: the file extends past the header region, so healing it would
-                // erase the payload.
-                let mut raw = v1_blob_bytes(5, &[0u8; 100]);
-                raw[8..12].fill(0);
+            ("committed blob truncated below the reserved page", {
+                // A nonzero CRC is only issued after the 4096-byte page length is durable,
+                // so a shorter file carrying one was truncated, not left uncommitted.
+                let mut raw = v1_blob_bytes(5, b"");
+                raw.truncate(100);
+                raw
+            }),
+            ("committed blob truncated to exactly the header region", {
+                let mut raw = v1_blob_bytes(5, b"");
+                raw.truncate(Header::PARSE_LEN);
                 raw
             }),
         ];
         for (label, raw) in cases {
             assert!(
-                !Layout::V1.interrupted_creation(raw),
+                !Header::uncommitted_v1(raw),
                 "{label} must stay a loud corruption error"
             );
+        }
+    }
+
+    #[test]
+    fn test_v1_crc_never_uses_uncommitted_value() {
+        for version in u16::MIN..=u16::MAX {
+            let (pending, _) = Header::prepare(&(version..=version));
+            assert_ne!(pending.checksum(), &[0; Header::EXTENSION_SIZE]);
         }
     }
 

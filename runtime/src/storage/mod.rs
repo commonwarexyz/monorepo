@@ -106,7 +106,7 @@ stability_scope!(BETA {
     pub mod metered;
 
     mod header;
-    pub(crate) use header::{Header, Layout};
+    pub(crate) use header::{Header, Layout, PendingHeader};
 
     /// Validate that a partition name contains only allowed characters.
     ///

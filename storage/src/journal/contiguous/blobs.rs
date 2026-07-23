@@ -68,7 +68,7 @@ impl<E: Context> Partition<E> {
     }
 
     /// Scan a partition's blob names, treating a missing partition as empty.
-    async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
+    pub(super) async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(name).await {
             Ok(names) => Ok(names),
             Err(RError::PartitionMissing(_)) => Ok(Vec::new()),
