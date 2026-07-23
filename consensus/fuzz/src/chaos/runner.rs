@@ -565,6 +565,7 @@ mod tests {
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;
 
+    #[cfg(feature = "mocks")]
     use crate::simplex::SimplexCertificateMock;
 
     /// Episode length the ignored integration tests run: short (versus the
@@ -617,6 +618,7 @@ mod tests {
     /// The certificate-mock backend runs the full oracle (shared invariant
     /// suite, finalized-payload uniqueness, all lifecycle/network coverage);
     /// a full episode must complete.
+    #[cfg(feature = "mocks")]
     #[test]
     #[ignore]
     fn cert_mock_episode_completes() {
