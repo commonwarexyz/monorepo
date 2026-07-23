@@ -880,6 +880,16 @@ where
     slot: usize,
     /// Re-enqueue target for wakes.
     tasks: Weak<Tasks>,
+    /// Whether the task is already in the ready queue (or terminally done).
+    ///
+    /// A waker may legally fire many times before its task is polled, and
+    /// each unguarded push is a full re-poll (a future waking itself twice
+    /// per poll would double the queue every executor turn). Only the wake
+    /// that transitions this latch queues the task; the rest coalesce. The
+    /// latch is released immediately before polling a live future and set
+    /// terminally once the future is gone, so late wakes on a completed or
+    /// cleared cell buy at most one dead poll.
+    queued: AtomicBool,
     /// The future, polled and cleared only on the owning worker thread (a
     /// spawning thread builds the cell but never touches the future), so no
     /// lock is needed.
@@ -942,6 +952,10 @@ where
     /// If the upgrade fails, the runtime already exited and the wake is a
     /// no-op (e.g. data holding a waker dropped after `start` returned).
     fn enqueue(self: &Arc<Self>) {
+        // Coalesce repeated wakes: only the latch transition queues the task.
+        if self.queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
         if let Some(tasks) = self.tasks.upgrade() {
             tasks.queue(Arc::clone(self) as Arc<dyn Erased>);
         }
@@ -957,11 +971,19 @@ where
         let mut cx = task::Context::from_waker(&waker);
         self.future.with(|cell| {
             let mut slot = cell.borrow_mut();
-            // A duplicate wake may re-poll a completed task: its slot was
-            // already freed, so report no completion.
+            // A wake that raced completion may re-poll a dead cell: its slot
+            // was already freed, so report no completion. The queued latch
+            // stays set (the wake that scheduled this poll set it), so later
+            // wakes cannot re-queue the cell again.
             let Some(future) = slot.as_mut() else {
                 return false;
             };
+            // Release the queued latch before polling so wakes during the
+            // poll re-queue the task. The acquiring swap pairs with the
+            // release half of coalesced wakes' latch RMWs (which bypass the
+            // ready-queue mutex), making their published state visible to
+            // this poll.
+            self.queued.swap(false, Ordering::AcqRel);
             // SAFETY: the future lives inside this task's Arc allocation and
             // is never moved out of it: completion (below) and teardown
             // ([Erased::clear]) both drop it in place by overwriting the
@@ -970,6 +992,8 @@ where
             match future.poll(&mut cx) {
                 Poll::Ready(()) => {
                     *slot = None;
+                    // Terminal: late wakes must not re-queue a dead cell.
+                    self.queued.store(true, Ordering::Relaxed);
                     true
                 }
                 Poll::Pending => false,
@@ -978,6 +1002,9 @@ where
     }
 
     fn clear(&self) {
+        // Terminal latch first: teardown-era late wakes must not re-queue a
+        // cell nothing will poll again.
+        self.queued.store(true, Ordering::Relaxed);
         self.future.with(|cell| {
             *cell.borrow_mut() = None;
         });
@@ -1078,6 +1105,8 @@ impl Tasks {
             let cell = Arc::new(TaskCell {
                 slot,
                 tasks: Arc::downgrade(arc_self),
+                // Latched: the cell is queued for its first poll below.
+                queued: AtomicBool::new(true),
                 // Pin the cell to the worker that polls it, not to the
                 // registering thread: spawns may arrive from any thread
                 // through a moved context.
@@ -1862,6 +1891,39 @@ mod tests {
                     matches!(orphan.await, Err(Error::Closed))
                 });
             assert!(checker.await.unwrap());
+        });
+    }
+
+    /// Repeated wakes of the same task before its next poll must coalesce
+    /// into one ready-queue entry: unguarded pushes let a legal
+    /// multiple-wakes-per-poll future grow the queue without bound.
+    #[test]
+    fn test_duplicate_wakes_coalesce() {
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+
+            // Smuggle a spawned task's waker out through a oneshot.
+            let (send, recv) = oneshot::channel();
+            let _task = context.child("waker").spawn(move |_| async move {
+                let mut send = Some(send);
+                std::future::poll_fn(move |cx| {
+                    if let Some(send) = send.take() {
+                        let _ = send.send(cx.waker().clone());
+                    }
+                    Poll::<()>::Pending
+                })
+                .await
+            });
+            let waker = recv.await.unwrap();
+
+            // The task was polled (it sent the waker) and is idle: repeated
+            // wakes must queue it exactly once.
+            let before = executor.tasks.ready.lock().len();
+            for _ in 0..5 {
+                waker.wake_by_ref();
+            }
+            let after = executor.tasks.ready.lock().len();
+            assert_eq!(after - before, 1, "duplicate wakes must coalesce");
         });
     }
 
