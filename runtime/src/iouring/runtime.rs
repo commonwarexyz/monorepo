@@ -318,11 +318,29 @@ struct Shared {
 ///
 /// Wrapped in `Mutex<Option<Sleeping>>` on the [Executor]: the mutex is the
 /// single synchronization point for every sleeper interaction (registration,
-/// the still-open check on re-polls, and teardown), and `None` marks the
-/// worker as torn down so late interactions fail loudly instead of parking
-/// state nothing will ever drain.
+/// waker refresh, cancellation, and teardown), and `None` marks the worker as
+/// torn down so late interactions fail loudly instead of parking state
+/// nothing will ever drain.
+///
+/// Lock order: this mutex first, then any [AlarmState] waker slot. Holding
+/// the queue lock across a slot take and its tombstone accounting keeps
+/// `cancelled` exact relative to draining and compaction.
 struct Sleeping {
     alarms: BinaryHeap<Alarm>,
+    /// Alarms in the heap whose waker slot was emptied by cancellation.
+    /// Tombstones hold no task resources and are dropped at their deadline
+    /// or by compaction, whichever comes first.
+    cancelled: usize,
+}
+
+/// State shared between a heap [Alarm] and its [Sleeper].
+struct AlarmState {
+    /// The waker of the task most recently seen polling the sleeper.
+    ///
+    /// Emptied exactly once: by firing, by cancellation ([Sleeper::drop]), or
+    /// by worker teardown. Accessed only under the [Sleeping] queue lock (or
+    /// with the heap already moved out of it at teardown).
+    waker: Mutex<Option<Waker>>,
 }
 
 /// Runtime state shared by every [Context] on one worker thread.
@@ -361,28 +379,78 @@ impl Executor {
         }
     }
 
-    /// Whether this worker's alarm queue is still accepting sleepers.
-    fn alarms_open(&self) -> bool {
-        self.sleeping.lock().is_some()
+    /// Store the current task's waker in a registered alarm, so the alarm
+    /// always wakes the task that most recently polled its sleeper.
+    ///
+    /// Panics if this worker already tore down: the alarm was discarded, so
+    /// the sleep fails loudly in the polling task instead of hanging it.
+    fn refresh_alarm(&self, state: &AlarmState, waker: &Waker) {
+        let sleeping = self.sleeping.lock();
+        assert!(sleeping.is_some(), "sleep outlived its io_uring worker");
+        let mut slot = state.waker.lock();
+        match &mut *slot {
+            Some(current) => current.clone_from(waker),
+            // Firing pops the alarm before this sleeper's deadline check can
+            // reach a pending re-poll, and cancellation consumes the sleeper,
+            // so an empty slot under an open queue is unreachable.
+            None => unreachable!("registered alarm lost its waker before its deadline"),
+        }
+    }
+
+    /// Cancel a registered alarm: release its waker (and the task resources
+    /// it retains) immediately, leaving a tombstone in the heap.
+    ///
+    /// Compaction rebuilds the heap once tombstones outnumber live alarms, so
+    /// the heap's size stays proportional to live sleepers regardless of how
+    /// many long-deadline sleeps are cancelled (e.g. by losing a `select!`).
+    fn cancel_alarm(&self, state: &AlarmState) {
+        let mut guard = self.sleeping.lock();
+        // Worker already torn down: the heap (and this alarm) was discarded.
+        let Some(sleeping) = guard.as_mut() else {
+            return;
+        };
+        // An already-empty slot means the alarm fired and left the heap.
+        if state.waker.lock().take().is_none() {
+            return;
+        }
+        sleeping.cancelled += 1;
+        if sleeping.cancelled * 2 > sleeping.alarms.len() {
+            sleeping
+                .alarms
+                .retain(|alarm| alarm.state.waker.lock().is_some());
+            sleeping.cancelled = 0;
+        }
     }
 
     /// Wake any sleepers whose deadlines have elapsed.
     fn wake_ready_sleepers(&self, current: Instant) {
-        let mut sleeping = self.sleeping.lock();
-        let sleeping = sleeping
-            .as_mut()
-            .expect("alarm queue closed while the worker loop is running");
-        while let Some(next) = sleeping.alarms.peek() {
-            if next.time <= current {
-                let sleeper = sleeping.alarms.pop().unwrap();
-                sleeper.waker.wake();
-            } else {
-                break;
+        let mut due = Vec::new();
+        {
+            let mut sleeping = self.sleeping.lock();
+            let sleeping = sleeping
+                .as_mut()
+                .expect("alarm queue closed while the worker loop is running");
+            while let Some(next) = sleeping.alarms.peek() {
+                if next.time > current {
+                    break;
+                }
+                let alarm = sleeping.alarms.pop().unwrap();
+                match alarm.state.waker.lock().take() {
+                    Some(waker) => due.push(waker),
+                    // A tombstone reached its deadline before compaction.
+                    None => sleeping.cancelled -= 1,
+                }
             }
+        }
+        for waker in due {
+            waker.wake();
         }
     }
 
     /// Return the delay until the next sleeper alarm, if any.
+    ///
+    /// Tombstones may report a deadline with no waker behind it; the loop
+    /// then wakes up only to discard them, which is harmless.
     fn next_alarm(&self) -> Option<Duration> {
         let sleeping = self.sleeping.lock();
         let sleeping = sleeping
@@ -459,6 +527,7 @@ impl Worker {
             tasks: Arc::new(Tasks::new(driver.waker())),
             sleeping: Mutex::new(Some(Sleeping {
                 alarms: BinaryHeap::new(),
+                cancelled: 0,
             })),
             shared,
         });
@@ -578,7 +647,9 @@ impl Worker {
                 .take()
                 .expect("alarm queue closed twice");
             for alarm in sleeping.alarms {
-                alarm.waker.wake();
+                if let Some(waker) = alarm.state.waker.lock().take() {
+                    waker.wake();
+                }
             }
             for task in executor.tasks.clear() {
                 task.clear();
@@ -711,7 +782,7 @@ impl crate::Runner for Runner {
         let collector = process.collect(move |duration| Sleeper {
             executor: process_executor.clone(),
             time: Instant::now() + duration.min(MAX_SLEEP),
-            registered: false,
+            state: None,
         });
         let _ = Tasks::register(&worker.executor.tasks, collector);
 
@@ -1372,12 +1443,14 @@ impl crate::Metrics for Context {
 struct Sleeper {
     executor: Weak<Executor>,
     time: Instant,
-    registered: bool,
+    /// Alarm state shared with the heap, allocated on the first pending poll
+    /// (an unpolled or immediately-ready sleep registers nothing).
+    state: Option<Arc<AlarmState>>,
 }
 
 struct Alarm {
     time: Instant,
-    waker: Waker,
+    state: Arc<AlarmState>,
 }
 
 impl PartialEq for Alarm {
@@ -1409,20 +1482,41 @@ impl Future for Sleeper {
             return Poll::Ready(());
         }
         let executor = self.executor.upgrade().expect("executor already dropped");
-        if !self.registered {
-            self.registered = true;
-            executor.register_alarm(Alarm {
-                time: self.time,
-                waker: cx.waker().clone(),
-            });
-        } else {
-            // A pending re-poll before the deadline is either a spurious wake
-            // or the teardown wake of a worker that discarded this sleeper's
-            // alarm. The closed queue is the discard signal: fail loudly
-            // instead of returning `Pending` with no alarm left to fire.
-            assert!(executor.alarms_open(), "sleep outlived its io_uring worker");
+        match &self.state {
+            None => {
+                // First pending poll: share alarm state with the heap.
+                let state = Arc::new(AlarmState {
+                    waker: Mutex::new(Some(cx.waker().clone())),
+                });
+                executor.register_alarm(Alarm {
+                    time: self.time,
+                    state: Arc::clone(&state),
+                });
+                self.state = Some(state);
+            }
+            // A pending re-poll before the deadline: refresh the stored waker
+            // so the alarm wakes whichever task holds the sleeper now. This
+            // also fails loudly (instead of returning `Pending` with no alarm
+            // left to fire) when the re-poll is the teardown wake of a worker
+            // that discarded this sleeper's alarm.
+            Some(state) => executor.refresh_alarm(state, cx.waker()),
         }
         Poll::Pending
+    }
+}
+
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        // Cancelled before the deadline (e.g. by losing a `select!`): release
+        // the registered waker so the heap does not retain the task's
+        // resources until the deadline elapses.
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        let Some(executor) = self.executor.upgrade() else {
+            return;
+        };
+        executor.cancel_alarm(&state);
     }
 }
 
@@ -1435,7 +1529,7 @@ impl Clock for Context {
         Sleeper {
             executor: self.executor.clone(),
             time: Instant::now() + duration.min(MAX_SLEEP),
-            registered: false,
+            state: None,
         }
     }
 
@@ -1855,6 +1949,61 @@ mod tests {
             });
             origin.await.unwrap();
             assert!(matches!(sleeper.await, Err(Error::Exited)));
+        });
+    }
+
+    /// Cancelling sleeps before their deadline (e.g. by losing a `select!`)
+    /// must not retain their alarms until the deadline elapses: cancellation
+    /// releases the waker immediately and compaction keeps the heap
+    /// proportional to live sleepers.
+    #[test]
+    fn test_sleep_cancel_releases_alarm() {
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+            let alarms = |executor: &Arc<Executor>| {
+                let guard = executor.sleeping.lock();
+                let sleeping = guard.as_ref().unwrap();
+                (sleeping.alarms.len(), sleeping.cancelled)
+            };
+
+            // The heap may hold unrelated live alarms (e.g. the process
+            // metrics collector); nothing else runs between these reads (no
+            // awaits on this single-threaded worker), so counts are exact.
+            let (baseline, baseline_cancelled) = alarms(&executor);
+            assert_eq!(baseline_cancelled, 0);
+
+            // Register far-future sleeps (one pending poll each), then cancel
+            // them all by dropping the futures.
+            let mut sleeps = Vec::new();
+            for _ in 0..8 {
+                let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+                assert!(futures::poll!(sleep.as_mut()).is_pending());
+                sleeps.push(sleep);
+            }
+            assert_eq!(alarms(&executor).0, baseline + 8);
+            drop(sleeps);
+
+            // Only the baseline alarms remain live, and tombstones are within
+            // the compaction bound (so the heap cannot grow unboundedly).
+            let (len, cancelled) = alarms(&executor);
+            assert_eq!(len - cancelled, baseline, "cancelled sleeps retained");
+            assert!(cancelled * 2 <= len, "tombstones exceed compaction bound");
+        });
+    }
+
+    /// A sleep polled once in one task and then moved to another must wake
+    /// the task that most recently polled it, not the original registrant.
+    #[test]
+    fn test_sleep_waker_refresh_across_tasks() {
+        Runner::default().start(|context| async move {
+            // Register the sleep with the root task's waker.
+            let mut sleep = Box::pin(context.sleep(Duration::from_millis(300)));
+            assert!(futures::poll!(sleep.as_mut()).is_pending());
+
+            // Move the pending sleep to a spawned task: its first poll must
+            // refresh the alarm to wake the new task at the deadline.
+            let handle = context.child("mover").spawn(move |_| sleep);
+            handle.await.unwrap();
         });
     }
 
