@@ -136,18 +136,24 @@ unsafe fn reduce_regs(l: [__m512i; 5]) -> [__m512i; 5] {
 }
 
 /// Ripple-carries the 10 raw schoolbook-product columns ([`mul`]/[`square`]'s intermediate,
-/// before the `*608` fold) so every one of columns 1-9 is strictly `< 2^52`. Column 0 is left
-/// unmasked (there is nothing before it to carry into it from) and column 9 is left unmasked too
-/// (there is no column 10 to carry its overflow into) -- but both are provably safe as fold-multiply
-/// inputs regardless: with at most 9 accumulated `< 2^52` terms per raw column (column 4, the
-/// worst case: 5 low-half terms with `i+j==4` plus 4 high-half terms with `i+j==3`; the diagonal
-/// case in [`square`] is smaller), the largest any raw column reaches is `< 9 * 2^52`, and after
-/// this ripple every column below 9 is masked to `< 2^52` while column 9's own carry-in is bounded
-/// by the carry *out* of column 8, itself `< 9`, i.e. column 9 stays `< 2^52 + 9`. Either bound,
+/// before the `*608` fold) so every one of columns 5-8 is strictly `< 2^52` -- the only columns
+/// that actually feed the `*608` fold-multiply below (column `5+k` scales into column `k`, for `k`
+/// in `0..5`). Columns 0-4 are only ever *added* into the fold result, never scaled, so a fold
+/// value of `col[k] + 608 * col[k+5]` is exactly as correct (and no more overflow-prone: at most
+/// `~2^55.17 + 608 * 2^52 ~= 2^61.3`, comfortably under `2^64`) whether `col[k]` for `k < 5` is
+/// masked here or left raw -- [`reduce_regs`]'s three carry passes normalize that looseness away
+/// regardless, the same as it does for any other loose input. So this only ripples `k` in `5..9`,
+/// leaving columns 0-4 untouched. Column 9 is left unmasked too (there is no column 10 to carry its
+/// overflow into), and is provably safe as a fold-multiply input regardless: it only ever
+/// accumulates the single `i==j==4` high-half term in both [`mul`] and [`square`] (every other
+/// `i + j + 1 == 9` pair needs `i + j == 8`, impossible for `i, j < 5`), so it is `< 2^52` before
+/// even receiving column 8's carry-out (itself `< 9`, from at most 9 accumulated `< 2^52` terms per
+/// raw column -- column 4 or 5, the worst case: 5 low-half terms with `i+j==4` plus 4 high-half
+/// terms with `i+j==3`, or the mirror for column 5), i.e. column 9 stays `< 2^52 + 9`. Either bound,
 /// multiplied by [`super::FOLD_608`] (`608 < 2^10`), stays comfortably under `2^63`, which is what
-/// makes the subsequent `vpmullq`-based fold safe -- unlike folding the *raw* columns directly,
-/// which can reach `~2^55.17 * 608 ~= 2^64.4`, overflowing a `u64` lane with no carry-out (found on
-/// real AVX-512 hardware; see the module docs).
+/// makes the `vpmullq`-based fold safe -- unlike folding the *raw* columns directly, which can
+/// reach `~2^55.17 * 608 ~= 2^64.4`, overflowing a `u64` lane with no carry-out (found on real
+/// AVX-512 hardware; see the module docs).
 ///
 /// # Safety
 ///
@@ -155,7 +161,7 @@ unsafe fn reduce_regs(l: [__m512i; 5]) -> [__m512i; 5] {
 #[target_feature(enable = "avx512f")]
 unsafe fn carry_cols(mut col: [__m512i; 10]) -> [__m512i; 10] {
     let mask = _mm512_set1_epi64(super::MASK_52 as i64);
-    for k in 0..9 {
+    for k in 5..9 {
         col[k + 1] = _mm512_add_epi64(col[k + 1], _mm512_srli_epi64(col[k], 52));
         col[k] = _mm512_and_si512(col[k], mask);
     }
