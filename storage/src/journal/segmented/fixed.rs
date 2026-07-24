@@ -37,7 +37,11 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as BlobReplay},
 };
 use commonware_utils::NZUsize;
-use std::{collections::VecDeque, marker::PhantomData, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    marker::PhantomData,
+    num::NonZeroUsize,
+};
 use tracing::{trace, warn};
 
 /// State for replaying a single section's blob.
@@ -405,10 +409,22 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
     /// are allocated lazily as the reader advances.
     pub async fn replay(
+        self,
+        start_section: u64,
+        start_position: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<Replay<E, A>, Error> {
+        self.replay_with_durable_ends(start_section, start_position, buffer, BTreeMap::new())
+            .await
+    }
+
+    /// Replay while refusing to repair below a composite journal's durable section ends.
+    pub(super) async fn replay_with_durable_ends(
         mut self,
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
+        durable_ends: BTreeMap<u64, u64>,
     ) -> Result<Replay<E, A>, Error> {
         let mut sections = VecDeque::new();
         for (&section, blob) in self.0.manager.sections_from(start_section) {
@@ -440,6 +456,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             finished,
             errored: false,
             repairing: false,
+            durable_ends,
         })
     }
 
@@ -552,6 +569,7 @@ pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     finished: bool,
     errored: bool,
     repairing: bool,
+    durable_ends: BTreeMap<u64, u64>,
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
@@ -580,6 +598,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                         // the last complete item before returning the journal.
                         let section = current.section;
                         let valid_offset = current.position * Inner::<E, A>::CHUNK_SIZE_U64;
+                        let durable_end = self.durable_ends.get(&section).copied().unwrap_or(0);
+                        if valid_offset < durable_end {
+                            self.sections.pop_front();
+                            return self.fail(Error::Corruption(format!(
+                                "section {section} is incomplete at {valid_offset}, below durable \
+                                 end {durable_end}"
+                            )));
+                        }
                         warn!(
                             blob = section,
                             new_size = valid_offset,
@@ -604,6 +630,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                     // bytes) rather than failing, so a torn flush never wedges recovery.
                     let section = current.section;
                     let valid_offset = current.position * Inner::<E, A>::CHUNK_SIZE_U64;
+                    let durable_end = self.durable_ends.get(&section).copied().unwrap_or(0);
+                    if valid_offset < durable_end {
+                        self.sections.pop_front();
+                        return self.fail(Error::Corruption(format!(
+                            "section {section} has a torn page at {valid_offset}, below durable end \
+                             {durable_end}"
+                        )));
+                    }
                     warn!(
                         blob = section,
                         new_size = valid_offset,

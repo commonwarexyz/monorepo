@@ -26,40 +26,51 @@
 //! - Glob value without index entry (orphan - acceptable but cleaned up)
 //! - Glob sections without corresponding index sections (orphan sections - removed)
 //!
-//! Before infer-mode initialization returns its [Replay], crash recovery is performed:
-//! 1. Each section's last valid entry is found by scanning backwards: an entry is valid
-//!    only if its glob reference is in bounds (`value_offset + value_size <= glob_size`)
-//!    and its value's checksum verifies
-//! 2. Entries beyond the last valid one are skipped and the index journal is rewound
-//! 3. Orphan value sections (sections in glob but not in index) are removed
+//! Infer mode stores a durable index watermark for each section. A watermark is published only
+//! after both the index and values through that point are proven durable. Blocking syncs publish
+//! their current sizes; background syncs publish previously observed completions, so their
+//! watermarks may lag without adding a metadata fsync after the data fsync.
 //!
-//! This allows async writes (glob first, then index) while ensuring consistency
-//! after recovery: a trailing run of entries that became durable ahead of their value
-//! bytes is rewound at the next init, whether the glob is short (range check) or covers
-//! the ranges with garbage (checksum check). Entries below the last valid one are kept
-//! without reading their values (monotonically increasing offsets make them range-valid),
-//! so their checksums are verified lazily at `get_value()`, which can fail for a kept
-//! entry if the underlying storage is corrupted. Rewinds (including the truncations
-//! recovery itself performs) make both journals' truncations durable before returning,
-//! so neither a dropped index entry nor the stale bytes it referenced can survive a
-//! crash once later appends may reuse the freed offsets.
+//! Before [Oversized::init] returns its [Replay], recovery:
+//! 1. Rejects a watermark beyond the retained index and verifies its boundary entry and value
+//! 2. Scans index/value pairs forward from that floor, requiring contiguous value offsets and
+//!    valid value checksums
+//! 3. Truncates both journals at the first invalid pair and removes orphan value sections
+//!
+//! This catches an interior value hole even if later index pages and values survived the same
+//! interrupted flush. Fixed-index replay then protects every recorded floor: corruption below one
+//! fails recovery rather than rolling acknowledged data back. Value checksums strictly below a
+//! floor remain lazy, so later external corruption there is reported by `get_value()`.
+//!
+//! Rewinds lower the affected watermarks before moving data backward. Recovery truncations are
+//! made durable before returning, so neither a dropped index entry nor stale value bytes can
+//! survive a crash once later appends may reuse the freed offsets.
 //!
 //! [Oversized::init_from_checkpoint] restores exactly the checkpointed state instead of inferring
 //! one: sections below the checkpoint are verified complete (their last entry must end exactly at
 //! the glob's size, without reading values) and adopted unchanged, the checkpointed section is
 //! durably truncated to the committed size, and everything after it is removed. Committed damage
 //! the checkpoint covers fails init rather than being repaired, and value checksums below the
-//! checkpoint are still verified lazily at read.
+//! checkpoint are still verified lazily at read. This mode uses the caller's checkpoint instead of
+//! infer-mode watermarks, so its sync operations do not write recovery metadata.
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::journal::Error;
+use crate::{
+    SyncCompletion,
+    journal::Error,
+    metadata::{Config as MetadataConfig, Metadata},
+};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
-use futures::future::try_join;
-use std::{collections::HashSet, num::NonZeroUsize};
+use commonware_utils::sequence::VecU64;
+use futures::{FutureExt as _, future::try_join};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    num::NonZeroUsize,
+};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -80,6 +91,9 @@ pub trait Record: CodecFixed<Cfg = ()> + Clone {
 #[derive(Clone)]
 pub struct Config<C> {
     /// Partition for the fixed index journal.
+    ///
+    /// Infer mode stores recovery metadata in a companion `{index_partition}-metadata`
+    /// partition.
     pub index_partition: String,
 
     /// Partition for the glob value storage.
@@ -115,6 +129,9 @@ pub struct Config<C> {
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
+    watermarks: Metadata<E, u64, VecU64>,
+    pending: BTreeMap<u64, (u64, SyncCompletion)>,
+    track_watermarks: bool,
 }
 
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug
@@ -133,9 +150,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 {
     /// Initialize without a checkpoint and begin replay recovery.
     ///
-    /// Recovery first reconciles the tail of each index section with its value section, then
-    /// returns a [Replay] that verifies and repairs the index journal. Drain the replay and call
-    /// [Replay::finish] to obtain a usable [Oversized].
+    /// Recovery reconciles every index/value pair above its durable per-section watermark, then
+    /// returns a [Replay] that verifies the index journal while protecting acknowledged data below
+    /// those watermarks. Drain the replay and call [Replay::finish] to obtain a usable [Oversized].
     pub async fn init(
         context: E,
         cfg: Config<V::Cfg>,
@@ -152,20 +169,28 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// `index_size`, and everything after it is removed. Anything the checkpoint covers that is
     /// missing or inconsistent fails with [Error::Corruption]. Callers must only provide a
     /// checkpoint that was durably synced before it was published (see [crate::freezer::Freezer]).
+    /// This mode does not maintain infer-mode recovery watermarks.
     pub async fn init_from_checkpoint(
         context: E,
         cfg: Config<V::Cfg>,
         checkpoint: (u64, u64),
     ) -> Result<Self, Error> {
         let (section, index_size) = checkpoint;
-        Self::open(context, cfg)
-            .await?
-            .restore(section, index_size)
-            .await
+        let mut oversized = Self::open(context, cfg).await?;
+
+        // Checkpoint mode has its own exact recovery boundary. Remove any infer-mode floors
+        // before restoring backward so a later mode switch cannot trust stale metadata.
+        if oversized.watermarks.keys().next().is_some() {
+            oversized.watermarks.clear();
+            oversized.watermarks = oversized.watermarks.sync().await?;
+        }
+        oversized.track_watermarks = false;
+        oversized.restore(section, index_size).await
     }
 
     /// Open the index and value journals without reconciling them.
     async fn open(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        let metadata_partition = format!("{}-metadata", cfg.index_partition);
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
@@ -180,84 +205,139 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             write_buffer: cfg.value_write_buffer,
         };
         let values = Glob::init(context.child("values"), value_cfg).await?;
+        let watermarks = Metadata::init(
+            context.child("metadata"),
+            MetadataConfig {
+                partition: metadata_partition,
+                codec_config: (),
+            },
+        )
+        .await?;
 
-        Ok(Self { index, values })
+        Ok(Self {
+            index,
+            values,
+            watermarks,
+            pending: BTreeMap::new(),
+            track_watermarks: true,
+        })
     }
 
-    /// Perform crash recovery by validating index entries against glob contents.
-    ///
-    /// Only checks entries from the end of each section until one is valid. Since entries
-    /// are appended sequentially and value offsets are monotonically increasing within a
-    /// section, all earlier entries must be range-valid (their value checksums are
-    /// verified lazily at read).
+    /// Perform crash recovery by validating index entries and values above each durable floor.
     async fn repair(mut self) -> Result<Self, Error> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
+        let section_set: HashSet<u64> = sections.iter().copied().collect();
+
+        // A watermark vouches for index and value data made durable by a completed joint sync.
+        // Missing index storage below one is unrecoverable loss, not crash debris.
+        for section in self.watermarks.keys().copied() {
+            let watermark = self.watermark(section);
+            if watermark != 0 && !section_set.contains(&section) {
+                return Err(Error::Corruption(format!(
+                    "section {section} is missing below durable end {watermark}"
+                )));
+            }
+        }
 
         let mut rewound_index = Vec::new();
         let mut rewound_values = Vec::new();
         for section in sections {
             let index_size = self.index.size(section)?;
-            if index_size == 0 {
-                continue;
+            let watermark = self.watermark(section);
+            if !watermark.is_multiple_of(chunk_size) {
+                return Err(Error::Corruption(format!(
+                    "section {section} durable end {watermark} is not item-aligned"
+                )));
+            }
+            if watermark > index_size {
+                return Err(Error::Corruption(format!(
+                    "section {section} retains {index_size} of durable {watermark}"
+                )));
             }
 
-            let glob_size = match self.values.size(section) {
-                Ok(size) => size,
-                Err(Error::AlreadyPrunedToSection(oldest)) => {
-                    // This shouldn't happen in normal operation: prune() prunes the index
-                    // first, then the glob. A crash between these would leave the glob
-                    // NOT pruned (opposite of this case). We handle this defensively in
-                    // case of external manipulation or future changes.
-                    warn!(
-                        section,
-                        oldest, "index has section that glob already pruned"
-                    );
-                    0
+            let glob_size = self.values.size(section)?;
+            let entry_count = index_size / chunk_size;
+            let floor_count = watermark / chunk_size;
+
+            // Derive the value floor from the last durable entry. It must still be readable
+            // and checksum-valid; recovery never rolls back acknowledged data.
+            let mut glob_target = if floor_count == 0 {
+                0
+            } else {
+                let entry = match self.index.get(section, floor_count - 1).await {
+                    Ok(entry) => entry,
+                    Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
+                        return Err(Error::Corruption(format!(
+                            "section {section} durable entry {} is unreadable",
+                            floor_count - 1
+                        )));
+                    }
+                    Err(err) => return Err(err),
+                };
+                let (offset, size) = entry.value_location();
+                let end = offset
+                    .checked_add(u64::from(size))
+                    .ok_or(Error::Corruption(format!(
+                        "section {section} durable entry {} overflows its value range",
+                        floor_count - 1
+                    )))?;
+                if end > glob_size || !self.values.verify(section, offset, size).await? {
+                    return Err(Error::Corruption(format!(
+                        "section {section} durable entry {} has an unreadable value",
+                        floor_count - 1
+                    )));
                 }
-                Err(e) => return Err(e),
+                end
             };
 
-            // Truncate any trailing partial entry
-            let entry_count = index_size / chunk_size;
-            let aligned_size = entry_count * chunk_size;
-            if aligned_size < index_size {
-                warn!(
-                    section,
-                    index_size, aligned_size, "trailing bytes detected: truncating"
-                );
-                self.index = self.index.rewind_section(section, aligned_size).await?;
-                rewound_index.push(section);
-            }
-
-            // If there is nothing, we can exit early and rewind values to 0
-            if entry_count == 0 {
-                warn!(
-                    section,
-                    index_size, "trailing bytes detected: truncating to 0"
-                );
-                self.values = self.values.rewind_section(section, 0).await?;
-                if glob_size > 0 {
-                    rewound_values.push(section);
+            // Starting at the durable floor, keep only the first contiguous sequence of
+            // checksum-valid index/value pairs. This catches an interior value hole even when
+            // a later value and index page survived the same interrupted flush.
+            let mut valid_count = floor_count;
+            for position in floor_count..entry_count {
+                let entry = match self.index.get(section, position).await {
+                    Ok(entry) => entry,
+                    Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
+                        warn!(section, position, "invalid index entry: truncating");
+                        break;
+                    }
+                    Err(err) => return Err(err),
+                };
+                let (offset, size) = entry.value_location();
+                let Some(end) = offset.checked_add(u64::from(size)) else {
+                    warn!(section, position, "value range overflows: truncating");
+                    break;
+                };
+                if offset != glob_target
+                    || end > glob_size
+                    || !self.values.verify(section, offset, size).await?
+                {
+                    warn!(
+                        section,
+                        position,
+                        offset,
+                        size,
+                        expected_offset = glob_target,
+                        glob_size,
+                        "invalid value: truncating"
+                    );
+                    break;
                 }
-                continue;
+                valid_count = position + 1;
+                glob_target = end;
             }
 
-            // Find last valid entry and target glob size
-            let (valid_count, glob_target) = self
-                .find_last_valid_entry(section, entry_count, glob_size)
-                .await?;
-
-            // Rewind index if any entries are invalid
-            if valid_count < entry_count {
-                let valid_size = valid_count * chunk_size;
-                debug!(section, entry_count, valid_count, "rewinding index");
+            let valid_size = valid_count * chunk_size;
+            if valid_size < index_size {
+                debug!(
+                    section,
+                    index_size, valid_size, "rewinding invalid index suffix"
+                );
                 self.index = self.index.rewind_section(section, valid_size).await?;
                 rewound_index.push(section);
             }
 
-            // Truncate glob trailing garbage (can occur when value was written but
-            // index entry wasn't, or when index was truncated but glob wasn't)
             if glob_size > glob_target {
                 debug!(
                     section,
@@ -394,42 +474,72 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         Ok(self)
     }
 
-    /// Find the number of valid entries and the corresponding glob target size.
-    ///
-    /// Scans backwards from the last entry until a valid one is found: an entry is valid
-    /// only if its byte range fits within the glob and its value's checksum verifies.
-    /// Returns `(valid_count, glob_target)` where `glob_target` is the end offset
-    /// of the last valid entry's value.
-    async fn find_last_valid_entry(
-        &self,
-        section: u64,
-        entry_count: u64,
-        glob_size: u64,
-    ) -> Result<(u64, u64), Error> {
-        for pos in (0..entry_count).rev() {
-            match self.index.get(section, pos).await {
-                Ok(entry) => {
-                    let (offset, size) = entry.value_location();
-                    let entry_end = offset.saturating_add(u64::from(size));
-                    if entry_end <= glob_size && self.values.verify(section, offset, size).await? {
-                        return Ok((pos + 1, entry_end));
-                    }
-                    if pos == entry_count - 1 {
-                        warn!(
-                            section,
-                            pos, glob_size, entry_end, "invalid entry: glob truncated or corrupt"
-                        );
-                    }
-                }
-                Err(Error::ItemOutOfRange(_) | Error::Runtime(RError::InvalidChecksum)) => {
-                    if pos == entry_count - 1 {
-                        warn!(section, pos, "corrupted last entry, scanning backwards");
-                    }
-                }
-                Err(err) => return Err(err),
+    /// Return the durable index end for `section`.
+    fn watermark(&self, section: u64) -> u64 {
+        if !self.track_watermarks {
+            return 0;
+        }
+        self.watermarks.get(&section).copied().map_or(0, u64::from)
+    }
+
+    /// Return every durable index end for protected fixed-journal replay.
+    fn durable_ends(&self) -> BTreeMap<u64, u64> {
+        if !self.track_watermarks {
+            return BTreeMap::new();
+        }
+        self.watermarks
+            .keys()
+            .map(|section| (*section, self.watermark(*section)))
+            .collect()
+    }
+
+    /// Raise a section's in-memory recovery watermark after its joint sync is proven complete.
+    fn mark_durable(&mut self, section: u64, size: u64) {
+        if !self.track_watermarks {
+            return;
+        }
+        if size > self.watermark(section) {
+            self.watermarks.put(section, size.into());
+        }
+    }
+
+    /// Lower a section's watermark before moving its journals backward.
+    fn lower_watermark(&mut self, section: u64, size: u64) {
+        if !self.track_watermarks {
+            return;
+        }
+        let current = self.watermark(section);
+        if current <= size {
+            return;
+        }
+        if size == 0 {
+            self.watermarks.remove(&section);
+        } else {
+            self.watermarks.put(section, size.into());
+        }
+    }
+
+    /// Observe completed background data syncs without blocking.
+    fn observe_pending(&mut self) {
+        if !self.track_watermarks {
+            return;
+        }
+        let completed = self
+            .pending
+            .iter()
+            .filter_map(|(&section, (size, completion))| {
+                completion
+                    .clone()
+                    .now_or_never()
+                    .map(|result| (section, *size, result))
+            })
+            .collect::<Vec<_>>();
+        for (section, size, result) in completed {
+            self.pending.remove(&section);
+            if result.is_ok() {
+                self.mark_durable(section, size);
             }
         }
-        Ok((0, 0))
     }
 
     /// Append entry + value.
@@ -494,34 +604,76 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<Replay<E, I, V>, Error> {
-        let index = self
-            .index
-            .replay(start_section, start_position, buffer)
+        let durable_ends = self.durable_ends();
+        let Self {
+            index,
+            values,
+            watermarks,
+            pending,
+            track_watermarks,
+        } = self;
+        let index = index
+            .replay_with_durable_ends(start_section, start_position, buffer, durable_ends)
             .await?;
         Ok(Replay {
             index,
-            values: self.values,
+            values,
+            watermarks,
+            pending,
+            track_watermarks,
         })
     }
 
-    /// Sync both journals for the given `sections`.
+    /// Sync both journals for `sections`.
+    ///
+    /// Infer mode also publishes their current durable recovery watermarks. Checkpoint mode relies
+    /// on its externally published checkpoint and does not write recovery metadata.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        let sections = sections.sections().collect::<Vec<_>>();
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        let sizes = if self.track_watermarks {
+            sections
+                .iter()
+                .map(|&section| self.index.size(section).map(|size| (section, size)))
+                .collect::<Result<BTreeMap<_, _>, _>>()?
+        } else {
+            BTreeMap::new()
+        };
         (self.index, self.values) =
             try_join(self.index.sync(&sections), self.values.sync(&sections)).await?;
+        if self.track_watermarks {
+            self.observe_pending();
+            for (section, size) in sizes {
+                self.pending.remove(&section);
+                self.mark_durable(section, size);
+            }
+            self.watermarks = self.watermarks.sync().await?;
+        }
         Ok(self)
     }
 
     /// Start syncing both journals for the given `sections`.
     ///
-    /// The returned handle completes once both journals' syncs complete, failing with the first
-    /// error encountered. An error reported by the returned [Handle] is fatal to the journal:
-    /// the caller must stop using the returned journal.
+    /// The returned handle completes once both journals' syncs complete. In infer mode it also
+    /// publishes every previously observed joint completion as a recovery watermark. The current
+    /// sync's watermark may be published by a later sync, so recovery can scan forward from a stale
+    /// floor without adding a metadata fsync after this call's data fsync. Checkpoint mode does not
+    /// write recovery metadata.
+    ///
+    /// An error reported by the returned [Handle] is fatal to the journal: the caller must stop
+    /// using the returned journal.
     pub async fn start_sync(
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
-        let sections = sections.sections().collect::<Vec<_>>();
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        let sizes = if self.track_watermarks {
+            sections
+                .iter()
+                .map(|&section| self.index.size(section).map(|size| (section, size)))
+                .collect::<Result<BTreeMap<_, _>, _>>()?
+        } else {
+            BTreeMap::new()
+        };
         let ((index, index_handle), (values, values_handle)) = try_join(
             self.index.start_sync(&sections),
             self.values.start_sync(&sections),
@@ -529,17 +681,57 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         .await?;
         self.index = index;
         self.values = values;
+
+        let completion: SyncCompletion =
+            async move { try_join(index_handle, values_handle).await.map(|_| ()) }
+                .boxed()
+                .shared();
+
+        let watermark_handle = if self.track_watermarks {
+            // Starting a newer section sync may have waited for its predecessor. Publish every
+            // completion now observable, one interval behind the sync being returned.
+            self.observe_pending();
+            let (watermarks, handle) = self.watermarks.start_sync().await?;
+            self.watermarks = watermarks;
+            for (section, size) in sizes {
+                self.pending.insert(section, (size, completion.clone()));
+            }
+            handle
+        } else {
+            Handle::ready(Ok(()))
+        };
+
         Ok((
             self,
-            Handle::from_future(
-                async move { try_join(index_handle, values_handle).await.map(|_| ()) },
-            ),
+            Handle::from_future(async move {
+                completion.await?;
+                watermark_handle.await
+            }),
         ))
     }
 
     /// Sync all sections.
+    ///
+    /// Infer mode also publishes their current durable recovery watermarks. Checkpoint mode does
+    /// not write recovery metadata.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
+        let sizes = if self.track_watermarks {
+            self.index
+                .sections()
+                .map(|section| self.index.size(section).map(|size| (section, size)))
+                .collect::<Result<BTreeMap<_, _>, _>>()?
+        } else {
+            BTreeMap::new()
+        };
         (self.index, self.values) = try_join(self.index.sync_all(), self.values.sync_all()).await?;
+        if self.track_watermarks {
+            self.observe_pending();
+            for (section, size) in sizes {
+                self.pending.remove(&section);
+                self.mark_durable(section, size);
+            }
+            self.watermarks = self.watermarks.sync().await?;
+        }
         Ok(self)
     }
 
@@ -549,6 +741,23 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// - If crash after index prune but before glob: orphan data in glob (acceptable)
     /// - If crash before index prune: no change, retry works
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
+        // Remove recovery promises before their sections. A crash between this metadata sync
+        // and the blob removals merely leaves old sections to be scanned again.
+        if self.track_watermarks {
+            self.observe_pending();
+            self.pending.retain(|section, _| *section >= min);
+            let removed = self
+                .watermarks
+                .keys()
+                .copied()
+                .take_while(|section| *section < min)
+                .collect::<Vec<_>>();
+            for section in removed {
+                self.watermarks.remove(&section);
+            }
+            self.watermarks = self.watermarks.sync().await?;
+        }
+
         let index_pruned;
         (self.index, index_pruned) = self.index.prune(min).await?;
         let value_pruned;
@@ -566,6 +775,23 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// its later sections (newest first) before truncating `section`, and those removals
     /// carry the storage layer's removal durability.
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
+        // Lower durable bounds before moving either journal backward.
+        if self.track_watermarks {
+            self.observe_pending();
+            self.pending.retain(|candidate, _| *candidate < section);
+            let removed = self
+                .watermarks
+                .keys()
+                .copied()
+                .filter(|candidate| *candidate > section)
+                .collect::<Vec<_>>();
+            for candidate in removed {
+                self.watermarks.remove(&candidate);
+            }
+            self.lower_watermark(section, index_size);
+            self.watermarks = self.watermarks.sync().await?;
+        }
+
         // Rewind index first (this also removes sections after `section`)
         self.index = self.index.rewind(section, index_size).await?;
 
@@ -601,6 +827,13 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     ///
     /// Both truncations are made durable before returning (see [Self::rewind]).
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
+        if self.track_watermarks {
+            self.observe_pending();
+            self.pending.remove(&section);
+            self.lower_watermark(section, index_size);
+            self.watermarks = self.watermarks.sync().await?;
+        }
+
         // Rewind index first
         self.index = self.index.rewind_section(section, index_size).await?;
 
@@ -667,9 +900,15 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
     /// Destroy all underlying storage.
     pub async fn destroy(self) -> Result<(), Error> {
-        try_join(self.index.destroy(), self.values.destroy())
-            .await
-            .map(|_| ())
+        let Self {
+            index,
+            values,
+            watermarks,
+            ..
+        } = self;
+        try_join(index.destroy(), values.destroy()).await?;
+        watermarks.destroy().await?;
+        Ok(())
     }
 }
 
@@ -681,6 +920,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 pub struct Replay<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
     values: Glob<E, V>,
+    watermarks: Metadata<E, u64, VecU64>,
+    pending: BTreeMap<u64, (u64, SyncCompletion)>,
+    track_watermarks: bool,
 }
 
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
@@ -701,6 +943,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         Ok(Oversized {
             index: self.index.finish()?,
             values: self.values,
+            watermarks: self.watermarks,
+            pending: self.pending,
+            track_watermarks: self.track_watermarks,
         })
     }
 }
@@ -741,6 +986,44 @@ mod tests {
             result?;
         }
         replay.finish()
+    }
+
+    /// Persist index and value bytes without advancing oversized recovery metadata.
+    ///
+    /// Tests use this to construct states that can arise above a stale durable floor.
+    async fn persist_without_watermark<E, I, V>(
+        mut oversized: Oversized<E, I, V>,
+        sections: impl crate::Sections,
+    ) -> Result<Oversized<E, I, V>, Error>
+    where
+        E: BufferPooler + Storage + Metrics,
+        I: Record + Send + Sync,
+        V: CodecShared,
+    {
+        let sections = sections.sections().collect::<Vec<_>>();
+        (oversized.index, oversized.values) = try_join(
+            oversized.index.sync(&sections),
+            oversized.values.sync(&sections),
+        )
+        .await?;
+        Ok(oversized)
+    }
+
+    /// Persist a lowered recovery floor without applying the corresponding data rewind.
+    async fn lower_watermark_without_rewind<E, I, V>(
+        mut oversized: Oversized<E, I, V>,
+        section: u64,
+        size: u64,
+    ) -> Result<Oversized<E, I, V>, Error>
+    where
+        E: BufferPooler + Storage + Metrics,
+        I: Record + Send + Sync,
+        V: CodecShared,
+    {
+        oversized.pending.remove(&section);
+        oversized.lower_watermark(section, size);
+        oversized.watermarks = oversized.watermarks.sync().await?;
+        Ok(oversized)
     }
 
     /// Test index entry that stores a u64 id and references a value.
@@ -875,7 +1158,9 @@ mod tests {
                     .expect("Failed to append");
                 locations.push((position, offset, size));
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
             drop(oversized);
 
             // Simulate crash: truncate glob to lose last 2 values
@@ -1197,9 +1482,11 @@ mod tests {
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync(1).await.expect("Failed to sync");
-
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = lower_watermark_without_rewind(oversized, 1, chunk)
+                .await
+                .expect("Failed to lower watermark");
             oversized.index = oversized
                 .index
                 .rewind(1, chunk)
@@ -1253,11 +1540,13 @@ mod tests {
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync(1).await.expect("Failed to sync");
-
             // Replay `rewind(1, chunk)`'s steps up to the worst crash point: the index
             // truncation is durable but the freed value bytes are not yet rewound.
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = lower_watermark_without_rewind(oversized, 1, chunk)
+                .await
+                .expect("Failed to lower watermark");
             oversized.index = oversized
                 .index
                 .rewind(1, chunk)
@@ -1423,6 +1712,59 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_start_sync_advances_all_watermarks_one_interval_behind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to init");
+            for section in [1, 7] {
+                (oversized, _, _, _) = oversized
+                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                    .await
+                    .expect("Failed to append");
+            }
+
+            let (next, handle) = oversized
+                .start_sync([1, 7])
+                .await
+                .expect("Failed to start sync");
+            oversized = next;
+            assert_eq!(oversized.watermark(1), 0);
+            assert_eq!(oversized.watermark(7), 0);
+            handle.await.expect("Failed to sync data");
+
+            // The next call observes the completed joint sync and publishes both section
+            // floors while starting the current interval.
+            let (next, handle) = oversized
+                .start_sync([1, 7])
+                .await
+                .expect("Failed to start second sync");
+            oversized = next;
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            assert_eq!(oversized.watermark(1), chunk);
+            assert_eq!(oversized.watermark(7), chunk);
+            handle.await.expect("Failed to sync watermarks");
+            drop(oversized);
+
+            let replay: Replay<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg, NZUsize!(1024))
+                    .await
+                    .expect("Failed to reopen");
+            assert_eq!(
+                replay.watermarks.get(&1).copied().map(u64::from),
+                Some(chunk)
+            );
+            assert_eq!(
+                replay.watermarks.get(&7).copied().map(u64::from),
+                Some(chunk)
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_recovery_rejects_entry_with_torn_value_bytes() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
@@ -1476,6 +1818,81 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_recovery_repairs_torn_interior_value() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to init");
+
+            // Establish a durable floor at entry 0.
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(0, 0, 0), &[0; 16])
+                .await
+                .expect("Failed to append");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+
+            // Persist three more pairs without advancing the floor, then damage the middle
+            // value. Entry 3 remains a valid island beyond the hole.
+            let mut locations = Vec::new();
+            for id in 1..=3u64 {
+                let (offset, size);
+                (oversized, _, offset, size) = oversized
+                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .expect("Failed to append");
+                locations.push((offset, size));
+            }
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
+            let (offset, size) = locations[1];
+            oversized
+                .values
+                .inject(1, offset, vec![0xFF; size as usize])
+                .await
+                .expect("Failed to damage interior value");
+            oversized.values = oversized
+                .values
+                .sync(1)
+                .await
+                .expect("Failed to sync damaged value");
+            drop(oversized);
+
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("second"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to recover");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            assert_eq!(oversized.size(1).expect("size"), 2 * chunk);
+            assert_adopted_entries_consistent(&oversized).await;
+            assert_eq!(oversized.get(1, 0).await.expect("entry").id, 0);
+            assert_eq!(oversized.get(1, 1).await.expect("entry").id, 1);
+            assert!(oversized.get(1, 2).await.is_err());
+
+            // The repaired ranges can be reused and made durable.
+            let position;
+            (oversized, position, _, _) = oversized
+                .append(1, TestEntry::new(4, 0, 0), &[4; 16])
+                .await
+                .expect("Failed to append after recovery");
+            assert_eq!(position, 2);
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("third"), cfg, None)
+                    .await
+                    .expect("Failed to reopen");
+            assert_adopted_entries_consistent(&oversized).await;
+            assert_eq!(oversized.get(1, 2).await.expect("entry").id, 4);
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_recovery_scans_past_torn_interior_index_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1494,7 +1911,7 @@ mod tests {
                 codec_config: (),
             };
 
-            // Create five durable entry/value pairs.
+            // Persist five entry/value pairs, then lower the durable floor to the first two.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 init_oversized(context.child("first"), cfg.clone(), None)
                     .await
@@ -1506,6 +1923,10 @@ mod tests {
                     .expect("Failed to append");
             }
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = lower_watermark_without_rewind(oversized, 1, 2 * chunk)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Corrupt the CRC record of the THIRD entry's index page: the backward open
@@ -1552,6 +1973,69 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_replay_rejects_torn_index_page_below_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                index_partition: "test-index".into(),
+                value_partition: "test-values".into(),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(TestEntry::SIZE as u16),
+                    NZUsize!(8),
+                ),
+                index_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: (),
+            };
+
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to init");
+            for id in 0..3u64 {
+                (oversized, _, _, _) = oversized
+                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Damage entry 1 while entry 2's page remains readable. The watermark covers all
+            // three entries, so replay must preserve the evidence instead of truncating.
+            let physical_page = TestEntry::SIZE as u64 + 12;
+            let (index_blob, size) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open index");
+            index_blob
+                .write_at_sync(physical_page + TestEntry::SIZE as u64, vec![0xFF; 12])
+                .await
+                .expect("Failed to damage index");
+            drop(index_blob);
+
+            let mut replay: Replay<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg.clone(), NZUsize!(1024))
+                    .await
+                    .expect("Failed to begin recovery");
+            assert!(matches!(replay.next().await, Some(Ok((1, 0, _)))));
+            assert!(matches!(
+                replay.next().await,
+                Some(Err(Error::Corruption(_)))
+            ));
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            let (_, retained) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to reopen index");
+            assert_eq!(retained, size, "durable corruption must not be truncated");
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_restore_discards_beyond_checkpoint() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
@@ -1584,7 +2068,7 @@ mod tests {
         // Restore truncates to the checkpoint without validating the discarded state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            let oversized: Oversized<_, TestEntry, TestValue> = init_oversized(
+            let mut oversized: Oversized<_, TestEntry, TestValue> = init_oversized(
                 context.child("second"),
                 test_cfg(&context),
                 Some((1, chunk)),
@@ -1594,6 +2078,16 @@ mod tests {
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_eq!(oversized.newest_section(), Some(1));
             assert_adopted_entries_consistent(&oversized).await;
+
+            // Checkpoint mode clears stale infer-mode floors and does not recreate them on sync.
+            assert!(!oversized.track_watermarks);
+            assert!(oversized.watermarks.keys().next().is_none());
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(4, 0, 0), &[4; 16])
+                .await
+                .expect("Failed to append");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            assert!(oversized.watermarks.keys().next().is_none());
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
@@ -1840,7 +2334,9 @@ mod tests {
                     .await
                     .expect("Failed to append");
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
             drop(oversized);
 
             // Truncate glob to 0 bytes - ALL entries become invalid
@@ -1934,6 +2430,13 @@ mod tests {
                     .expect("Failed to append");
             }
             oversized = oversized.sync(3).await.expect("Failed to sync");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = lower_watermark_without_rewind(oversized, 1, chunk)
+                .await
+                .expect("Failed to lower section 1 watermark");
+            oversized = lower_watermark_without_rewind(oversized, 2, 3 * chunk)
+                .await
+                .expect("Failed to lower section 2 watermark");
             drop(oversized);
 
             // Truncate section 1 glob to keep only first entry
@@ -2020,7 +2523,9 @@ mod tests {
                     .await
                     .expect("Failed to append");
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
             drop(oversized);
 
             // Corrupt the last page's CRC to trigger page-level integrity failure
@@ -2142,6 +2647,9 @@ mod tests {
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = lower_watermark_without_rewind(oversized, 1, 0)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Truncate glob to 0 - single entry becomes invalid
@@ -2190,6 +2698,10 @@ mod tests {
                 locations.push((position, offset, size));
             }
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = lower_watermark_without_rewind(oversized, 1, 2 * chunk)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Truncate glob to be off by 1 byte from last entry
@@ -2270,18 +2782,12 @@ mod tests {
                 .await
                 .expect("Failed to remove");
 
-            // Reinitialize - glob size will be 0, all entries invalid
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized(context.child("second"), cfg, None)
-                    .await
-                    .expect("Failed to reinit");
-
-            // All entries should be gone
-            assert!(oversized.get(1, 0).await.is_err());
-            assert!(oversized.get(1, 1).await.is_err());
-            assert!(oversized.get(1, 2).await.is_err());
-
-            oversized.destroy().await.expect("Failed to destroy");
+            // The durable watermark covers the missing values, so this is storage loss rather
+            // than an interrupted unacknowledged write.
+            assert!(matches!(
+                init_oversized::<_, TestEntry, TestValue>(context.child("second"), cfg, None).await,
+                Err(Error::Corruption(_))
+            ));
         });
     }
 
@@ -2308,7 +2814,9 @@ mod tests {
                     .expect("Failed to append");
                 locations.push((position, offset, size));
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
             drop(oversized);
 
             // Truncate glob to keep only first 2 entries
@@ -2395,21 +2903,12 @@ mod tests {
             glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
 
-            // Reinitialize - should recover gracefully with warning
-            // Index section 1 will be rewound to 0 entries
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized(context.child("second"), cfg.clone(), None)
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 entries should be gone (index rewound due to glob pruned)
-            assert!(oversized.get(1, 0).await.is_err());
-
-            // Sections 2 and 3 should still be valid
-            assert!(oversized.get(2, 0).await.is_ok());
-            assert!(oversized.get(3, 0).await.is_ok());
-
-            oversized.destroy().await.expect("Failed to destroy");
+            // Section 1 was covered by a durable watermark. Losing its value blob is
+            // unrecoverable storage corruption, not an interrupted prune state.
+            assert!(matches!(
+                init_oversized::<_, TestEntry, TestValue>(context.child("second"), cfg, None).await,
+                Err(Error::Corruption(_))
+            ));
         });
     }
 
@@ -2442,21 +2941,11 @@ mod tests {
                 .await
                 .expect("Failed to remove index");
 
-            // Reinitialize - should handle gracefully
-            // Section 2 is gone from index, orphan data in glob is acceptable
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized(context.child("second"), cfg.clone(), None)
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 and 3 should still be valid
-            assert!(oversized.get(1, 0).await.is_ok());
-            assert!(oversized.get(3, 0).await.is_ok());
-
-            // Section 2 should be gone (index file deleted)
-            assert!(oversized.get(2, 0).await.is_err());
-
-            oversized.destroy().await.expect("Failed to destroy");
+            // The missing index section is covered by a durable watermark.
+            assert!(matches!(
+                init_oversized::<_, TestEntry, TestValue>(context.child("second"), cfg, None).await,
+                Err(Error::Corruption(_))
+            ));
         });
     }
 
@@ -2567,7 +3056,9 @@ mod tests {
                     .expect("Failed to append");
                 locations.push((position, offset, size));
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
             drop(oversized);
 
             // Simulate crash: truncate INDEX but leave GLOB intact
@@ -2774,6 +3265,9 @@ mod tests {
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = lower_watermark_without_rewind(oversized, 1, 0)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Truncate index to only partial data (less than one full entry)
@@ -2856,6 +3350,10 @@ mod tests {
                 locations.push((position, offset, size));
             }
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = lower_watermark_without_rewind(oversized, 1, 2 * chunk)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Simulate crash during rewind: truncate index to 2 entries but leave glob intact
@@ -2924,6 +3422,10 @@ mod tests {
                 locations.push((position, offset, size));
             }
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = lower_watermark_without_rewind(oversized, 1, 2 * chunk)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Simulate crash during rewind: truncate glob to 2 entries but leave index intact
@@ -3362,6 +3864,9 @@ mod tests {
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = lower_watermark_without_rewind(oversized, 1, 0)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Manually create orphan value section 2
@@ -3596,7 +4101,9 @@ mod tests {
                 .append(1, entry, &value)
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync(1).await.expect("Failed to sync");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist");
             drop(oversized);
 
             // Build a corrupted entry with offset near u64::MAX that would overflow.
@@ -3693,6 +4200,9 @@ mod tests {
                 .await
                 .expect("Failed to append to section 2");
             oversized = oversized.sync(2).await.expect("Failed to sync section 2");
+            oversized = lower_watermark_without_rewind(oversized, 1, 0)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Truncate section 1's index to 0 (making it empty)
@@ -3720,11 +4230,7 @@ mod tests {
             // Section 1 should still be tracked (blob exists but is empty)
             assert_eq!(oversized.oldest_section(), Some(1));
 
-            // Append to empty section 1
-            // Note: When index is truncated to 0 but the index blob still exists,
-            // the glob is NOT truncated (the section isn't considered an orphan).
-            // The glob still has orphan DATA from the old entries, but this doesn't
-            // affect correctness - new entries simply append after the orphan data.
+            // Append to empty section 1. Recovery removed its orphaned value suffix.
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
             let (pos, offset, size);
@@ -3733,8 +4239,7 @@ mod tests {
                 .await
                 .expect("Failed to append to empty section");
             assert_eq!(pos, 0);
-            // Glob offset is non-zero because orphan data wasn't truncated
-            assert!(offset > 0);
+            assert_eq!(offset, 0);
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Verify the new entry is readable despite orphan data before it
@@ -3855,6 +4360,9 @@ mod tests {
                 locations.push((section, (position, offset, size)));
                 oversized = oversized.sync(section).await.expect("Failed to sync");
             }
+            oversized = lower_watermark_without_rewind(oversized, large_sections[1], 0)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Simulate crash: truncate glob for middle section
@@ -3928,6 +4436,10 @@ mod tests {
                 locations.push((position, offset, size));
             }
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            let chunk_size = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            oversized = lower_watermark_without_rewind(oversized, 1, 3 * chunk_size)
+                .await
+                .expect("Failed to lower watermark");
             drop(oversized);
 
             // Phase 2: Simulate first crash - truncate glob to lose last 2 entries
@@ -3944,7 +4456,6 @@ mod tests {
             // Recovery would try to rewind index from 5 entries to 3 entries.
             // Simulate partial rewind by manually truncating index to 4 entries
             // (as if crash occurred mid-rewind).
-            let chunk_size = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             let (index_blob, _) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await

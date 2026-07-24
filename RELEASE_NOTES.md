@@ -109,13 +109,6 @@ sections and an over-strict assertion on an empty oldest section ([#3906],
 recovered data is made durable before recovery metadata advances past it
 ([#3809], [#3904], [#3928]).
 
-Segmented journals now repair torn interior pages during replay and require
-recovery before use ([#4327]). The fixed, variable, and infer-mode oversized
-`init` methods take a replay buffer and return a `Replay`; drain it and call
-`finish()` to obtain the journal. Oversized callers with a separately published
-durable checkpoint use `init_from_checkpoint` instead. This is a source-only
-migration: existing on-disk journals require no conversion.
-
 Recovery is also stricter about what it will repair. States that cannot arise
 from any valid crash sequence now fail initialization with a corruption error
 that preserves the surviving data as evidence, instead of being silently
@@ -546,7 +539,6 @@ so allocator-sensitive workloads should link jemalloc or mimalloc directly
 [#4252]: https://github.com/commonwarexyz/monorepo/pull/4252
 [#4253]: https://github.com/commonwarexyz/monorepo/pull/4253
 [#4254]: https://github.com/commonwarexyz/monorepo/pull/4254
-[#4327]: https://github.com/commonwarexyz/monorepo/pull/4327
 
 ## v2026.5.0
 

@@ -1,9 +1,9 @@
 use super::{Config, Error};
-use crate::{Context, SyncCompletion};
+use crate::SyncCompletion;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut,
+    Blob, BufMut, BufferPooler, Error as RError, Handle, IoBufMut, Metrics, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -74,7 +74,7 @@ struct State<B: Blob, K: Span> {
 }
 
 /// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
-struct Inner<E: Context, K: Span, V: Codec> {
+struct Inner<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
@@ -86,7 +86,7 @@ struct Inner<E: Context, K: Span, V: Codec> {
     keys: Gauge,
 }
 
-impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Inner<E, K, V> {
     /// See [Metadata::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
@@ -559,9 +559,9 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 ///
 /// Storage-mutating functions consume the store and return it only on success: an error (or a
 /// dropped future) destroys the handle.
-pub struct Metadata<E: Context, K: Span, V: Codec>(Box<Inner<E, K, V>>);
+pub struct Metadata<E: BufferPooler + Storage + Metrics, K: Span, V: Codec>(Box<Inner<E, K, V>>);
 
-impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Metadata")
             .field("keys", &self.0.map.len())
@@ -569,7 +569,7 @@ impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
     }
 }
 
-impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
