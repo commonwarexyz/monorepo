@@ -203,6 +203,10 @@ pub enum Error<F: Family> {
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
+    /// The caller cancelled the operation before it completed.
+    #[error("operation cancelled")]
+    Cancelled,
+
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,

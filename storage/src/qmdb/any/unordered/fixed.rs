@@ -1771,6 +1771,52 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_any_fixed_snapshot_resolver_cancellation() {
+        use crate::qmdb::sync::resolver::Resolver as _;
+        use commonware_utils::channel::oneshot;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let mut db = apply_ops(db, create_test_ops(20)).await;
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.proof_snapshot().await.unwrap();
+            let resolver = Arc::new(snapshot);
+
+            // A request whose sender is already gone is cancelled before any disk work, and
+            // the serve releases its clone of the snapshot.
+            let serve = Arc::clone(&resolver);
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            drop(cancel_tx);
+            let result = serve
+                .get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx)
+                .await;
+            assert!(matches!(result, Err(crate::qmdb::Error::Cancelled)));
+            drop(serve);
+            assert_eq!(Arc::strong_count(&resolver), 1);
+
+            // Cancelling one in-flight request wedges nothing: a subsequent serve over the
+            // same resolver succeeds.
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            let pending =
+                resolver.get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx);
+            drop(cancel_tx);
+            assert!(matches!(pending.await, Err(crate::qmdb::Error::Cancelled)));
+
+            let (_cancel_tx, cancel_rx) = oneshot::channel();
+            let result = resolver
+                .get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx)
+                .await
+                .unwrap();
+            assert_eq!(result.operations.len(), *op_count as usize);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
