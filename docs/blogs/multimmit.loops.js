@@ -571,7 +571,8 @@ const FIGURES = {
         { k: 'emit', row: 'cons', t: 2.8, color: RED, missingUntil: 99, label: 'views time out', labelSide: 'right' },
         { k: 'emit', row: 'cons', t: 4.2, color: RED, missingUntil: 99 },
         { k: 'mark', t: 5, ghost: true },
-        { k: 'emit', row: 'cons', t: 5.5, color: RED, label: 'leader block', labelSide: 'right' },
+        { k: 'emit', row: 'cons', t: 5.5, color: RED },
+        { k: 'note', t: 5.5, tx: 5.76, y: 96, lines: ['leader block'], fill: RED },
         ...Array.from({ length: 7 }, (_, i) => (
           { k: 'edge', fromRow: 'cons', fromT: 5.5, toRow: 'mm', toT: (i + 2) * 2 / 3, t: 5.5, d: 0.45, style: 'sup' }
         )),
