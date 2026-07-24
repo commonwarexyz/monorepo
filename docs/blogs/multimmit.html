@@ -275,21 +275,21 @@ O’Grady</a></div>
         later, the earliest the leader’s block may include it. The block
         stays red as in figure 1, but now carries only references.</p>
         </div>
-        <p>The obvious escape is to reference blocks before they
-        certify, and the known ways to do it each break something.
-        Autobahn sketches uncertified references as an optimization: a
-        voter missing a referenced batch holds its vote and fetches the
-        batch from the leader. Faulty producers that disclose their
-        latest batches to the leader alone can then force <span
+        <p>The escape is to reference blocks before they certify, and
+        the known ways to do it each break something. Autobahn sketches
+        uncertified references as an optimization: a voter missing a
+        referenced batch holds its vote and fetches the batch from the
+        leader. Faulty producers that disclose their latest batches to
+        the leader alone can then force <span
         class="math inline">\Omega(n^2)</span> batch transmissions
         through the leader’s uplink before the view can progress,
-        exactly the traffic pattern producer chains exist to avoid. <a
-        href="https://arxiv.org/abs/2504.18649">Raptr</a> eliminates the
-        fetch: voters support the longest prefix of the proposal they
-        hold data for, and the protocol finalizes a prefix supported by
-        a quorum. But prefixes are order-sensitive. Withhold the data
-        behind a single early batch and the proposal is
-        <em>spoiled</em>, finalizing little or nothing, however much
+        exactly the traffic pattern producer chains exist to avoid.</p>
+        <p><a href="https://arxiv.org/abs/2504.18649">Raptr</a>
+        eliminates the fetch: voters support the longest prefix of the
+        proposal they hold data for, and the protocol finalizes a prefix
+        supported by a quorum. But prefixes are order-sensitive.
+        Withhold the data behind a single early batch and the proposal
+        is <em>spoiled</em>, finalizing little or nothing, however much
         available data it references, so <span
         class="math inline">k</span> faulty producers taking turns can
         deny the whole network its fast path for <span
@@ -300,10 +300,11 @@ O’Grady</a></div>
         certified-only inclusion), but the mitigation is reactive: each
         producer spoils before it is blamed, and a reputation mechanism
         forgiving enough to readmit slow-but-honest producers re-arms
-        the attack on every reset. The DAG world faces the same choice:
-        <a href="https://arxiv.org/abs/2310.14821">Mysticeti</a>
-        references uncertified vertices, and dropping just 1% of egress
-        traffic at 5 of 100 validators has been <a
+        the attack on every reset.</p>
+        <p>The DAG world faces the same choice: <a
+        href="https://arxiv.org/abs/2310.14821">Mysticeti</a> references
+        uncertified vertices, and dropping just 1% of egress traffic at
+        5 of 100 validators has been <a
         href="https://arxiv.org/abs/2405.20488">observed</a> to increase
         its median latency by an order of magnitude at moderate load.
         This fragility is why reputation shows up wherever uncertified
@@ -374,8 +375,8 @@ O’Grady</a></div>
         broadcast. The dashed markers are where the earlier figures
         finalized on the same axis.</p>
         </div>
-        <p>Read the User row of either figure: submit to an API node,
-        the API node’s next block carries the transaction to every
+        <p>Either way, the user’s path is the same: submit to an API
+        node, the API node’s next block carries the transaction to every
         validator, and one round of votes finalizes it. There is no
         separate journey to the leader because there is nothing the
         leader must gather first. Averaged over the wait for the next
@@ -392,8 +393,13 @@ O’Grady</a></div>
         class="math inline">t+5\delta</span> in expectation with
         <em>no</em> faults, degrading to <span
         class="math inline">t+5.5\delta</span> (and spoilable) once
-        faulty producers show up. Multimmit’s figures do not degrade: an
-        honest chain’s block still finalizes by <span
+        faulty producers show up. <em>Of the roughly <span
+        class="math inline">2\delta</span> saved, one <span
+        class="math inline">\delta</span> is bought by the stronger
+        assumption <span class="math inline">n \geq 5f+1</span> (one
+        round of voting rather than two), and the rest comes from
+        checkpoints and extension votes.</em> Multimmit’s figures do not
+        degrade: an honest chain’s block still finalizes by <span
         class="math inline">t+3\delta</span> in expectation with <span
         class="math inline">f</span> faulty producers doing their
         worst.</p>
