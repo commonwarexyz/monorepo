@@ -45,38 +45,6 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
   .cw-loop-spoiling {
     aspect-ratio: 1024 / 500;
   }
-
-  @media (max-width: 600px) {
-    .cw-loop {
-      aspect-ratio: auto;
-      height: 295px;
-      overflow-x: auto;
-    }
-
-    .cw-loop-dag {
-      height: 270px;
-    }
-
-    .cw-loop-dagstructure {
-      height: 245px;
-    }
-
-    .cw-loop-dagfetch {
-      height: 260px;
-    }
-
-    .cw-loop-certificate {
-      height: 330px;
-    }
-
-    .cw-loop-spoiling {
-      height: 315px;
-    }
-
-    .cw-loop svg {
-      min-width: 640px;
-    }
-  }
 </style>
 <noscript>
   <style>
@@ -84,9 +52,7 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
       aspect-ratio: auto;
       border-left: 2px solid #d9251c;
       color: gray;
-      height: auto;
       margin: 28px 0 6px;
-      overflow-x: visible;
       padding-left: 12px;
     }
   </style>
