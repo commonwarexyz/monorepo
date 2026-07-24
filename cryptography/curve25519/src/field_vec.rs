@@ -549,6 +549,33 @@ pub(crate) fn fused_point_add(
     None
 }
 
+/// Computes one step of the mixed-addition formula 8-wide (see
+/// [`crate::signing::point::PointVec::add_mixed`]) via a single fused AVX-512 function when
+/// available, same [`fused_point_add`] pattern and for the same reason (see
+/// [`avx512::point_add_mixed`]'s doc comment) -- returns `None` on any CPU without this backend.
+// Not `const`: on `x86_64` this calls `avx512::available()`, a runtime CPU check (see
+// `simd_available`'s own `#[allow]` for the same reason).
+#[allow(clippy::missing_const_for_fn, clippy::too_many_arguments)]
+pub(crate) fn fused_point_add_mixed(
+    ax: &Reduced,
+    ay: &Reduced,
+    az: &Reduced,
+    at: &Reduced,
+    bx: &Reduced,
+    by: &Reduced,
+    bt2d: &Reduced,
+) -> Option<(Reduced, Reduced, Reduced, Reduced)> {
+    #[cfg(target_arch = "x86_64")]
+    if avx512::available() {
+        // SAFETY: `available()` just confirmed the CPU supports every feature
+        // `avx512::point_add_mixed` requires.
+        return Some(unsafe { avx512::point_add_mixed(ax, ay, az, at, bx, by, bt2d) });
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (ax, ay, az, at, bx, by, bt2d);
+    None
+}
+
 /// Computes the dedicated `dbl-2008-hwcd` doubling formula 8-wide (see
 /// [`crate::signing::point::PointVec::double`]) via a single fused AVX-512 function when
 /// available, same [`fused_point_add`] pattern and for the same reason (see

@@ -44,7 +44,7 @@ mod verify_batch_bytes_bench {
         let mut group = c.benchmark_group(module_path!());
         for n in [1, 10, 100, 1_000, 10_000, 16_384] {
             let batch = generate_batch(n);
-            for concurrency in [1, 8] {
+            for concurrency in [1, 8, 16, 32] {
                 let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
                 group.throughput(Throughput::Elements(n as u64));
                 group.bench_function(format!("sigs={n} conc={concurrency}"), |b| {

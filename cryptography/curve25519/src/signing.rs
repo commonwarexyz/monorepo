@@ -9,7 +9,7 @@ mod scalar;
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
 pub use error::Error;
-use point::EdwardsPoint;
+use point::{EdwardsPoint, MixedPoint};
 use rand_core::CryptoRng;
 use scalar::Scalar;
 use sha2::{Digest, Sha512};
@@ -210,7 +210,7 @@ pub fn verify_batch<'a>(
         .collect();
     strategy.sort_by(&mut keyed, |a, b| a.0.cmp(&b.0));
     let a_terms = coalesce(&keyed);
-    let a_points: Vec<EdwardsPoint> = a_terms.iter().map(|(_, p, _)| *p).collect();
+    let a_points: Vec<MixedPoint> = a_terms.iter().map(|(_, p, _)| MixedPoint::new(p)).collect();
     let a_scalars: Vec<Scalar> = a_terms.iter().map(|(_, _, s)| *s).collect();
 
     let s_sum = layers
@@ -463,12 +463,14 @@ mod tests {
     }
 
     /// A batch of both independent signers and a repeated signer, spanning multiple parallel MSM
-    /// chunks (`msm::PARALLEL_CHUNK_SIZE` is 256), verified under `Manual` -- which disables the
-    /// adaptive serial/parallel policy so every `strategy` call in this test genuinely dispatches
-    /// across the thread pool, rather than the policy falling back to serial for a size it judges
-    /// too small. Every other test in this module uses `Sequential`, so this is the only one
-    /// exercising real concurrent execution of the coalescing sort and the fused decompress-and-MSM
-    /// pass end to end.
+    /// chunks (at `n = 600` over a 4-thread pool, `msm::chunk_size` still lands on its
+    /// `msm::MIN_CHUNK_SIZE` floor of 256, since `600 / 4 = 150` is below it, giving the same
+    /// 3-chunk split a fixed 256-sized chunking would), verified under `Manual` -- which disables
+    /// the adaptive serial/parallel policy so every `strategy` call in this test genuinely
+    /// dispatches across the thread pool, rather than the policy falling back to serial for a size
+    /// it judges too small. Every other test in this module uses `Sequential`, so this is the only
+    /// one exercising real concurrent execution of the coalescing sort and the fused
+    /// decompress-and-MSM pass end to end.
     fn mixed_batch_with_repeats(n: usize) -> Vec<(VerifyingKey, Signature, Vec<u8>)> {
         let mut rng = test_rng();
         let mut seed = [0u8; 32];
