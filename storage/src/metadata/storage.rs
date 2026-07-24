@@ -332,6 +332,22 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Inner<E, K, V> {
         Ok(())
     }
 
+    /// Observe an in-flight sync without waiting.
+    ///
+    /// Returns `true` when a new sync may start, `false` while the prior sync is still pending,
+    /// and surfaces a completed failure without clearing it.
+    fn poll_pending(&mut self) -> Result<bool, RError> {
+        let Some(completion) = &self.state.pending else {
+            return Ok(true);
+        };
+        let Some(result) = completion.clone().now_or_never() else {
+            return Ok(false);
+        };
+        result?;
+        self.state.pending = None;
+        Ok(true)
+    }
+
     /// See [Metadata::sync].
     async fn sync(&mut self) -> Result<(), RError> {
         self.wait_for_pending().await?;
@@ -659,6 +675,11 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let handle = self.0.start_sync().await?;
         Ok((self, handle))
+    }
+
+    /// Observe whether a new sync can start without waiting for an in-flight sync.
+    pub(crate) fn poll_sync(&mut self) -> Result<bool, Error> {
+        self.0.poll_pending().map_err(Error::Runtime)
     }
 
     /// Remove the underlying blobs for this [Metadata].

@@ -163,6 +163,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
+const METADATA_PARTITION: &str = "fuzz-metadata";
 
 fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool {
     let end = offset.saturating_add(write_len as u64);
@@ -173,6 +174,7 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
+        metadata_partition: METADATA_PARTITION.into(),
         index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
@@ -214,17 +216,25 @@ fn fuzz(input: FuzzInput) {
                     .expect("setup append failed");
                 entry_id += 1;
             }
-            oversized = oversized.sync(section).await.expect("setup sync failed");
         }
 
         if input.sync_before_corrupt {
-            let _ = oversized.sync_all().await.expect("setup sync_all failed");
+            drop(oversized.sync_all().await.expect("setup sync_all failed"));
         } else {
-            drop(oversized);
+            // Persist the data without publishing recovery watermarks. The first background sync
+            // has no earlier completion to publish, so recovery must treat all retained bytes as
+            // repairable crash debris.
+            let (journal, handle) = oversized
+                .start_sync([1, 2, 3])
+                .await
+                .expect("setup start_sync failed");
+            handle.await.expect("setup background sync failed");
+            drop(journal);
         }
 
         // Phase 2: Apply corruptions
         let mut index_page_integrity_may_be_invalidated = false;
+        let mut durable_data_may_be_corrupted = false;
         for corruption in &input.corruptions {
             match corruption {
                 CorruptionType::TruncateIndex {
@@ -235,6 +245,8 @@ fn fuzz(input: FuzzInput) {
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
+                        durable_data_may_be_corrupted |=
+                            input.sync_before_corrupt && new_size < size;
                         let _ = blob.resize(new_size).await;
                         let _ = blob.sync().await;
                     }
@@ -247,6 +259,8 @@ fn fuzz(input: FuzzInput) {
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
+                        durable_data_may_be_corrupted |=
+                            input.sync_before_corrupt && new_size < size;
                         let _ = blob.resize(new_size).await;
                         let _ = blob.sync().await;
                     }
@@ -266,6 +280,7 @@ fn fuzz(input: FuzzInput) {
                         // lower-level tail trimming and should not require this allowance.
                         if overlaps_existing_blob(offset, data.len(), size) {
                             index_page_integrity_may_be_invalidated = true;
+                            durable_data_may_be_corrupted |= input.sync_before_corrupt;
                         }
                         let _ = blob.write_at_sync(offset, data.to_vec()).await;
                     }
@@ -280,15 +295,19 @@ fn fuzz(input: FuzzInput) {
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
+                        durable_data_may_be_corrupted |= input.sync_before_corrupt
+                            && overlaps_existing_blob(offset, data.len(), size);
                         let _ = blob.write_at_sync(offset, data.to_vec()).await;
                     }
                 }
                 CorruptionType::DeleteIndex { section } => {
+                    durable_data_may_be_corrupted |= input.sync_before_corrupt;
                     let _ = context
                         .remove(INDEX_PARTITION, Some(&section.to_be_bytes()))
                         .await;
                 }
                 CorruptionType::DeleteGlob { section } => {
+                    durable_data_may_be_corrupted |= input.sync_before_corrupt;
                     let _ = context
                         .remove(VALUE_PARTITION, Some(&section.to_be_bytes()))
                         .await;
@@ -333,6 +352,9 @@ fn fuzz(input: FuzzInput) {
             {
                 return;
             }
+            // Mutating acknowledged bytes is external storage loss. Recovery must report it
+            // rather than silently rolling the section back.
+            Err(JournalError::Corruption(_)) if durable_data_may_be_corrupted => return,
             Err(err) => panic!("Unexpected recovery failure: {err:?}"),
         };
 

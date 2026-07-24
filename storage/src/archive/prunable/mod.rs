@@ -183,6 +183,9 @@ pub struct Config<T: Translator, C> {
     pub translator: T,
 
     /// The partition to use for the key journal (stores index+key metadata).
+    ///
+    /// The companion `{key_partition}-metadata` partition is reserved for recovery watermarks and
+    /// must be distinct from `value_partition`.
     pub key_partition: String,
 
     /// The page cache to use for the key journal.

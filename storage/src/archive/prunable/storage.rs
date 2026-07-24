@@ -176,9 +176,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Initialize oversized journal
+        let metadata_partition = format!("{}-metadata", cfg.key_partition);
         let oversized_cfg = OversizedConfig {
             index_partition: cfg.key_partition,
             value_partition: cfg.value_partition,
+            metadata_partition,
             index_page_cache: cfg.key_page_cache,
             index_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,

@@ -326,6 +326,7 @@ impl StorageWorkload for SegmentedOversizedWorkload {
         let config = oversized::Config {
             index_partition: format!("segmented-oversized-index-conformance-{seed}"),
             value_partition: format!("segmented-oversized-value-conformance-{seed}"),
+            metadata_partition: format!("segmented-oversized-metadata-conformance-{seed}"),
             index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,

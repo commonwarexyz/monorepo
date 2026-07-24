@@ -91,13 +91,16 @@ pub trait Record: CodecFixed<Cfg = ()> + Clone {
 #[derive(Clone)]
 pub struct Config<C> {
     /// Partition for the fixed index journal.
-    ///
-    /// Infer mode stores recovery metadata in a companion `{index_partition}-metadata`
-    /// partition.
     pub index_partition: String,
 
     /// Partition for the glob value storage.
     pub value_partition: String,
+
+    /// Partition for durable recovery watermarks.
+    ///
+    /// This must be distinct from the index and value partitions. Checkpoint mode opens and
+    /// clears this partition before relying exclusively on its externally published checkpoint.
+    pub metadata_partition: String,
 
     /// Page cache for index journal caching.
     pub index_page_cache: commonware_runtime::buffer::paged::CacheRef,
@@ -130,6 +133,7 @@ pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
     watermarks: Metadata<E, u64, VecU64>,
+    watermarks_dirty: bool,
     pending: BTreeMap<u64, (u64, SyncCompletion)>,
     track_watermarks: bool,
 }
@@ -184,13 +188,21 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             oversized.watermarks.clear();
             oversized.watermarks = oversized.watermarks.sync().await?;
         }
+        oversized.watermarks_dirty = false;
         oversized.track_watermarks = false;
         oversized.restore(section, index_size).await
     }
 
     /// Open the index and value journals without reconciling them.
     async fn open(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let metadata_partition = format!("{}-metadata", cfg.index_partition);
+        if cfg.index_partition == cfg.value_partition
+            || cfg.index_partition == cfg.metadata_partition
+            || cfg.value_partition == cfg.metadata_partition
+        {
+            return Err(Error::InvalidConfiguration(
+                "oversized index, value, and metadata partitions must be distinct".into(),
+            ));
+        }
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
@@ -208,7 +220,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         let watermarks = Metadata::init(
             context.child("metadata"),
             MetadataConfig {
-                partition: metadata_partition,
+                partition: cfg.metadata_partition,
                 codec_config: (),
             },
         )
@@ -218,6 +230,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             index,
             values,
             watermarks,
+            watermarks_dirty: false,
             pending: BTreeMap::new(),
             track_watermarks: true,
         })
@@ -305,11 +318,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     Err(err) => return Err(err),
                 };
                 let (offset, size) = entry.value_location();
+                // Before recovery watermarks existed, an empty index section could retain an
+                // orphan value prefix. A later, durably synced first entry then began after that
+                // prefix. At a zero floor, adopt that first entry's offset as the start of the
+                // contiguous sequence so upgrading does not discard the acknowledged entry.
+                let expected_offset = if position == 0 { offset } else { glob_target };
                 let Some(end) = offset.checked_add(u64::from(size)) else {
                     warn!(section, position, "value range overflows: truncating");
                     break;
                 };
-                if offset != glob_target
+                if offset != expected_offset
                     || end > glob_size
                     || !self.values.verify(section, offset, size).await?
                 {
@@ -318,7 +336,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                         position,
                         offset,
                         size,
-                        expected_offset = glob_target,
+                        expected_offset,
                         glob_size,
                         "invalid value: truncating"
                     );
@@ -500,6 +518,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         }
         if size > self.watermark(section) {
             self.watermarks.put(section, size.into());
+            self.watermarks_dirty = true;
         }
     }
 
@@ -517,6 +536,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         } else {
             self.watermarks.put(section, size.into());
         }
+        self.watermarks_dirty = true;
     }
 
     /// Observe completed background data syncs without blocking.
@@ -609,6 +629,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             index,
             values,
             watermarks,
+            watermarks_dirty,
             pending,
             track_watermarks,
         } = self;
@@ -619,6 +640,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             index,
             values,
             watermarks,
+            watermarks_dirty,
             pending,
             track_watermarks,
         })
@@ -647,6 +669,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                 self.mark_durable(section, size);
             }
             self.watermarks = self.watermarks.sync().await?;
+            self.watermarks_dirty = false;
         }
         Ok(self)
     }
@@ -688,11 +711,19 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                 .shared();
 
         let watermark_handle = if self.track_watermarks {
-            // Starting a newer section sync may have waited for its predecessor. Publish every
-            // completion now observable, one interval behind the sync being returned.
+            // Publish every completion now observable, one interval behind the sync being
+            // returned. Metadata permits only one write at a time, so skip publication rather
+            // than waiting when its previous write is still in flight. The accumulated in-memory
+            // updates will be included by a later sync.
             self.observe_pending();
-            let (watermarks, handle) = self.watermarks.start_sync().await?;
-            self.watermarks = watermarks;
+            let handle = if self.watermarks_dirty && self.watermarks.poll_sync()? {
+                let (watermarks, handle) = self.watermarks.start_sync().await?;
+                self.watermarks = watermarks;
+                self.watermarks_dirty = false;
+                handle
+            } else {
+                Handle::ready(Ok(()))
+            };
             for (section, size) in sizes {
                 self.pending.insert(section, (size, completion.clone()));
             }
@@ -731,6 +762,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                 self.mark_durable(section, size);
             }
             self.watermarks = self.watermarks.sync().await?;
+            self.watermarks_dirty = false;
         }
         Ok(self)
     }
@@ -754,8 +786,10 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                 .collect::<Vec<_>>();
             for section in removed {
                 self.watermarks.remove(&section);
+                self.watermarks_dirty = true;
             }
             self.watermarks = self.watermarks.sync().await?;
+            self.watermarks_dirty = false;
         }
 
         let index_pruned;
@@ -787,9 +821,11 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                 .collect::<Vec<_>>();
             for candidate in removed {
                 self.watermarks.remove(&candidate);
+                self.watermarks_dirty = true;
             }
             self.lower_watermark(section, index_size);
             self.watermarks = self.watermarks.sync().await?;
+            self.watermarks_dirty = false;
         }
 
         // Rewind index first (this also removes sections after `section`)
@@ -832,6 +868,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             self.pending.remove(&section);
             self.lower_watermark(section, index_size);
             self.watermarks = self.watermarks.sync().await?;
+            self.watermarks_dirty = false;
         }
 
         // Rewind index first
@@ -921,6 +958,7 @@ pub struct Replay<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
     values: Glob<E, V>,
     watermarks: Metadata<E, u64, VecU64>,
+    watermarks_dirty: bool,
     pending: BTreeMap<u64, (u64, SyncCompletion)>,
     track_watermarks: bool,
 }
@@ -944,6 +982,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             index: self.index.finish()?,
             values: self.values,
             watermarks: self.watermarks,
+            watermarks_dirty: self.watermarks_dirty,
             pending: self.pending,
             track_watermarks: self.track_watermarks,
         })
@@ -957,8 +996,10 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, mocks::SyncFaultContext,
+        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, release_pending_syncs},
     };
     use commonware_utils::{NZU16, NZUsize};
 
@@ -1023,6 +1064,7 @@ mod tests {
         oversized.pending.remove(&section);
         oversized.lower_watermark(section, size);
         oversized.watermarks = oversized.watermarks.sync().await?;
+        oversized.watermarks_dirty = false;
         Ok(oversized)
     }
 
@@ -1087,6 +1129,7 @@ mod tests {
         Config {
             index_partition: "test-index".into(),
             value_partition: "test-values".into(),
+            metadata_partition: "test-metadata".into(),
             index_page_cache: CacheRef::from_pooler(pooler, NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
@@ -1097,6 +1140,18 @@ mod tests {
 
     /// Simple test value type with unit config.
     type TestValue = [u8; 16];
+
+    #[test_traced]
+    fn test_partitions_must_be_distinct() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context);
+            cfg.metadata_partition.clone_from(&cfg.value_partition);
+            let result =
+                Oversized::<_, TestEntry, TestValue>::init(context, cfg, NZUsize!(1024)).await;
+            assert!(matches!(result, Err(Error::InvalidConfiguration(_))));
+        });
+    }
 
     #[test_traced]
     fn test_oversized_append_and_get() {
@@ -1765,6 +1820,58 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_start_sync_does_not_wait_for_metadata_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("journal"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            let (next, first) = oversized.start_sync(1).await.expect("Failed to start sync");
+            oversized = next;
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            first.await.expect("Failed to complete first sync");
+
+            // This interval publishes section 1's completed data sync, leaving the metadata write
+            // and section 2's independent data writes in flight.
+            (oversized, _, _, _) = oversized
+                .append(2, TestEntry::new(2, 0, 0), &[2; 16])
+                .await
+                .expect("Failed to append");
+            let (next, second) = oversized.start_sync(2).await.expect("Failed to start sync");
+            oversized = next;
+            assert_eq!(pending.lock().len(), 3);
+
+            // A third independent interval must start without waiting for that metadata write.
+            (oversized, _, _, _) = oversized
+                .append(3, TestEntry::new(3, 0, 0), &[3; 16])
+                .await
+                .expect("Failed to append");
+            let (oversized, third) = oversized
+                .start_sync(3)
+                .await
+                .expect("metadata sync must not block a later data sync");
+            assert_eq!(pending.lock().len(), 5);
+
+            release_pending_syncs(&pending);
+            second.await.expect("Failed to complete second sync");
+            third.await.expect("Failed to complete third sync");
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_recovery_rejects_entry_with_torn_value_bytes() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
@@ -1900,6 +2007,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
+                metadata_partition: "test-metadata".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -1979,6 +2087,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
+                metadata_partition: "test-metadata".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -2497,6 +2606,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
+                metadata_partition: "test-metadata".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -3027,6 +3137,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
+                metadata_partition: "test-metadata".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -3321,6 +3432,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
+                metadata_partition: "test-metadata".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -4078,6 +4190,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test-index".into(),
                 value_partition: "test-values".into(),
+                metadata_partition: "test-metadata".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -4164,6 +4277,65 @@ mod tests {
             // Offset should be 0 (glob was truncated to 0)
             assert_eq!(new_offset, 0);
 
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_preserves_legacy_orphan_value_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            // Build the legacy state: an empty index section retained its old value bytes, then
+            // the pre-watermark implementation appended and durably synced a new first entry
+            // after that orphan prefix.
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to init");
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append old value");
+            oversized = oversized.sync(1).await.expect("Failed to sync old value");
+            oversized = lower_watermark_without_rewind(oversized, 1, 0)
+                .await
+                .expect("Failed to clear watermark");
+            drop(oversized);
+
+            let (blob, _) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open index");
+            blob.resize(0).await.expect("Failed to empty index");
+            blob.sync().await.expect("Failed to sync empty index");
+            drop(blob);
+
+            let mut oversized =
+                Oversized::<_, TestEntry, TestValue>::open(context.child("legacy"), cfg.clone())
+                    .await
+                    .expect("Failed to open legacy journal");
+            let (offset, size);
+            (oversized, _, offset, size) = oversized
+                .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                .await
+                .expect("Failed to append legacy entry");
+            assert!(offset > 0, "legacy entry must follow the orphan prefix");
+            oversized = persist_without_watermark(oversized, 1)
+                .await
+                .expect("Failed to persist legacy entry");
+            drop(oversized);
+
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context.child("recovered"), cfg, None)
+                    .await
+                    .expect("Failed to recover legacy journal");
+            assert_eq!(oversized.get(1, 0).await.expect("entry").id, 2);
+            assert_eq!(
+                oversized.get_value(1, offset, size).await.expect("value"),
+                [2; 16]
+            );
             oversized.destroy().await.expect("Failed to destroy");
         });
     }

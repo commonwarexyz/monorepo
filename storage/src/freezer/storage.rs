@@ -644,11 +644,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
         // A missing or empty checkpoint starts fresh: delete all existing freezer data
         let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
+        let metadata_partition = format!("{}-metadata", config.key_partition);
         if reset {
             for partition in [
                 &config.key_partition,
                 &config.value_partition,
                 &config.table_partition,
+                &metadata_partition,
             ] {
                 match context.remove(partition, None).await {
                     Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
@@ -664,6 +666,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
+            metadata_partition,
             index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
@@ -1490,6 +1493,17 @@ mod tests {
                 let (freezer, _) = freezer.sync().await.unwrap();
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
+
+            // A fresh start owns and removes the companion metadata partition too.
+            let metadata_partition = format!("{}-metadata", cfg.key_partition);
+            let (blob, _) = context
+                .open(&metadata_partition, b"left")
+                .await
+                .expect("Failed to open metadata");
+            blob.write_at_sync(0, vec![0xFF; 3])
+                .await
+                .expect("Failed to corrupt metadata");
+            drop(blob);
 
             let checkpoint = Checkpoint {
                 epoch: 0,
