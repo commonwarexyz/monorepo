@@ -445,18 +445,9 @@ where
         // the retained witness journal: a syncing client's target trails the source by its
         // fetch latency, and the client verifies the payload against its own target root.
         // [`witness::Store::prune`] bounds how far back this reaches.
-        target
-            .validate()
-            .map_err(compact_sync::ServeError::InvalidTarget)?;
-        let tip = self.witness.with(|w| {
-            if target.leaf_count > w.leaf_count() {
-                return Err(compact_sync::ServeError::StaleTarget {
-                    requested: target.clone(),
-                    current: w.target(),
-                });
-            }
-            Ok((target.leaf_count == w.leaf_count()).then(|| w.witness.clone()))
-        })?;
+        let tip = self
+            .witness
+            .with(|w| (target.leaf_count == w.leaf_count()).then(|| w.witness.clone()));
         let entry = match tip {
             Some(entry) => entry,
             // While an import is pending the journal still holds the previous partition's

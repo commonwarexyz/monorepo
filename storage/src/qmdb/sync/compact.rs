@@ -644,7 +644,6 @@ fn serve_decline_or_error<F: Family, D: Digest>(
 ) -> ServeError<F, D> {
     match err {
         qmdb::Error::HistoricalFloorPruned(_)
-        | qmdb::Error::OperationPruned(_)
         | qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
         | qmdb::Error::Merkle(crate::merkle::Error::ElementPruned(_)) => ServeError::StaleTarget {
             requested: requested.clone(),
@@ -946,8 +945,8 @@ macro_rules! impl_compact_resolver_immutable {
     };
 }
 
-// Resolver impls for compact keyless databases. These already persist a compact witness, so serving
-// is just a target check over the current witness rather than reconstructing anything from history.
+// Resolver impls for compact keyless databases. These persist a witness journal, so serving
+// reads a retained witness entry rather than reconstructing anything from history.
 macro_rules! impl_compact_resolver_compact_keyless {
     ($db:ident, $op:ident) => {
         impl<F, E, V, H, C, S> Resolver for Arc<$db<F, E, V, H, C, S>>

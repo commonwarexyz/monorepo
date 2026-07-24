@@ -583,11 +583,10 @@ where
 
     /// Prune both the Merkle structure and journal to the given location.
     ///
-    /// Callers must ensure `prune_loc` is justified by durable data: after any crash,
-    /// recovery must never need the pruned items to explain the retained ones (e.g. a
-    /// commit record declaring the boundary is already durable, or is made durable by
-    /// committing before pruning). Each component syncs before removing anything only
-    /// when its own barrier has not yet covered the boundary.
+    /// Callers must ensure `prune_loc` is justified by durable data (see
+    /// [`Mutable::prune`](crate::journal::contiguous::Mutable::prune)). Each component
+    /// syncs before removing anything only when its own barrier has not yet covered the
+    /// boundary.
     ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.

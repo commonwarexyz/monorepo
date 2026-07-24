@@ -362,9 +362,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// Implementations must never discard history a restart would need to
     /// recover unflushed state. Pruning waits on in-flight flushes unless the
-    /// pruned range is already durably justified. In QMDB, a durable commit at
-    /// or above the target justifies it, and the prune otherwise serializes
-    /// behind the journal's in-flight sync chain.
+    /// pruned range is already durably justified.
     fn prune(
         self,
         _target: &Self::SyncTarget,
@@ -480,12 +478,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Prune each database to the provided per-database targets.
     ///
-    /// The removals are durable and the databases remain recoverable, but
-    /// pruning is not a durability checkpoint: applied state whose deferred
-    /// flush has not landed stays non-durable. It never discards history a
-    /// restart would need to replay unflushed state: each [`ManagedDb::prune`]
-    /// waits on in-flight flushes unless the pruned range is already durably
-    /// justified.
+    /// Removals are durable but pruning is not a durability checkpoint (see
+    /// [`ManagedDb::prune`]).
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.

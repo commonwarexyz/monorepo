@@ -447,7 +447,7 @@ where
     /// [crate::merkle::Family::MAX_LEAVES].
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
-    /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`crate::journal::Error::ItemPruned`] if `start_loc` has been pruned.
     /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
     /// commit op, either because the caller passed a non-commit-boundary `op_count` or
     /// because pruning removed the commit that would have governed `op_count`.
