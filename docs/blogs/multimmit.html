@@ -390,6 +390,26 @@ O’Grady</a></div>
         class="math inline">f</span> faulty producers doing their worst,
         and at most waits one extra view for its slot in the total
         ordering behind a lagging faulty chain.</p>
+        <p>Spoiling is worth seeing concretely. A Raptr proposal is one
+        ordered sequence, and a vote is a single prefix length, so one
+        hole caps every vote behind it.</p>
+        <div id="multimmit-fig-spoiling" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader proposes an ordered sequence of six batches from six producers, A through F. Producer B withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
+          <noscript>This figure animates easy spoiling: a Raptr proposal is an ordered sequence of six batches from six producers, producer B withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
+        </div>
+        <div class="image-caption">
+        <p>Figure 5: Easy spoiling. A Raptr proposal is an ordered
+        sequence of batches, and each voter supports the longest prefix
+        whose data it holds. One withheld batch early in the sequence
+        caps almost every vote at the hole, so the proposal finalizes
+        prefix 1 and strands every available batch behind position 2.
+        The batches belong to six different producers, so producer B’s
+        hole strands the data of C through F. Stranded batches
+        eventually land through the certified slow path, which is
+        exactly the path prefix voting exists to avoid. Multimmit’s
+        votes (next figure) report per chain instead of per prefix, so
+        there is no position to poison: a withheld block costs its own
+        chain and nothing else.</p>
+        </div>
         <p>What does one round of votes actually pin down? Everything is
         read off the certificate by rank rules. An L-QC is any <span
         class="math inline">n-f</span> votes for the leader block, and
@@ -405,7 +425,7 @@ O’Grady</a></div>
           <noscript>This figure animates the certificate rules at n=11, f=2. Nine votes stack above one chain's proposed positions. Dropping the top 3f=6 votes yields the finalized tip (position 3), and dropping only the top f=2 yields the safe-to-extend tip (position 4). The finalized tips of all chains are then stamped into a single order by a fixed sweep, each chain's first new block before any chain's second.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 5: From votes to an ordering, drawn at <span
+        <p>Figure 6: From votes to an ordering, drawn at <span
         class="math inline">n=11</span>, <span
         class="math inline">f=2</span> so the discards are visible.
         Left: one chain of the proposal inside an L-QC, which is any
@@ -413,13 +433,15 @@ O’Grady</a></div>
         block. Each vote reports the highest proposed position it
         supports. Dropping the top <span class="math inline">3f=6</span>
         leaves the finalized tip (gold), backed by <span
-        class="math inline">3f+1=7</span> votes. Dropping only the top
-        <span class="math inline">f=2</span> leaves the safe-to-extend
-        tip (blue), which the next leader must build on, so a finalized
-        tip can never be orphaned. Right: every chain’s finalized tips
-        enter the log by a fixed sweep, each chain’s first new block
-        before any chain’s second (gray cells are the previous tips,
-        already ordered).</p>
+        class="math inline">3f+1=7</span> votes. The low votes belong to
+        voters missing this chain’s newest blocks, and they lower only
+        this chain’s tip. Dropping only the top <span
+        class="math inline">f=2</span> leaves the safe-to-extend tip
+        (blue), which the next leader must build on, so a finalized tip
+        can never be orphaned. Right: every chain’s finalized tips enter
+        the log by a fixed sweep, each chain’s first new block before
+        any chain’s second (gray cells are the previous tips, already
+        ordered).</p>
         </div>
         <p>The thresholds above are exact, and they carry guarantees
         that go beyond latency:</p>
@@ -459,7 +481,7 @@ O’Grady</a></div>
           <noscript>This figure animates DAG construction: four validators emit one vertex per round, and each new vertex draws reference edges back to n−f (here 3 of 4) vertices of the previous round.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 6: How a DAG mempool is built. Each round, every
+        <p>Figure 7: How a DAG mempool is built. Each round, every
         validator emits a vertex referencing <span
         class="math inline">n-f</span> vertices of the previous round.
         The references are the protocol: they carry availability and
@@ -477,7 +499,7 @@ O’Grady</a></div>
           <noscript>This figure animates DAG finality: anchor A enters in round r, is referenced by n−f round r+1 vertices, and commits only once round r+2 lands, ordering its causal history with it. Finality arrives two rounds of DAG growth after the vertex itself.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 7: Finality read out of the lattice, drawn with a
+        <p>Figure 8: Finality read out of the lattice, drawn with a
         Mysticeti-style three-round pattern. Anchor <span
         class="math inline">A</span> enters in round <span
         class="math inline">r</span>, gathers support (gold references)
@@ -503,7 +525,7 @@ O’Grady</a></div>
           <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. A vertex is unusable without its full ancestry, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and round r+3 starts a fetch round trip late.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 8: The fetch problem. Validator 3 withholds its
+        <p>Figure 9: The fetch problem. Validator 3 withholds its
         round-<span class="math inline">(r+1)</span> vertex, disclosing
         it only to validator 2, whose next vertex references it (red
         edge). A vertex is unusable until its full ancestry is held, so
@@ -525,7 +547,7 @@ O’Grady</a></div>
           <noscript>This figure animates block production over 8δ. The DAG producer waits out a 2δ certificate round trip between consecutive vertices (4 vertices total). The Multimmit producer keeps emitting while certificates form in the background (13 blocks in the same window), constrained only by its pipelining window.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 9: One producer, identical <span
+        <p>Figure 10: One producer, identical <span
         class="math inline">2\delta</span> certificate round trips. The
         DAG producer’s next vertex waits for the previous round’s
         certificates, drawn charitably as if every other producer’s

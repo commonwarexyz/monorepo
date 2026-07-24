@@ -196,6 +196,49 @@ const FIGURES = {
     }],
   },
 
+  'multimmit-fig-spoiling': {
+    height: 464,
+    rows: [],
+    rowTop: 0,
+    rowGap: 0,
+    noAxis: true,
+    axis: { min: 0, max: 7, origin: null },
+    variants: [{
+      tag: 'one withheld batch spoils the whole proposal',
+      end: 6.5,
+      phases: [],
+      events: [
+        { k: 'note', static: true, t: 0, x: 512, y: 76, lines: ['Raptr: each vote supports the longest prefix it holds'], fill: 'black', size: 16, weight: 700 },
+        { k: 'note', static: true, t: 0, x: 512, y: 100, lines: ['producer B withholds batch 2'], size: 13 },
+        { k: 'cell', static: true, t: 0, x: 347, y: 372, w: 58, h: 58, label: '1', fill: '#e9f5ec', stroke: GREEN, changes: [{ t: 4.2, fill: GOLD_FILL, stroke: GOLD, strokeWidth: 2.5 }] },
+        { k: 'cell', static: true, t: 0, x: 413, y: 372, w: 58, h: 58, label: '2', dash: true, labelFill: GRAY },
+        { k: 'cell', static: true, t: 0, x: 479, y: 372, w: 58, h: 58, label: '3', fill: '#e9f5ec', stroke: GREEN, changes: [{ t: 5.2, fill: '#f0f0f0', stroke: '#c4c4c4' }] },
+        { k: 'cell', static: true, t: 0, x: 545, y: 372, w: 58, h: 58, label: '4', fill: '#e9f5ec', stroke: GREEN, changes: [{ t: 5.2, fill: '#f0f0f0', stroke: '#c4c4c4' }] },
+        { k: 'cell', static: true, t: 0, x: 611, y: 372, w: 58, h: 58, label: '5', fill: '#e9f5ec', stroke: GREEN, changes: [{ t: 5.2, fill: '#f0f0f0', stroke: '#c4c4c4' }] },
+        { k: 'cell', static: true, t: 0, x: 677, y: 372, w: 58, h: 58, label: '6', fill: '#e9f5ec', stroke: GREEN, changes: [{ t: 5.2, fill: '#f0f0f0', stroke: '#c4c4c4' }] },
+        { k: 'note', static: true, t: 0, x: 347, y: 420, lines: ['A'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 413, y: 420, lines: ['B'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 479, y: 420, lines: ['C'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 545, y: 420, lines: ['D'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 611, y: 420, lines: ['E'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 677, y: 420, lines: ['F'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 512, y: 444, lines: ["one proposal, six producers' batches"], size: 13 },
+        { k: 'dot', t: 0.8, x: 347, y: 330 },
+        { k: 'dot', t: 1.1, x: 347, y: 310 },
+        { k: 'dot', t: 1.4, x: 347, y: 290 },
+        { k: 'dot', t: 1.7, x: 677, y: 330 },
+        { k: 'dot', t: 2.0, x: 347, y: 270 },
+        { k: 'dot', t: 2.3, x: 347, y: 250 },
+        { k: 'dot', t: 2.6, x: 347, y: 230 },
+        { k: 'dot', t: 2.9, x: 347, y: 210 },
+        { k: 'dot', t: 3.2, x: 347, y: 190 },
+        { k: 'note', t: 4.2, x: 512, y: 150, lines: ['finalized: the shortest quorum prefix'], fill: GOLD, size: 15, weight: 700 },
+        { k: 'note', t: 5.2, x: 540, y: 174, lines: ['batches 3-6: available, yet stranded'], size: 14 },
+      ],
+      token: [],
+    }],
+  },
+
   'multimmit-fig-certificate': {
     height: 464,
     rows: [],
@@ -204,6 +247,7 @@ const FIGURES = {
     noAxis: true,
     axis: { min: 0, max: 11, origin: null },
     variants: [{
+      tag: 'per-chain votes: no prefix to poison',
       end: 10.8,
       phases: [],
       events: [
@@ -788,6 +832,7 @@ function buildFigure(mount, cfg) {
       const rect = svgEl('rect', {
         x: ev.x - ev.w / 2, y: ev.y - ev.h / 2, width: ev.w, height: ev.h,
         fill: ev.fill ?? 'white', stroke: ev.stroke ?? '#9a9a9a', 'stroke-width': 1.4,
+        'stroke-dasharray': ev.dash ? '5 4' : 'none',
       });
       group.appendChild(rect);
       if (ev.label) {

@@ -135,6 +135,19 @@ Figure 4: Transaction block $b$ misses the leader block, crossing it on the wire
 
 Read the User row of either figure: submit to an API node, the API node's next block carries the transaction to every validator, and one round of votes finalizes it. There is no separate journey to the leader because there is nothing the leader must gather first. Averaged over the wait for the next vote event, a block disseminated at time $t$ is finalized by $t+3\delta$, and by $t+2\delta$ when the timing is favorable. Two message delays is optimal. Reported from the leader's proposal instead, the convention most consensus papers use, Multimmit's figure would simply read $2\delta$: the mechanisms above act on the leg that convention never measures. For comparison, Raptr finalizes a batch disseminated at time $t$ at $t+5\delta$ in expectation with *no* faults, degrading to $t+5.5\delta$ (and spoilable) once faulty producers show up. Multimmit's figures do not degrade: an honest chain's block still finalizes by $t+3\delta$ in expectation with $f$ faulty producers doing their worst, and at most waits one extra view for its slot in the total ordering behind a lagging faulty chain.
 
+Spoiling is worth seeing concretely. A Raptr proposal is one ordered sequence, and a vote is a single prefix length, so one hole caps every vote behind it.
+
+```{=html}
+<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader proposes an ordered sequence of six batches from six producers, A through F. Producer B withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
+  <noscript>This figure animates easy spoiling: a Raptr proposal is an ordered sequence of six batches from six producers, producer B withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 5: Easy spoiling. A Raptr proposal is an ordered sequence of batches, and each voter supports the longest prefix whose data it holds. One withheld batch early in the sequence caps almost every vote at the hole, so the proposal finalizes prefix 1 and strands every available batch behind position 2. The batches belong to six different producers, so producer B's hole strands the data of C through F. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (next figure) report per chain instead of per prefix, so there is no position to poison: a withheld block costs its own chain and nothing else.
+:::
+
+
 What does one round of votes actually pin down? Everything is read off the certificate by rank rules. An L-QC is any $n-f$ votes for the leader block, and each vote already reports, per chain, the highest proposed position it supports. Sorting a chain's reported positions and discarding the top $3f$ yields its finalized tip, discarding only the top $f$ yields the tip the next leader must extend, and quorum intersection keeps the second at or above the first. The finalized tips then enter the log in a deterministic sweep.
 
 ```{=html}
@@ -144,7 +157,7 @@ What does one round of votes actually pin down? Everything is read off the certi
 ```
 
 ::: {.image-caption}
-Figure 5: From votes to an ordering, drawn at $n=11$, $f=2$ so the discards are visible. Left: one chain of the proposal inside an L-QC, which is any $n-f=9$ votes for the leader block. Each vote reports the highest proposed position it supports. Dropping the top $3f=6$ leaves the finalized tip (gold), backed by $3f+1=7$ votes. Dropping only the top $f=2$ leaves the safe-to-extend tip (blue), which the next leader must build on, so a finalized tip can never be orphaned. Right: every chain's finalized tips enter the log by a fixed sweep, each chain's first new block before any chain's second (gray cells are the previous tips, already ordered).
+Figure 6: From votes to an ordering, drawn at $n=11$, $f=2$ so the discards are visible. Left: one chain of the proposal inside an L-QC, which is any $n-f=9$ votes for the leader block. Each vote reports the highest proposed position it supports. Dropping the top $3f=6$ leaves the finalized tip (gold), backed by $3f+1=7$ votes. The low votes belong to voters missing this chain's newest blocks, and they lower only this chain's tip. Dropping only the top $f=2$ leaves the safe-to-extend tip (blue), which the next leader must build on, so a finalized tip can never be orphaned. Right: every chain's finalized tips enter the log by a fixed sweep, each chain's first new block before any chain's second (gray cells are the previous tips, already ordered).
 :::
 
 
@@ -167,7 +180,7 @@ DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](ht
 ```
 
 ::: {.image-caption}
-Figure 6: How a DAG mempool is built. Each round, every validator emits a vertex referencing $n-f$ vertices of the previous round. The references are the protocol: they carry availability and voting information, so the ordering logic can read finality out of the lattice.
+Figure 7: How a DAG mempool is built. Each round, every validator emits a vertex referencing $n-f$ vertices of the previous round. The references are the protocol: they carry availability and voting information, so the ordering logic can read finality out of the lattice.
 :::
 
 Reading finality out of the lattice takes more rounds still. A reference is not finality on its own: the ordering logic designates periodic anchor vertices, and an anchor commits only once the following rounds' reference pattern proves enough of the network built on top of it. Committing the anchor then orders every vertex in its causal history, and everything else waits for a later anchor.
@@ -179,7 +192,7 @@ Reading finality out of the lattice takes more rounds still. A reference is not 
 ```
 
 ::: {.image-caption}
-Figure 7: Finality read out of the lattice, drawn with a Mysticeti-style three-round pattern. Anchor $A$ enters in round $r$, gathers support (gold references) in $r+1$, and commits once the $r+2$ pattern lands, ordering its causal history (gold) with it. Every other vertex waits for a later anchor, and in a certified DAG each of these rounds is itself a certificate round trip.
+Figure 8: Finality read out of the lattice, drawn with a Mysticeti-style three-round pattern. Anchor $A$ enters in round $r$, gathers support (gold references) in $r+1$, and commits once the $r+2$ pattern lands, ordering its causal history (gold) with it. Every other vertex waits for a later anchor, and in a certified DAG each of these rounds is itself a certificate round trip.
 :::
 
 The coupling cuts both ways. A vertex may only enter round $r+1$ once $n-f$ round-$r$ vertices have arrived, so the whole network produces in lockstep, and nobody's next block can outrun the slowest quorum step of the last one. In certified DAGs like Narwhal, that step is a certificate round trip between every pair of consecutive vertices. In uncertified DAGs like Mysticeti, the round trip goes away and the fetch problem comes back: every vertex is a dependency of the vertices that reference it, so a validator missing a vertex must fetch it before processing anything built on top.
@@ -191,7 +204,7 @@ The coupling cuts both ways. A vertex may only enter round $r+1$ once $n-f$ roun
 ```
 
 ::: {.image-caption}
-Figure 8: The fetch problem. Validator 3 withholds its round-$(r+1)$ vertex, disclosing it only to validator 2, whose next vertex references it (red edge). A vertex is unusable until its full ancestry is held, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and without it they hold only two of the $n-f=3$ round-$(r+2)$ vertices that round $r+3$ requires. Every lane's round $r+3$ starts late. At larger scale the DAG routes around one hole, but every hole still puts a fetch on someone's critical path, and at real block rates sustained loss keeps holes in nearly every round (the measured blowup above). In Multimmit a reference never obligates a download: voters report how far they can support each chain and vote on schedule, so a withheld block costs its own chain's tally and nobody else's.
+Figure 9: The fetch problem. Validator 3 withholds its round-$(r+1)$ vertex, disclosing it only to validator 2, whose next vertex references it (red edge). A vertex is unusable until its full ancestry is held, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and without it they hold only two of the $n-f=3$ round-$(r+2)$ vertices that round $r+3$ requires. Every lane's round $r+3$ starts late. At larger scale the DAG routes around one hole, but every hole still puts a fetch on someone's critical path, and at real block rates sustained loss keeps holes in nearly every round (the measured blowup above). In Multimmit a reference never obligates a download: voters report how far they can support each chain and vote on schedule, so a withheld block costs its own chain's tally and nobody else's.
 :::
 
 ```{=html}
@@ -201,7 +214,7 @@ Figure 8: The fetch problem. Validator 3 withholds its round-$(r+1)$ vertex, dis
 ```
 
 ::: {.image-caption}
-Figure 9: One producer, identical $2\delta$ certificate round trips. The DAG producer's next vertex waits for the previous round's certificates, drawn charitably as if every other producer's certificate arrives with its own votes (spreading them costs a certified DAG a third delay per round). The Multimmit producer waits only on its own chain and runs ahead of certification, up to $d$ uncertified blocks in flight (drawn with production paced by load, filling the $d=3$ window).
+Figure 10: One producer, identical $2\delta$ certificate round trips. The DAG producer's next vertex waits for the previous round's certificates, drawn charitably as if every other producer's certificate arrives with its own votes (spreading them costs a certified DAG a third delay per round). The Multimmit producer waits only on its own chain and runs ahead of certification, up to $d$ uncertified blocks in flight (drawn with production paced by load, filling the $d=3$ window).
 :::
 
 Multimmit's chains carry no cross-producer references, so there is nothing for a producer to wait on. Each producer extends its own chain as transactions arrive and may run up to $d$ blocks ahead of its last certified block, with certificates forming behind it. Under sustained load a chain grows up to $d$ blocks per certificate round trip rather than one, and consensus never waits on certification either way: the leader checkpoints whatever has arrived, and the voters extend past whatever the leader missed.
