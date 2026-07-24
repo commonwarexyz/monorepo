@@ -150,8 +150,8 @@ pub struct Trapdoor<E: Pairing> {
 ///
 /// Any block commitment that the verifier can recompute from public state
 /// (e.g. an aggregate of ledger commitments) need not be transmitted: the
-/// verifier reassembles the proof with the recomputed point. The transmitted
-/// material is then `2 G1 + 1 F` plus one `G1` per *fresh* block commitment.
+/// verifier rebuilds it from the [`Claim`]. The transmitted material is then
+/// `2 G1 + 1 F` plus one `G1` per *fresh* block commitment.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Proof<E: Pairing> {
     /// Per-block committed-input commitments `C_ci_j` (hiding Pedersen vector
@@ -163,6 +163,24 @@ pub struct Proof<E: Pairing> {
     pub u_g: E::G1Affine,
     /// Masked A-side evaluation `v_a = z_A(r) - x_A(r)`.
     pub v_a: E::ScalarField,
+}
+
+/// One batched-range verification claim.
+///
+/// The block-1 aggregate commitment is never transmitted or serialized: the
+/// Fiat-Shamir challenge binds `(theta, c_hat, ledger, T)`, and the verifier
+/// derives the aggregate `ledger[0] + theta ledger[1]` only where the pairing
+/// needs it. Batch verification folds the aggregation into its accumulation
+/// MSM, so per-claim scalar multiplications never materialize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claim<E: Pairing> {
+    /// The transmitted proof body `(c_hat, T, U, v_a)`.
+    pub proof: crate::zkpari::range::RangeProof<E>,
+    /// The aggregation challenge, derived from the ledger commitments.
+    pub theta: E::ScalarField,
+    /// The ledger commitments whose `theta`-combination forms the block-1
+    /// commitment. The second entry may be the identity (zero-padding).
+    pub ledger: [E::G1Affine; 2],
 }
 
 /// Opening (blinding) randomness `rho_ci_j` of a committed-input commitment

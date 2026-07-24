@@ -27,46 +27,52 @@ use ark_ff::{Field, Zero};
 use ark_std::{rand::RngCore, UniformRand};
 
 impl<E: Pairing> ZkPari<E> {
-    /// Simulates an accepting proof for the committed-input commitments
-    /// `c_ci` (one per block) under `public_input`, using the setup
-    /// `trapdoor`.
+    /// Simulates an accepting claim for the fresh commitment `c_hat` and the
+    /// ledger commitments `ledger` under the aggregation challenge `theta`,
+    /// using the setup `trapdoor`.
     ///
-    /// The returned [`Proof`] verifies against `vk` with these exact `c_ci`.
-    /// It carries no witness and proves no statement about the committed
-    /// values; see the module documentation.
+    /// The returned [`Proof`] verifies (as a claim) against `vk` with these
+    /// exact commitments. It carries no witness and proves no statement about
+    /// the committed values; see the module documentation.
     ///
     /// # Panics
     ///
-    /// Panics if `c_ci.len()` does not match the number of committed-input
-    /// blocks, or in the astronomically unlikely event that the Fiat-Shamir
-    /// challenge equals the trapdoor `tau`.
+    /// Panics if the trapdoor does not have the two-block payments shape, or
+    /// in the astronomically unlikely event that the Fiat-Shamir challenge
+    /// equals the trapdoor `tau`.
     pub fn simulate(
         trapdoor: &Trapdoor<E>,
         vk: &VerifyingKey<E>,
-        c_ci: &[E::G1Affine],
-        public_input: &[E::ScalarField],
+        c_hat: E::G1Affine,
+        theta: E::ScalarField,
+        ledger: &[E::G1Affine; 2],
         rng: &mut impl RngCore,
     ) -> Proof<E> {
-        Self::simulate_inner(trapdoor, vk, c_ci, public_input, rng)
+        Self::simulate_inner(trapdoor, vk, c_hat, theta, ledger, rng)
     }
 
     fn simulate_inner(
         trapdoor: &Trapdoor<E>,
         vk: &VerifyingKey<E>,
-        c_ci: &[E::G1Affine],
-        public_input: &[E::ScalarField],
+        c_hat: E::G1Affine,
+        theta: E::ScalarField,
+        ledger: &[E::G1Affine; 2],
         rng: &mut impl RngCore,
     ) -> Proof<E> {
         assert_eq!(
-            c_ci.len(),
             trapdoor.deltas.len(),
-            "one committed-input commitment per block"
+            2,
+            "two committed-input blocks in the payments shape"
         );
         assert_eq!(
-            public_input.len(),
-            vk.succinct_index.instance_len - 1,
-            "public input length must match the instance"
+            vk.succinct_index.instance_len,
+            2,
+            "instance is [1, theta] in the payments shape"
         );
+
+        let com_theta: E::G1Affine = (ledger[0] + ledger[1] * theta).into_affine();
+        let c_ci = [c_hat, com_theta];
+        let public_input = [theta];
 
         let delta_w_inv = trapdoor
             .delta_w
@@ -74,7 +80,7 @@ impl<E: Pairing> ZkPari<E> {
             .expect("delta_w is a nonzero trapdoor scalar");
 
         // Instance contributions at tau: x_hat_A(tau), x_hat_B(tau), over the
-        // public assignment x = (1, public_input...).
+        // public assignment x = (1, theta).
         let px = core::iter::once(E::ScalarField::ONE).chain(public_input.iter().copied());
         let (x_hat_a_tau, x_hat_b_tau) = px.enumerate().fold(
             (E::ScalarField::zero(), E::ScalarField::zero()),
@@ -101,16 +107,18 @@ impl<E: Pairing> ZkPari<E> {
         }
         let t_g = t_proj.into_affine();
 
-        // Challenge: identical Fiat-Shamir derivation to the verifier. T does
+        // Challenge: identical Fiat-Shamir derivation to the verifier — it
+        // binds the ledger commitments, not the derived aggregate. T does
         // not depend on r, so deriving r here is consistent.
-        let r = compute_chall::<E>(vk, public_input, c_ci, &t_g);
+        let transcript_comms = [c_hat, ledger[0], ledger[1]];
+        let r = compute_chall::<E>(vk, &public_input, &transcript_comms, &t_g);
         assert_ne!(
             r, trapdoor.tau,
             "Fiat-Shamir challenge collided with the trapdoor tau"
         );
 
         // v_R = (v_a + x_A(r))^2 - x_B(r), with x_B(r) = 0 after outlining.
-        let x_a_r = Self::instance_eval_a_at(vk, public_input, r);
+        let x_a_r = Self::instance_eval_a_at(vk, &public_input, r);
         let v_r = (v_a + x_a_r).square();
 
         // Solve the verification equation for the unique accepting U:

@@ -60,6 +60,47 @@ pub(crate) fn compute_chall_from_transcript<E: Pairing>(
     transcript.get_and_append_challenge("r".as_bytes()).unwrap()
 }
 
+/// Domain separator for the aggregation-challenge transcript.
+const THETA_DOMAIN: &[u8] = b"ZK-Pari-theta";
+
+/// Compute the aggregation challenge `theta` binding the verifying key and
+/// the ledger commitments entering one batched range proof, in slot order.
+///
+/// `theta` must be derived *after* the ledger commitments are fixed and
+/// *before* proving, on both the prover and verifier side.
+pub(crate) fn compute_theta<E: Pairing>(
+    vk: &VerifyingKey<E>,
+    commitments: &[E::G1Affine],
+) -> E::ScalarField {
+    let mut transcript = IOPTranscript::<E::ScalarField>::new(THETA_DOMAIN);
+    let _ = transcript.append_serializable_element(b"vk", vk);
+    compute_theta_from_transcript::<E>(&transcript, commitments)
+}
+
+/// Pre-seed a theta transcript with the VK. Clone the result for each claim
+/// to avoid re-serializing the VK N times during batch verification.
+pub(crate) fn seed_theta_transcript_with_vk<E: Pairing>(
+    vk: &VerifyingKey<E>,
+) -> IOPTranscript<E::ScalarField> {
+    let mut transcript = IOPTranscript::<E::ScalarField>::new(THETA_DOMAIN);
+    let _ = transcript.append_serializable_element(b"vk", vk);
+    transcript
+}
+
+/// Compute `theta` from a pre-seeded transcript (already contains the VK).
+pub(crate) fn compute_theta_from_transcript<E: Pairing>(
+    base_transcript: &IOPTranscript<E::ScalarField>,
+    commitments: &[E::G1Affine],
+) -> E::ScalarField {
+    let mut transcript = base_transcript.clone();
+    for commitment in commitments {
+        let _ = transcript.append_serializable_element(b"ledger_comm", commitment);
+    }
+    transcript
+        .get_and_append_challenge("theta".as_bytes())
+        .unwrap()
+}
+
 fn append_input_and_comms<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
     public_input: &[E::ScalarField],

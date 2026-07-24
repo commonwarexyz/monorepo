@@ -1,6 +1,6 @@
 use crate::zkpari::{
     data_structures::{ProvingKey, SuccinctIndex, Trapdoor, VerifyingKey},
-    range::{range_relation, RangeRelation},
+    range::{batched_range_relation, RangeRelation},
     ZkPari,
 };
 use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing};
@@ -29,7 +29,7 @@ impl<E: Pairing> ZkPari<E> {
     where
         E::ScalarField: Field,
     {
-        let relation = range_relation::<E::ScalarField>();
+        let relation = batched_range_relation::<E::ScalarField>();
         let instance_len = relation.instance_len;
         let num_constraints = relation.num_constraints;
         let num_witness = relation.num_witness;

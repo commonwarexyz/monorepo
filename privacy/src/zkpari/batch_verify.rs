@@ -1,5 +1,5 @@
 use crate::zkpari::{
-    data_structures::{Proof, VerifyingKey},
+    data_structures::{Claim, VerifyingKey},
     utils::{batch_inversion_and_mul, msm_bigint_wnaf},
     ZkPari,
 };
@@ -13,7 +13,8 @@ use ark_std::{
 use commonware_parallel::Strategy;
 
 struct BatchAccumulator<E: Pairing> {
-    c_tildes: Vec<E::G1>,
+    c_hat_tilde: E::G1,
+    ledger_tilde: E::G1,
     t_tilde: E::G1,
     u_tilde: E::G1,
     v_tilde: E::G1,
@@ -22,9 +23,10 @@ struct BatchAccumulator<E: Pairing> {
 }
 
 impl<E: Pairing> BatchAccumulator<E> {
-    fn zero(num_blocks: usize) -> Self {
+    fn zero() -> Self {
         Self {
-            c_tildes: vec![E::G1::zero(); num_blocks],
+            c_hat_tilde: E::G1::zero(),
+            ledger_tilde: E::G1::zero(),
             t_tilde: E::G1::zero(),
             u_tilde: E::G1::zero(),
             v_tilde: E::G1::zero(),
@@ -34,9 +36,8 @@ impl<E: Pairing> BatchAccumulator<E> {
     }
 
     fn combine(&mut self, other: Self) {
-        for (lhs, rhs) in self.c_tildes.iter_mut().zip(other.c_tildes) {
-            *lhs += rhs;
-        }
+        self.c_hat_tilde += other.c_hat_tilde;
+        self.ledger_tilde += other.ledger_tilde;
         self.t_tilde += other.t_tilde;
         self.u_tilde += other.u_tilde;
         self.v_tilde += other.v_tilde;
@@ -46,30 +47,29 @@ impl<E: Pairing> BatchAccumulator<E> {
 }
 
 impl<E: Pairing> ZkPari<E> {
-    /// Batch verification of N proofs using a random linear combination.
+    /// Batch verification of N claims using a random linear combination.
     ///
-    /// Reduces N independent `(3 + #blocks)`-pairing checks to one pairing
-    /// product by sampling random 128-bit challenges and accumulating the
-    /// commitments, openings, and scalar terms.
-    pub fn batch_verify(
-        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
-        vk: &VerifyingKey<E>,
-        rng: &mut impl RngCore,
-    ) -> bool
+    /// Reduces N independent 5-pairing checks to one pairing product by
+    /// sampling random 128-bit challenges and accumulating the commitments,
+    /// openings, and scalar terms. The block-1 aggregation
+    /// `ledger[0] + theta ledger[1]` is folded into the accumulation MSM
+    /// (scalars `rho` and `rho * theta`), so no per-claim aggregate point is
+    /// ever materialized.
+    pub fn batch_verify(claims: &[Claim<E>], vk: &VerifyingKey<E>, rng: &mut impl RngCore) -> bool
     where
         E::G1Affine: Neg<Output = E::G1Affine>,
     {
-        Self::batch_verify_inner(proofs_and_inputs, vk, rng)
+        Self::batch_verify_inner(claims, vk, rng)
     }
 
     /// Batch verification using a caller-provided parallel execution strategy.
     ///
-    /// The proof list is split into roughly equal contiguous chunks based on
+    /// The claim list is split into roughly equal contiguous chunks based on
     /// the strategy's manual parallelism. Each worker accumulates one chunk, the
     /// partial accumulators are reduced, and the final pairing is performed once.
     pub fn batch_verify_with_strategy(
         strategy: &impl Strategy,
-        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
+        claims: &[Claim<E>],
         vk: &VerifyingKey<E>,
         rng: &mut impl RngCore,
     ) -> bool
@@ -80,14 +80,14 @@ impl<E: Pairing> ZkPari<E> {
         E::G2Affine: Send + Sync,
         E::G2Prepared: Send + Sync,
     {
-        let n = proofs_and_inputs.len();
+        let n = claims.len();
         if n <= 1 {
-            return Self::batch_verify_inner(proofs_and_inputs, vk, rng);
+            return Self::batch_verify_inner(claims, vk, rng);
         }
 
         let chunks = strategy.manual().parallelism().max(1).min(n);
         if chunks == 1 {
-            return Self::batch_verify_inner(proofs_and_inputs, vk, rng);
+            return Self::batch_verify_inner(claims, vk, rng);
         }
 
         let base = n / chunks;
@@ -105,11 +105,10 @@ impl<E: Pairing> ZkPari<E> {
 
         let accumulators = strategy.map_collect_vec(ranges, |(start, end, seed)| {
             let mut rng = StdRng::from_seed(seed);
-            Self::batch_accumulate(&proofs_and_inputs[start..end], vk, &mut rng)
+            Self::batch_accumulate(&claims[start..end], vk, &mut rng)
         });
 
-        let num_blocks = vk.delta_h_prep.len();
-        let mut accumulator = BatchAccumulator::zero(num_blocks);
+        let mut accumulator = BatchAccumulator::zero();
         for partial in accumulators {
             let Some(partial) = partial else {
                 return false;
@@ -121,35 +120,31 @@ impl<E: Pairing> ZkPari<E> {
     }
 
     fn batch_accumulate(
-        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
+        claims: &[Claim<E>],
         vk: &VerifyingKey<E>,
         rng: &mut impl RngCore,
     ) -> Option<BatchAccumulator<E>>
     where
         E::G1Affine: Neg<Output = E::G1Affine>,
     {
-        let n = proofs_and_inputs.len();
-        let num_blocks = vk.delta_h_prep.len();
-        let instance_len = vk.succinct_index.instance_len;
-        if proofs_and_inputs.iter().any(|(proof, public_input)| {
-            proof.c_ci.len() != num_blocks || public_input.len() != instance_len - 1
-        }) {
+        let n = claims.len();
+        if vk.delta_h_prep.len() != 2 || vk.succinct_index.instance_len != 2 {
             return None;
         }
         if n == 0 {
-            return Some(BatchAccumulator::zero(num_blocks));
+            return Some(BatchAccumulator::zero());
         }
 
         let challenges: Vec<E::ScalarField> = {
             let base_transcript = crate::zkpari::utils::seed_transcript_with_vk::<E>(vk);
-            proofs_and_inputs
+            claims
                 .iter()
-                .map(|(proof, public_input)| {
+                .map(|claim| {
                     crate::zkpari::utils::compute_chall_from_transcript::<E>(
                         &base_transcript,
-                        public_input,
-                        &proof.c_ci,
-                        &proof.t_g,
+                        &[claim.theta],
+                        &[claim.proof.c_hat, claim.ledger[0], claim.ledger[1]],
+                        &claim.proof.t_g,
                     )
                 })
                 .collect()
@@ -165,14 +160,12 @@ impl<E: Pairing> ZkPari<E> {
         );
 
         let mut v_rs = Vec::with_capacity(n);
-        for ((proof, public_input), lagrange_coeffs) in
-            proofs_and_inputs.iter().zip(all_lagrange_coeffs)
-        {
+        for (claim, lagrange_coeffs) in claims.iter().zip(all_lagrange_coeffs) {
             let x_a = lagrange_coeffs
                 .into_iter()
-                .zip(core::iter::once(E::ScalarField::ONE).chain(public_input.iter().copied()))
+                .zip([E::ScalarField::ONE, claim.theta])
                 .fold(E::ScalarField::zero(), |acc, (l, x)| acc + l * x);
-            v_rs.push((x_a + proof.v_a).square());
+            v_rs.push((x_a + claim.proof.v_a).square());
         }
 
         let rhos: Vec<E::ScalarField> = (0..n)
@@ -183,24 +176,23 @@ impl<E: Pairing> ZkPari<E> {
             })
             .collect();
 
-        let t_bases: Vec<E::G1Affine> = proofs_and_inputs
-            .iter()
-            .map(|(proof, _)| proof.t_g)
-            .collect();
-        let u_bases: Vec<E::G1Affine> = proofs_and_inputs
-            .iter()
-            .map(|(proof, _)| proof.u_g)
-            .collect();
+        let c_hat_bases: Vec<E::G1Affine> = claims.iter().map(|claim| claim.proof.c_hat).collect();
+        let t_bases: Vec<E::G1Affine> = claims.iter().map(|claim| claim.proof.t_g).collect();
+        let u_bases: Vec<E::G1Affine> = claims.iter().map(|claim| claim.proof.u_g).collect();
 
-        let c_tildes = (0..num_blocks)
-            .map(|block| {
-                let c_bases: Vec<E::G1Affine> = proofs_and_inputs
-                    .iter()
-                    .map(|(proof, _)| proof.c_ci[block])
-                    .collect();
-                <E::G1 as VariableBaseMSM>::msm_unchecked(&c_bases, &rhos)
-            })
-            .collect();
+        // Fold the aggregation into the RLC: sum_i rho_i com_theta_i
+        //   = sum_i rho_i ledger_i[0] + sum_i (rho_i theta_i) ledger_i[1].
+        let mut ledger_bases = Vec::with_capacity(2 * n);
+        let mut ledger_scalars = Vec::with_capacity(2 * n);
+        for (claim, rho) in claims.iter().zip(&rhos) {
+            ledger_bases.push(claim.ledger[0]);
+            ledger_scalars.push(*rho);
+            ledger_bases.push(claim.ledger[1]);
+            ledger_scalars.push(*rho * claim.theta);
+        }
+
+        let c_hat_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&c_hat_bases, &rhos);
+        let ledger_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&ledger_bases, &ledger_scalars);
         let t_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&t_bases, &rhos);
         let u_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&u_bases, &rhos);
 
@@ -213,9 +205,9 @@ impl<E: Pairing> ZkPari<E> {
 
         let v_a_tilde = rhos
             .iter()
-            .zip(proofs_and_inputs.iter())
-            .fold(E::ScalarField::zero(), |acc, (rho, (proof, _))| {
-                acc + *rho * proof.v_a
+            .zip(claims.iter())
+            .fold(E::ScalarField::zero(), |acc, (rho, claim)| {
+                acc + *rho * claim.proof.v_a
             });
         let v_r_tilde = rhos
             .iter()
@@ -223,7 +215,8 @@ impl<E: Pairing> ZkPari<E> {
             .fold(E::ScalarField::zero(), |acc, (rho, v_r)| acc + *rho * *v_r);
 
         Some(BatchAccumulator {
-            c_tildes,
+            c_hat_tilde,
+            ledger_tilde,
             t_tilde,
             u_tilde,
             v_tilde,
@@ -247,14 +240,11 @@ impl<E: Pairing> ZkPari<E> {
         )
         .into();
 
-        let mut g1_terms = accumulator
-            .c_tildes
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<E::G1Affine>>();
+        let c_hat_tilde: E::G1Affine = accumulator.c_hat_tilde.into();
+        let ledger_tilde: E::G1Affine = accumulator.ledger_tilde.into();
         let t_tilde: E::G1Affine = accumulator.t_tilde.into();
         let u_tilde: E::G1Affine = accumulator.u_tilde.into();
-        g1_terms.extend([t_tilde, -u_tilde, last_left]);
+        let g1_terms = [c_hat_tilde, ledger_tilde, t_tilde, -u_tilde, last_left];
         let mut g2_terms = vk.delta_h_prep.clone();
         g2_terms.extend([
             vk.delta_w_h_prep.clone(),
@@ -266,30 +256,25 @@ impl<E: Pairing> ZkPari<E> {
     }
 
     fn batch_verify_inner(
-        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
+        claims: &[Claim<E>],
         vk: &VerifyingKey<E>,
         rng: &mut impl RngCore,
     ) -> bool
     where
         E::G1Affine: Neg<Output = E::G1Affine>,
     {
-        let n = proofs_and_inputs.len();
+        let n = claims.len();
         if n == 0 {
             return true;
         }
-
-        let num_blocks = vk.delta_h_prep.len();
-        let instance_len = vk.succinct_index.instance_len;
-        if proofs_and_inputs.iter().any(|(proof, public_input)| {
-            proof.c_ci.len() != num_blocks || public_input.len() != instance_len - 1
-        }) {
+        if vk.delta_h_prep.len() != 2 || vk.succinct_index.instance_len != 2 {
             return false;
         }
         if n == 1 {
-            return Self::verify(&proofs_and_inputs[0].0, vk, &proofs_and_inputs[0].1);
+            return Self::verify(&claims[0], vk);
         }
 
-        let Some(accumulator) = Self::batch_accumulate(proofs_and_inputs, vk, rng) else {
+        let Some(accumulator) = Self::batch_accumulate(claims, vk, rng) else {
             return false;
         };
         Self::finish_batch_accumulation(accumulator, vk)

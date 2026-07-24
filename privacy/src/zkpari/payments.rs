@@ -1,21 +1,35 @@
 //! Implementation of the private payments backend API using ZK-Pari.
 //!
 //! This module supplies the concrete commitment and proof machinery for the
-//! [`crate::payments::Backend`] trait.
+//! [`crate::payments::Backend`] trait, using the batched-transfer
+//! construction: one proof simultaneously range-checks the transferred
+//! amount and the sender's remaining balance.
+//!
+//! Ledger commitments live in the basis of the aggregate committed-input
+//! slot (block 1 of the batched range relation). A proof commits the claimed
+//! value pair `(v_1, v_2)` in a fresh block-0 commitment `c_hat` and binds
+//! it to the ledger via the aggregation challenge `theta`, derived by
+//! Fiat-Shamir from the ledger commitments: the verifier recomputes the
+//! block-1 commitment as `com_1 + theta com_2` from public state, so it is
+//! never transmitted. A transfer or burn proof is therefore `3 G1 + 1 F`
+//! elements.
 
 #[cfg(feature = "simulator")]
 use crate::zkpari::Trapdoor;
 use crate::{
     payments::{Backend, Commitment as PaymentCommitmentTrait, Opening as PaymentOpeningTrait},
     zkpari::{
-        data_structures::{CommittedInputOpening, Proof, ProvingKey, VerifyingKey},
-        range::RangeProof,
+        data_structures::{Claim, CommittedInputOpening, ProvingKey, VerifyingKey},
+        range::{RangeProof, TRANSFER_BATCH},
         rng::ArkRng,
+        utils::{compute_theta, compute_theta_from_transcript, seed_theta_transcript_with_vk},
         ZkPari,
     },
 };
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_std::rand::{rngs::StdRng, RngCore, SeedableRng};
+#[cfg(feature = "simulator")]
+use ark_std::UniformRand;
 use commonware_parallel::Strategy;
 use core::{
     convert::Infallible,
@@ -23,6 +37,10 @@ use core::{
     ops::{Add, Neg, Sub},
 };
 use rand_core::CryptoRng;
+
+/// Committed-input block holding the aggregate slot whose basis is the
+/// ledger payment-commitment basis.
+const PAYMENT_BLOCK: usize = 1;
 
 /// Concrete private payments backend implemented by ZK-Pari.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,18 +131,16 @@ impl<E: Pairing> PaymentOpeningTrait for PaymentOpening<E> {
     }
 }
 
-/// A transfer proof contains the two range proofs needed for conservation:
-/// the transferred amount and the sender's remaining balance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransferProof<E: Pairing> {
-    pub amount: RangeProof<E>,
-    pub remaining: RangeProof<E>,
-}
+/// A transfer proof is one batched range proof covering the transferred
+/// amount and the sender's remaining balance: `(c_hat, T, U, v_a)`.
+pub type TransferProof<E> = RangeProof<E>;
 
-/// A burn proof range-checks the remaining private balance after de-shielding.
+/// A burn proof range-checks the remaining private balance after
+/// de-shielding, using the same batched relation with the second value slot
+/// zero-padded.
 pub type BurnProof<E> = RangeProof<E>;
 
-type RangeClaim<E> = (Proof<E>, Vec<<E as Pairing>::ScalarField>);
+type RangeClaim<E> = Claim<E>;
 
 fn commit_with<E: Pairing>(
     params: &PaymentsParams<E>,
@@ -133,45 +149,48 @@ fn commit_with<E: Pairing>(
     PaymentCommitment(
         params
             .range_pk
-            .pedersen_commit(0, &[E::ScalarField::from(opening.value)], &opening.opening)
+            .pedersen_commit(
+                PAYMENT_BLOCK,
+                &[E::ScalarField::from(opening.value)],
+                &opening.opening,
+            )
             .into_group(),
     )
 }
 
-fn slim_proof<E: Pairing>(proof: Proof<E>) -> RangeProof<E> {
-    RangeProof {
-        t_g: proof.t_g,
-        u_g: proof.u_g,
-        v_a: proof.v_a,
-    }
-}
-
-fn proof_with_commitment<E: Pairing>(
-    proof: &RangeProof<E>,
-    commitment: &PaymentCommitment<E>,
-) -> Proof<E> {
-    Proof {
-        c_ci: vec![commitment.0.into_affine()],
-        t_g: proof.t_g,
-        u_g: proof.u_g,
-        v_a: proof.v_a,
-    }
-}
-
-fn prove_range<E: Pairing>(
+/// Prove that both committed values are 64-bit ranged and aggregate to the
+/// ledger commitments `first + theta second`.
+fn prove_pair<E: Pairing>(
     params: &PaymentsParams<E>,
-    opening: &PaymentOpening<E>,
-    commitment: &PaymentCommitment<E>,
+    values: [u64; TRANSFER_BATCH],
+    first: (&PaymentCommitment<E>, &PaymentOpening<E>),
+    second: (&PaymentCommitment<E>, &PaymentOpening<E>),
     rng: &mut impl RngCore,
 ) -> RangeProof<E> {
+    let ledger = [first.0 .0.into_affine(), second.0 .0.into_affine()];
+    let theta = compute_theta::<E>(&params.range_pk.verifying_key, &ledger);
+    let aggregate_opening = CommittedInputOpening {
+        rho: first.1.opening.rho + theta * second.1.opening.rho,
+    };
+    let fresh_opening = CommittedInputOpening::rand(rng);
     let proof = ZkPari::<E>::prove_with_openings(
-        opening.value,
+        &values,
+        theta,
         &params.range_pk,
-        core::slice::from_ref(&opening.opening),
+        &[fresh_opening, aggregate_opening],
+        &ledger,
         rng,
     );
-    debug_assert_eq!(proof.c_ci[0], commitment.0.into_affine());
-    slim_proof(proof)
+    debug_assert_eq!(
+        proof.c_ci[PAYMENT_BLOCK],
+        (first.0 .0 + second.0 .0 * theta).into_affine()
+    );
+    RangeProof {
+        c_hat: proof.c_ci[0],
+        t_g: proof.t_g,
+        u_g: proof.u_g,
+        v_a: proof.v_a,
+    }
 }
 
 impl<E> ZkPariBackend<E>
@@ -179,39 +198,75 @@ where
     E: Pairing,
     E::G1Affine: Neg<Output = E::G1Affine>,
 {
+    /// Reassemble the verification claim of one transfer: derive `theta`
+    /// from the ledger commitments. The aggregate block-1 commitment is left
+    /// to the verifier, which folds it into its accumulation MSM.
+    fn transfer_claim(
+        base_transcript: &crate::zkpari::utils::transcript::IOPTranscript<E::ScalarField>,
+        ledger: [E::G1Affine; 2],
+        proof: &TransferProof<E>,
+    ) -> RangeClaim<E> {
+        let theta = compute_theta_from_transcript::<E>(base_transcript, &ledger);
+        Claim {
+            proof: *proof,
+            theta,
+            ledger,
+        }
+    }
+
+    /// Reassemble the verification claim of one burn: the second value slot
+    /// is zero-padded, so the aggregate is the remaining-balance commitment.
+    fn burn_claim(
+        base_transcript: &crate::zkpari::utils::transcript::IOPTranscript<E::ScalarField>,
+        remaining: E::G1Affine,
+        proof: &BurnProof<E>,
+    ) -> RangeClaim<E> {
+        let ledger = [remaining, E::G1Affine::zero()];
+        let theta = compute_theta_from_transcript::<E>(base_transcript, &ledger);
+        Claim {
+            proof: *proof,
+            theta,
+            ledger,
+        }
+    }
+
     fn range_claims(
         params: &PaymentsParams<E>,
         funds: &[(u64, PaymentCommitment<E>, ())],
         transfers: &[(PaymentCommitment<E>, PaymentCommitment<E>, TransferProof<E>)],
         burns: &[(PaymentCommitment<E>, u64, BurnProof<E>)],
     ) -> Option<Vec<RangeClaim<E>>> {
-        let mut range_claims = Vec::with_capacity(transfers.len() * 2 + burns.len());
-
         for (value, fund_commitment, _) in funds {
             if fund_commitment != &Self::commit_public(params, *value).0 {
                 return None;
             }
         }
 
-        for (current, amount_commitment, proof) in transfers {
-            let remaining_commitment = current.clone() - amount_commitment;
-            range_claims.push((
-                proof_with_commitment(&proof.amount, amount_commitment),
-                Vec::new(),
-            ));
-            range_claims.push((
-                proof_with_commitment(&proof.remaining, &remaining_commitment),
-                Vec::new(),
+        // Materialize every ledger point and normalize them all with a
+        // single batched inversion.
+        let mut points = Vec::with_capacity(2 * transfers.len() + burns.len());
+        for (current, amount_commitment, _) in transfers {
+            points.push(amount_commitment.0);
+            points.push(current.0 - amount_commitment.0);
+        }
+        for (current, value, _) in burns {
+            let (public_commitment, _) = Self::commit_public(params, *value);
+            points.push(current.0 - public_commitment.0);
+        }
+        let points = E::G1::normalize_batch(&points);
+        let (transfer_points, burn_points) = points.split_at(2 * transfers.len());
+
+        let base_transcript = seed_theta_transcript_with_vk::<E>(&params.range_vk);
+        let mut range_claims = Vec::with_capacity(transfers.len() + burns.len());
+        for ((_, _, proof), ledger) in transfers.iter().zip(transfer_points.chunks_exact(2)) {
+            range_claims.push(Self::transfer_claim(
+                &base_transcript,
+                [ledger[0], ledger[1]],
+                proof,
             ));
         }
-
-        for (current, value, proof) in burns {
-            let (public_commitment, _) = Self::commit_public(params, *value);
-            let remaining_commitment = current.clone() - &public_commitment;
-            range_claims.push((
-                proof_with_commitment(proof, &remaining_commitment),
-                Vec::new(),
-            ));
+        for ((_, _, proof), remaining) in burns.iter().zip(burn_points) {
+            range_claims.push(Self::burn_claim(&base_transcript, *remaining, proof));
         }
 
         Some(range_claims)
@@ -245,18 +300,19 @@ where
             return None;
         }
 
+        let base_transcript = seed_theta_transcript_with_vk::<E>(&params.range_vk);
         let transfer_claims = strategy.fold(
             transfers,
             Vec::new,
             |mut claims, (current, amount_commitment, proof)| {
                 let remaining_commitment = current.clone() - amount_commitment;
-                claims.push((
-                    proof_with_commitment(&proof.amount, amount_commitment),
-                    Vec::new(),
-                ));
-                claims.push((
-                    proof_with_commitment(&proof.remaining, &remaining_commitment),
-                    Vec::new(),
+                claims.push(Self::transfer_claim(
+                    &base_transcript,
+                    [
+                        amount_commitment.0.into_affine(),
+                        remaining_commitment.0.into_affine(),
+                    ],
+                    proof,
                 ));
                 claims
             },
@@ -271,9 +327,10 @@ where
             |mut claims, (current, value, proof)| {
                 let (public_commitment, _) = Self::commit_public(params, *value);
                 let remaining_commitment = current.clone() - &public_commitment;
-                claims.push((
-                    proof_with_commitment(proof, &remaining_commitment),
-                    Vec::new(),
+                claims.push(Self::burn_claim(
+                    &base_transcript,
+                    remaining_commitment.0.into_affine(),
+                    proof,
                 ));
                 claims
             },
@@ -405,10 +462,13 @@ where
             commit_with(params, &remaining_opening)
         );
 
-        let proof = TransferProof {
-            amount: prove_range(params, &amount_opening, &amount_commitment, rng),
-            remaining: prove_range(params, &remaining_opening, &remaining_commitment, rng),
-        };
+        let proof = prove_pair(
+            params,
+            [amount, remaining_opening.value],
+            (&amount_commitment, &amount_opening),
+            (&remaining_commitment, &remaining_opening),
+            rng,
+        );
         (amount_commitment, amount_opening, proof)
     }
 
@@ -422,21 +482,19 @@ where
     ) -> Self::TransferProof {
         let rng = &mut ArkRng(rng);
         let remaining_commitment = input_commitment.clone() - amount_commitment;
+        let ledger = [
+            amount_commitment.0.into_affine(),
+            remaining_commitment.0.into_affine(),
+        ];
+        let theta = compute_theta::<E>(&params.range_vk, &ledger);
+        // A real block-0 commitment is uniform thanks to its fresh blinding.
+        let c_hat = E::G1::rand(rng).into_affine();
+        let proof = ZkPari::<E>::simulate(trapdoor, &params.range_vk, c_hat, theta, &ledger, rng);
         TransferProof {
-            amount: slim_proof(ZkPari::<E>::simulate(
-                trapdoor,
-                &params.range_vk,
-                &[amount_commitment.0.into_affine()],
-                &[],
-                rng,
-            )),
-            remaining: slim_proof(ZkPari::<E>::simulate(
-                trapdoor,
-                &params.range_vk,
-                &[remaining_commitment.0.into_affine()],
-                &[],
-                rng,
-            )),
+            c_hat,
+            t_g: proof.t_g,
+            u_g: proof.u_g,
+            v_a: proof.v_a,
         }
     }
 
@@ -458,7 +516,13 @@ where
             remaining_commitment,
             commit_with(params, &remaining_opening)
         );
-        prove_range(params, &remaining_opening, &remaining_commitment, rng)
+        prove_pair(
+            params,
+            [remaining_opening.value, 0],
+            (&remaining_commitment, &remaining_opening),
+            (&PaymentCommitment::zero(), &PaymentOpening::zero()),
+            rng,
+        )
     }
 
     fn batch_verify(
@@ -507,7 +571,7 @@ pub mod codec {
     use super::{PaymentCommitment, PaymentOpening, PaymentsParams, TransferProof, ZkPariBackend};
     use crate::{
         payments::{Backend, Commitment as PaymentCommitmentTrait},
-        zkpari::{range::RangeProof, CommittedInputOpening, ZkPari},
+        zkpari::CommittedInputOpening,
     };
     #[cfg(feature = "simulator")]
     use crate::zkpari::Trapdoor;
@@ -526,8 +590,8 @@ pub mod codec {
     const BN254_G1_COMPRESSED_SIZE: usize = 32;
     const BN254_G1_UNCOMPRESSED_SIZE: usize = 64;
     const BN254_FR_SIZE: usize = 32;
-    const COMPRESSED_RANGE_PROOF_SIZE: usize = BN254_G1_COMPRESSED_SIZE * 2 + BN254_FR_SIZE;
-    const UNCOMPRESSED_RANGE_PROOF_SIZE: usize = BN254_G1_UNCOMPRESSED_SIZE * 2 + BN254_FR_SIZE;
+    const COMPRESSED_TRANSFER_PROOF_SIZE: usize = BN254_G1_COMPRESSED_SIZE * 3 + BN254_FR_SIZE;
+    const UNCOMPRESSED_TRANSFER_PROOF_SIZE: usize = BN254_G1_UNCOMPRESSED_SIZE * 3 + BN254_FR_SIZE;
 
     /// Validation policy used when decoding ZK-Pari curve and field elements.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -781,37 +845,46 @@ pub mod codec {
         "zkpari_payment_commitment_uncompressed"
     );
 
-    macro_rules! impl_range_proof_codec {
+    macro_rules! impl_transfer_proof_codec {
         ($wrapper:ident, $g1_size:expr, $proof_size:expr, $compress:expr, $context:expr) => {
-            impl FixedSize for $wrapper<RangeProof<Bn254>> {
+            impl FixedSize for $wrapper<TransferProof<Bn254>> {
                 const SIZE: usize = $proof_size;
             }
 
-            impl FixedSize for $wrapper<&RangeProof<Bn254>> {
+            impl FixedSize for $wrapper<&TransferProof<Bn254>> {
                 const SIZE: usize = $proof_size;
             }
 
-            impl Write for $wrapper<RangeProof<Bn254>> {
+            impl Write for $wrapper<TransferProof<Bn254>> {
                 fn write(&self, buf: &mut impl BufMut) {
+                    write_canonical(&self.0.c_hat, buf, $compress, $g1_size);
                     write_canonical(&self.0.t_g, buf, $compress, $g1_size);
                     write_canonical(&self.0.u_g, buf, $compress, $g1_size);
                     write_canonical(&self.0.v_a, buf, $compress, BN254_FR_SIZE);
                 }
             }
 
-            impl Write for $wrapper<&RangeProof<Bn254>> {
+            impl Write for $wrapper<&TransferProof<Bn254>> {
                 fn write(&self, buf: &mut impl BufMut) {
+                    write_canonical(&self.0.c_hat, buf, $compress, $g1_size);
                     write_canonical(&self.0.t_g, buf, $compress, $g1_size);
                     write_canonical(&self.0.u_g, buf, $compress, $g1_size);
                     write_canonical(&self.0.v_a, buf, $compress, BN254_FR_SIZE);
                 }
             }
 
-            impl Read for $wrapper<RangeProof<Bn254>> {
+            impl Read for $wrapper<TransferProof<Bn254>> {
                 type Cfg = Validation;
 
                 fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-                    Ok(Self(RangeProof {
+                    Ok(Self(TransferProof {
+                        c_hat: read_canonical(
+                            buf,
+                            $compress,
+                            *cfg,
+                            $g1_size,
+                            concat!($context, "_c_hat"),
+                        )?,
                         t_g: read_canonical(
                             buf,
                             $compress,
@@ -837,8 +910,9 @@ pub mod codec {
                 }
             }
 
-            impl Hash for $wrapper<RangeProof<Bn254>> {
+            impl Hash for $wrapper<TransferProof<Bn254>> {
                 fn hash<H: Hasher>(&self, state: &mut H) {
+                    hash_canonical(&self.0.c_hat, state, $compress, $g1_size);
                     hash_canonical(&self.0.t_g, state, $compress, $g1_size);
                     hash_canonical(&self.0.u_g, state, $compress, $g1_size);
                     hash_canonical(&self.0.v_a, state, $compress, BN254_FR_SIZE);
@@ -847,67 +921,20 @@ pub mod codec {
         };
     }
 
-    impl_range_proof_codec!(
+    impl_transfer_proof_codec!(
         Compressed,
         BN254_G1_COMPRESSED_SIZE,
-        COMPRESSED_RANGE_PROOF_SIZE,
+        COMPRESSED_TRANSFER_PROOF_SIZE,
         Compress::Yes,
-        "zkpari_range_compressed"
+        "zkpari_transfer_compressed"
     );
-    impl_range_proof_codec!(
+    impl_transfer_proof_codec!(
         Uncompressed,
         BN254_G1_UNCOMPRESSED_SIZE,
-        UNCOMPRESSED_RANGE_PROOF_SIZE,
+        UNCOMPRESSED_TRANSFER_PROOF_SIZE,
         Compress::No,
-        "zkpari_range_uncompressed"
+        "zkpari_transfer_uncompressed"
     );
-
-    macro_rules! impl_transfer_proof_codec {
-        ($wrapper:ident, $range_size:expr) => {
-            impl FixedSize for $wrapper<TransferProof<Bn254>> {
-                const SIZE: usize = $range_size * 2;
-            }
-
-            impl FixedSize for $wrapper<&TransferProof<Bn254>> {
-                const SIZE: usize = $range_size * 2;
-            }
-
-            impl Write for $wrapper<TransferProof<Bn254>> {
-                fn write(&self, buf: &mut impl BufMut) {
-                    $wrapper(self.0.amount).write(buf);
-                    $wrapper(self.0.remaining).write(buf);
-                }
-            }
-
-            impl Write for $wrapper<&TransferProof<Bn254>> {
-                fn write(&self, buf: &mut impl BufMut) {
-                    $wrapper(&self.0.amount).write(buf);
-                    $wrapper(&self.0.remaining).write(buf);
-                }
-            }
-
-            impl Read for $wrapper<TransferProof<Bn254>> {
-                type Cfg = Validation;
-
-                fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-                    Ok(Self(TransferProof {
-                        amount: <$wrapper<RangeProof<Bn254>> as Read>::read_cfg(buf, cfg)?.0,
-                        remaining: <$wrapper<RangeProof<Bn254>> as Read>::read_cfg(buf, cfg)?.0,
-                    }))
-                }
-            }
-
-            impl Hash for $wrapper<TransferProof<Bn254>> {
-                fn hash<H: Hasher>(&self, state: &mut H) {
-                    $wrapper(self.0.amount).hash(state);
-                    $wrapper(self.0.remaining).hash(state);
-                }
-            }
-        };
-    }
-
-    impl_transfer_proof_codec!(Compressed, COMPRESSED_RANGE_PROOF_SIZE);
-    impl_transfer_proof_codec!(Uncompressed, UNCOMPRESSED_RANGE_PROOF_SIZE);
 
     macro_rules! impl_opening_codec {
         ($wrapper:ident, $compress:expr, $context:expr) => {
@@ -995,7 +1022,6 @@ pub mod codec {
     macro_rules! impl_fixed_validation_codecs {
         ($mode:ident, $form:ident, $validation:expr) => {
             impl_fixed_validation_codec!($mode, $form, $validation, PaymentCommitment<Bn254>);
-            impl_fixed_validation_codec!($mode, $form, $validation, RangeProof<Bn254>);
             impl_fixed_validation_codec!($mode, $form, $validation, TransferProof<Bn254>);
             impl_fixed_validation_codec!($mode, $form, $validation, CommittedInputOpening<Fr>);
         };
@@ -1014,7 +1040,7 @@ pub mod codec {
                 type Opening = PaymentOpening<Bn254>;
                 type FundProof = ();
                 type TransferProof = $wrapper<TransferProof<Bn254>>;
-                type BurnProof = $wrapper<RangeProof<Bn254>>;
+                type BurnProof = $wrapper<TransferProof<Bn254>>;
                 type SetupInput = [u8; 32];
                 type SetupError = core::convert::Infallible;
                 #[cfg(feature = "simulator")]
@@ -1125,74 +1151,23 @@ pub mod codec {
                     burns: &[(Self::Commitment, u64, Self::BurnProof)],
                     rng: &mut impl rand_core::CryptoRng,
                 ) -> bool {
-                    let funds_valid = strategy.fold(
-                        funds,
-                        || true,
-                        |valid, (value, commitment, _)| {
-                            valid
-                                && commitment.0
-                                    == ZkPariBackend::<Bn254>::commit_public(params, *value).0
-                        },
-                        |left, right| left && right,
-                    );
-                    if !funds_valid {
-                        return false;
-                    }
-
-                    let transfer_claims = strategy.fold(
-                        transfers,
-                        Vec::new,
-                        |mut claims, (current, amount, proof)| {
-                            let remaining_commitment = current.0.clone() - &amount.0;
-                            claims.push((
-                                super::proof_with_commitment(&proof.0.amount, &amount.0),
-                                Vec::new(),
-                            ));
-                            claims.push((
-                                super::proof_with_commitment(
-                                    &proof.0.remaining,
-                                    &remaining_commitment,
-                                ),
-                                Vec::new(),
-                            ));
-                            claims
-                        },
-                        |mut left, right| {
-                            left.extend(right);
-                            left
-                        },
-                    );
-                    let burn_claims = strategy.fold(
-                        burns,
-                        Vec::new,
-                        |mut claims, (current, value, proof)| {
-                            let (public_commitment, _) =
-                                ZkPariBackend::<Bn254>::commit_public(params, *value);
-                            let remaining_commitment = current.0.clone() - &public_commitment;
-                            claims.push((
-                                super::proof_with_commitment(&proof.0, &remaining_commitment),
-                                Vec::new(),
-                            ));
-                            claims
-                        },
-                        |mut left, right| {
-                            left.extend(right);
-                            left
-                        },
-                    );
-
-                    let mut range_claims =
-                        Vec::with_capacity(transfer_claims.len() + burn_claims.len());
-                    range_claims.extend(transfer_claims);
-                    range_claims.extend(burn_claims);
-
-                    range_claims.is_empty()
-                        || ZkPari::<Bn254>::batch_verify_with_strategy(
-                            strategy,
-                            &range_claims,
-                            &params.range_vk,
-                            &mut crate::zkpari::rng::ArkRng(rng),
-                        )
+                    let funds = funds
+                        .iter()
+                        .map(|(value, commitment, proof)| (*value, commitment.0.clone(), *proof))
+                        .collect::<Vec<_>>();
+                    let transfers = transfers
+                        .iter()
+                        .map(|(current, amount, proof)| {
+                            (current.0.clone(), amount.0.clone(), proof.0)
+                        })
+                        .collect::<Vec<_>>();
+                    let burns = burns
+                        .iter()
+                        .map(|(current, value, proof)| (current.0.clone(), *value, proof.0))
+                        .collect::<Vec<_>>();
+                    ZkPariBackend::<Bn254>::batch_verify_with_strategy(
+                        strategy, params, &funds, &transfers, &burns, rng,
+                    )
                 }
             }
         };
@@ -1237,6 +1212,16 @@ pub mod codec {
                     value
                 );
             }
+        }
+
+        #[test]
+        fn bn254_wire_sizes() {
+            assert_eq!(<Compressed<TransferProof<Bn254>> as FixedSize>::SIZE, 128);
+            assert_eq!(
+                <Uncompressed<TransferProof<Bn254>> as FixedSize>::SIZE,
+                224
+            );
+            assert_eq!(<Compressed<PaymentCommitment<Bn254>> as FixedSize>::SIZE, 32);
         }
 
         #[test]

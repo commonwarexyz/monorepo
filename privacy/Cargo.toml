@@ -60,5 +60,9 @@ std = [
 [dev-dependencies]
 rand_chacha.workspace = true
 
+[[example]]
+name = "payments_bench"
+required-features = [ "codec", "zkpari" ]
+
 [lints]
 workspace = true

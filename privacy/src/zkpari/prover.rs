@@ -1,6 +1,8 @@
 use crate::zkpari::{
     data_structures::{CommittedInputOpening, Proof, ProvingKey},
-    range::{evaluate_row, range_assignment, range_relation, Matrix},
+    range::{
+        batched_range_assignment, batched_range_relation, evaluate_row, Matrix, TRANSFER_BATCH,
+    },
     utils::compute_chall,
     ZkPari,
 };
@@ -15,29 +17,29 @@ use ark_std::{rand::RngCore, UniformRand};
 type RowEvaluations<F> = (Vec<F>, Vec<F>, Vec<F>);
 
 impl<E: Pairing> ZkPari<E> {
-    /// Produce a range proof, sampling fresh blinding randomness.
-    pub fn prove<R: RngCore>(value: u64, pk: &ProvingKey<E>, rng: &mut R) -> Proof<E>
-    where
-        E::ScalarField: Field,
-    {
-        let openings: Vec<CommittedInputOpening<E::ScalarField>> = (0..pk.sigma_ci.len())
-            .map(|_| CommittedInputOpening::rand(rng))
-            .collect();
-        Self::prove_with_openings(value, pk, &openings, rng)
-    }
-
-    /// Produce a range proof with caller-supplied openings.
+    /// Produce a batched range proof with caller-supplied openings.
+    ///
+    /// `openings[0]` blinds the fresh block-0 commitment to `values`;
+    /// `openings[1]` must be the opening randomness of the aggregate ledger
+    /// commitment `ledger[0] + theta ledger[1]` (block 1), so that
+    /// `proof.c_ci[1]` equals the verifier-derived aggregate.
+    ///
+    /// The Fiat-Shamir challenge binds the `ledger` commitments themselves
+    /// rather than the derived aggregate, mirroring
+    /// [`crate::zkpari::ZkPari::verify`].
     pub fn prove_with_openings<R: RngCore>(
-        value: u64,
+        values: &[u64; TRANSFER_BATCH],
+        theta: E::ScalarField,
         pk: &ProvingKey<E>,
         openings: &[CommittedInputOpening<E::ScalarField>],
+        ledger: &[E::G1Affine; 2],
         rng: &mut R,
     ) -> Proof<E>
     where
         E::ScalarField: Field,
     {
-        let relation = range_relation::<E::ScalarField>();
-        let assignment = range_assignment::<E::ScalarField>(value);
+        let relation = batched_range_relation::<E::ScalarField>();
+        let assignment = batched_range_assignment::<E::ScalarField>(values, theta);
         let block_indices = relation.committed_witness_indices.clone();
 
         assert_eq!(
@@ -175,8 +177,13 @@ impl<E: Pairing> ZkPari<E> {
         let t_q = E::G1::msm_unchecked(&pk.sigma_q_comm[..q_tilde.coeffs.len()], &q_tilde.coeffs);
         let t: E::G1Affine = (t_w + t_mask + t_q).into();
 
-        let challenge =
-            compute_chall::<E>(&pk.verifying_key, &instance_assignment[1..], &c_cis, &t);
+        let transcript_comms = [c_cis[0], ledger[0], ledger[1]];
+        let challenge = compute_chall::<E>(
+            &pk.verifying_key,
+            &instance_assignment[1..],
+            &transcript_comms,
+            &t,
+        );
         let v_a = w_a_masked.evaluate(&challenge);
 
         let mut r_coeffs = z_b_hat.coeffs;

@@ -16,22 +16,30 @@
 //!   independent randomness at the verifier challenge and at the SRS trapdoor.
 //! - A single Glock-style opening proof accounts for both the ordinary Pari
 //!   commitment and the exposed committed-input commitments, so a proof is
-//!   `(2 + #blocks) G1 + 1 F` elements. Applications may use slimmer wire
-//!   formats when a commitment is recomputable, but must reconstruct the full
-//!   `Proof` before verification.
+//!   `(2 + #blocks) G1 + 1 F` elements.
+//!
+//! The fixed relation is the batched payments range relation
+//! ([`range`]): two committed values are 64-bit range-checked and bound to
+//! the aggregate `v_theta = v_1 + theta v_2` in a second block whose basis
+//! doubles as the ledger payment basis. The block-1 aggregate commitment
+//! `ledger[0] + theta ledger[1]` is recomputable from public state, so the
+//! wire proof ([`range::RangeProof`]) is `3 G1 + 1 F` elements and a
+//! verification [`Claim`] carries `(proof, theta, ledger)`.
 //!
 //! The scheme is statistically honest-verifier zero-knowledge with simulation
 //! distance at most `1 / (|F| - |K|)`.
 //!
-//! Verification checks the (3 + #blocks)-pairing equation
+//! Verification checks the 5-pairing equation
 //!
 //! ```text
-//! prod_j e(C_ci_j, delta_j H) * e(T, delta_w H)
+//! e(c_hat, delta_1 H) * e(com_theta, delta_2 H) * e(T, delta_w H)
 //!     = e(U, tau H - r H) * e(v_a alpha G + v_R beta G, H)
 //! ```
 //!
 //! with `v_R = (v_a + x_A(r))^2 - x_B(r)` computed by the verifier
-//! (`x_B = 0` after SR1CS instance outlining).
+//! (`x_B = 0` after SR1CS instance outlining). The Fiat-Shamir challenge `r`
+//! binds the ledger commitments rather than the derived aggregate, so batch
+//! verification folds the aggregation into its accumulation MSM.
 //!
 use ark_ec::pairing::Pairing;
 use ark_std::marker::PhantomData;
@@ -52,7 +60,7 @@ mod verifier;
 mod tests;
 
 pub use data_structures::{
-    CommittedInputOpening, Proof, ProvingKey, SuccinctIndex, Trapdoor, VerifyingKey,
+    Claim, CommittedInputOpening, Proof, ProvingKey, SuccinctIndex, Trapdoor, VerifyingKey,
 };
 
 /// The ZK-Pari SNARK.
