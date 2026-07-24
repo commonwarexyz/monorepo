@@ -874,6 +874,14 @@ function buildFigure(mount, cfg) {
       return tau => {
         const frac = clamp((tau - ev.t) / ev.d, 0, 1);
         path.setAttribute('stroke-dashoffset', length * (1 - frac));
+        // A faint arc is a certificate still forming; it solidifies once the
+        // round trip completes.
+        if (ev.faint) {
+          const done = frac >= 1;
+          path.setAttribute('stroke', done ? BLUE : BLUE_LIGHT);
+          path.setAttribute('stroke-width', done ? 2 : 1.6);
+          path.setAttribute('opacity', done ? 0.85 : 0.7);
+        }
         if (labelEl) labelEl.setAttribute('opacity', frac > 0.3 ? 1 : 0);
       };
     },
