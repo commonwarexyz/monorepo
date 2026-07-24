@@ -52,19 +52,6 @@ enum SnapshotUndo<F: Family, K> {
     },
 }
 
-/// The db-level durable frontier: the state proven durable in the log, observed from the
-/// journal barrier.
-///
-/// Constructible only through [`Db::barrier`], so boundary math over durable state cannot
-/// accidentally read live fields.
-#[derive(Clone, Copy)]
-pub(crate) struct Barrier<F: Family> {
-    /// The highest inactivity floor declared by a commit proven durable in the log.
-    pub(crate) floor: Location<F>,
-    /// The operation count covered by the newest commit proven durable in the log.
-    pub(crate) size: Location<F>,
-}
-
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
 /// - [crate::qmdb::any::ordered::fixed::Db]
@@ -470,7 +457,7 @@ where
         // The prune target must be justified by a durable commit: recovery then lands on a
         // commit whose floor covers everything pruned. Commit first only when no durable
         // commit justifies the target yet.
-        if self.barrier().floor < prune_loc {
+        if self.barrier().start < prune_loc {
             self.log = self.log.commit().await?;
             self.mark_commits_durable();
         }
@@ -493,17 +480,15 @@ where
         }
     }
 
-    /// Observe the journal barrier and return the db-level durable frontier.
+    /// Observe the journal barrier and return the db-level durable frontier: the inactivity
+    /// floor declared by the newest durable commit up to that commit's operation count.
     ///
     /// Durable claims (pruning boundaries, watermarks) must be computed from this frontier,
     /// never from live state: a durably recorded claim the durable log cannot justify
     /// leaves recovery unable to rebuild it.
-    pub(crate) fn barrier(&mut self) -> Barrier<F> {
+    pub(crate) fn barrier(&mut self) -> std::ops::Range<Location<F>> {
         self.advance_durable_floor();
-        Barrier {
-            floor: self.durable_floor,
-            size: self.durable_size,
-        }
+        self.durable_floor..self.durable_size
     }
 
     /// Record that every appended commit is proven durable.

@@ -529,13 +529,13 @@ where
     /// The invariant lives here and nowhere else: pruning metadata must never record a
     /// boundary the durable log cannot rebuild on reopen. The boundary a durable state
     /// justifies depends on its floor AND its ops count (delayed-merge absorption), so it is
-    /// recomputed from the [`any::db::Barrier`](crate::qmdb::any::db::Barrier) with the same
-    /// helper that computes serving boundaries.
+    /// recomputed from the durable barrier window with the same helper that computes serving
+    /// boundaries.
     async fn ensure_durable(mut self, boundary: Location<F>) -> Result<Self, Error<F>> {
         let barrier = self.any.barrier();
         let durable_boundary = self::sync_boundary::<F, N>(
-            *barrier.floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *barrier.size,
+            *barrier.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
+            *barrier.end,
         );
         if durable_boundary < boundary {
             self.any.log = self.any.log.commit().await?;
