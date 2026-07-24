@@ -498,7 +498,7 @@ mod tests {
             marshal: MarshalMailbox<TestScheme, TestVariant>,
         ) -> (
             Self,
-            actor_mailbox::Receiver<syncer::SyncerMessage<deterministic::Context, TestApp>>,
+            actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
         ) {
             let (_mailbox_sender, mailbox) =
                 actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
@@ -836,7 +836,7 @@ mod tests {
             // Service the single target update like a live sync coordinator: respond that
             // sync has not completed, then record the tip update.
             let coordinator = context.child("coordinator").spawn(move |_| async move {
-                let Some(syncer::SyncerMessage::UpdateTargets { update, response }) =
+                let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                     syncer_receiver.recv().await
                 else {
                     panic!("retarget should send a target update to the syncer");

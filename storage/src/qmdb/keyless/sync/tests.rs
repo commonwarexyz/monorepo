@@ -1577,10 +1577,10 @@ mod compact_variable_mmr {
             };
             assert_ne!(window_target, current_target);
 
-            let source = Arc::new(source);
             // A target below the tip stays servable: a syncing client's target trails the
             // source by its fetch latency, and the payload authenticates against the older
             // root.
+            let source = Arc::new(source);
             let window_cfg = client_config(&format!("{suffix}-window"), &context);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("window_client"),
@@ -2362,10 +2362,10 @@ mod compact_variable_mmb {
             };
             assert_ne!(window_target, current_target);
 
-            let source = Arc::new(source);
             // A target below the tip stays servable: a syncing client's target trails the
             // source by its fetch latency, and the payload authenticates against the older
             // root.
+            let source = Arc::new(source);
             let window_cfg = client_config(&format!("{suffix}-window"), &context);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("window_client"),
