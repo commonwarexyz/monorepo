@@ -25,7 +25,7 @@ use crate::{
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Error as RError, Handle};
 use commonware_utils::sync::RwLock;
 use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -182,9 +182,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, committing the journal
     /// so the entry survives a crash. Journal recovery may be required on reopen.
     ///
-    /// If the cached witness already matches the Merkle, this only awaits any sync still in
-    /// flight from [`Self::start_sync`]. Otherwise appends a witness built from the unpruned
-    /// Merkle, prunes the Merkle to its frontier, and refreshes the cache.
+    /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure. If the
+    /// cached witness already matches the Merkle, nothing more is needed. Otherwise appends a
+    /// witness built from the unpruned Merkle, prunes the Merkle to its frontier, and refreshes
+    /// the cache.
     pub(crate) async fn commit<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -195,6 +196,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
+        self.wait_for_sync().await?;
         self.persist::<H, S>(
             merkle,
             inactivity_floor_loc,
@@ -207,9 +209,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, syncing the journal and
     /// all of its metadata to minimize recovery work on reopen.
     ///
-    /// If the cached witness already matches the Merkle, this only awaits any sync still in
-    /// flight from [`Self::start_sync`]. Otherwise appends a witness built from the unpruned
-    /// Merkle, prunes the Merkle to its frontier, and refreshes the cache.
+    /// If the cached witness already matches the Merkle, this only settles any sync pipelined
+    /// by [`Self::start_sync`], running a full journal sync when one is outstanding. Otherwise
+    /// appends a witness built from the unpruned Merkle, prunes the Merkle to its frontier, and
+    /// refreshes the cache.
     pub(crate) async fn sync<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -250,26 +253,16 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
         let Some(verified) = verified else {
-            // Nothing new to append, so only the sync pipelined by start_sync needs
-            // settling. Its success provides only commit-level durability, so a full
-            // sync still runs.
-            match durability {
-                Durability::Commit => {
-                    if let Some(pending) = self.pending_sync.clone()
-                        && pending.await.is_err()
-                    {
-                        self.journal = self.journal.commit().await?;
-                    }
-                }
-                Durability::Sync => {
-                    if self.pending_sync.take().is_some() {
-                        self.journal = self.journal.sync().await?;
-                    }
-                }
+            // A commit already waited for the pipelined sync. A full sync still runs because
+            // the pipelined sync made only a best-effort attempt to persist all metadata.
+            if matches!(durability, Durability::Sync) && self.pending_sync.take().is_some() {
+                self.journal = self.journal.sync().await?;
             }
             return Ok(self);
         };
         (self.journal, _) = self.journal.append(&verified.witness).await?;
+
+        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
         self.journal = match durability {
             Durability::Commit => self.journal.commit().await?,
             Durability::Sync => {
@@ -318,11 +311,15 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok((self, Handle::from_future(completion)))
     }
 
-    /// Whether a sync pipelined by [`Self::start_sync`] is still pending.
-    pub(crate) fn has_pending_sync(&self) -> bool {
-        self.pending_sync
-            .as_ref()
-            .is_some_and(|pending| !matches!(pending.peek(), Some(Ok(()))))
+    /// Wait for any sync pipelined by [`Self::start_sync`], surfacing its failure.
+    ///
+    /// A successful completion remains recorded until the next full journal sync, which must
+    /// still guarantee that all metadata is current.
+    pub(crate) async fn wait_for_sync(&self) -> Result<(), RError> {
+        let Some(pending) = self.pending_sync.clone() else {
+            return Ok(());
+        };
+        pending.await
     }
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.

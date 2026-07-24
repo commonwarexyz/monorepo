@@ -536,8 +536,9 @@ where
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
-    /// of the deferred work surface on the returned handle. A failed data sync also fails the
-    /// next durability operation.
+    /// of the deferred durability work surface on the returned handle. A failed data sync also
+    /// fails the next durability operation. A failed offsets or recovery-watermark sync is not
+    /// observed by [Self::commit] and resurfaces on the next [Self::sync].
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let handle;
