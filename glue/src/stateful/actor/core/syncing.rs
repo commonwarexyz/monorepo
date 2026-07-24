@@ -203,13 +203,13 @@ where
             // Persist the retargeted floor before the live session can record it and before
             // marshal is acknowledged: the sync engine's durable state advances toward the
             // new target, and marshal prunes behind acknowledged blocks, so a crash must
-            // resume from a floor at least as new as any target the engine acted on.
-            let finalization = self
-                .marshal
-                .get_finalization(block.height())
-                .await
-                .expect("marshal must hold the finalization for a delivered block");
-            self.sync_metadata = self.sync_metadata.begin_sync(finalization).await;
+            // resume from a floor at least as new as any target the engine acted on. An
+            // ancestor finalized transitively by a descendant's certificate has no
+            // finalization of its own; the floor then advances when the certificate-carrying
+            // descendant is delivered.
+            if let Some(finalization) = self.marshal.get_finalization(block.height()).await {
+                self.sync_metadata = self.sync_metadata.begin_sync(finalization).await;
+            }
 
             // Do not acknowledge marshal until the live sync session has recorded this
             // block's tip update. If we ack after merely enqueueing it, sync can still
@@ -644,7 +644,7 @@ mod tests {
         context: deterministic::Context,
         scheme: TestScheme,
         block: &TestBlock,
-        finalization: Finalization<TestScheme, Sha256Digest>,
+        finalization: Option<Finalization<TestScheme, Sha256Digest>>,
     ) -> (
         MarshalMailbox<TestScheme, TestVariant>,
         handler::Handler<Sha256Digest>,
@@ -652,18 +652,21 @@ mod tests {
     ) {
         let provider = ConstantProvider::new(scheme);
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height = immutable::Archive::init(
+        let mut finalizations_by_height = immutable::Archive::init(
             context.child("finalizations_by_height"),
             archive_config(page_cache.clone(), "syncing-finalizations"),
         )
         .await
-        .expect("failed to initialize finalizations archive")
-        .put(block.height().get(), block.digest(), finalization)
-        .await
-        .expect("failed to seed finalization")
-        .sync()
-        .await
-        .expect("failed to sync finalizations archive");
+        .expect("failed to initialize finalizations archive");
+        if let Some(finalization) = finalization {
+            finalizations_by_height = finalizations_by_height
+                .put(block.height().get(), block.digest(), finalization)
+                .await
+                .expect("failed to seed finalization")
+                .sync()
+                .await
+                .expect("failed to sync finalizations archive");
+        }
         let finalized_blocks = immutable::Archive::init(
             context.child("finalized_blocks"),
             archive_config(page_cache.clone(), "syncing-blocks"),
@@ -827,7 +830,7 @@ mod tests {
                 context.child("marshal"),
                 fixture.schemes[0].clone(),
                 &block,
-                finalization.clone(),
+                Some(finalization.clone()),
             )
             .await;
             let (harness, mut syncer_receiver) =
@@ -863,6 +866,55 @@ mod tests {
                 syncing.sync_metadata.in_progress_floor(),
                 Some(&finalization),
                 "retargeted floor must be persisted before marshal is acknowledged",
+            );
+        });
+    }
+
+    /// An ancestor finalized transitively by a descendant's certificate has no finalization
+    /// of its own: the retarget still records the tip update and acknowledges marshal, and
+    /// the persisted floor is left unchanged.
+    #[test]
+    fn retarget_without_finalization_acknowledges_without_persisting() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let block = TestBlock::new(8, 10);
+            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+                context.child("marshal"),
+                fixture.schemes[0].clone(),
+                &block,
+                None,
+            )
+            .await;
+            let (harness, mut syncer_receiver) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+
+            // Service the single target update like a live sync coordinator.
+            let coordinator = context.child("coordinator").spawn(move |_| async move {
+                let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                    syncer_receiver.recv().await
+                else {
+                    panic!("retarget should send a target update to the syncer");
+                };
+                assert!(
+                    response.send(None).is_ok(),
+                    "response receiver should be alive"
+                );
+                let _ = update.record();
+            });
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, action) = harness
+                .syncing
+                .process_finalized(Arc::new(block), acknowledgement)
+                .await;
+
+            assert!(action.is_none(), "retarget mid-sync must not hand off");
+            assert!(waiter.await.is_ok(), "marshal must be acknowledged");
+            coordinator.await.expect("coordinator failed");
+            assert_eq!(
+                syncing.sync_metadata.in_progress_floor(),
+                None,
+                "an uncertified ancestor must not move the persisted floor",
             );
         });
     }
