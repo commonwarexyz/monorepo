@@ -143,7 +143,7 @@
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
             <div class="date">July 23rd, 2026</div>
         </div>
-        <p>Every high-throughput consensus design must decide when a block may enter the ordering process: wait for a proof of availability and every transaction pays for round trips it rarely needs, or reference blocks immediately and voters fetch missing data at the worst possible time. Multimmit does neither, finalizing a block as little as two message delays after it hits the wire.</p>
+        <p>Blockchains that decouple data dissemination from consensus buy throughput with user latency, waiting out certificate round trips or fetching missing data at the worst possible time. Multimmit pays neither: every producer proposes in parallel, and each block finalizes as little as two message delays after hitting the wire, as fast as any consensus can go.</p>
         <h3><a href="/blogs/pick-your-poisons.html">Pick Your Poisons</a></h3>
         <div class="meta">
             <div class="author">By <a href="https://x.com/guruvamsip">Guru Vamsi Policharla</a></div>

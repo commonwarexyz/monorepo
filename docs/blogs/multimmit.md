@@ -1,6 +1,6 @@
 ---
 title: "The Best of Both Worlds"
-description: "Every high-throughput consensus design must decide when a block may enter the ordering process: wait for a proof of availability and every transaction pays for round trips it rarely needs, or reference blocks immediately and voters fetch missing data at the worst possible time. Multimmit does neither, finalizing a block as little as two message delays after it hits the wire."
+description: "Blockchains that decouple data dissemination from consensus buy throughput with user latency, waiting out certificate round trips or fetching missing data at the worst possible time. Multimmit pays neither: every producer proposes in parallel, and each block finalizes as little as two message delays after hitting the wire, as fast as any consensus can go."
 date: "July 23rd, 2026"
 published-time: "2026-07-23T00:00:00Z"
 modified-time: "2026-07-23T00:00:00Z"
@@ -17,7 +17,7 @@ For throughput, the fix is well understood: decouple transaction dissemination f
 
 For latency, decoupling created a new wait: consensus must never finalize a reference to data the network cannot recover, and the two known ways to establish availability each have a price. Certify every block before consensus may reference it, and throughput is bought with the user's latency: every transaction pays for certificate round trips it rarely needs. Reference blocks immediately, and the latency of ordinary consensus survives only until a producer misbehaves: voters must fetch whatever they are missing at the worst possible time.
 
-Today, we're sharing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that pays neither cost: producers saturate their network bandwidth, each extending its own chain of blocks without waiting on the others, consensus references blocks the moment they arrive, and the votes already being cast establish availability, so no block waits on a certificate and no voter waits on a fetch.
+Today, we're sharing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that pays neither cost: producers saturate their network bandwidth, each extending its own chain of blocks without waiting on the others, consensus references blocks the moment they arrive, and the votes already being cast establish availability, so no block waits on a certificate and no voter waits on a fetch. Votes also extend past whatever the leader omits, so every producer can add to each view's finalized log.
 
 A transaction block disseminated at time $t$ is finalized by $t+2\delta$ at best and $t+3\delta$ in expectation (for $n \geq 5f+1$). The clock starts when the producer broadcasts, not when a leader proposes, and those figures hold for an honest producer's blocks even while up to $f$ producers misbehave. Two message delays is [optimal](https://arxiv.org/abs/2102.07240) (no fault-tolerant consensus can finalize faster, even in the best case), and protocols that reach that floor do so only for the leader's own block. Multimmit puts every producer's blocks there at once, without handing back the throughput: the best of both worlds.
 

@@ -9,12 +9,12 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > The Best of Both Worlds</title>
-    <meta name="description" content="Every high-throughput consensus
-design must decide when a block may enter the ordering process: wait for
-a proof of availability and every transaction pays for round trips it
-rarely needs, or reference blocks immediately and voters fetch missing
-data at the worst possible time. Multimmit does neither, finalizing a
-block as little as two message delays after it hits the wire.">
+    <meta name="description" content="Blockchains that decouple data
+dissemination from consensus buy throughput with user latency, waiting
+out certificate round trips or fetching missing data at the worst
+possible time. Multimmit pays neither: every producer proposes in
+parallel, and each block finalizes as little as two message delays after
+hitting the wire, as fast as any consensus can go.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -23,13 +23,12 @@ block as little as two message delays after it hits the wire.">
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="og:title" content="The Best of Both Worlds" />
-    <meta property="og:description" content="Every high-throughput
-consensus design must decide when a block may enter the ordering
-process: wait for a proof of availability and every transaction pays for
-round trips it rarely needs, or reference blocks immediately and voters
-fetch missing data at the worst possible time. Multimmit does neither,
-finalizing a block as little as two message delays after it hits the
-wire." />
+    <meta property="og:description" content="Blockchains that decouple
+data dissemination from consensus buy throughput with user latency,
+waiting out certificate round trips or fetching missing data at the
+worst possible time. Multimmit pays neither: every producer proposes in
+parallel, and each block finalizes as little as two message delays after
+hitting the wire, as fast as any consensus can go." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-07-23T00:00:00Z" />
     <meta property="article:modified_time" content="2026-07-23T00:00:00Z" />
@@ -40,13 +39,12 @@ wire." />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/multimmit" />
     <meta property="twitter:title" content="The Best of Both Worlds" />
-    <meta property="twitter:description" content="Every high-throughput
-consensus design must decide when a block may enter the ordering
-process: wait for a proof of availability and every transaction pays for
-round trips it rarely needs, or reference blocks immediately and voters
-fetch missing data at the worst possible time. Multimmit does neither,
-finalizing a block as little as two message delays after it hits the
-wire." />
+    <meta property="twitter:description" content="Blockchains that
+decouple data dissemination from consensus buy throughput with user
+latency, waiting out certificate round trips or fetching missing data at
+the worst possible time. Multimmit pays neither: every producer proposes
+in parallel, and each block finalizes as little as two message delays
+after hitting the wire, as fast as any consensus can go." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
@@ -144,7 +142,9 @@ O’Grady</a></div>
         without waiting on the others, consensus references blocks the
         moment they arrive, and the votes already being cast establish
         availability, so no block waits on a certificate and no voter
-        waits on a fetch.</p>
+        waits on a fetch. Votes also extend past whatever the leader
+        omits, so every producer can add to each view’s finalized
+        log.</p>
         <p>A transaction block disseminated at time <span
         class="math inline">t</span> is finalized by <span
         class="math inline">t+2\delta</span> at best and <span
