@@ -154,31 +154,31 @@ O’Grady</a></div>
         the block.</p>
         <style>
           .cw-loop {
-            aspect-ratio: 1024 / 440;
+            aspect-ratio: 1024 / 464;
             margin: 28px 0 6px;
           }
 
           .cw-loop-dag {
-            aspect-ratio: 1024 / 400;
+            aspect-ratio: 1024 / 424;
           }
 
           .cw-loop-dagstructure {
-            aspect-ratio: 1024 / 360;
+            aspect-ratio: 1024 / 384;
           }
 
           @media (max-width: 600px) {
             .cw-loop {
               aspect-ratio: auto;
-              height: 280px;
+              height: 295px;
               overflow-x: auto;
             }
 
             .cw-loop-dag {
-              height: 255px;
+              height: 270px;
             }
 
             .cw-loop-dagstructure {
-              height: 230px;
+              height: 245px;
             }
 
             .cw-loop svg {
@@ -249,15 +249,20 @@ O’Grady</a></div>
         still queues for the next proposal after that. Returning
         DA-votes to every validator instead of just the producer would
         shave one delay by letting the leader assemble the PoA itself,
-        at the cost of cubic communication per lane height.</p>
+        at the cost of cubic communication per height of lane growth
+        (<span class="math inline">n</span> voters sending to <span
+        class="math inline">n</span> validators, for each of <span
+        class="math inline">n</span> lanes).</p>
         <div id="multimmit-fig-lanes" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of producer lanes with certified tips. The API node broadcasts a batch, validators return DA-votes, the producer broadcasts a proof of availability, and only then does the leader's block reference the batch, with two rounds of votes finalizing it six message delays after its broadcast, seven after submission.">
           <noscript>This figure animates the certified-tip pipeline: batch broadcast, DA-votes back to the producer, PoA certificate out, then the leader's block and two rounds of votes. Finality lands 6δ after the batch broadcast.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 2: Producer lanes with certified tips, over the same
-        Simplex-style two-round consensus as figure 1. The batch crosses
-        the network once, and its PoA follows two message delays later,
-        the earliest the leader’s block may reference it.</p>
+        Simplex-style two-round consensus as figure 1 (three message
+        delays from proposal to finality, the same total as Autobahn’s
+        fast path). The batch crosses the network once, and its PoA
+        follows two message delays later, the earliest the leader’s
+        block may reference it.</p>
         </div>
         <p>The obvious escape is to reference blocks before they
         certify, and the known ways to do it each break something.
@@ -276,12 +281,24 @@ O’Grady</a></div>
         nothing, however much available data it references, so <span
         class="math inline">k</span> faulty producers taking turns can
         deny the whole network its fast path for <span
-        class="math inline">k</span> consecutive proposals. The DAG
-        world hits the same fork: <a
+        class="math inline">k</span> consecutive proposals. Raptr
+        counters with reputation (voters blame the authors of missing
+        batches, and a producer blamed by <span
+        class="math inline">f+1</span> validators is demoted to
+        certified-only inclusion), but the mitigation is reactive: each
+        producer spoils before it is blamed, and a reputation forgiving
+        enough to readmit slow-but-honest producers re-arms the attack
+        on every reset. This fragility is exactly why reputation shows
+        up wherever uncertified references do, and DAG deployments have
+        scored anchors the same way since <a
+        href="https://arxiv.org/abs/2306.03058">Shoal</a>. The DAG world
+        hits the same fork: <a
         href="https://arxiv.org/abs/2310.14821">Mysticeti</a> references
-        uncertified vertices, and a message loss rate of just 0.05% has
-        been <a href="https://arxiv.org/abs/2405.20488">observed</a> to
-        increase its latency by an order of magnitude.</p>
+        uncertified vertices, and dropping just 1% of egress traffic at
+        5 of 100 validators has been <a
+        href="https://arxiv.org/abs/2405.20488">observed</a> to increase
+        its median latency by an order of magnitude at moderate
+        load.</p>
         <h2 id="checkpoint-now-certify-in-the-background">Checkpoint
         Now, Certify in the Background</h2>
         <p>Multimmit keeps the producer lanes but makes each a real
@@ -369,10 +386,15 @@ O’Grady</a></div>
         nothing at all or that block’s membership in the ledger is
         settled in that view, whatever the leader proposed.</li>
         <li>Consensus messages stay tens of kilobytes per view,
-        independent of transaction volume. At line rate, a single view
-        can order tens of megabytes of transactions on a commodity
-        gigabit link.</li>
+        independent of transaction volume. With views lasting 100-200ms,
+        a single view at line rate can order tens of megabytes of
+        transactions on a commodity gigabit link.</li>
         </ul>
+        <p>Multimmit can carry a reputation mechanism too, but as a
+        refinement rather than a defense. With damage already confined
+        to a faulty producer’s own chain, blame only tunes where lagging
+        chains sit in the ordering sweep, no guarantee depends on it,
+        and forgiveness can be generous.</p>
         <h2 id="dags-wait-in-waves">DAGs Wait in Waves</h2>
         <p>DAG-based protocols (<a
         href="https://arxiv.org/abs/2105.11827">Narwhal</a>, <a
@@ -398,9 +420,9 @@ O’Grady</a></div>
         </div>
         <p>Reading finality out of the lattice takes more rounds still.
         A reference is not finality on its own: the ordering logic
-        designates an anchor vertex each round, and the anchor commits
-        only once the following rounds’ reference pattern proves enough
-        of the network built on top of it. Committing the anchor then
+        designates periodic anchor vertices, and an anchor commits only
+        once the following rounds’ reference pattern proves enough of
+        the network built on top of it. Committing the anchor then
         orders every vertex in its causal history, and everything else
         waits for a later anchor.</p>
         <div id="multimmit-fig-dagfinality" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG finality. Four validators emit one vertex per round. Validator 2's round-r vertex, labeled A, is the anchor. Gold reference edges from round r+1 mark its support, and once round r+2 lands, A and its causal history turn gold, two rounds after A entered the DAG. Every other vertex stays pending until a later anchor commits.">
@@ -427,10 +449,10 @@ O’Grady</a></div>
         pair of consecutive vertices. In uncertified DAGs like
         Mysticeti, the round trip goes away and the fetch problem comes
         back: every vertex is a dependency of the vertices that
-        reference it, so a vertex some validators never received must be
-        fetched before the DAG can grow past it.</p>
-        <div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. Validators 1 and 4 must fetch the missing vertex from validator 2 before they can proceed, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
-          <noscript>This figure animates a fetch stall in an uncertified DAG: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. Validators 1 and 4 must fetch the missing dependency before processing that vertex, so the whole DAG stalls for a fetch round trip before round r+3 can start.</noscript>
+        reference it, so a validator missing a vertex must fetch it
+        before processing anything built on top.</p>
+        <div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG with four validators. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. Validators 1 and 4 must fetch the missing vertex from validator 2 before they can proceed, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
+          <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. Validators 1 and 4 must fetch the missing dependency before processing that vertex, so round r+3 starts a fetch round trip late.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 7: The fetch problem. Validator 3 withholds its
@@ -438,7 +460,12 @@ O’Grady</a></div>
         it only to validator 2, whose next vertex references it.
         Validators 1 and 4 cannot process that vertex until they fetch
         the missing dependency, so every lane’s round <span
-        class="math inline">r+3</span> starts late. In Multimmit a
+        class="math inline">r+3</span> starts late. Four validators
+        leave no quorum slack, which is why a single hole stalls
+        everything here. At larger scale the DAG routes around one hole,
+        but every hole still puts a fetch on someone’s critical path,
+        and at real block rates sustained loss keeps holes in nearly
+        every round (the measured blowup above). In Multimmit a
         reference never obligates a download: voters report how far they
         can support each chain and vote on schedule, so a withheld block
         costs its own chain’s tally and nobody else’s.</p>
@@ -450,10 +477,12 @@ O’Grady</a></div>
         <p>Figure 8: One producer, identical <span
         class="math inline">2\delta</span> certificate round trips. The
         DAG producer’s next vertex waits for the previous round’s
-        certificates. The Multimmit producer extends only its own chain
-        and runs ahead of certification, up to <span
-        class="math inline">d</span> uncertified blocks in flight (drawn
-        with production paced by load, filling the <span
+        certificates, drawn charitably as if every other producer’s
+        certificate arrives with its own votes (spreading them costs a
+        certified DAG a third delay per round). The Multimmit producer
+        waits only on its own chain and runs ahead of certification, up
+        to <span class="math inline">d</span> uncertified blocks in
+        flight (drawn with production paced by load, filling the <span
         class="math inline">d=3</span> window).</p>
         </div>
         <p>Multimmit’s chains carry no cross-producer references, so

@@ -46,9 +46,9 @@ const VALIDATORS = ['leader', 'v2', 'v3', 'v4'];
 
 const FIGURES = {
   'multimmit-fig-simplex': {
-    height: 440,
+    height: 464,
     rows: ROWS_CONSENSUS,
-    rowTop: 84,
+    rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
     variants: [{
@@ -80,9 +80,9 @@ const FIGURES = {
   },
 
   'multimmit-fig-lanes': {
-    height: 440,
+    height: 464,
     rows: ROWS_CONSENSUS,
-    rowTop: 84,
+    rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
     variants: [{
@@ -119,9 +119,9 @@ const FIGURES = {
   },
 
   'multimmit-fig-checkpoint': {
-    height: 440,
+    height: 464,
     rows: ROWS_CONSENSUS,
-    rowTop: 84,
+    rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
     variants: [{
@@ -156,9 +156,9 @@ const FIGURES = {
   },
 
   'multimmit-fig-extend': {
-    height: 440,
+    height: 464,
     rows: ROWS_CONSENSUS,
-    rowTop: 84,
+    rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
     variants: [{
@@ -192,14 +192,14 @@ const FIGURES = {
   },
 
   'multimmit-fig-dagstructure': {
-    height: 360,
+    height: 384,
     rows: [
       { id: 'v1', label: 'Validator 1' },
       { id: 'v2', label: 'Validator 2' },
       { id: 'v3', label: 'Validator 3' },
       { id: 'v4', label: 'Validator 4' },
     ],
-    rowTop: 78,
+    rowTop: 90,
     rowGap: 62,
     axis: { min: -0.5, max: 5.5, origin: null, unit: 'round' },
     variants: [{
@@ -229,14 +229,14 @@ const FIGURES = {
   },
 
   'multimmit-fig-dagfinality': {
-    height: 360,
+    height: 384,
     rows: [
       { id: 'v1', label: 'Validator 1' },
       { id: 'v2', label: 'Validator 2' },
       { id: 'v3', label: 'Validator 3' },
       { id: 'v4', label: 'Validator 4' },
     ],
-    rowTop: 78,
+    rowTop: 90,
     rowGap: 62,
     axis: { min: -0.5, max: 5.5, origin: null, unit: 'round' },
     variants: [{
@@ -281,18 +281,18 @@ const FIGURES = {
   },
 
   'multimmit-fig-dagfetch': {
-    height: 360,
+    height: 384,
     rows: [
       { id: 'v1', label: 'Validator 1' },
       { id: 'v2', label: 'Validator 2' },
       { id: 'v3', label: 'Validator 3' },
       { id: 'v4', label: 'Validator 4' },
     ],
-    rowTop: 78,
+    rowTop: 90,
     rowGap: 62,
     axis: { min: -0.5, max: 6.6, origin: null },
     variants: [{
-      tag: 'one withheld vertex stalls the whole DAG',
+      tag: 'a withheld vertex puts fetches on the critical path',
       end: 6.3,
       phases: [],
       events: [
@@ -352,13 +352,13 @@ const FIGURES = {
   },
 
   'multimmit-fig-dag': {
-    height: 400,
+    height: 424,
     plotX0: 214,
     rows: [
       { id: 'dag', label: 'DAG producer' },
       { id: 'mm', label: 'Multimmit producer' },
     ],
-    rowTop: 96,
+    rowTop: 108,
     rowGap: 164,
     arcDepth: 66,
     axis: { min: -0.4, max: 8, origin: null },
@@ -484,7 +484,7 @@ function buildFigure(mount, cfg) {
   for (let t = Math.ceil(cfg.axis.min); t <= Math.floor(cfg.axis.max); t++) {
     const x = xOf(t);
     staticLayer.appendChild(svgEl('line', {
-      x1: x, y1: 46, x2: x, y2: axisY - 12,
+      x1: x, y1: 54, x2: x, y2: axisY - 12,
       stroke: '#e4e4e4', 'stroke-width': 1,
     }));
     let label;
@@ -640,17 +640,17 @@ function buildFigure(mount, cfg) {
       const x = xOf(ev.t);
       const group = svgEl('g', { opacity: 0 });
       const lineEl = svgEl('line', {
-        x1: x, y1: 46, x2: x, y2: H - 46,
+        x1: x, y1: 54, x2: x, y2: H - 46,
         stroke: ev.ghost ? GRAY : GOLD, 'stroke-width': ev.ghost ? 1.5 : 2.5,
         'stroke-dasharray': ev.ghost ? '5 4' : 'none',
       });
       const halo = svgEl('rect', {
-        x: x - 9, y: 46, width: 18, height: H - 92,
+        x: x - 9, y: 54, width: 18, height: H - 100,
         fill: GOLD_FILL, opacity: 0,
       });
       group.append(halo, lineEl);
       if (ev.label) {
-        group.appendChild(text(x, 40, ev.label, {
+        group.appendChild(text(x, 46, ev.label, {
           'text-anchor': 'middle', 'font-size': ev.ghost ? 14 : 17,
           fill: ev.ghost ? GRAY : GOLD, 'font-weight': ev.ghost ? 400 : 700,
         }));
@@ -658,7 +658,7 @@ function buildFigure(mount, cfg) {
       if (ev.sub) {
         // Labels sit beside the line, never on it: gold finality on the
         // left, ghost references on the right.
-        group.appendChild(text(ev.ghost ? x + 7 : x - 7, H - 52, ev.sub, {
+        group.appendChild(text(ev.ghost ? x + 7 : x - 7, H - 58, ev.sub, {
           'text-anchor': ev.ghost ? 'start' : 'end', 'font-size': ev.ghost ? 14 : 15,
           fill: ev.ghost ? GRAY : GOLD, 'font-weight': ev.ghost ? 400 : 700,
         }));
