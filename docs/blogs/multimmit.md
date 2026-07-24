@@ -38,6 +38,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
     aspect-ratio: 1024 / 408;
   }
 
+  .cw-loop-certificate {
+    aspect-ratio: 1024 / 520;
+  }
+
   @media (max-width: 600px) {
     .cw-loop {
       aspect-ratio: auto;
@@ -55,6 +59,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
 
     .cw-loop-dagfetch {
       height: 260px;
+    }
+
+    .cw-loop-certificate {
+      height: 330px;
     }
 
     .cw-loop svg {
@@ -138,26 +146,26 @@ Read the User row of either figure: submit to an API node, the API node's next b
 Spoiling is worth seeing concretely. A Raptr proposal is one ordered sequence, and a vote is a single prefix length, so one hole caps every vote behind it.
 
 ```{=html}
-<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader proposes an ordered sequence of six batches from six producers, A through F. Producer B withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
-  <noscript>This figure animates easy spoiling: a Raptr proposal is an ordered sequence of six batches from six producers, producer B withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
+<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader proposes an ordered sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
+  <noscript>This figure animates easy spoiling: a Raptr proposal is an ordered sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 5: Easy spoiling. A Raptr proposal is an ordered sequence of batches, and each voter supports the longest prefix whose data it holds. One withheld batch early in the sequence caps almost every vote at the hole, so the proposal finalizes prefix 1 and strands every available batch behind position 2. The batches belong to six different producers, so producer B's hole strands the data of C through F. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (next figure) report per chain instead of per prefix, so there is no position to poison: a withheld block costs its own chain and nothing else.
+Figure 5: Easy spoiling. A Raptr proposal is an ordered sequence of batches, and each voter supports the longest prefix whose data it holds. One withheld batch early in the sequence caps almost every vote at the hole, so the proposal finalizes prefix 1 and strands every available batch behind position 2. The batches belong to six different producers, so P2's hole strands the data of P3 through P6. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (next figure) report per chain instead of per prefix, so there is no position to poison: a withheld block costs its own chain and nothing else.
 :::
 
 
-What does one round of votes actually pin down? Everything is read off the certificate by rank rules. An L-QC is any $n-f$ votes for the leader block, and each vote already reports, per chain, the highest proposed position it supports. Sorting a chain's reported positions and discarding the top $3f$ yields its finalized tip, discarding only the top $f$ yields the tip the next leader must extend, and quorum intersection keeps the second at or above the first. The finalized tips then enter the log in a deterministic sweep.
+What does one round of votes actually pin down? The difference from figure 5 is the shape of the vote. Raptr's vote is one prefix length over one interleaved sequence, so every batch sits behind every earlier batch, whoever produced it. Multimmit's vote carries an independent coordinate per chain, and the interleaving is not voted on at all: it is computed afterwards from the finalized tips, so a hole in one coordinate cannot cap what any other chain finalizes. Everything is read off the certificate by rank rules. An L-QC is any $n-f$ votes for the leader block, and each vote already reports, per chain, the highest proposed position it supports. Sorting a chain's reported positions and discarding the top $3f$ yields its finalized tip, discarding only the top $f$ yields the tip the next leader must extend, and quorum intersection keeps the second at or above the first. The finalized tips then enter the log in a deterministic sweep.
 
 ```{=html}
-<div id="multimmit-fig-certificate" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated diagram of Multimmit's certificate rules, drawn at n equals 11 and f equals 2. Left: nine votes stack as dots above one chain's proposed positions. Discarding the top six votes marks position 3 finalized in gold, and discarding only the top two marks position 4 safe to extend in blue. Right: a four-chain grid where the finalized tips of every chain are stamped into a single order, each chain's first new block before any chain's second.">
-  <noscript>This figure animates the certificate rules at n=11, f=2. Nine votes stack above one chain's proposed positions. Dropping the top 3f=6 votes yields the finalized tip (position 3), and dropping only the top f=2 yields the safe-to-extend tip (position 4). The finalized tips of all chains are then stamped into a single order by a fixed sweep, each chain's first new block before any chain's second.</noscript>
+<div id="multimmit-fig-certificate" class="cw-loop cw-loop-certificate" role="img" aria-label="Animated diagram of Multimmit's certificate rules, drawn at n equals 11 and f equals 2. Left: the leader block is drawn as a red container holding one compact coordinate row per chain, chains 1 through 4, each a gray previous tip followed by as many green proposed entries as the leader has seen for that chain, and chain 1's coordinate is zoomed below it: blocks 1B through 1E proposed above its previous tip 1A. Nine votes stack as dots above the entries. Discarding the top six votes finalizes 1D in gold, and discarding only the top two marks 1E safe to extend in blue. Right: a four-chain grid where the finalized tips of every chain are stamped into a single order, each chain's first new block before any chain's second, with chain 1's column carrying the same gold 1D and blue 1E as the zoomed coordinate.">
+  <noscript>This figure animates the certificate rules at n=11, f=2. The leader block carries one coordinate per chain, and chain 1's coordinate is zoomed: nine votes stack above its proposed entries (1B through 1E, above its previous tip 1A). Dropping the top 3f=6 votes finalizes 1D, and dropping only the top f=2 marks 1E safe to extend. The finalized tips of all chains are then stamped into a single order by a fixed sweep, each chain's first new block before any chain's second.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 6: From votes to an ordering, drawn at $n=11$, $f=2$ so the discards are visible. Left: one chain of the proposal inside an L-QC, which is any $n-f=9$ votes for the leader block. Each vote reports the highest proposed position it supports. Dropping the top $3f=6$ leaves the finalized tip (gold), backed by $3f+1=7$ votes. The low votes belong to voters missing this chain's newest blocks, and they lower only this chain's tip. Dropping only the top $f=2$ leaves the safe-to-extend tip (blue), which the next leader must build on, so a finalized tip can never be orphaned. Right: every chain's finalized tips enter the log by a fixed sweep, each chain's first new block before any chain's second (gray cells are the previous tips, already ordered).
+Figure 6: From votes to an ordering, drawn at $n=11$, $f=2$ so the discards are visible. Left: the leader block carries one coordinate per producer chain, each holding as many proposed entries (green) as the leader has seen for that chain, and chain 1's coordinate is zoomed beneath it, proposing blocks 1B through 1E above the previous tip 1A. An L-QC is any $n-f=9$ votes for the leader block, and each vote reports, per chain, the highest entry it supports, so one vote covers every chain independently, unlike figure 5's single prefix. Dropping the top $3f=6$ finalizes 1D (gold), backed by $3f+1=7$ votes. The low votes belong to voters missing chain 1's newest blocks, and they lower only chain 1's tip. Dropping only the top $f=2$ leaves the safe-to-extend tip 1E (blue), which the next leader must build on, so a finalized tip can never be orphaned. Right: the same rules run for every chain, and the finalized tips enter the log by a fixed sweep, each chain's first new block before any chain's second. Every green entry on the left lands in the grid, with chain 1's column carrying the same gold 1D and blue 1E as its zoomed coordinate, the latter waiting for the next leader. Gray cells are the previous tips, already ordered.
 :::
 
 
