@@ -9,11 +9,10 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > The Best of Both Worlds</title>
-    <meta name="description" content="Multimmit lets every validator
-disseminate transactions concurrently without putting availability
-certificates or missing-data fetches on the path to finality. An honest
-producer’s block can finalize in two message delays, the fastest any
-consensus can go.">
+    <meta name="description" content="Two-delay finality is the
+theoretical minimum, but existing protocols, including DAGs, provide it
+only for designated leader blocks. Multimmit extends two-delay finality
+to every honest producer’s blocks at once: the best of both worlds.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -22,11 +21,10 @@ consensus can go.">
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="og:title" content="The Best of Both Worlds" />
-    <meta property="og:description" content="Multimmit lets every
-validator disseminate transactions concurrently without putting
-availability certificates or missing-data fetches on the path to
-finality. An honest producer’s block can finalize in two message delays,
-the fastest any consensus can go." />
+    <meta property="og:description" content="Two-delay finality is the
+theoretical minimum, but existing protocols, including DAGs, provide it
+only for designated leader blocks. Multimmit extends two-delay finality
+to every honest producer’s blocks at once: the best of both worlds." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-07-23T00:00:00Z" />
     <meta property="article:modified_time" content="2026-07-23T00:00:00Z" />
@@ -37,11 +35,11 @@ the fastest any consensus can go." />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/multimmit" />
     <meta property="twitter:title" content="The Best of Both Worlds" />
-    <meta property="twitter:description" content="Multimmit lets every
-validator disseminate transactions concurrently without putting
-availability certificates or missing-data fetches on the path to
-finality. An honest producer’s block can finalize in two message delays,
-the fastest any consensus can go." />
+    <meta property="twitter:description" content="Two-delay finality is
+the theoretical minimum, but existing protocols, including DAGs, provide
+it only for designated leader blocks. Multimmit extends two-delay
+finality to every honest producer’s blocks at once: the best of both
+worlds." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
@@ -152,9 +150,9 @@ O’Grady</a></div>
         for fault-tolerant consensus. Existing two-round protocols,
         including DAG protocols such as <a
         href="https://arxiv.org/abs/2511.15361">BlueBottle</a>, reach it
-        for designated leader blocks. Multimmit reaches that bound for
-        blocks from every honest producer without giving up concurrent
-        dissemination: the best of both worlds.</p>
+        only for designated leader blocks. Multimmit reaches that bound
+        for blocks from every honest producer without giving up
+        concurrent dissemination: the best of both worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
         <p>Consider a typical deployed protocol with one proposer at a
         time and <a
@@ -396,8 +394,8 @@ O’Grady</a></div>
         an API node, let its next block carry the transaction to every
         validator, and wait one round of votes for finality. The
         producer can pre-confirm the transaction as soon as it arrives,
-        potentially before the transaction could reach a leader an ocean
-        away. Nothing must reach the leader before dissemination begins.
+        potentially before it could reach a leader an ocean away.
+        Nothing must reach the leader before dissemination begins.
         Including the wait for the next vote event, a block sent at time
         <span class="math inline">t</span> finalizes at <span
         class="math inline">t+3\delta</span> in expectation (and by

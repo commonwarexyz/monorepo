@@ -1,6 +1,6 @@
 ---
 title: "The Best of Both Worlds"
-description: "Multimmit lets every validator disseminate transactions concurrently without putting availability certificates or missing-data fetches on the path to finality. An honest producer's block can finalize in two message delays, the fastest any consensus can go."
+description: "Two-delay finality is the theoretical minimum, but existing protocols, including DAGs, provide it only for designated leader blocks. Multimmit extends two-delay finality to every honest producer's blocks at once: the best of both worlds."
 date: "July 23rd, 2026"
 published-time: "2026-07-23T00:00:00Z"
 modified-time: "2026-07-23T00:00:00Z"
@@ -19,7 +19,7 @@ However, decoupling has typically increased finality latency. Consensus cannot f
 
 Today, we're sharing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that avoids both delays. Each producer extends its own chain of transaction blocks without waiting on other producers. Consensus references blocks as soon as they arrive, and the votes already being cast establish availability. No block waits for a certificate and no voter waits to fetch missing data. Votes can also include blocks the leader missed, allowing every producer to add to the finalized log in each view.
 
-With Multimmit, an honest producer's block finalizes $2\delta$ after broadcast in the best case and $3\delta$ in expectation, even when up to $f$ producers are faulty (assuming $n \geq 5f+1$). Unlike the latency figures usually reported for consensus, this timer starts at broadcast, not at a later leader proposal. Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing two-round protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), reach it for designated leader blocks. Multimmit reaches that bound for blocks from every honest producer without giving up concurrent dissemination: the best of both worlds.
+With Multimmit, an honest producer's block finalizes $2\delta$ after broadcast in the best case and $3\delta$ in expectation, even when up to $f$ producers are faulty (assuming $n \geq 5f+1$). Unlike the latency figures usually reported for consensus, this timer starts at broadcast, not at a later leader proposal. Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing two-round protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), reach it only for designated leader blocks. Multimmit reaches that bound for blocks from every honest producer without giving up concurrent dissemination: the best of both worlds.
 
 ## The Ride to the Leader
 
@@ -143,7 +143,7 @@ Figure 4: Transaction block $b$ (green, like the batch in Figure 2) reaches the 
 Figure 5: Transaction block $b$ crosses the leader block on the wire and misses the proposal, but reaches validators before they vote. Extension votes attest $b$ directly, finalizing it $2\delta$ after its broadcast. Certification continues in the background (faint arrows) and finishes after $b$ has already finalized.
 :::
 
-From the user's perspective, both paths are simple: submit to an API node, let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before the transaction could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation (and by $t+2\delta$ with favorable timing). The two-delay case is optimal.
+From the user's perspective, both paths are simple: submit to an API node, let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before it could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation (and by $t+2\delta$ with favorable timing). The two-delay case is optimal.
 
 If we started the timer at the leader's proposal, as consensus papers often do, Multimmit finality would be reported as $2\delta$. That convention misses where checkpoints and extension votes save time. Raptr, measured from dissemination, finalizes a batch at $t+5\delta$ in expectation with *no* faults and at $t+5.5\delta$ once faulty producers are present (with the fast path still subject to spoiling). Roughly one $\delta$ of Multimmit's improvement comes from assuming $n \geq 5f+1$ and using one voting round instead of two. Checkpoints and extension votes provide the rest. An honest chain's expected $t+3\delta$ finality does not change when $f$ producers misbehave.
 
