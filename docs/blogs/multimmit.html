@@ -166,7 +166,7 @@ O’Grady</a></div>
         <p>Start with the shape of most deployed protocols: one proposer
         at a time, drawn with <a
         href="https://eprint.iacr.org/2023/463">Simplex</a>-style
-        notarize and finalize rounds. The next four figures run on the
+        notarize and finalize rounds. Figures 1, 2, 4, and 5 run on the
         user’s clock, submission to finality. Follow the transaction
         rather than the block.</p>
         <style>
@@ -213,11 +213,11 @@ O’Grady</a></div>
         <div class="image-caption">
         <p>Figure 1: A transaction’s path through a single-proposer
         protocol, on an axis of message delays (<span
-        class="math inline">\delta</span>) since submission. Figures 1
-        through 4 share that axis and draw the best case, with no waits
-        for proposal or production events. The clock that consensus
-        papers report starts at “block”. The user has been waiting <span
-        class="math inline">2\delta</span> by then.</p>
+        class="math inline">\delta</span>) since submission. Figures 1,
+        2, 4, and 5 share that axis and draw the best case, with no
+        waits for proposal or production events. The clock that
+        consensus papers report starts at “block”. The user has been
+        waiting <span class="math inline">2\delta</span> by then.</p>
         </div>
         <p>Two problems, one on each side of the figure. On the right,
         finality costs two rounds of voting, and a recent cohort (<a
@@ -225,7 +225,7 @@ O’Grady</a></div>
         href="https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana">Alpenglow</a>,
         <a href="https://arxiv.org/abs/2505.08771">Kudzu</a>) cuts it to
         one round when <span class="math inline">n \geq 5f+1</span>
-        (Multimmit inherits exactly that skeleton, and figures 3 and 4
+        (Multimmit inherits exactly that skeleton, and figures 4 and 5
         draw it). On the left, the transaction crosses to an API node,
         crosses again to the leader, and in expectation sits in a
         mempool until the leader’s next proposal, all before the
@@ -302,6 +302,21 @@ O’Grady</a></div>
         producer spoils before it is blamed, and a reputation mechanism
         forgiving enough to readmit slow-but-honest producers re-arms
         the attack on every reset.</p>
+        <div id="multimmit-fig-spoiling" class="cw-loop cw-loop-spoiling" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader block is drawn as a red container holding one flat sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
+          <noscript>This figure animates easy spoiling: a Raptr leader block carries one flat sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
+        </div>
+        <div class="image-caption">
+        <p>Figure 3: Easy spoiling. A Raptr leader block carries one
+        flat sequence of batches from many producers, and each voter
+        supports the longest prefix whose data it holds. One withheld
+        batch caps almost every vote at the hole: the proposal finalizes
+        prefix 1, stranding P3 through P6’s available data behind P2’s
+        hole. Stranded batches eventually land through the certified
+        slow path, which is exactly the path prefix voting exists to
+        avoid. Multimmit’s votes (figure 6) report per chain instead of
+        per prefix, so there is no shared position to poison: a withheld
+        block costs its own chain and nothing else.</p>
+        </div>
         <p>The DAG world faces the same choice: <a
         href="https://arxiv.org/abs/2310.14821">Mysticeti</a> references
         uncertified vertices, and dropping just 1% of egress traffic at
@@ -343,7 +358,7 @@ O’Grady</a></div>
           <noscript>This figure animates Multimmit's checkpoint path: the leader block references the uncertified transaction block and one vote round finalizes it at block + 3δ, while DA-votes and the PoA form in the background.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 3: Transaction block <span
+        <p>Figure 4: Transaction block <span
         class="math inline">b</span> (green, as batches in figure 2)
         reaches the leader in time and is checkpointed in the leader
         block before any PoA forms. Minimmit’s single round of votes
@@ -368,7 +383,7 @@ O’Grady</a></div>
           <noscript>This figure animates Multimmit's extension path: the transaction block misses the leader block but reaches the voters, whose extension votes attest it directly, finalizing at block + 2δ while DA-votes and the PoA form in the background.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 4: Transaction block <span
+        <p>Figure 5: Transaction block <span
         class="math inline">b</span> misses the leader block, crossing
         it on the wire, but reaches the voters before they vote. Their
         votes attest <span class="math inline">b</span> directly and it
@@ -404,25 +419,8 @@ O’Grady</a></div>
         class="math inline">t+3\delta</span> in expectation with <span
         class="math inline">f</span> faulty producers doing their
         worst.</p>
-        <p>A Raptr leader block is one flat sequence, and a vote is a
-        single prefix length, so one hole caps every vote behind it.</p>
-        <div id="multimmit-fig-spoiling" class="cw-loop cw-loop-spoiling" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader block is drawn as a red container holding one flat sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
-          <noscript>This figure animates easy spoiling: a Raptr leader block carries one flat sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
-        </div>
-        <div class="image-caption">
-        <p>Figure 5: Easy spoiling. A Raptr leader block carries one
-        flat sequence of batches from many producers, and each voter
-        supports the longest prefix whose data it holds. One withheld
-        batch caps almost every vote at the hole: the proposal finalizes
-        prefix 1, stranding P3 through P6’s available data behind P2’s
-        hole. Stranded batches eventually land through the certified
-        slow path, which is exactly the path prefix voting exists to
-        avoid. Multimmit’s votes (next figure) report per chain instead
-        of per prefix, so there is no shared position to poison: a
-        withheld block costs its own chain and nothing else.</p>
-        </div>
         <p>What does one round of votes actually pin down? The
-        difference from figure 5 is the shape of the vote. Multimmit’s
+        difference from figure 3 is the shape of the vote. Multimmit’s
         vote carries an independent coordinate per chain, and the
         interleaving is not voted on at all: it is computed afterwards
         from the finalized tips, so a hole in one coordinate cannot cap
@@ -451,7 +449,7 @@ O’Grady</a></div>
         previous tip 1A. An L-QC is any <span
         class="math inline">n-f=9</span> votes for the leader block, and
         each vote reports, per chain, the highest entry it supports, so
-        one vote covers every chain independently, unlike figure 5’s
+        one vote covers every chain independently, unlike figure 3’s
         single prefix. Dropping the top <span
         class="math inline">3f=6</span> finalizes 1D (gold), backed by
         <span class="math inline">3f+1=7</span> votes. The low votes
@@ -491,6 +489,14 @@ O’Grady</a></div>
         to a faulty producer’s own chain, blame only tunes where lagging
         chains sit in the ordering sweep, no guarantee depends on it,
         and forgiveness can be generous.</p>
+        <p><em>Leader rotation is itself a choice. A stable leader would
+        run faster views, but every transaction on the planet must first
+        travel to it, while a Multimmit producer can pre-confirm a
+        transaction the moment it arrives, long before it could reach a
+        leader an ocean away. For deployments comfortable with a stable
+        leader’s censorship profile, our prior work <a
+        href="/blogs/carnot-bound.html">Carnot</a> pushes that design to
+        near line-rate throughput.</em></p>
         <h2 id="one-structure-two-jobs">One Structure, Two Jobs</h2>
         <p>DAG-based protocols (<a
         href="https://arxiv.org/abs/2105.11827">Narwhal</a>, <a

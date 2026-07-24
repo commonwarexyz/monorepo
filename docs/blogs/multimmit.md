@@ -23,7 +23,7 @@ A transaction block disseminated at time $t$ is finalized by $t+2\delta$ at best
 
 ## The Ride to the Leader
 
-Start with the shape of most deployed protocols: one proposer at a time, drawn with [Simplex](https://eprint.iacr.org/2023/463)-style notarize and finalize rounds. The next four figures run on the user's clock, submission to finality. Follow the transaction rather than the block.
+Start with the shape of most deployed protocols: one proposer at a time, drawn with [Simplex](https://eprint.iacr.org/2023/463)-style notarize and finalize rounds. Figures 1, 2, 4, and 5 run on the user's clock, submission to finality. Follow the transaction rather than the block.
 
 ```{=html}
 <style>
@@ -70,10 +70,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
 ```
 
 ::: {.image-caption}
-Figure 1: A transaction's path through a single-proposer protocol, on an axis of message delays ($\delta$) since submission. Figures 1 through 4 share that axis and draw the best case, with no waits for proposal or production events. The clock that consensus papers report starts at "block". The user has been waiting $2\delta$ by then.
+Figure 1: A transaction's path through a single-proposer protocol, on an axis of message delays ($\delta$) since submission. Figures 1, 2, 4, and 5 share that axis and draw the best case, with no waits for proposal or production events. The clock that consensus papers report starts at "block". The user has been waiting $2\delta$ by then.
 :::
 
-Two problems, one on each side of the figure. On the right, finality costs two rounds of voting, and a recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) cuts it to one round when $n \geq 5f+1$ (Multimmit inherits exactly that skeleton, and figures 3 and 4 draw it). On the left, the transaction crosses to an API node, crosses again to the leader, and in expectation sits in a mempool until the leader's next proposal, all before the reported clock starts. Worse, every one of those bytes must flow *out* of the leader again inside the block: the leader's uplink is the throughput ceiling for the entire network. One-round voting fixes nothing on the left side.
+Two problems, one on each side of the figure. On the right, finality costs two rounds of voting, and a recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) cuts it to one round when $n \geq 5f+1$ (Multimmit inherits exactly that skeleton, and figures 4 and 5 draw it). On the left, the transaction crosses to an API node, crosses again to the leader, and in expectation sits in a mempool until the leader's next proposal, all before the reported clock starts. Worse, every one of those bytes must flow *out* of the leader again inside the block: the leader's uplink is the throughput ceiling for the entire network. One-round voting fixes nothing on the left side.
 
 ## Many Chains, Gated on Certificates
 
@@ -95,6 +95,16 @@ The escape is to reference blocks before they certify, and the known ways to do 
 
 [Raptr](https://arxiv.org/abs/2504.18649) eliminates the fetch: voters support the longest prefix of the proposal they hold data for, and the protocol finalizes a prefix supported by a quorum. But prefixes are order-sensitive. Withhold the data behind a single early batch and the proposal is *spoiled*, finalizing little or nothing, however much available data it references, so $k$ faulty producers taking turns can deny the whole network its fast path for $k$ consecutive proposals. Raptr counters with reputation (voters blame the authors of missing batches, and a producer blamed by $f+1$ validators is demoted to certified-only inclusion), but the mitigation is reactive: each producer spoils before it is blamed, and a reputation mechanism forgiving enough to readmit slow-but-honest producers re-arms the attack on every reset.
 
+```{=html}
+<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-spoiling" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader block is drawn as a red container holding one flat sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
+  <noscript>This figure animates easy spoiling: a Raptr leader block carries one flat sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 3: Easy spoiling. A Raptr leader block carries one flat sequence of batches from many producers, and each voter supports the longest prefix whose data it holds. One withheld batch caps almost every vote at the hole: the proposal finalizes prefix 1, stranding P3 through P6's available data behind P2's hole. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (figure 6) report per chain instead of per prefix, so there is no shared position to poison: a withheld block costs its own chain and nothing else.
+:::
+
 The DAG world faces the same choice: [Mysticeti](https://arxiv.org/abs/2310.14821) references uncertified vertices, and dropping just 1% of egress traffic at 5 of 100 validators has been [observed](https://arxiv.org/abs/2405.20488) to increase its median latency by an order of magnitude at moderate load. This fragility is why reputation shows up wherever uncertified references do, and DAG deployments have scored anchors (their leader equivalents) the same way since [Shoal](https://arxiv.org/abs/2306.03058).
 
 ## Checkpoint Now, Certify in the Background
@@ -110,7 +120,7 @@ Multimmit keeps the producer lanes but makes each a real chain: every producer s
 ```
 
 ::: {.image-caption}
-Figure 3: Transaction block $b$ (green, as batches in figure 2) reaches the leader in time and is checkpointed in the leader block before any PoA forms. Minimmit's single round of votes finalizes it $3\delta$ after its broadcast. The faint arrows are the DA-votes and PoA, forming off the critical path. The dashed markers are where figures 1 and 2 finalized on the same axis. No transaction data flows through the leader here.
+Figure 4: Transaction block $b$ (green, as batches in figure 2) reaches the leader in time and is checkpointed in the leader block before any PoA forms. Minimmit's single round of votes finalizes it $3\delta$ after its broadcast. The faint arrows are the DA-votes and PoA, forming off the critical path. The dashed markers are where figures 1 and 2 finalized on the same axis. No transaction data flows through the leader here.
 :::
 
 *Extension votes.* A vote may also attest up to $e$ fresh blocks *beyond* the proposed tips, anchored at the voter's own reported position. A block no longer needs to reach the leader before the proposal to finalize in a view. It needs to reach the voters before they vote. The same anchoring makes extensions leader-proof: junk or stale entries for a chain cannot stop correct voters from attaching its true recent blocks. A leader that wants to exclude a well-circulated honest block therefore cannot propose around it, and its only remaining move is to suppress the entire view, forfeiting finalization.
@@ -122,24 +132,12 @@ Figure 3: Transaction block $b$ (green, as batches in figure 2) reaches the lead
 ```
 
 ::: {.image-caption}
-Figure 4: Transaction block $b$ misses the leader block, crossing it on the wire, but reaches the voters before they vote. Their votes attest $b$ directly and it finalizes $2\delta$ after its broadcast. The dashed markers are where the earlier figures finalized on the same axis.
+Figure 5: Transaction block $b$ misses the leader block, crossing it on the wire, but reaches the voters before they vote. Their votes attest $b$ directly and it finalizes $2\delta$ after its broadcast. The dashed markers are where the earlier figures finalized on the same axis.
 :::
 
 Either way, the user's path is the same: submit to an API node, the API node's next block carries the transaction to every validator, and one round of votes finalizes it. There is no separate journey to the leader because there is nothing the leader must gather first. Averaged over the wait for the next vote event, a block disseminated at time $t$ is finalized by $t+3\delta$, and by $t+2\delta$ when the timing is favorable. Two message delays is optimal. Reported from the leader's proposal instead, Multimmit's figure would simply read $2\delta$: the mechanisms above act on the leg that convention never measures. For comparison, Raptr finalizes a batch disseminated at time $t$ at $t+5\delta$ in expectation with *no* faults, degrading to $t+5.5\delta$ (and spoilable) once faulty producers show up. *Of the roughly $2\delta$ saved, one $\delta$ is bought by the stronger assumption $n \geq 5f+1$ (one round of voting rather than two), and the rest comes from checkpoints and extension votes.* Multimmit's figures do not degrade: an honest chain's block still finalizes by $t+3\delta$ in expectation with $f$ faulty producers doing their worst.
 
-A Raptr leader block is one flat sequence, and a vote is a single prefix length, so one hole caps every vote behind it.
-
-```{=html}
-<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-spoiling" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader block is drawn as a red container holding one flat sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
-  <noscript>This figure animates easy spoiling: a Raptr leader block carries one flat sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
-</div>
-```
-
-::: {.image-caption}
-Figure 5: Easy spoiling. A Raptr leader block carries one flat sequence of batches from many producers, and each voter supports the longest prefix whose data it holds. One withheld batch caps almost every vote at the hole: the proposal finalizes prefix 1, stranding P3 through P6's available data behind P2's hole. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (next figure) report per chain instead of per prefix, so there is no shared position to poison: a withheld block costs its own chain and nothing else.
-:::
-
-What does one round of votes actually pin down? The difference from figure 5 is the shape of the vote. Multimmit's vote carries an independent coordinate per chain, and the interleaving is not voted on at all: it is computed afterwards from the finalized tips, so a hole in one coordinate cannot cap what any other chain finalizes. Everything is read off the certificate by rank rules. An L-QC (a quorum certificate on the leader block) is any $n-f$ votes for it, and each vote already reports, per chain, the highest proposed position it supports. Sort a chain's reported positions: discarding the top $3f$ yields its finalized tip, and discarding only the top $f$ yields the tip the next leader must extend. Quorum intersection keeps the second at or above the first. The finalized tips then enter the log in a fixed sweep.
+What does one round of votes actually pin down? The difference from figure 3 is the shape of the vote. Multimmit's vote carries an independent coordinate per chain, and the interleaving is not voted on at all: it is computed afterwards from the finalized tips, so a hole in one coordinate cannot cap what any other chain finalizes. Everything is read off the certificate by rank rules. An L-QC (a quorum certificate on the leader block) is any $n-f$ votes for it, and each vote already reports, per chain, the highest proposed position it supports. Sort a chain's reported positions: discarding the top $3f$ yields its finalized tip, and discarding only the top $f$ yields the tip the next leader must extend. Quorum intersection keeps the second at or above the first. The finalized tips then enter the log in a fixed sweep.
 
 ```{=html}
 <div id="multimmit-fig-certificate" class="cw-loop cw-loop-certificate" role="img" aria-label="Animated diagram of Multimmit's certificate rules, drawn at n equals 11 and f equals 2. Left: the leader block is drawn as a red container holding one compact coordinate row per chain, chains 1 through 4, each a gray previous tip followed by as many green proposed entries as the leader has seen for that chain, and chain 1's coordinate is zoomed below it: blocks 1B through 1E proposed above its previous tip 1A. Nine votes stack as dots above the entries. Discarding the top six votes finalizes 1D in gold, and discarding only the top two marks 1E safe to extend in blue. Right: a four-chain grid where the finalized tips of every chain are stamped into a single order, each chain's first new block before any chain's second, with chain 1's column carrying the same gold 1D and blue 1E as the zoomed coordinate.">
@@ -148,7 +146,7 @@ What does one round of votes actually pin down? The difference from figure 5 is 
 ```
 
 ::: {.image-caption}
-Figure 6: From votes to an ordering, drawn at $n=11$, $f=2$ so the discards are visible. Left: the leader block carries one coordinate per producer chain, each holding as many proposed entries (green) as the leader has seen for that chain, and chain 1's coordinate is zoomed beneath it, with blocks 1B through 1E proposed above the previous tip 1A. An L-QC is any $n-f=9$ votes for the leader block, and each vote reports, per chain, the highest entry it supports, so one vote covers every chain independently, unlike figure 5's single prefix. Dropping the top $3f=6$ finalizes 1D (gold), backed by $3f+1=7$ votes. The low votes belong to voters missing chain 1's newest blocks, and they lower only chain 1's tip. Dropping only the top $f=2$ leaves the safe-to-extend tip 1E (blue), which the next leader must build on, so a finalized tip can never be orphaned. Right: the same rules run for every chain, and the finalized tips enter the log by a fixed sweep, each chain's first new block before any chain's second. Every green entry on the left lands in the grid, with chain 1's column carrying the same gold 1D and blue 1E as its zoomed coordinate, the latter waiting for the next leader. Gray cells are the previous tips, already ordered.
+Figure 6: From votes to an ordering, drawn at $n=11$, $f=2$ so the discards are visible. Left: the leader block carries one coordinate per producer chain, each holding as many proposed entries (green) as the leader has seen for that chain, and chain 1's coordinate is zoomed beneath it, with blocks 1B through 1E proposed above the previous tip 1A. An L-QC is any $n-f=9$ votes for the leader block, and each vote reports, per chain, the highest entry it supports, so one vote covers every chain independently, unlike figure 3's single prefix. Dropping the top $3f=6$ finalizes 1D (gold), backed by $3f+1=7$ votes. The low votes belong to voters missing chain 1's newest blocks, and they lower only chain 1's tip. Dropping only the top $f=2$ leaves the safe-to-extend tip 1E (blue), which the next leader must build on, so a finalized tip can never be orphaned. Right: the same rules run for every chain, and the finalized tips enter the log by a fixed sweep, each chain's first new block before any chain's second. Every green entry on the left lands in the grid, with chain 1's column carrying the same gold 1D and blue 1E as its zoomed coordinate, the latter waiting for the next leader. Gray cells are the previous tips, already ordered.
 :::
 
 The thresholds above are exact at $n=5f+1$, and they carry guarantees that go beyond latency:
@@ -158,6 +156,8 @@ The thresholds above are exact at $n=5f+1$, and they carry guarantees that go be
 - Consensus messages stay tens of kilobytes per view, independent of transaction volume. With views lasting 100-200ms, a single view at line rate can order tens of megabytes of transactions on a commodity gigabit link.
 
 Multimmit can carry a reputation mechanism too, but as a refinement rather than a defense. With damage already confined to a faulty producer's own chain, blame only tunes where lagging chains sit in the ordering sweep, no guarantee depends on it, and forgiveness can be generous.
+
+*Leader rotation is itself a choice. A stable leader would run faster views, but every transaction on the planet must first travel to it, while a Multimmit producer can pre-confirm a transaction the moment it arrives, long before it could reach a leader an ocean away. For deployments comfortable with a stable leader's censorship profile, our prior work [Carnot](/blogs/carnot-bound.html) pushes that design to near line-rate throughput.*
 
 ## One Structure, Two Jobs
 
