@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/multimmit.png"
 katex: true
 ---
 
-For a user, a blockchain's speed is the time from submitting a transaction to seeing it final. The protocols underneath are usually measured against something narrower: the time from a leader proposing a block to the network accepting it. The difference is the trip your transaction makes first, to whichever node is leading, before riding back across the network inside that leader's block. That last leg also caps the network's throughput: every byte leaves one node while every other validator's bandwidth idles.
+For a user, a blockchain's speed is the time from submitting a transaction to seeing it final. The protocols underneath, however, are usually measured against something narrower: the time from a leader proposing a block to the network accepting it. The difference is the trip your transaction makes first, to whichever node is leading, before riding back across the network inside that leader's block. That last leg also caps the network's throughput: every byte leaves one node while every other validator's bandwidth idles.
 
 For throughput, the fix is well understood: decouple transaction dissemination from consensus. Every validator becomes a *producer*, streaming transaction data in parallel, consensus orders references to it, and the network finalizes transactions at roughly the rate validators can *download* them rather than the rate one leader can *upload* them. That split is [now standard among high-throughput designs](https://hackmd.io/@patrickogrady/rys8mdl5p).
 
