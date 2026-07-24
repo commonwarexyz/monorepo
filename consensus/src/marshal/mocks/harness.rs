@@ -1871,10 +1871,6 @@ impl TestHarness for StandardHarness {
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-metadata",
-                    config.partition_prefix
-                ),
                 freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
@@ -1915,10 +1911,6 @@ impl TestHarness for StandardHarness {
                 freezer_table_resize_chunk_size: 10,
                 freezer_key_partition: format!(
                     "{}-finalized_blocks-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
@@ -2661,10 +2653,6 @@ impl TestHarness for CodingHarness {
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-metadata",
-                    config.partition_prefix
-                ),
                 freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
@@ -2705,10 +2693,6 @@ impl TestHarness for CodingHarness {
                 freezer_table_resize_chunk_size: 10,
                 freezer_key_partition: format!(
                     "{}-finalized_blocks-freezer-key",
-                    config.partition_prefix
-                ),
-                freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),

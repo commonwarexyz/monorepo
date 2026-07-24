@@ -7,9 +7,9 @@
 //!
 //! The [fixed] and [variable] journal constructors return replay readers rather than usable
 //! journals. Drain the replay completely and call its `finish` method to obtain a journal that can
-//! be read or mutated. Composite journals may instead expose an explicit constructor that restores
-//! a separately validated durable checkpoint. See each implementation's recovery documentation
-//! for details.
+//! be read or mutated. [oversized] additionally requires the caller's durable checkpoint at
+//! construction, in either of the two shapes a caller's committed record can take. See each
+//! implementation's recovery documentation for details.
 
 pub mod fixed;
 pub mod glob;

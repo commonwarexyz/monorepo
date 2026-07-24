@@ -642,23 +642,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // Reject a partition-name collision before the destructive reset below, so an invalid
-        // configuration fails without deleting data. The key, value, table, and metadata
-        // partitions must all be distinct.
-        let partitions = [
-            config.key_partition.as_str(),
-            config.value_partition.as_str(),
-            config.table_partition.as_str(),
-            config.metadata_partition.as_str(),
-        ];
-        for (i, partition) in partitions.iter().enumerate() {
-            if partitions[i + 1..].contains(partition) {
-                return Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
-                    format!("freezer partitions must be distinct: {partition} used more than once"),
-                )));
-            }
-        }
-
         // A missing or empty checkpoint starts fresh: delete all existing freezer data
         let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
         if reset {
@@ -666,7 +649,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 &config.key_partition,
                 &config.value_partition,
                 &config.table_partition,
-                &config.metadata_partition,
             ] {
                 match context.remove(partition, None).await {
                     Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
@@ -682,7 +664,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
-            metadata_partition: config.metadata_partition,
             index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
@@ -1320,7 +1301,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1376,7 +1356,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1438,7 +1417,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1485,7 +1463,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1514,17 +1491,6 @@ mod tests {
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
 
-            // A fresh start owns and removes the configured metadata partition too.
-            let metadata_partition = cfg.metadata_partition.clone();
-            let (blob, _) = context
-                .open(&metadata_partition, b"left")
-                .await
-                .expect("Failed to open metadata");
-            blob.write_at_sync(0, vec![0xFF; 3])
-                .await
-                .expect("Failed to corrupt metadata");
-            drop(blob);
-
             let checkpoint = Checkpoint {
                 epoch: 0,
                 section: 0,
@@ -1543,89 +1509,12 @@ mod tests {
         });
     }
 
-    /// A fresh-start init with a partition-name collision must reject the configuration without
-    /// deleting data: the config is validated before the destructive reset, so a rejected init
-    /// leaves the caller's partitions untouched. Covers both fresh-start entry points (`None` and
-    /// an empty checkpoint).
-    #[test_traced]
-    fn init_rejects_partition_collision_before_reset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for label in ["none", "empty"] {
-                let checkpoint = (label == "empty").then_some(Checkpoint {
-                    epoch: 0,
-                    section: 0,
-                    oversized_size: 0,
-                    table_size: 0,
-                });
-                let key_partition = format!("collide-key-{label}");
-                // The value and metadata partitions share a name; init must reject the
-                // configuration before its destructive reset runs.
-                let metadata_partition = format!("collide-shared-{label}");
-                let cfg = super::super::Config {
-                    key_partition: key_partition.clone(),
-                    key_write_buffer: NZUsize!(1024),
-                    key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                    value_partition: metadata_partition.clone(),
-                    value_compression: None,
-                    value_write_buffer: NZUsize!(1024),
-                    value_target_size: 10 * 1024 * 1024,
-                    metadata_partition: metadata_partition.clone(),
-                    table_partition: format!("collide-table-{label}"),
-                    table_initial_size: 2,
-                    table_resize_frequency: 1,
-                    table_resize_chunk_size: 1,
-                    table_replay_buffer: NZUsize!(64 * 1024),
-                    codec_config: (),
-                };
-
-                // Seed data in the colliding partition.
-                let (blob, _) = context
-                    .open(&metadata_partition, b"left")
-                    .await
-                    .expect("Failed to seed colliding partition");
-                blob.write_at_sync(0, vec![0xAB; 3]).await.unwrap();
-                drop(blob);
-
-                let result =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.child(label), cfg, checkpoint)
-                        .await;
-                assert!(
-                    matches!(
-                        result,
-                        Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
-                            _
-                        )))
-                    ),
-                    "{label}: expected InvalidConfiguration, got {result:?}"
-                );
-
-                // The rejected init must not have deleted or modified the seeded partition. A
-                // deleted partition reopens as a fresh empty blob, so the size assert catches
-                // deletion; the byte assert catches a truncate-or-overwrite-before-error regression.
-                let (blob, len) = context
-                    .open(&metadata_partition, b"left")
-                    .await
-                    .expect("seeded blob must survive a rejected init");
-                assert_eq!(len, 3, "{label}: seeded blob size changed");
-                let data = blob.read_at(0, 3).await.unwrap().coalesce();
-                assert_eq!(
-                    data.as_ref(),
-                    &[0xAB; 3][..],
-                    "{label}: seeded blob contents changed"
-                );
-                drop(blob);
-            }
-        });
-    }
-
     #[test_traced]
     fn no_checkpoint_deletes_close_started_partial_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1670,7 +1559,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1717,7 +1605,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1771,7 +1658,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1808,7 +1694,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1896,7 +1781,6 @@ mod tests {
             // A tiny value target so every put seals a section
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),

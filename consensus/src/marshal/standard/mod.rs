@@ -415,9 +415,6 @@ mod tests {
                 freezer_key_partition: format!(
                     "{partition_prefix}-finalizations-by-height-freezer-key"
                 ),
-                freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-metadata"
-                ),
                 freezer_key_page_cache: page_cache.clone(),
                 freezer_value_partition: format!(
                     "{partition_prefix}-finalizations-by-height-freezer-value"
@@ -447,9 +444,6 @@ mod tests {
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
                 freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
-                freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-metadata"
-                ),
                 freezer_key_page_cache: page_cache,
                 freezer_value_partition: format!(
                     "{partition_prefix}-finalized_blocks-freezer-value"
@@ -4025,9 +4019,6 @@ mod tests {
                 freezer_key_partition: format!(
                     "{partition_prefix}-finalizations-by-height-freezer-key"
                 ),
-                freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-metadata"
-                ),
                 freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{partition_prefix}-finalizations-by-height-freezer-value"
@@ -4056,9 +4047,6 @@ mod tests {
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
                 freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
-                freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-metadata"
-                ),
                 freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{partition_prefix}-finalized_blocks-freezer-value"

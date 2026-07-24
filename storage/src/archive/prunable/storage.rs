@@ -1,10 +1,12 @@
 use super::{Config, Translator};
 use crate::{
+    SyncCompletion,
     archive::{Error, Identifier},
     index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord, Replay as OversizedReplay,
     },
+    metadata::{Config as MetadataConfig, Metadata},
     rmap::RMap,
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
@@ -12,9 +14,21 @@ use commonware_runtime::{
     Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Array;
+use commonware_utils::{
+    Array,
+    sequence::{VecU64, prefixed_u64::U64},
+};
+use futures::FutureExt as _;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
+
+/// Prefix for a section's durable index size in the archive's metadata.
+const CHECKPOINT_PREFIX: u8 = 0;
+
+/// Metadata key holding `section`'s durable index size.
+const fn checkpoint_key(section: u64) -> U64 {
+    U64::new(CHECKPOINT_PREFIX, section)
+}
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +120,22 @@ struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: Co
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
+    /// Durable index size of each section, the checkpoint [Oversized::init] recovers from.
+    ///
+    /// A section's size is raised only once a joint index+value sync covering it completed, so
+    /// the checkpoint never claims more than the archive acknowledged. It may claim less: a
+    /// completion observed after the last publication is published by a later sync, and recovery
+    /// scans forward from the stale floor to recover the rest.
+    ///
+    /// Keys are prefixed so a later record kind can share the store without a format migration.
+    metadata: Metadata<E, U64, VecU64>,
+
+    /// Whether `metadata` holds unpublished changes.
+    checkpoint_dirty: bool,
+
+    /// Sections with a sync in flight, mapped to the index size its completion proves durable.
+    unproven: BTreeMap<u64, (u64, SyncCompletion)>,
+
     /// Sections with writes not yet included in any sync request. Moved into `requested` when a
     /// sync is requested; the `syncs` metric counts only this set, so each section of writes is
     /// counted once per request.
@@ -163,6 +193,44 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
     }
 
+    /// Raise a section's in-memory durable size after a joint sync proved it durable.
+    fn mark_durable(&mut self, section: u64, size: u64) {
+        let key = checkpoint_key(section);
+        let current = self.metadata.get(&key).map_or(0, u64::from);
+        if size > current {
+            self.metadata.put(key, size.into());
+            self.checkpoint_dirty = true;
+        }
+    }
+
+    /// Record every in-flight sync that has since completed, without blocking on the rest.
+    fn observe_unproven(&mut self) {
+        let completed = self
+            .unproven
+            .iter()
+            .filter_map(|(&section, (size, completion))| {
+                completion
+                    .clone()
+                    .now_or_never()
+                    .map(|result| (section, *size, result))
+            })
+            .collect::<Vec<_>>();
+        for (section, size, result) in completed {
+            self.unproven.remove(&section);
+            if result.is_ok() {
+                self.mark_durable(section, size);
+            }
+        }
+    }
+
+    /// Index size each section would reach if a sync issued now completed.
+    fn sizes(&self, sections: &BTreeSet<u64>) -> Result<BTreeMap<u64, u64>, Error> {
+        sections
+            .iter()
+            .map(|&section| Ok((section, self.oversized.size(section)?)))
+            .collect()
+    }
+
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.indices.get(&index).into_iter().copied().chain(
@@ -175,19 +243,39 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
+        // Load the durable-size checkpoint. An archive written before checkpoints existed has
+        // none, and recovers every section by scan.
+        let metadata = Metadata::<E, U64, VecU64>::init(
+            context.child("metadata"),
+            MetadataConfig {
+                partition: cfg.metadata_partition,
+                codec_config: (),
+            },
+        )
+        .await?;
+        let checkpoint = metadata
+            .keys()
+            .filter(|key| key.prefix() == CHECKPOINT_PREFIX)
+            .map(|key| (key.value(), metadata.get(key).map_or(0, u64::from)))
+            .collect::<BTreeMap<_, _>>();
+
         // Initialize oversized journal
         let oversized_cfg = OversizedConfig {
             index_partition: cfg.key_partition,
             value_partition: cfg.value_partition,
-            metadata_partition: cfg.metadata_partition,
             index_page_cache: cfg.key_page_cache,
             index_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let mut replay: OversizedReplay<E, Record<K>, V> =
-            Oversized::init(context.child("oversized"), oversized_cfg, cfg.replay_buffer).await?;
+        let mut replay: OversizedReplay<E, Record<K>, V> = Oversized::init(
+            context.child("oversized"),
+            oversized_cfg,
+            checkpoint,
+            cfg.replay_buffer,
+        )
+        .await?;
 
         // Populate the in-memory index by replaying index entries (values are not decoded here).
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
@@ -235,6 +323,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
             oversized,
+            metadata,
+            checkpoint_dirty: false,
+            unproven: BTreeMap::new(),
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
@@ -413,6 +504,25 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         }
         debug!(min, "pruning archive");
 
+        // Drop the pruned sections from the checkpoint before their blobs are removed. A crash
+        // between this sync and the removals merely leaves old sections to be scanned again,
+        // while the reverse order would report a pruned section as lost.
+        self.observe_unproven();
+        self.unproven = self.unproven.split_off(&min);
+        let removed = self
+            .metadata
+            .keys()
+            .filter(|key| key.prefix() == CHECKPOINT_PREFIX)
+            .take_while(|key| key.value() < min)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in removed {
+            self.metadata.remove(&key);
+            self.checkpoint_dirty = true;
+        }
+        self.metadata = self.metadata.sync().await?;
+        self.checkpoint_dirty = false;
+
         // Prune oversized journal (handles both index and values)
         (self.oversized, _) = self.oversized.prune(min).await?;
 
@@ -467,7 +577,18 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
         // also waits for any of their syncs still in flight.
+        let sizes = self.sizes(&self.requested)?;
         self.oversized = self.oversized.sync(&self.requested).await?;
+
+        // Every requested section is now durable at the size observed above, so publish the
+        // checkpoint before returning.
+        self.observe_unproven();
+        for (section, size) in sizes {
+            self.unproven.remove(&section);
+            self.mark_durable(section, size);
+        }
+        self.metadata = self.metadata.sync().await?;
+        self.checkpoint_dirty = false;
 
         self.requested.clear();
         Ok(self)
@@ -482,9 +603,36 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
         // without issuing a new sync.
         self.requested.append(&mut self.pending);
+        let sizes = self.sizes(&self.requested)?;
         let handle;
         (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
-        Ok((self, handle))
+        let completion: SyncCompletion = handle.boxed().shared();
+
+        // Publish every completion now observable, one interval behind the sync being returned.
+        // Metadata permits only one write at a time, so skip publication rather than waiting when
+        // its previous write is still in flight. The accumulated in-memory updates will be
+        // included by a later sync.
+        self.observe_unproven();
+        let checkpoint_handle = if self.checkpoint_dirty && self.metadata.poll_sync()? {
+            let (metadata, handle) = self.metadata.start_sync().await?;
+            self.metadata = metadata;
+            self.checkpoint_dirty = false;
+            handle
+        } else {
+            Handle::ready(Ok(()))
+        };
+        for (section, size) in sizes {
+            self.unproven.insert(section, (size, completion.clone()));
+        }
+
+        Ok((
+            self,
+            Handle::from_future(async move {
+                // Prefer the current data-sync error over an older checkpoint-sync error.
+                completion.await?;
+                checkpoint_handle.await
+            }),
+        ))
     }
 
     /// See [crate::archive::Archive::next_gap].
@@ -519,7 +667,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        Ok(self.oversized.destroy().await?)
+        self.oversized.destroy().await?;
+        self.metadata.destroy().await?;
+        Ok(())
     }
 
     /// See [crate::archive::MultiArchive::get_all].
@@ -605,7 +755,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 {
     /// Initialize a new `Archive` instance.
     ///
-    /// The in-memory index is populated from replayed index entries; recovery may verify value
+    /// The in-memory index is populated from replayed index entries. Recovery may verify value
     /// frames but does not decode them.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
