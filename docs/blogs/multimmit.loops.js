@@ -1017,24 +1017,10 @@ function buildFigure(mount, cfg) {
   return { svg, dyn, mountVariant, render };
 }
 
-function initFigure(mount, cfg, reducedMotion, freezeSeconds) {
+function initFigure(mount, cfg, freezeSeconds) {
   if (typeof mount.cwDispose === 'function') mount.cwDispose();
   mount.cwDispose = null;
   const fig = buildFigure(mount, cfg);
-
-  if (reducedMotion) {
-    // Static fallback: the completed diagram of the final variant.
-    const variant = cfg.variants[cfg.variants.length - 1];
-    fig.mountVariant(variant);
-    fig.render(variant.end + 0.01);
-    // Motion on request: an explicit click opts this figure back into the
-    // animated loop, which reduced-motion guidance permits.
-    fig.svg.addEventListener('click', () => initFigure(mount, cfg, false, null), { once: true });
-    const tooltip = svgEl('title');
-    tooltip.textContent = 'Click to play';
-    fig.svg.appendChild(tooltip);
-    return;
-  }
 
   const loopSeconds = variant =>
     START_HOLD + ((variant.holdTo ?? variant.end) - cfg.axis.min) / SPEED + END_HOLD;
@@ -1130,23 +1116,13 @@ function initFigure(mount, cfg, reducedMotion, freezeSeconds) {
 
 function initAll() {
   injectStyles();
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const freezeParam = new URLSearchParams(window.location.search).get('freeze');
   const freezeSeconds = freezeParam === null ? null : Number(freezeParam);
   for (const [id, cfg] of Object.entries(FIGURES)) {
     const mount = document.getElementById(id);
     if (!mount) continue;
-    initFigure(mount, cfg, reducedMotion.matches, freezeSeconds);
+    initFigure(mount, cfg, freezeSeconds);
   }
-  // Re-init statically if the preference flips on after load. Flipping it
-  // back off requires a reload, which is fine for an edge case.
-  reducedMotion.addEventListener('change', event => {
-    if (!event.matches) return;
-    for (const [id, cfg] of Object.entries(FIGURES)) {
-      const mount = document.getElementById(id);
-      if (mount) initFigure(mount, cfg, true, null);
-    }
-  });
 }
 
 initAll();

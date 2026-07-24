@@ -231,6 +231,16 @@ O’Grady</a></div>
         <em>out</em> of the leader again inside the block: the leader’s
         egress is the throughput ceiling for the entire network.
         One-round voting fixes nothing on the left side.</p>
+        <p><em>Erasure coding attacks the egress ceiling directly, with
+        the leader sending each validator a small fragment of the block
+        rather than a full copy. We explore that design in <a
+        href="/blogs/coding.html">Deliver Us in Pieces</a> and bound its
+        efficiency in <a href="/blogs/carnot-bound.html">The Carnot
+        Bound</a>, where fully saturating bandwidth also requires a
+        stable leader to close the gaps between proposals. Decoupling
+        goes further, removing the leader from the data path entirely,
+        so the trip to the leader disappears along with the
+        ceiling.</em></p>
         <h2 id="many-chains-gated-on-certificates">Many Chains, Gated on
         Certificates</h2>
         <p><a href="https://arxiv.org/abs/2401.10369">Autobahn</a> fixes
