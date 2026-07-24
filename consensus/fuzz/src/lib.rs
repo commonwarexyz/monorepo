@@ -25,6 +25,7 @@ pub mod simplex_certificate_mock;
 pub mod simplex_node;
 pub mod state_cov;
 pub mod strategy;
+mod twins_network;
 pub mod types;
 pub mod utils;
 use crate::{
@@ -32,12 +33,14 @@ use crate::{
     network::ByzantineFirstReceiver,
     simplex_audit::{RecordingAutomaton, RecordingReporter, summaries},
     simplex_node::NodeFuzzInput,
-    strategy::{AnyScope, FutureScope, SmallScope, Strategy, StrategyChoice},
+    strategy::{
+        AnyScope, FutureScope, HeaderScope, SmallScope, SplitHeader, Strategy, StrategyChoice,
+    },
     utils::{Action, Partition, SetPartition, apply_partition, link_peers, register},
 };
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
-use commonware_codec::{Decode, DecodeExt, Read};
+use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     Monitor, Reporter, Reporters, Viewable,
     simplex::{
@@ -51,10 +54,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     PublicKey as CryptoPublicKey, Sha256, certificate::Verifier, sha256::Digest as Sha256Digest,
 };
-use commonware_p2p::{
-    Recipients,
-    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
-};
+use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
@@ -712,6 +712,40 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
                 context,
                 scheme,
                 FutureScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                },
+                required_containers,
+                epoch,
+            );
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+        StrategyChoice::HeaderScope {
+            fault_rounds,
+            fault_rounds_bound,
+            mutation,
+        } => {
+            let disrupter = Disrupter::new_with_epoch(
+                context,
+                scheme,
+                HeaderScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                    mutation,
+                },
+                required_containers,
+                epoch,
+            );
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+        StrategyChoice::SplitHeader {
+            fault_rounds,
+            fault_rounds_bound,
+        } => {
+            let disrupter = Disrupter::new_with_epoch(
+                context,
+                scheme,
+                SplitHeader {
                     fault_rounds,
                     fault_rounds_bound,
                 },
@@ -1522,6 +1556,24 @@ pub(crate) fn network_faults(
             fault_rounds_bound,
         }
         .network_faults(required_containers, rng),
+        StrategyChoice::HeaderScope {
+            fault_rounds,
+            fault_rounds_bound,
+            mutation,
+        } => HeaderScope {
+            fault_rounds,
+            fault_rounds_bound,
+            mutation,
+        }
+        .network_faults(required_containers, rng),
+        StrategyChoice::SplitHeader {
+            fault_rounds,
+            fault_rounds_bound,
+        } => SplitHeader {
+            fault_rounds,
+            fault_rounds_bound,
+        }
+        .network_faults(required_containers, rng),
     }
 }
 
@@ -1544,6 +1596,24 @@ fn messaging_faults(
             fault_rounds,
             fault_rounds_bound,
         } => FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        }
+        .messaging_faults(required_containers, rng),
+        StrategyChoice::HeaderScope {
+            fault_rounds,
+            fault_rounds_bound,
+            mutation,
+        } => HeaderScope {
+            fault_rounds,
+            fault_rounds_bound,
+            mutation,
+        }
+        .messaging_faults(required_containers, rng),
+        StrategyChoice::SplitHeader {
+            fault_rounds,
+            fault_rounds_bound,
+        } => SplitHeader {
             fault_rounds,
             fault_rounds_bound,
         }
@@ -2363,23 +2433,6 @@ fn run_with_twins_campaign<P: simplex::Simplex>(
     );
 }
 
-fn twins_resolver_view<P: simplex::Simplex>(
-    message: &IoBuf,
-    codec: &<<P::Scheme as Verifier>::Certificate as Read>::Cfg,
-) -> Option<View> {
-    let msg = ResolverMessage::<U64>::decode(message.clone()).ok()?;
-    match msg.payload {
-        ResolverPayload::Request(key) => Some(View::new(u64::from(key))),
-        ResolverPayload::Response(bytes) => {
-            let cert =
-                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut bytes.as_ref(), codec)
-                    .ok()?;
-            Some(cert.view())
-        }
-        ResolverPayload::Error => None,
-    }
-}
-
 /// Unified twins driver. The two existing modes (TwinsMutator / TwinsCampaign)
 /// share scenario sampling, forwarders/routers, twin-half splitting, the
 /// primary engine, the honest validators, and the byzantine-aware invariants.
@@ -2488,108 +2541,58 @@ fn run_twins<P: simplex::Simplex>(
                     .remove(&validator)
                     .expect("validator should be registered");
 
-                let make_vote_forwarder = || {
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                        let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone())
-                        else {
-                            return None;
-                        };
-                        let (primary, secondary) =
-                            scenario.partitions(msg.view(), term_length, participants.as_ref());
-                        match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                        }
-                    }
-                };
-                let make_certificate_forwarder = || {
-                    let codec = schemes[idx].certificate_codec_config();
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                        let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                            &mut message.as_ref(),
-                            &codec,
-                        ) else {
-                            return None;
-                        };
-                        let (primary, secondary) =
-                            scenario.partitions(msg.view(), term_length, participants.as_ref());
-                        match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                        }
-                    }
-                };
-                let make_vote_router = || {
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |(sender, message): &(_, IoBuf)| {
-                        let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone())
-                        else {
-                            return SplitTarget::None;
-                        };
-                        scenario.route(msg.view(), term_length, sender, participants.as_ref())
-                    }
-                };
-                let make_certificate_router = || {
-                    let codec = schemes[idx].certificate_codec_config();
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |(sender, message): &(_, IoBuf)| {
-                        let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                            &mut message.as_ref(),
-                            &codec,
-                        ) else {
-                            return SplitTarget::None;
-                        };
-                        scenario.route(msg.view(), term_length, sender, participants.as_ref())
-                    }
-                };
-                let make_resolver_forwarder = || {
-                    let codec = schemes[idx].certificate_codec_config();
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                        let view = twins_resolver_view::<P>(message, &codec)?;
-                        let (primary, secondary) =
-                            scenario.partitions(view, term_length, participants.as_ref());
-                        match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
-                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
-                        }
-                    }
-                };
-                let make_resolver_router = || {
-                    let codec = schemes[idx].certificate_codec_config();
-                    let participants = participants.clone();
-                    let scenario = scenario.clone();
-                    move |(sender, message): &(_, IoBuf)| {
-                        let Some(view) = twins_resolver_view::<P>(message, &codec) else {
-                            return SplitTarget::None;
-                        };
-                        scenario.route(view, term_length, sender, participants.as_ref())
-                    }
-                };
                 let (vote_sender, vote_receiver) = vote_network;
                 let (certificate_sender, certificate_receiver) = certificate_network;
                 let (resolver_sender, resolver_receiver) = resolver_network;
 
                 let (vote_sender_primary, vote_sender_secondary) =
-                    vote_sender.split_with(make_vote_forwarder());
-                let (vote_receiver_primary, vote_receiver_secondary) =
-                    vote_receiver.split_with(context.child("pending_split"), make_vote_router());
-                let (certificate_sender_primary, certificate_sender_secondary) =
-                    certificate_sender.split_with(make_certificate_forwarder());
+                    vote_sender.split_with(twins_network::vote_forwarder::<P>(
+                        participants.clone(),
+                        scenario.clone(),
+                        term_length,
+                    ));
+                let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                    context.child("pending_split"),
+                    twins_network::vote_router::<P>(
+                        participants.clone(),
+                        scenario.clone(),
+                        term_length,
+                    ),
+                );
+                let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
+                    .split_with(twins_network::certificate_forwarder::<P>(
+                        participants.clone(),
+                        scenario.clone(),
+                        term_length,
+                        schemes[idx].clone(),
+                    ));
                 let (certificate_receiver_primary, certificate_receiver_secondary) =
-                    certificate_receiver
-                        .split_with(context.child("recovered_split"), make_certificate_router());
-                let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(make_resolver_forwarder());
+                    certificate_receiver.split_with(
+                        context.child("recovered_split"),
+                        twins_network::certificate_router::<P>(
+                            participants.clone(),
+                            scenario.clone(),
+                            term_length,
+                            schemes[idx].clone(),
+                        ),
+                    );
+                let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
+                    .split_with(twins_network::resolver_forwarder::<P>(
+                        participants.clone(),
+                        scenario.clone(),
+                        term_length,
+                        schemes[idx].clone(),
+                    ));
                 let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                    .split_with(context.child("resolver_split"), make_resolver_router());
+                    .split_with(
+                        context.child("resolver_split"),
+                        twins_network::resolver_router::<P>(
+                            participants.clone(),
+                            scenario.clone(),
+                            term_length,
+                            schemes[idx].clone(),
+                        ),
+                    );
 
                 // Primary: legitimate engine driven by the twins-aware elector.
                 let primary_context = context.child("primary");

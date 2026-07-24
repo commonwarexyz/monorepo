@@ -108,6 +108,15 @@ pub enum StrategyChoice {
         fault_rounds: u64,
         fault_rounds_bound: u64,
     },
+    HeaderScope {
+        fault_rounds: u64,
+        fault_rounds_bound: u64,
+        mutation: HeaderMutation,
+    },
+    SplitHeader {
+        fault_rounds: u64,
+        fault_rounds_bound: u64,
+    },
 }
 
 fn sample_faults(
@@ -766,6 +775,223 @@ impl Strategy for FutureScope {
         Some(sample_fault_views(d, start, required_containers, rng))
     }
 }
+
+/// Payload-preserving proposal-header mutations.
+#[derive(Clone, Copy, Debug)]
+pub enum HeaderMutation {
+    /// Re-point the proposal at the view immediately before its declared parent.
+    PreviousParent,
+    /// Re-point the proposal at the highest view the mutator has observed finalized.
+    LastFinalizedParent,
+    /// Re-point the proposal immediately before the highest view observed notarized.
+    BeforeLastNotarizedParent,
+}
+
+/// Mutates proposal ancestry while preserving its round and payload.
+///
+/// A leader-valid proposal whose `(round, payload)` matches an honest proposal
+/// but whose parent differs tests whether verification and certification state
+/// is scoped to the full header. Unsolicited proposals stay at obsolete view 0
+/// so they cannot occupy the victim's proposal slot before a reactive mutation
+/// of an observed proposal arrives.
+pub struct HeaderScope {
+    pub fault_rounds: u64,
+    pub fault_rounds_bound: u64,
+    pub mutation: HeaderMutation,
+}
+
+impl HeaderScope {
+    fn inner(&self) -> SmallScope {
+        SmallScope {
+            fault_rounds: self.fault_rounds,
+            fault_rounds_bound: self.fault_rounds_bound,
+        }
+    }
+
+    const fn header_mutation(&self) -> HeaderMutation {
+        self.mutation
+    }
+}
+
+/// Backward-compatible focused header strategy that always selects the
+/// immediately previous parent.
+pub struct SplitHeader {
+    pub fault_rounds: u64,
+    pub fault_rounds_bound: u64,
+}
+
+impl SplitHeader {
+    fn inner(&self) -> SmallScope {
+        SmallScope {
+            fault_rounds: self.fault_rounds,
+            fault_rounds_bound: self.fault_rounds_bound,
+        }
+    }
+
+    const fn header_mutation(&self) -> HeaderMutation {
+        HeaderMutation::PreviousParent
+    }
+}
+
+fn mutate_header(
+    mutation: HeaderMutation,
+    proposal: &Proposal<Sha256Digest>,
+    last_finalized_view: u64,
+    last_notarized_view: u64,
+) -> Proposal<Sha256Digest> {
+    let parent = match mutation {
+        HeaderMutation::PreviousParent => proposal.parent.get().saturating_sub(1),
+        HeaderMutation::LastFinalizedParent => last_finalized_view,
+        HeaderMutation::BeforeLastNotarizedParent => last_notarized_view.saturating_sub(1),
+    };
+    proposal_with_parent_view(proposal, parent)
+}
+
+macro_rules! impl_header_scope {
+    ($strategy:ty) => {
+        impl Strategy for $strategy {
+            fn random_proposal(
+                &self,
+                rng: &mut impl Rng,
+                last_vote_view: u64,
+                last_finalized_view: u64,
+                last_notarized_view: u64,
+                last_nullified_view: u64,
+            ) -> Proposal<Sha256Digest> {
+                self.inner().random_proposal(
+                    rng,
+                    last_vote_view,
+                    last_finalized_view,
+                    last_notarized_view,
+                    last_nullified_view,
+                )
+            }
+
+            fn proposal_with_view(
+                &self,
+                proposal: &Proposal<Sha256Digest>,
+                view: u64,
+            ) -> Proposal<Sha256Digest> {
+                proposal_with_view(proposal, view)
+            }
+
+            fn proposal_with_parent_view(
+                &self,
+                proposal: &Proposal<Sha256Digest>,
+                view: u64,
+            ) -> Proposal<Sha256Digest> {
+                proposal_with_parent_view(proposal, view)
+            }
+
+            fn mutate_proposal(
+                &self,
+                _rng: &mut impl Rng,
+                proposal: &Proposal<Sha256Digest>,
+                _last_vote_view: u64,
+                last_finalized_view: u64,
+                last_notarized_view: u64,
+                _last_nullified_view: u64,
+            ) -> Proposal<Sha256Digest> {
+                mutate_header(
+                    self.header_mutation(),
+                    proposal,
+                    last_finalized_view,
+                    last_notarized_view,
+                )
+            }
+
+            fn mutate_nullify_view(
+                &self,
+                _rng: &mut impl Rng,
+                last_vote_view: u64,
+                _last_finalized_view: u64,
+                last_notarized_view: u64,
+                _last_nullified_view: u64,
+            ) -> u64 {
+                if last_notarized_view > 0 {
+                    last_notarized_view
+                } else {
+                    last_vote_view
+                }
+            }
+
+            fn random_view_for_proposal(
+                &self,
+                _rng: &mut impl Rng,
+                _last_vote_view: u64,
+                _last_finalized_view: u64,
+                _last_notarized_view: u64,
+                _last_nullified_view: u64,
+            ) -> u64 {
+                0
+            }
+
+            fn random_parent_view(
+                &self,
+                rng: &mut impl Rng,
+                last_vote_view: u64,
+                last_finalized_view: u64,
+                last_notarized_view: u64,
+                last_nullified_view: u64,
+            ) -> u64 {
+                self.inner().random_parent_view(
+                    rng,
+                    last_vote_view,
+                    last_finalized_view,
+                    last_notarized_view,
+                    last_nullified_view,
+                )
+            }
+
+            fn random_payload(&self, rng: &mut impl Rng) -> Sha256Digest {
+                random_payload(rng)
+            }
+
+            fn mutate_certificate_bytes(&self, rng: &mut impl Rng, cert: &[u8]) -> Vec<u8> {
+                tweak_bytes(rng, cert)
+            }
+
+            fn mutate_resolver_bytes(&self, rng: &mut impl Rng, msg: &[u8]) -> Vec<u8> {
+                tweak_bytes(rng, msg)
+            }
+
+            fn repeated_proposal_index(
+                &self,
+                rng: &mut impl Rng,
+                proposals_len: usize,
+            ) -> Option<usize> {
+                self.inner().repeated_proposal_index(rng, proposals_len)
+            }
+
+            fn network_faults(
+                &self,
+                required_containers: u64,
+                rng: &mut impl Rng,
+            ) -> Vec<(View, SetPartition)> {
+                self.inner().network_faults(required_containers, rng)
+            }
+
+            fn messaging_faults(
+                &self,
+                required_containers: u64,
+                rng: &mut impl Rng,
+            ) -> Vec<(View, u8)> {
+                self.inner().messaging_faults(required_containers, rng)
+            }
+
+            fn disrupter_faults(
+                &self,
+                _required_containers: u64,
+                _rng: &mut impl Rng,
+            ) -> Option<Vec<View>> {
+                None
+            }
+        }
+    };
+}
+
+impl_header_scope!(HeaderScope);
+impl_header_scope!(SplitHeader);
 
 fn proposal_with_view(proposal: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
     Proposal::new(

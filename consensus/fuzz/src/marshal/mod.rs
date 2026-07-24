@@ -10,13 +10,15 @@
 //!   marshal variant (`StandardHarness` / `CodingHarness`), mirroring how
 //!   marshal itself splits into `standard` and `coding`. Targets:
 //!   `marshal_single_node_standard`, `marshal_single_node_coding`.
-//! - [`multi_node`]: runs a live `N4F1C3` cluster (three honest nodes
-//!   plus one byzantine `Disrupter`) wired to real simplex consensus, and
-//!   checks marshal liveness (every honest node delivers a target number of
-//!   ordered finalized blocks sampled within a single-epoch bound) plus
-//!   cross-node agreement. Also per-variant. Targets:
-//!   `marshal_multi_node_liveness_standard`, `marshal_multi_node_liveness_coding`.
-//! - [`inline`]: drives the standard inline block path. Target: `marshal_inline_standard`.
+//! - [`multi_node`]: runs live `N4F1C3` clusters wired to real Simplex
+//!   consensus. The liveness targets use a Byzantine `Disrupter`; the standard
+//!   Twins mutator splits one compromised identity between a full engine and a
+//!   `Disrupter`.
+//!   Targets: `marshal_multi_node_liveness_standard`,
+//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins_standard`.
+//! - [`inline`]: drives the standard inline and deferred block paths, including
+//!   split-header equivocation. Targets: `marshal_inline_standard`,
+//!   `marshal_deferred_standard`.
 //! - [`store`]: drives the marshal block/certificate store directly. Target:
 //!   `marshal_store_standard`.
 //!
@@ -38,7 +40,10 @@ pub mod multi_node;
 pub mod single_node;
 pub mod store;
 
-pub use inline::{MarshalInlineInput, fuzz_marshal_inline};
-pub use multi_node::{MarshalLivenessInput, fuzz_marshal_liveness};
+pub use inline::{MarshalInlineInput, fuzz_marshal_deferred, fuzz_marshal_inline};
+pub use multi_node::{
+    MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins,
+    fuzz_marshal_twins_id_split_header,
+};
 pub use single_node::{MarshalEvent, MarshalFuzzInput, VariantPublish, fuzz_marshal_single_node};
 pub use store::{MarshalStoreInput, fuzz_marshal_store};

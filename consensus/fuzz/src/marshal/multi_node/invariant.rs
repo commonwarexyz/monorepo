@@ -11,6 +11,7 @@
 //! would silently overwrite them).
 
 use commonware_consensus::{
+    Block,
     marshal::mocks::{application::Application, harness::TestHarness},
     types::Height,
 };
@@ -22,10 +23,19 @@ pub fn check_all<H: TestHarness>(
     required: u64,
     honest_apps: &[(usize, Application<H::ApplicationBlock>)],
 ) {
+    check_all_blocks(required, honest_apps);
+}
+
+/// Run every liveness-model invariant for a standard block type whose Simplex
+/// context is selected by the fuzzed signing scheme.
+pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
+    required: u64,
+    honest_apps: &[(usize, Application<B>)],
+) {
     for (idx, app) in honest_apps {
         check_in_order(*idx, required, &app.delivered());
     }
-    check_cross_node_agreement::<H>(honest_apps);
+    check_cross_node_agreement(honest_apps);
 }
 
 /// Invariant: per-node in-order, gap-free delivery.
@@ -64,8 +74,8 @@ fn check_in_order<D>(idx: usize, required: u64, delivered: &[(Height, D)]) {
 ///
 /// No honest fork: any height delivered by more than one honest node must carry
 /// the same block digest everywhere it appears.
-fn check_cross_node_agreement<H: TestHarness>(
-    honest_apps: &[(usize, Application<H::ApplicationBlock>)],
+fn check_cross_node_agreement<B: Block<Digest = Sha256Digest>>(
+    honest_apps: &[(usize, Application<B>)],
 ) {
     let mut seen: BTreeMap<Height, (usize, Sha256Digest)> = BTreeMap::new();
     for (idx, app) in honest_apps {

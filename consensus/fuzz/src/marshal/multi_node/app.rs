@@ -6,45 +6,68 @@
 //! [`Marshaled`](commonware_consensus::marshal::coding::Marshaled) wrapper) for
 //! a live engine whose `reporter` is marshal. On `propose` it reads the parent
 //! from the supplied ancestry and emits a contiguous child block
-//! (`height = parent + 1`) that embeds the consensus context verbatim, so a
-//! peer's wrapper accepts it (it checks `block.context() == context`). `verify`
-//! always accepts; ancestry and parent-linkage checks are enforced by the
-//! wrapper itself.
+//! (`height = parent + 1`) that embeds the consensus context verbatim. `verify`
+//! eventually accepts, with an optional per-view delay used to exercise
+//! certification timeouts; ancestry, context, and parent-linkage checks are
+//! enforced by the wrapper itself.
 //!
 //! Generic over the context type `C` so the same builder serves both variants:
 //! standard uses `Context<Digest, K>`, coding uses `Context<Commitment, K>`.
 
 use commonware_codec::Codec;
 use commonware_consensus::{
-    Application, Epochable, Heightable,
+    Application, Epochable, Heightable, Viewable,
     marshal::{
         ancestry::Ancestry,
-        mocks::{block::Block, harness::S},
+        mocks::{block::Block, harness::S as DefaultSigningScheme},
     },
+    types::View,
 };
-use commonware_cryptography::{Digestible, Sha256, sha256::Digest as Sha256Digest};
-use commonware_runtime::deterministic;
+use commonware_cryptography::{
+    Digestible, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
+};
+use commonware_runtime::{Clock as _, deterministic};
 use futures::StreamExt;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, time::Duration};
 
 /// Honest block-building application, generic over the consensus context type.
-pub struct BlockBuilderApp<C>(PhantomData<fn() -> C>);
+pub struct BlockBuilderApp<C, S = DefaultSigningScheme> {
+    verification_delay: Option<(View, Duration)>,
+    _marker: PhantomData<fn() -> (C, S)>,
+}
 
-impl<C> Default for BlockBuilderApp<C> {
+impl<C, S> Default for BlockBuilderApp<C, S> {
     fn default() -> Self {
-        Self(PhantomData)
+        Self {
+            verification_delay: None,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<C> Clone for BlockBuilderApp<C> {
+impl<C, S> Clone for BlockBuilderApp<C, S> {
     fn clone(&self) -> Self {
-        Self(PhantomData)
+        Self {
+            verification_delay: self.verification_delay,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<C> Application<deterministic::Context> for BlockBuilderApp<C>
+impl<C, S> BlockBuilderApp<C, S> {
+    /// Delay verification at `view`, then return the normal successful verdict.
+    pub const fn with_verification_delay(view: View, delay: Duration) -> Self {
+        Self {
+            verification_delay: Some((view, delay)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<C, S> Application<deterministic::Context> for BlockBuilderApp<C, S>
 where
-    C: Codec<Cfg = ()> + Epochable + Clone + PartialEq + Send + Sync + 'static,
+    C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
+    S: Scheme,
 {
     type SigningScheme = S;
     type Context = C;
@@ -72,9 +95,15 @@ where
 
     async fn verify(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
+        let (runtime, consensus) = context;
+        if let Some((view, delay)) = self.verification_delay
+            && consensus.view() == view
+        {
+            runtime.sleep(delay).await;
+        }
         true
     }
 }

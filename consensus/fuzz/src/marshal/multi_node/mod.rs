@@ -17,6 +17,8 @@
 //!   coding `Marshaled`) reporting to marshal.
 //! - `runner` sets up the cluster, drives the liveness window, and checks
 //!   invariants.
+//! - `twins` runs the standard marshal stack under sampled Simplex Twins
+//!   scenarios and checks post-prefix recovery.
 //! - `invariant` holds the end-of-run assertions.
 
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
@@ -26,14 +28,16 @@ mod engine;
 mod input;
 mod invariant;
 mod runner;
+mod twins;
 
 pub use engine::LiveMarshal;
-pub use input::MarshalLivenessInput;
+pub use input::{MarshalLivenessInput, MarshalTwinsInput};
 pub use runner::fuzz_marshal_liveness;
+pub use twins::{fuzz_marshal_twins, fuzz_marshal_twins_id_split_header};
 
-/// Engine p2p channel ids, shared by the honest engines and the byzantine
-/// `Disrupter` so they talk on the same consensus channels. Marshal hardcodes
-/// backfill=1 and broadcast=2 in `setup_validator_with`, so these sit above.
+/// Engine p2p channel ids, shared by the honest engines and Byzantine twins.
+/// Marshal hardcodes backfill=1 and broadcast=2 in `setup_validator_with`, so
+/// these sit above.
 const ENGINE_VOTE: u64 = 3;
 const ENGINE_CERTIFICATE: u64 = 4;
 const ENGINE_RESOLVER: u64 = 5;
