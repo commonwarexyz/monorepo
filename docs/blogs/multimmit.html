@@ -238,13 +238,13 @@ O’Grady</a></div>
         the egress. Every producer builds its own <em>lane</em> of
         transaction batches, streaming each batch to all validators as
         it is produced, so transaction data crosses the network exactly
-        once. Blocks still exist, but they shrink: the leader’s block
+        once. Blocks still exist, but they shrink. The leader’s block
         carries references to lane tips instead of transactions, and
         finalizing it finalizes everything below the referenced tips.
         This architecture also collapses the left side of Figure 1,
         because the node that accepts your transaction <em>is</em> a
         producer. Submission is dissemination. The lanes also run
-        regardless of consensus: a timed-out leader stops ordering,
+        regardless of consensus. A timed-out leader stops ordering,
         never dissemination, and the first successful proposal commits
         the whole backlog at once. Autobahn calls this
         <em>seamlessness</em>: a consensus blip leaves no hangover.</p>
@@ -297,7 +297,7 @@ O’Grady</a></div>
         counters with reputation (voters blame the authors of missing
         batches, and a producer blamed by <span
         class="math inline">f+1</span> validators is demoted to
-        certified-only inclusion), but the mitigation is reactive: each
+        certified-only inclusion), but the mitigation is reactive. Each
         producer spoils before it is blamed, and a reputation mechanism
         forgiving enough to readmit slow-but-honest producers re-arms
         the attack on every reset.</p>
@@ -330,11 +330,11 @@ O’Grady</a></div>
         <h2 id="checkpoint-now-certify-in-the-background">Checkpoint
         Now, Certify in the Background</h2>
         <p>Multimmit keeps the producer lanes but makes each a real
-        chain: every producer signs its own sequence of transaction
+        chain. Every producer signs its own sequence of transaction
         blocks, each referencing its parent by hash, extended as
         transactions arrive. DA-votes and PoAs still form for every
         block, as in Figure 2, but they pace production rather than
-        consensus: a producer may run up to <span
+        consensus. A producer may run up to <span
         class="math inline">d</span> blocks ahead of its last certified
         block, so every chain stays recoverable up to a short
         uncertified tail. The design is built around a single principle:
@@ -402,9 +402,9 @@ O’Grady</a></div>
         class="math inline">t+2\delta</span> when the timing is
         favorable. Two message delays is optimal. Reported from the
         leader’s proposal instead, Multimmit’s figure would simply read
-        <span class="math inline">2\delta</span>: the mechanisms above
-        act on the leg that convention never measures. For comparison,
-        Raptr finalizes a batch disseminated at time <span
+        <span class="math inline">2\delta</span>, since the mechanisms
+        above act on the leg that convention never measures. For
+        comparison, Raptr finalizes a batch disseminated at time <span
         class="math inline">t</span> at <span
         class="math inline">t+5\delta</span> in expectation with
         <em>no</em> faults, degrading to <span
@@ -415,14 +415,14 @@ O’Grady</a></div>
         assumption <span class="math inline">n \geq 5f+1</span> (one
         round of voting rather than two), and the rest comes from
         checkpoints and extension votes.</em> Multimmit’s figures do not
-        degrade: an honest chain’s block still finalizes by <span
+        degrade. An honest chain’s block still finalizes by <span
         class="math inline">t+3\delta</span> in expectation with <span
         class="math inline">f</span> faulty producers doing their
         worst.</p>
         <p>What does one round of votes actually pin down? The
         difference from Figure 3 is the shape of the vote. Multimmit’s
         vote carries an independent coordinate per chain, and the
-        interleaving is not voted on at all: it is computed afterwards
+        interleaving is not voted on at all. It is computed afterwards
         from the finalized tips, so a hole in one coordinate cannot cap
         what any other chain finalizes. Everything is read off the
         certificate by rank rules. An L-QC (a quorum certificate on the
@@ -605,9 +605,9 @@ O’Grady</a></div>
         sustained load a chain grows up to <span
         class="math inline">d</span> blocks per certificate round trip
         rather than one. Consensus never waits on certification either
-        way: the leader checkpoints whatever has arrived, and the voters
-        extend past whatever the leader missed. Production never waits
-        on consensus: chains grow through leader failures and view
+        way, since the leader checkpoints whatever has arrived and the
+        voters extend past whatever the leader missed. Production never
+        waits on consensus. Chains grow through leader failures and view
         changes, and the first successful view checkpoints everything a
         blip delayed.</p>
         <h2 id="onward">Onward</h2>
