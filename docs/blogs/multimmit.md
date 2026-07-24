@@ -211,6 +211,16 @@ Figure 10: One producer, identical $2\delta$ certificate round trips. The DAG pr
 
 Multimmit's chains carry no cross-producer references, so there is nothing for a producer to wait on. Each producer extends its own chain as transactions arrive and may run up to $d$ blocks ahead of its last certified block, with certificates forming behind it. Under sustained load a chain grows up to $d$ blocks per certificate round trip rather than one. Consensus never waits on certification either way, since the leader checkpoints whatever has arrived and the voters extend past whatever the leader missed. Production never waits on consensus. Chains grow through leader failures and view changes, and the first successful view checkpoints everything a blip delayed.
 
+```{=html}
+<div id="multimmit-fig-blip" class="cw-loop cw-loop-dag" role="img" aria-label="Animated diagram of a Multimmit producer through a consensus blip. Two rows: consensus views above, one producer below. The producer emits a block every two-thirds of a message delay for the whole window, with certificate arcs forming behind each block. An early leader block finalizes the first two blocks with gold edges. Then a consensus blip begins, marked by dashed boundaries: two views time out, drawn as dashed hollow leader blocks, while the producer keeps emitting and certificates keep forming. When the blip ends, the first successful leader block draws gold edges back to the entire backlog, and one message delay later seven blocks finalize at once.">
+  <noscript>This figure animates a consensus blip: two views time out while a Multimmit producer keeps emitting blocks on cadence, certificates forming behind them. The first successful view references the whole backlog, and one round of votes finalizes everything the blip delayed.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 11: A consensus blip, drawn as two timed-out views between the dashed markers. The producer keeps emitting on cadence and certificates keep forming, since neither depends on the leader. The first successful view checkpoints the whole backlog, and one round of votes finalizes everything the blip delayed. Blocks emitted after that leader block wait only for the next view.
+:::
+
 ## Onward
 
 Multimmit runs transaction dissemination and consensus concurrently, with neither ever blocking on the other. Blocks enter the ordering process the moment they hit the wire, availability is voted rather than fetched, and the failure of any producer is confined to its own chain. The [specification](https://arxiv.org/abs/2607.21021) includes proofs of consistency and liveness, an accounting of availability for every ordered block, and the exact extension threshold for every $n$, with the protocol's rules optimal at $n=5f+1$.

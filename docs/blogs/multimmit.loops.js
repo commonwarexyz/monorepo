@@ -533,6 +533,53 @@ const FIGURES = {
       token: [],
     }],
   },
+
+  'multimmit-fig-blip': {
+    height: 424,
+    plotX0: 214,
+    rows: [
+      { id: 'cons', label: 'Consensus (views)' },
+      { id: 'mm', label: 'Multimmit producer' },
+    ],
+    rowTop: 108,
+    rowGap: 164,
+    arcDepth: 66,
+    axis: { min: -0.4, max: 8, origin: null },
+    variants: [{
+      tag: 'a consensus blip leaves no hangover',
+      end: 8,
+      phases: [],
+      events: [
+        { k: 'emit', row: 'mm', t: 0, color: GREEN, label: 'b1', certAt: 2, finalAt: 2 },
+        { k: 'emit', row: 'mm', t: 2 / 3, color: GREEN, certAt: 2 / 3 + 2, finalAt: 2 },
+        ...Array.from({ length: 7 }, (_, i) => (
+          { k: 'emit', row: 'mm', t: (i + 2) * 2 / 3, color: GREEN, certAt: (i + 2) * 2 / 3 + 2, finalAt: 6.5 }
+        )),
+        ...Array.from({ length: 4 }, (_, i) => (
+          { k: 'emit', row: 'mm', t: (i + 9) * 2 / 3, color: GREEN, certAt: (i + 9) * 2 / 3 + 2 }
+        )),
+        { k: 'arc', row: 'mm', t: 0, d: 2, label: 'PoA' },
+        ...Array.from({ length: 12 }, (_, i) => (
+          { k: 'arc', row: 'mm', t: (i + 1) * 2 / 3, d: 2, faint: true }
+        )),
+        { k: 'counter', row: 'mm', unit: 'blocks' },
+        { k: 'emit', row: 'cons', t: 1, color: RED, label: 'leader block', labelSide: 'left' },
+        { k: 'edge', fromRow: 'cons', fromT: 1, toRow: 'mm', toT: 0, t: 1, d: 0.45, style: 'sup' },
+        { k: 'edge', fromRow: 'cons', fromT: 1, toRow: 'mm', toT: 2 / 3, t: 1, d: 0.45, style: 'sup' },
+        { k: 'mark', t: 2, ghost: true },
+        { k: 'note', t: 2, tx: 3.5, y: 74, lines: ['consensus blip'] },
+        { k: 'emit', row: 'cons', t: 2.8, color: RED, missingUntil: 99, label: 'views time out', labelSide: 'right' },
+        { k: 'emit', row: 'cons', t: 4.2, color: RED, missingUntil: 99 },
+        { k: 'mark', t: 5, ghost: true },
+        { k: 'emit', row: 'cons', t: 5.5, color: RED, label: 'leader block', labelSide: 'right' },
+        ...Array.from({ length: 7 }, (_, i) => (
+          { k: 'edge', fromRow: 'cons', fromT: 5.5, toRow: 'mm', toT: (i + 2) * 2 / 3, t: 5.5, d: 0.45, style: 'sup' }
+        )),
+        { k: 'mark', t: 6.5, label: 'finalized', sub: 'whole backlog' },
+      ],
+      token: [],
+    }],
+  },
 };
 
 const STYLE_ID = 'multimmit-loops-style';

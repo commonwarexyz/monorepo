@@ -610,6 +610,18 @@ O’Grady</a></div>
         waits on consensus. Chains grow through leader failures and view
         changes, and the first successful view checkpoints everything a
         blip delayed.</p>
+        <div id="multimmit-fig-blip" class="cw-loop cw-loop-dag" role="img" aria-label="Animated diagram of a Multimmit producer through a consensus blip. Two rows: consensus views above, one producer below. The producer emits a block every two-thirds of a message delay for the whole window, with certificate arcs forming behind each block. An early leader block finalizes the first two blocks with gold edges. Then a consensus blip begins, marked by dashed boundaries: two views time out, drawn as dashed hollow leader blocks, while the producer keeps emitting and certificates keep forming. When the blip ends, the first successful leader block draws gold edges back to the entire backlog, and one message delay later seven blocks finalize at once.">
+          <noscript>This figure animates a consensus blip: two views time out while a Multimmit producer keeps emitting blocks on cadence, certificates forming behind them. The first successful view references the whole backlog, and one round of votes finalizes everything the blip delayed.</noscript>
+        </div>
+        <div class="image-caption">
+        <p>Figure 11: A consensus blip, drawn as two timed-out views
+        between the dashed markers. The producer keeps emitting on
+        cadence and certificates keep forming, since neither depends on
+        the leader. The first successful view checkpoints the whole
+        backlog, and one round of votes finalizes everything the blip
+        delayed. Blocks emitted after that leader block wait only for
+        the next view.</p>
+        </div>
         <h2 id="onward">Onward</h2>
         <p>Multimmit runs transaction dissemination and consensus
         concurrently, with neither ever blocking on the other. Blocks
