@@ -356,8 +356,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Prune the database to a previously finalized sync target.
     ///
     /// Databases that do not retain pruneable operation history can rely on
-    /// the default no-op. This call makes changes durable and ensures they
-    /// will be present on startup without replay.
+    /// the default no-op. The removal is durable and the database remains
+    /// recoverable, but pruning is not a durability checkpoint: applied state
+    /// whose deferred flush has not landed stays non-durable.
     ///
     /// Implementations must never discard history a restart would need to
     /// recover unflushed state. Pruning waits on in-flight flushes unless the
@@ -479,10 +480,12 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Prune each database to the provided per-database targets.
     ///
-    /// This call makes changes durable and ensures they will be present on
-    /// startup without replay. It never discards history a restart would need
-    /// to replay unflushed state: each [`ManagedDb::prune`] waits on in-flight
-    /// flushes unless the pruned range is already durably justified.
+    /// The removals are durable and the databases remain recoverable, but
+    /// pruning is not a durability checkpoint: applied state whose deferred
+    /// flush has not landed stays non-durable. It never discards history a
+    /// restart would need to replay unflushed state: each [`ManagedDb::prune`]
+    /// waits on in-flight flushes unless the pruned range is already durably
+    /// justified.
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.

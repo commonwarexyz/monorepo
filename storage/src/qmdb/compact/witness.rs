@@ -497,6 +497,30 @@ where
     )
 }
 
+/// Recompute the root a witness's frontier pins commit for `leaf_count` and `floor`,
+/// without touching any live state. Returns `None` when the pins cannot produce a root
+/// (a tampered or truncated entry).
+pub(crate) fn frontier_root<F, H>(
+    leaf_count: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    pinned_nodes: Vec<H::Digest>,
+) -> Option<H::Digest>
+where
+    F: Family,
+    H: Hasher,
+{
+    let mem = merkle::mem::Mem::<F, H::Digest>::init(merkle::mem::Config {
+        nodes: Vec::new(),
+        pruning_boundary: leaf_count,
+        pinned_nodes,
+    })
+    .ok()?;
+    let hasher = qmdb::hasher::<H>();
+    let inactive_peaks =
+        F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+    mem.root(&hasher, inactive_peaks).ok()
+}
+
 /// Rebuild the Merkle from `witness` and verify the witness against it.
 ///
 /// The Merkle is reset to the witness's `(leaf_count, pinned_nodes)`, the root is recomputed

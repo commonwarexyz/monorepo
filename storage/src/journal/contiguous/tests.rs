@@ -1671,9 +1671,10 @@ fn test_fixed_durable_range_well_formed_after_prune_crash() {
 }
 
 /// The variable-journal twin of
-/// [test_fixed_durable_range_well_formed_after_prune_crash]. Unlike the fixed journal,
-/// the variable barrier advances only at the data+offsets join, so the persisted
-/// watermark always covers it and the recovered range needs no clamp.
+/// [test_fixed_durable_range_well_formed_after_prune_crash]: on this path the persisted
+/// watermark covers the barrier (the non-empty align syncs the offsets journal), so the
+/// recovered range is intact without clamping. The collapsing-prune variant below is the
+/// path that needs the clamp.
 #[test]
 fn test_variable_durable_range_well_formed_after_prune_crash() {
     let executor = deterministic::Runner::default();
@@ -1707,6 +1708,43 @@ fn test_variable_durable_range_well_formed_after_prune_crash() {
             durable,
             20..30,
             "the variable watermark must keep covering the barrier across a prune crash"
+        );
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// A prune that collapses the journal persists no watermark, and an empty-aligned reopen
+/// skips the offsets sync that would heal it: the recovered barrier must clamp to the
+/// pruning boundary rather than invert.
+#[test]
+fn test_variable_durable_range_well_formed_after_collapsing_prune_crash() {
+    let executor = deterministic::Runner::default();
+    let ((), checkpoint) = executor.start_and_recover(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-collapse");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        for i in 0..30u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        // Commit syncs the data blobs without persisting the offsets watermark.
+        journal = journal.commit().await.unwrap();
+        // The forced prune path commits the offsets journal (again no watermark) and
+        // removes every item-bearing blob, leaving the journal empty-aligned.
+        (journal, _) = journal.prune(30).await.unwrap();
+        drop(journal);
+    });
+    let executor = deterministic::Runner::from(checkpoint);
+    executor.start(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-collapse");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        let durable = Mutable::durable(&mut journal);
+        assert_eq!(
+            durable,
+            30..30,
+            "recovered watermark behind the pruning boundary must clamp, not invert"
         );
         journal.destroy().await.unwrap();
     });

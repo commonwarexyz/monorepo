@@ -477,21 +477,31 @@ where
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
         // The cached tip was verified when it was installed. A below-tip entry predates it,
-        // so re-check the commit proof the same way the client does: a payload that cannot
-        // authenticate against the requested root is declined instead of served, failing
-        // fast rather than spinning the client's retry loop.
-        if !pre_verified
-            && !crate::qmdb::verify_proof::<H, _, _>(
-                &last_commit_proof,
-                Location::new(*target.leaf_count - 1),
-                std::slice::from_ref(&op),
-                &target.root,
-            )
-        {
-            return Err(compact_sync::ServeError::StaleTarget {
-                requested: target,
-                current: self.target(),
-            });
+        // so re-check it with the same verification the client runs (commit proof, frontier
+        // pins, and floor bound): a payload that cannot authenticate against the requested
+        // root is declined instead of served, failing fast rather than spinning the
+        // client's retry loop.
+        if !pre_verified {
+            let last_commit_loc = Location::new(*target.leaf_count - 1);
+            let frontier_root = match &op {
+                Operation::Commit(_, floor) if *floor <= last_commit_loc => {
+                    witness::frontier_root::<F, H>(target.leaf_count, *floor, pinned_nodes.clone())
+                }
+                _ => None,
+            };
+            if frontier_root != Some(target.root)
+                || !crate::qmdb::verify_proof::<H, _, _>(
+                    &last_commit_proof,
+                    last_commit_loc,
+                    std::slice::from_ref(&op),
+                    &target.root,
+                )
+            {
+                return Err(compact_sync::ServeError::StaleTarget {
+                    requested: target,
+                    current: self.target(),
+                });
+            }
         }
         Ok(compact_sync::State {
             leaf_count: target.leaf_count,
@@ -1220,6 +1230,61 @@ mod tests {
             )
             .await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
+        });
+    }
+
+    /// A historical witness with tampered pinned nodes is declined, not served: the source
+    /// re-runs the client's verification before serving below-tip entries.
+    #[test_traced("INFO")]
+    fn test_compact_state_declines_tampered_historical_pinned_nodes() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "keyless-tampered-historical-pins";
+            let db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, None, Location::new(1))
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.sync().await.unwrap();
+            let historical_target = db.target();
+            let batch = db
+                .new_batch()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(1))
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.sync().await.unwrap();
+            let tip_target = db.target();
+            drop(db);
+
+            // Tamper the historical entry's frontier while keeping its operation and proof
+            // intact (the journal holds bootstrap, historical, tip).
+            let mut journal = open_witness_journal(context.child("corrupt"), partition).await;
+            journal = witness::tests::corrupt_entry(journal, 1, |entry| {
+                entry.pinned_nodes[0] = Sha256::fill(0xff);
+            })
+            .await;
+            drop(journal);
+
+            // The tip entry is intact, so reopen succeeds.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.target(), tip_target);
+
+            // The tampered frontier cannot authenticate against the requested root.
+            assert!(matches!(
+                reopened.compact_state(historical_target).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+            reopened.destroy().await.unwrap();
         });
     }
 

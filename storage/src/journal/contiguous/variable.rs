@@ -1163,8 +1163,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         metrics.update(bounds.end, bounds.start, items_per_blob);
 
         // The offsets watermark is this journal's recovery anchor. Init validated it against
-        // both journals, so it is a proven size to start from.
-        let barrier = Barrier::new(offsets.recovery_watermark());
+        // both journals, so it is a proven size to start from. A prune that collapses the
+        // journal persists no watermark and an empty-aligned reopen skips the offsets sync
+        // that would heal it, so the recovered watermark can trail the pruning boundary.
+        // Pruned positions were durably justified before removal, so the boundary is a
+        // durable floor.
+        let barrier = Barrier::new(offsets.recovery_watermark().max(bounds.start));
         Ok(Self {
             blobs,
             offsets,
