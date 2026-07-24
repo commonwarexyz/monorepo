@@ -611,13 +611,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                             new_size = valid_offset,
                             "incomplete item at end: truncating"
                         );
-                        self.repairing = true;
-                        let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
-                        self.repairing = false;
-                        if let Err(err) = repaired {
-                            self.sections.pop_front();
-                            return self.fail(err);
+                        if let Some(result) = self.repair_and_pop(section, valid_offset).await {
+                            return Some(result);
                         }
+                        continue;
                     }
                     // Reader exhausted, move to the next section
                     self.sections.pop_front();
@@ -643,14 +640,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                         new_size = valid_offset,
                         "torn page detected: truncating"
                     );
-                    self.repairing = true;
-                    let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
-                    self.repairing = false;
-                    if let Err(err) = repaired {
-                        self.sections.pop_front();
-                        return self.fail(err);
+                    if let Some(result) = self.repair_and_pop(section, valid_offset).await {
+                        return Some(result);
                     }
-                    self.sections.pop_front();
                     continue;
                 }
                 Err(err) => {
@@ -680,6 +672,26 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     const fn fail(&mut self, err: Error) -> Option<Result<(u64, u64, A), Error>> {
         self.errored = true;
         Some(Err(err))
+    }
+
+    /// Durably repair `section` back to `valid_offset` and pop it from the replay queue.
+    ///
+    /// Holds the `repairing` drop-guard across the repair so an interrupted repair fails the
+    /// replay rather than adopting mismatched in-memory state. Returns the terminal failure value
+    /// if the repair itself errored, else `None`.
+    async fn repair_and_pop(
+        &mut self,
+        section: u64,
+        valid_offset: u64,
+    ) -> Option<Result<(u64, u64, A), Error>> {
+        self.repairing = true;
+        let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
+        self.repairing = false;
+        self.sections.pop_front();
+        match repaired {
+            Ok(()) => None,
+            Err(err) => self.fail(err),
+        }
     }
 
     /// Returns the journal.

@@ -81,6 +81,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
+///
+/// All partition fields (`metadata_partition`, `freezer_table_partition`,
+/// `freezer_key_partition`, `freezer_value_partition`, `freezer_metadata_partition`,
+/// `ordinal_partition`) must be mutually distinct; initialization rejects any collision.
 #[derive(Clone)]
 pub struct Config<C> {
     /// The partition to use for the archive's metadata.
@@ -114,8 +118,6 @@ pub struct Config<C> {
     pub freezer_value_compression: Option<u8>,
 
     /// The partition to use for the archive's freezer recovery-watermark metadata.
-    ///
-    /// Must be distinct from the freezer key, value, and table partitions.
     pub freezer_metadata_partition: String,
 
     /// The partition to use for the archive's ordinal.

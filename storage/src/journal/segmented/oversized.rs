@@ -89,6 +89,9 @@ pub trait Record: CodecFixed<Cfg = ()> + Clone {
 }
 
 /// Configuration for oversized journal.
+///
+/// The `index_partition`, `value_partition`, and `metadata_partition` must be mutually distinct;
+/// initialization rejects any collision.
 #[derive(Clone)]
 pub struct Config<C> {
     /// Partition for the fixed index journal.
@@ -99,8 +102,8 @@ pub struct Config<C> {
 
     /// Partition for durable recovery watermarks.
     ///
-    /// This must be distinct from the index and value partitions. Checkpoint mode opens and
-    /// clears this partition before relying exclusively on its externally published checkpoint.
+    /// Checkpoint mode opens and clears this partition before relying exclusively on its
+    /// externally published checkpoint.
     pub metadata_partition: String,
 
     /// Page cache for index journal caching.
@@ -737,6 +740,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         Ok((
             self,
             Handle::from_future(async move {
+                // Prefer the current data-sync error over an older watermark-sync error.
                 completion.await?;
                 watermark_handle.await
             }),

@@ -189,7 +189,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let mut replay: OversizedReplay<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg, cfg.replay_buffer).await?;
 
-        // Initialize keys and replay index journal (no values read!)
+        // Populate the in-memory index by replaying index entries (values are not decoded here).
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), cfg.translator.clone());
@@ -605,8 +605,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 {
     /// Initialize a new `Archive` instance.
     ///
-    /// The in-memory index for `Archive` is populated during this call
-    /// by replaying only the index journal (no values are read).
+    /// The in-memory index is populated from replayed index entries; recovery may verify value
+    /// frames but does not decode them.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }

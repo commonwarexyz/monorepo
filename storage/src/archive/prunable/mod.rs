@@ -175,6 +175,9 @@ mod storage;
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
+///
+/// The `key_partition`, `value_partition`, and `metadata_partition` must be mutually distinct;
+/// initialization rejects any collision.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// Logic to transform keys into their index representation.
@@ -184,8 +187,6 @@ pub struct Config<T: Translator, C> {
     pub translator: T,
 
     /// The partition to use for the key journal (stores index+key metadata).
-    ///
-    /// Must be distinct from the value and metadata partitions.
     pub key_partition: String,
 
     /// The page cache to use for the key journal.
@@ -195,8 +196,6 @@ pub struct Config<T: Translator, C> {
     pub value_partition: String,
 
     /// The partition to use for the recovery-watermark metadata.
-    ///
-    /// Must be distinct from the key and value partitions.
     pub metadata_partition: String,
 
     /// The compression level to use for the value blob.

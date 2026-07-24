@@ -239,12 +239,12 @@ pub enum Error {
 }
 
 /// Configuration for [Freezer].
+///
+/// All partition fields (`key_partition`, `value_partition`, `table_partition`,
+/// `metadata_partition`) must be mutually distinct; initialization rejects any collision.
 #[derive(Clone)]
 pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition for the key index journal.
-    ///
-    /// The key, value, table, and metadata partitions must all be mutually distinct;
-    /// initialization rejects any collision.
     pub key_partition: String,
 
     /// The size of the write buffer for the key index journal.
@@ -266,8 +266,6 @@ pub struct Config<C> {
     pub value_target_size: u64,
 
     /// The [commonware_runtime::Storage] partition for the recovery-watermark metadata.
-    ///
-    /// Must be distinct from the key, value, and table partitions.
     pub metadata_partition: String,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.

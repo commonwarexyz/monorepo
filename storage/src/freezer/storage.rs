@@ -1514,8 +1514,8 @@ mod tests {
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
 
-            // A fresh start owns and removes the companion metadata partition too.
-            let metadata_partition = format!("{}-metadata", cfg.key_partition);
+            // A fresh start owns and removes the configured metadata partition too.
+            let metadata_partition = cfg.metadata_partition.clone();
             let (blob, _) = context
                 .open(&metadata_partition, b"left")
                 .await
@@ -1600,18 +1600,9 @@ mod tests {
                     "{label}: expected InvalidConfiguration, got {result:?}"
                 );
 
-                // The rejected init must not have deleted the seeded partition.
-                let names = context
-                    .scan(&metadata_partition)
-                    .await
-                    .expect("colliding partition must survive a rejected init");
-                assert!(
-                    names.contains(&b"left".to_vec()),
-                    "{label}: seeded blob was deleted by a rejected init"
-                );
-
-                // ...nor modified its contents: a truncate-or-overwrite-before-error regression
-                // must not pass, so verify the seeded bytes are byte-identical.
+                // The rejected init must not have deleted or modified the seeded partition. A
+                // deleted partition reopens as a fresh empty blob, so the size assert catches
+                // deletion; the byte assert catches a truncate-or-overwrite-before-error regression.
                 let (blob, len) = context
                     .open(&metadata_partition, b"left")
                     .await

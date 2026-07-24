@@ -677,15 +677,9 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                                 "torn page detected: truncating"
                             );
                             let (section, valid_offset) = (current.section, current.valid_offset);
-                            self.repairing = true;
-                            let repaired =
-                                repair_blob(&mut self.journal, section, valid_offset).await;
-                            self.repairing = false;
-                            if let Err(err) = repaired {
-                                self.sections.pop_front();
-                                return self.fail(err);
+                            if let Some(result) = self.repair_and_pop(section, valid_offset).await {
+                                return Some(result);
                             }
-                            self.sections.pop_front();
                             continue;
                         }
                         Err(err) => {
@@ -731,14 +725,12 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                                     // replay-time repaired sections separately.
                                     let (section, valid_offset) =
                                         (current.section, current.valid_offset);
-                                    self.repairing = true;
-                                    let repaired =
-                                        repair_blob(&mut self.journal, section, valid_offset).await;
-                                    self.repairing = false;
-                                    if let Err(err) = repaired {
-                                        self.sections.pop_front();
-                                        return self.fail(err);
+                                    if let Some(result) =
+                                        self.repair_and_pop(section, valid_offset).await
+                                    {
+                                        return Some(result);
                                     }
+                                    continue;
                                 }
                                 self.sections.pop_front();
                                 continue;
@@ -762,14 +754,9 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                         "incomplete item at end: truncating"
                     );
                     let (section, valid_offset) = (current.section, current.valid_offset);
-                    self.repairing = true;
-                    let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
-                    self.repairing = false;
-                    if let Err(err) = repaired {
-                        self.sections.pop_front();
-                        return self.fail(err);
+                    if let Some(result) = self.repair_and_pop(section, valid_offset).await {
+                        return Some(result);
                     }
-                    self.sections.pop_front();
                     continue;
                 }
                 Err(commonware_runtime::Error::InvalidChecksum) => {
@@ -782,14 +769,9 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                         "torn page detected: truncating"
                     );
                     let (section, valid_offset) = (current.section, current.valid_offset);
-                    self.repairing = true;
-                    let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
-                    self.repairing = false;
-                    if let Err(err) = repaired {
-                        self.sections.pop_front();
-                        return self.fail(err);
+                    if let Some(result) = self.repair_and_pop(section, valid_offset).await {
+                        return Some(result);
                     }
-                    self.sections.pop_front();
                     continue;
                 }
                 Err(err) => {
@@ -841,6 +823,26 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     const fn fail(&mut self, err: Error) -> Option<Result<(u64, u64, u32, V), Error>> {
         self.errored = true;
         Some(Err(err))
+    }
+
+    /// Durably repair `section` back to `valid_offset` and pop it from the replay queue.
+    ///
+    /// Holds the `repairing` drop-guard across the repair so an interrupted repair fails the
+    /// replay rather than adopting mismatched in-memory state. Returns the terminal failure value
+    /// if the repair itself errored, else `None`.
+    async fn repair_and_pop(
+        &mut self,
+        section: u64,
+        valid_offset: u64,
+    ) -> Option<Result<(u64, u64, u32, V), Error>> {
+        self.repairing = true;
+        let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
+        self.repairing = false;
+        self.sections.pop_front();
+        match repaired {
+            Ok(()) => None,
+            Err(err) => self.fail(err),
+        }
     }
 
     /// Returns the journal.
