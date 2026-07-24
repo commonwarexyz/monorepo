@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/multimmit.png"
 katex: true
 ---
 
-A blockchain user's clock starts at submission and ends at finality. Consensus research keeps a different clock, from the leader's proposal to the decision, and everything before it starts is expensive. A transaction first crosses the network to whichever node leads next, then flows back out of that leader's uplink inside a block. The same uplink caps the whole network's throughput: every byte leaves one node while every other validator's bandwidth idles.
+For a user, a blockchain's speed is the time from submitting a transaction to seeing it final. The protocols underneath are usually measured against something narrower: the time from a leader proposing a block to the network accepting it. The difference is the trip your transaction makes first, across the network to whichever node is leading and back out of that leader's uplink inside a block. The same uplink caps the whole network's throughput: every byte leaves one node while every other validator's bandwidth idles.
 
 The well-understood fix is to decouple transaction dissemination from consensus: every validator streams transaction data in parallel, consensus orders references to it, and the network finalizes transactions at roughly the rate validators can *download* them rather than the rate one leader can *upload* them. That split is [now standard among high-throughput designs](https://hackmd.io/@patrickogrady/rys8mdl5p).
 
