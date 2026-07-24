@@ -169,11 +169,11 @@ where
                     acknowledgement,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
-                    let (this, handoff) = self
+                    let handoff;
+                    (self, handoff) = self
                         .process_finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
-                    self = this;
                     if let Some(handoff) = handoff {
                         self.transition(Some(handoff)).await;
                         return;

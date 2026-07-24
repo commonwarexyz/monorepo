@@ -1686,8 +1686,8 @@ mod tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 round += 1;
             }
 
@@ -1923,9 +1923,9 @@ mod tests {
                         .merkleize(&db, None)
                         .await
                         .unwrap();
-                    let (next, _) = db.apply_batch(merkleized).await.unwrap();
+                    (db, _) = db.apply_batch(merkleized).await.unwrap();
                     let handle;
-                    (db, handle) = next.start_sync().await.unwrap();
+                    (db, handle) = db.start_sync().await.unwrap();
                     handle.await.unwrap();
                     commits.push((db.bounds().end, db.root(), db.sync_boundary()));
                 }
