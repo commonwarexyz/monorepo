@@ -1006,6 +1006,70 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_oversized_init_defers_interior_torn_value_to_get() {
+        // A crash may persist index entries and later value bytes while losing an interior
+        // value (the crash model on [commonware_runtime::Blob]). Model the resulting state by
+        // corrupting a durable interior value: infer-mode init verifies only each section's
+        // last entry, so the damaged entry is adopted and detection is deferred to
+        // `get_value`. Tracked by https://github.com/commonwarexyz/monorepo/issues/4326: a
+        // durable watermark would let init verify the whole suspect window instead.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+            for id in 1..=3u64 {
+                (oversized, _, _, _) = oversized
+                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            let torn = oversized.get(1, 1).await.expect("Failed to get entry");
+            let (torn_offset, _) = torn.value_location();
+            drop(oversized);
+
+            // Corrupt one byte of the interior (second) value in the glob section blob.
+            let (blob, _) = context
+                .open("test-values", &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open glob blob");
+            let byte = blob.read_at(torn_offset, 1).await.expect("Failed to read");
+            blob.write_at(torn_offset, vec![byte.coalesce().as_ref()[0] ^ 0xFF])
+                .await
+                .expect("Failed to corrupt value");
+            blob.sync().await.expect("Failed to sync corruption");
+            drop(blob);
+
+            // Init adopts all three entries: only the last one's value is verified.
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to reinit");
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            assert_eq!(oversized.size(1).expect("size") / chunk, 3);
+
+            // The entries around the hole read fine. The torn one is detected at read.
+            for position in [0u64, 2] {
+                let entry = oversized.get(1, position).await.expect("Failed to get");
+                let (offset, size) = entry.value_location();
+                let value = oversized
+                    .get_value(1, offset, size)
+                    .await
+                    .expect("intact value must read");
+                assert_eq!(value, [entry.id as u8; 16]);
+            }
+            let entry = oversized.get(1, 1).await.expect("Failed to get");
+            let (offset, size) = entry.value_location();
+            assert!(
+                oversized.get_value(1, offset, size).await.is_err(),
+                "torn interior value must fail its checksum at read"
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_oversized_rewind_truncation_durable_before_offset_reuse() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {

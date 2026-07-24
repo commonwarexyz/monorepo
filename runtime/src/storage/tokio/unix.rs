@@ -10,9 +10,9 @@ use std::{
 };
 use tokio::task;
 
-// Cap iovec batch size: larger iovecs reduce syscall count but increase
-// per-write kernel setup overhead.
-const IOVEC_BATCH_SIZE: usize = 32;
+// Cap iovec batches at the kernel's IOV_MAX (1024): larger submissions fail with
+// EINVAL. Larger batches reduce syscall count with no measurable per-iovec penalty.
+const IOVEC_BATCH_SIZE: usize = 1024;
 
 #[derive(Clone)]
 pub struct Blob {
@@ -51,14 +51,25 @@ impl Blob {
         Ok(())
     }
 
+    /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
+    ///
+    /// `flags` apply to every submission, so callers must only pass durability flags for
+    /// writes that fit a single submission (see [Blob::write_at_sync]).
     fn write_vectored_at(
         file: &File,
         mut offset: u64,
         mut bufs: IoBufs,
         flags: Option<libc::c_int>,
     ) -> Result<(), Error> {
+        debug_assert!(
+            flags.is_none() || bufs.chunk_count() <= IOVEC_BATCH_SIZE,
+            "durability flags on a multi-submission write serialize its batches"
+        );
+
         while bufs.has_remaining() {
-            let mut io_slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
+            // Scratch sized to the write, so small vectored writes never initialize a
+            // full IOVEC_BATCH_SIZE array.
+            let mut io_slices = vec![IoSlice::new(&[]); bufs.chunk_count().min(IOVEC_BATCH_SIZE)];
             let io_slices_len = bufs.chunks_vectored(&mut io_slices);
             assert!(
                 io_slices_len > 0,
@@ -183,8 +194,21 @@ impl crate::Blob for Blob {
 
         cfg_if! {
             if #[cfg(target_os = "linux")] {
+                // Fuse durability into the write only when it fits one submission:
+                // fusing every batch would serialize the batches behind per-call
+                // durability waits, while plain batches keep the device pipelined
+                // and pay a single fdatasync at the end.
+                let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
+                let partition = self.partition.clone();
+                let name = self.name.clone();
                 task::spawn_blocking(move || {
-                    Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
+                    if fused {
+                        return Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC));
+                    }
+                    Self::write_vectored_at(&file, offset, bufs, None)?;
+                    file.sync_data().map_err(|e| {
+                        Error::BlobSyncFailed(partition, hex(&name), e.into())
+                    })
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?

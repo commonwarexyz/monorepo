@@ -292,6 +292,42 @@ mod tests {
         run_storage_tests(storage).await;
     }
 
+    /// A sync write with more chunks than one iovec batch is submitted plain and made
+    /// durable with a trailing fdatasync instead of per-submission fusion. Verify the
+    /// content survives a reopen.
+    #[tokio::test]
+    async fn test_write_at_sync_spans_submissions() {
+        let mut rng = sys_rng();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_spans_{}", rng.random::<u64>()));
+        let config = Config::new(storage_directory, 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"spans").await.unwrap();
+        let chunks = 1500usize;
+        let chunk_len = 8usize;
+        let mut bufs = crate::IoBufs::default();
+        for i in 0..chunks {
+            bufs.append(crate::IoBuf::from(vec![(i % 251) as u8; chunk_len]));
+        }
+        blob.write_at_sync(0, bufs).await.unwrap();
+        drop(blob);
+
+        let (blob, len) = storage.open("partition", b"spans").await.unwrap();
+        assert_eq!(len as usize, chunks * chunk_len);
+        let read = blob
+            .read_at(0, chunks * chunk_len)
+            .await
+            .unwrap()
+            .coalesce();
+        for (i, chunk) in read.as_ref().chunks(chunk_len).enumerate() {
+            assert!(
+                chunk.iter().all(|&b| b == (i % 251) as u8),
+                "chunk {i} corrupt"
+            );
+        }
+    }
+
     /// Dropping the `start_sync` receiver must not break the blob: the handle stays
     /// usable and a later sync still persists data.
     #[tokio::test]

@@ -170,7 +170,10 @@ use io_uring::{
     squeue::SubmissionQueue,
     types::{SubmitArgs, Timespec},
 };
-use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
+use request::{
+    ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WRITE_IOVEC_BATCH_SIZE,
+    WriteAtRequest, WriteBuffers,
+};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -430,7 +433,7 @@ impl Handle {
             file,
             offset,
             written: 0,
-            write: bufs.into(),
+            write: WriteBuffers::for_storage(bufs),
             sync: false,
             result: None,
             sender: tx,
@@ -441,6 +444,11 @@ impl Handle {
     }
 
     /// Submit a logical positioned write with per-write sync and wait for its completion.
+    ///
+    /// Durability is fused into the write (`RWF_SYNC`) only when the whole write fits one
+    /// submission: fusing every submission would serialize the submissions behind per-SQE
+    /// durability waits. A larger write is submitted plain and made durable with one
+    /// trailing fsync, which keeps the device pipelined and pays a single wait at the end.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub async fn write_at_sync(
         &self,
@@ -448,19 +456,24 @@ impl Handle {
         offset: u64,
         bufs: IoBufs,
     ) -> Result<(), Error> {
+        let fused = bufs.chunk_count() <= WRITE_IOVEC_BATCH_SIZE;
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
-            file,
+            file: file.clone(),
             offset,
             written: 0,
-            write: bufs.into(),
-            sync: true,
+            write: WriteBuffers::for_storage(bufs),
+            sync: fused,
             result: None,
             sender: tx,
         }))
         .await
         .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)?
+        rx.await.map_err(|_| Error::WriteFailed)??;
+        if fused {
+            return Ok(());
+        }
+        self.sync(file).await
     }
 
     /// Submit a logical fsync request and wait for its completion.

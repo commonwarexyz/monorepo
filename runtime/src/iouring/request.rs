@@ -16,9 +16,14 @@ use std::{
     time::Instant,
 };
 
-/// Cap iovec batch size: larger iovecs reduce syscall count but increase
-/// per-write kernel setup overhead.
-const IOVEC_BATCH_SIZE: usize = 32;
+/// Cap iovec batches for socket sends: partial sends are common and each
+/// resubmission rebuilds the iovec list, so batches stay small.
+const SEND_IOVEC_BATCH_SIZE: usize = 32;
+
+/// Cap iovec batches for storage writes at the kernel's IOV_MAX (1024): larger
+/// submissions fail with EINVAL. Larger batches reduce submission count with no
+/// measurable per-iovec penalty.
+pub(super) const WRITE_IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
 ///
@@ -35,13 +40,27 @@ pub(super) enum WriteBuffers {
 }
 
 impl From<IoBufs> for WriteBuffers {
+    /// Normalize buffers with the send cap, the conservative default (see
+    /// [SEND_IOVEC_BATCH_SIZE]). Storage writes opt into larger batches via
+    /// [WriteBuffers::for_storage].
+    fn from(bufs: IoBufs) -> Self {
+        Self::new(bufs, SEND_IOVEC_BATCH_SIZE)
+    }
+}
+
+impl WriteBuffers {
+    /// Normalize buffers for a storage write (see [WRITE_IOVEC_BATCH_SIZE]).
+    pub(super) fn for_storage(bufs: IoBufs) -> Self {
+        Self::new(bufs, WRITE_IOVEC_BATCH_SIZE)
+    }
+
     /// Normalize caller-provided buffers into either a single-buffer fast path
     /// or a vectored representation with reusable iovec scratch space.
-    fn from(bufs: IoBufs) -> Self {
+    fn new(bufs: IoBufs, max_batch: usize) -> Self {
         match bufs.try_into_single() {
             Ok(buf) => Self::Single { buf },
             Err(bufs) => {
-                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
+                let max_iovecs = bufs.chunk_count().min(max_batch);
                 let iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
                     libc::iovec {
                         iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
@@ -54,9 +73,7 @@ impl From<IoBufs> for WriteBuffers {
             }
         }
     }
-}
 
-impl WriteBuffers {
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
         match self {

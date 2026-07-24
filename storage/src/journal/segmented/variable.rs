@@ -1469,6 +1469,118 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_journal_torn_sync_recovers_synced_prefix() {
+        // A crash may persist any subset of the bytes written since the last completed sync
+        // (the crash model on [commonware_runtime::Blob]). Tear the flush behind a failing
+        // sync across many seeds and pin the recovery dichotomy: either replay repairs the
+        // section (every synced item survives and the result is a contiguous valid prefix of
+        // what was appended), or replay detects an interior hole behind a valid island and
+        // fails. The failure case is a deterministic startup wedge tracked by
+        // https://github.com/commonwarexyz/monorepo/issues/4326: repair only truncates
+        // trailing garbage, so a torn page below the backward-scan size is never healed.
+        // Torn state is never adopted silently in either case. Once #4326 lands, no seed
+        // should wedge and this test should be tightened to require recovery everywhere.
+        let mut recoveries = 0;
+        let mut wedges = 0;
+        for seed in 0..16 {
+            let executor = deterministic::Runner::seeded(seed);
+            let wedged = executor.start(|context| async move {
+                let cfg = Config {
+                    partition: "test-partition".into(),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(8192),
+                };
+                let section = 1u64;
+                let item = |i: usize| [i as u8; 100];
+
+                let mut journal = Journal::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize journal");
+                for i in 0..10 {
+                    (journal, _, _) = journal
+                        .append(section, &item(i))
+                        .await
+                        .expect("Failed to append synced item");
+                }
+                journal = journal.sync(section).await.expect("Failed to sync");
+
+                // A multi-page batch that stays buffered until the torn sync below.
+                for i in 10..40 {
+                    (journal, _, _) = journal
+                        .append(section, &item(i))
+                        .await
+                        .expect("Failed to append unsynced item");
+                }
+
+                // The sync's flush tears: an arbitrary subset of its bytes persists.
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    write_rate: Some(1.0),
+                    partial_write_rate: Some(1.0),
+                    ..Default::default()
+                };
+                assert!(journal.sync(section).await.is_err());
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+                // Reopen and replay. Init always succeeds (the backward scan sizes to the
+                // last valid page), so the dichotomy surfaces during replay.
+                let journal = Journal::<_, [u8; 100]>::init(context.child("second"), cfg)
+                    .await
+                    .expect("Failed to re-initialize journal");
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                let mut recovered = 0;
+                let mut wedged = false;
+                while let Some(result) = replay.next().await {
+                    match result {
+                        Ok((s, _, _, it)) => {
+                            assert_eq!(s, section);
+                            assert_eq!(it, item(recovered), "recovered item {recovered} corrupt");
+                            recovered += 1;
+                        }
+                        Err(_) => {
+                            // An interior hole behind a valid island: detected, not repaired.
+                            wedged = true;
+                            break;
+                        }
+                    }
+                }
+                if wedged {
+                    assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+                    return true;
+                }
+                let mut journal = replay.finish().expect("Failed to finish replay");
+                assert!(recovered >= 10, "synced items lost: recovered {recovered}");
+
+                // The repaired journal accepts new durable appends.
+                (journal, _, _) = journal
+                    .append(section, &item(recovered))
+                    .await
+                    .expect("Failed to append after repair");
+                journal
+                    .sync(section)
+                    .await
+                    .expect("Failed to sync after repair");
+                false
+            });
+            if wedged {
+                wedges += 1;
+            } else {
+                recoveries += 1;
+            }
+        }
+
+        // Both arms must be exercised: recovery on clean-prefix tears, and the documented
+        // wedge on island tears. If the wedge count drops to zero, #4326 was likely fixed:
+        // tighten this test to require recovery for every seed.
+        assert!(recoveries > 0, "no seed exercised successful recovery");
+        assert!(wedges > 0, "no seed exercised the interior-hole wedge");
+    }
+
+    #[test_traced]
     fn test_journal_replay_dropped_during_repair_fails_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
