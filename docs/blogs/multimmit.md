@@ -159,7 +159,7 @@ The thresholds above are exact at $n=5f+1$, and they carry guarantees that go be
 
 Multimmit can carry a reputation mechanism too, but as a refinement rather than a defense. With damage already confined to a faulty producer's own chain, blame only tunes where lagging chains sit in the ordering sweep, no guarantee depends on it, and forgiveness can be generous.
 
-## DAGs Wait in Waves
+## One Structure, Two Jobs
 
 DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](https://arxiv.org/abs/2201.05677), [Mysticeti](https://arxiv.org/abs/2310.14821)) reached the bandwidth goal first, every validator disseminating in parallel, and Autobahn and Raptr are in large part responses to their costs. The coupling is the difference: the transaction-carrying structure *is* the consensus structure. Every validator's vertex carries transactions and must reference $n-f$ vertices from the previous round, and it is the reference pattern itself that the ordering logic interprets.
 
