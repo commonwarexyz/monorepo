@@ -75,8 +75,6 @@ Figure 1: A transaction's path through a single-proposer protocol, measured in m
 
 After the leader broadcasts a block, finality takes two rounds of voting. A recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) reduces this to one round when $n \geq 5f+1$ (Multimmit uses the same consensus skeleton in Figures 4 and 5). Before the broadcast, however, the transaction must reach an API node, travel again to the leader, and wait for the leader's next proposal. This time is usually excluded from reported consensus latency. The leader must then send every transaction back out inside its block, making its egress the throughput limit for the entire network. One-round voting only improves the part after the broadcast.
 
-*Erasure coding raises this limit by having the leader send each validator a small fragment instead of a full block. We explore that approach in [Deliver Us in Pieces](/blogs/coding.html) and bound its efficiency in [The Carnot Bound](/blogs/carnot-bound.html). Fully saturating bandwidth also requires a stable leader to eliminate gaps between proposals.*
-
 ## Removing the Leader Bottleneck
 
 [Autobahn](https://arxiv.org/abs/2401.10369) removes the leader's egress bottleneck. Every producer builds its own *lane* of transaction batches and streams each batch to all validators as it is produced, so transaction data crosses the network only once. The leader still proposes a block, but it now contains references to lane tips instead of transactions. When the leader block finalizes, so does everything below those tips.
@@ -113,6 +111,8 @@ Figure 3: Easy spoiling. A Raptr leader block carries one sequence of batches fr
 
 [Mysticeti](https://arxiv.org/abs/2310.14821) makes the same tradeoff for a DAG by referencing uncertified vertices. Dropping just 1% of egress traffic at 5 of 100 validators has been [observed](https://arxiv.org/abs/2405.20488) to increase its median latency by an order of magnitude at moderate load. DAG deployments use reputation for the same reason and have scored anchors (their leader equivalents) since [Shoal](https://arxiv.org/abs/2306.03058). We return to DAGs below.
 
+*Erasure coding takes a different approach: keep the leader on the data path, but send each validator a smaller fragment of each block. A stable leader can then pipeline proposals without gaps between them. Together, these techniques let a leader-based protocol approach line-rate throughput. The tradeoff is that every transaction must still reach that leader before dissemination begins, and the leader can censor transactions throughout its tenure. We explain the coding in [Deliver Us in Pieces](/blogs/coding.html) and establish its limits in [The Carnot Bound](/blogs/carnot-bound.html).*
+
 ## Multimmit: Checkpoint First, Certify in the Background
 
 Multimmit keeps producer lanes but makes each one a chain. Every producer signs its own sequence of transaction blocks, with each block referencing its parent by hash. DA-votes and PoAs still form for every block, as in Figure 2, but consensus does not wait for them. A producer may run up to $d$ blocks ahead of its last certified block, leaving a short uncertified tail while everything below it remains recoverable.
@@ -143,7 +143,7 @@ Figure 4: Transaction block $b$ (green, like the batch in Figure 2) reaches the 
 Figure 5: Transaction block $b$ crosses the leader block on the wire and misses the proposal, but reaches validators before they vote. Extension votes attest $b$ directly, finalizing it $2\delta$ after its broadcast. Certification continues in the background (faint arrows) and finishes after $b$ has already finalized.
 :::
 
-From the user's perspective, both paths are simple: submit to an API node, let its next block carry the transaction to every validator, and wait one round of votes for finality. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation (and by $t+2\delta$ with favorable timing). The two-delay case is optimal.
+From the user's perspective, both paths are simple: submit to an API node, let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before the transaction could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation (and by $t+2\delta$ with favorable timing). The two-delay case is optimal.
 
 If we started the timer at the leader's proposal, as consensus papers often do, Multimmit finality would be reported as $2\delta$. That convention misses where checkpoints and extension votes save time. Raptr, measured from dissemination, finalizes a batch at $t+5\delta$ in expectation with *no* faults and at $t+5.5\delta$ once faulty producers are present (with the fast path still subject to spoiling). Roughly one $\delta$ of Multimmit's improvement comes from assuming $n \geq 5f+1$ and using one voting round instead of two. Checkpoints and extension votes provide the rest. An honest chain's expected $t+3\delta$ finality does not change when $f$ producers misbehave.
 
@@ -166,8 +166,6 @@ At $n=5f+1$, these thresholds provide three other useful properties:
 - A faulty producer can withhold blocks, equivocate, or disclose blocks selectively, but any resulting delay is confined to its own chain (other chains wait at most one view for their position in the total ordering).
 - A leader cannot finalize its own block while censoring someone else's. If a fresh honest block reaches the honest validators before they vote, its membership in the ledger is settled in that view unless the view finalizes nothing.
 - Consensus messages stay tens of kilobytes per view, independent of transaction volume. With views lasting 100-200ms, a single view at line rate can order tens of megabytes of transactions on a commodity gigabit link.
-
-*A stable leader can run faster views, but every transaction must first travel to it. A Multimmit producer can pre-confirm a transaction as soon as it arrives, potentially before it could reach a leader an ocean away. For deployments comfortable with the censorship profile of a stable leader, our prior work [Carnot](/blogs/carnot-bound.html) pushes that design to near line-rate throughput.*
 
 ## Why Not a DAG?
 
