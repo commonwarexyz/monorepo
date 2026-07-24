@@ -31,7 +31,8 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active for `skip_timeout`, set `t_l` to 0.
+//!     * If leader `l` has not been active for `skip_timeout` while a quorum of participants
+//!       has been, set both `t_l` and `t_a` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -45,12 +46,13 @@
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
-//! * Cancel `t_a`
 //! * Mark `c` as notarized
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * Attempt to certify `c` (see [Certification](#certification))
-//!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
-//!     * On failure: broadcast `nullify(v)`
+//! * Attempt to certify `c` (see [Certification](#certification)), leaving `t_a` armed so a
+//!   stalled certification still times out the view
+//!     * On success: enter `v+1` and broadcast `finalize(c,v)` (skipped if we have broadcast
+//!       `nullify(v)`)
+//!     * On failure: treat as immediate timeout expiry and broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
@@ -62,8 +64,12 @@
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `nullify(v)`
-//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and the certificate that advanced us into view `v`
+//! * Every retry interval `t_r` after `nullify(v)` broadcast that we are still in view `v`:
+//!    * Rebroadcast `nullify(v)` alongside the best certificate for entering view `v` we hold at
+//!      that time: the finalization of `v-1` if we have one, otherwise the highest nullification
+//!      we hold for the previous term (checked only when `v` starts a term, as every view does
+//!      when `term_length` is 1), otherwise the notarization of `v-1`. If we hold none (as in
+//!      view 1), rebroadcast `nullify(v)` alone.
 //!
 //! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
@@ -88,9 +94,10 @@
 //! to wait until they have received enough shards to reconstruct and validate the full block before
 //! voting to finalize.
 //!
-//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
-//! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
-//! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
+//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload (unless it has
+//! broadcast `nullify`) and enters the next view. If `certify` returns `false`, the participant broadcasts
+//! `nullify` for the view instead (treating it as an immediate timeout), and will refuse to build upon the
+//! proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
@@ -110,7 +117,8 @@
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
 //! * Skip "leader timeout" and "certification timeout" if a designated leader has not participated
-//!   for `skip_timeout` (again to trigger early view transition for an unresponsive leader).
+//!   for `skip_timeout` while a quorum of participants has (again to trigger early view transition
+//!   for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -144,19 +152,22 @@
 //!    and possess required nullifications covering the skipped views from `v_p` to `v+k`.
 //! 2. A nullification certificate requires `2f+1` `nullify` votes for the covered view or an
 //!    earlier view in the same term.
-//! 3. An honest participant only broadcasts `nullify` when a timeout fires or when certification
-//!    fails.
+//! 3. An honest participant only broadcasts `nullify` on a nullify trigger: an expired timeout
+//!    (`t_l`, `t_a`, or the stall timeout) or an event treated as immediate timeout expiry
+//!    (proposal build failure, verification failure, certification failure, the leader's own
+//!    `nullify`, or leader inactivity, as listed in
+//!    [Deviations](#deviations-from-simplex-consensus)).
 //!
 //! Therefore, a nullification covering `v` can only form if at least `f+1` honest participants
 //! broadcast `nullify` at a single view `u` in `[term_start(v), v]`. If every view in that term
-//! prefix completes without timeout and with successful certification (just view `v` itself when
+//! prefix completes without any nullify trigger (just view `v` itself when
 //! `term_length` is 1), no honest participant has broadcast a covering `nullify`: at most `f`
 //! covering votes exist at any single view, which is insufficient to form a nullification
 //! certificate. Without that certificate, no future leader can skip view `v`, and the notarized
 //! payload must be included as an ancestor in all subsequent proposals. Note that a clean view
 //! `v` alone is not enough when `term_length > 1`: an honest `nullify` broadcast at an earlier
 //! view of the term (say, after a transient timeout at a view that later notarized) covers `v`
-//! even though `v` itself never timed out.
+//! even though no trigger fired at `v` itself.
 //!
 //! ### Same-Term Vote Safety
 //!
@@ -197,20 +208,28 @@
 //!
 //! ### Optimistic Finality
 //!
-//! The forced inclusion property provides a weaker but faster form of finality: once a
-//! notarization certificate is observed for view `v` (without any timeout having fired at any
-//! view from `term_start(v)` through `v`), the notarized payload can be treated as speculatively
-//! final. No future sequence of proposals can exclude it from the canonical chain. When
-//! `term_length` is 1, this reduces to observing a notarization for `v` with no timeout at `v`.
+//! The forced inclusion property provides a weaker but faster form of finality: a payload
+//! notarized at view `v` can be treated as speculatively final, because no future sequence of
+//! proposals can exclude it from the canonical chain if every view in `[term_start(v), v]`
+//! completes without any nullify trigger (just view `v` itself when `term_length` is 1).
 //!
 //! This "speculative finality" is available after just 2 network hops (proposal + notarization),
 //! compared to the 3 hops required for full finalization (proposal + notarization + finalization).
-//! A notarized-but-not-yet-finalized payload can only be excluded in two scenarios:
-//! `f+1` or more honest participants timed out at a single view of the term prefix
-//! `[term_start(v), v]`, or certification failed at one of those views. Because certification is
-//! deterministic, it either
-//! fails for all honest participants or none, so a certification failure always produces a
-//! nullification. In the common case (no faults, no timeouts), exclusion cannot happen.
+//! Observing the notarization does not by itself rule out exclusion: honest participants may
+//! still be inside a view of the term prefix, where a trigger can still fire (say, a
+//! certification that outlives `t_a`). Exclusion requires `f+1` or more honest participants to
+//! broadcast `nullify` at a single view of that prefix. Because certification is deterministic,
+//! it either fails for all honest participants or none, so a certification failure always
+//! produces a nullification. In the common case (no faults, no timeouts), exclusion cannot
+//! happen.
+//!
+//! One nullify trigger remains available to a Byzantine leader even when its proposal is valid,
+//! certifiable, and timely: broadcasting `nullify(v)` after its own proposal is notarized. Every
+//! honest participant still in view `v` treats that `nullify(v)` as immediate timeout expiry and
+//! responds with its own (and the leader's vote counts toward the `2f+1` quorum), so a Byzantine
+//! leader can single-handedly cause a covering nullification. Speculative finality for view `v`
+//! therefore also assumes the term's leader (constant across `[term_start(v), v]`) does not
+//! nullify its own proposals.
 //!
 //! ### Unchained Finalization
 //!
@@ -292,8 +311,9 @@
 //! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
 //! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
 //!
-//! To ensure progress is eventually made, leaders with nullified proposals directly broadcast the best finalization
-//! certificate they are aware of to ensure all honest participants eventually consider the same proposal ancestry valid.
+//! To ensure progress is eventually made, a leader whose proposal's view is nullified broadcasts the certificate of its
+//! proposal's parent (the parent's finalization if it holds one, otherwise the parent's notarization) alongside the
+//! nullification to ensure all honest participants eventually consider the same proposal ancestry valid.
 //!
 //! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
 //! finalization certificate after nullification, it would impose significant overhead under normal network
