@@ -761,10 +761,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                return match self.object(view, err) {
-                    Some(certificate) => Verify::Objection(certificate),
-                    None => Verify::Wait,
-                };
+                return self
+                    .object(view, err)
+                    .map_or(Verify::Wait, Verify::Objection);
             }
         };
         if !self
@@ -1095,7 +1094,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             })
             .and_then(|(_, round)| round.notarization())
     }
-
 }
 
 #[cfg(test)]
