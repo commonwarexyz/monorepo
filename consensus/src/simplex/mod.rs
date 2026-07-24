@@ -364,15 +364,18 @@
 //!
 //! #### Embedded VRF ([scheme::bls12381_threshold::vrf])
 //!
-//! Every `notarize(c,v)` or `nullify(v)` message includes an `attestation(v)` (a partial signature over the view `v`). After `2f+1`
-//! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `attestation(v)` is
-//! only over the view `v`, the seed derived for a given view `v` is the same regardless of whether or not a block was notarized in said
-//! view `v`.
+//! Every `notarize(c,v)`, `nullify(v)`, or `finalize(c,v)` message includes an `attestation(v)` (a partial signature over the view `v`).
+//! After `2f+1` attestations are collected from unique participants, `seed(v)` can be recovered. Because `attestation(v)` is only over the
+//! view `v`, the seed derived for a given view `v` is the same regardless of which block (if any) is notarized in view `v`. The `2f+1`
+//! attestations can come from mutually incompatible messages (`notarize` for different blocks, `nullify`, `finalize`), so `seed(v)` is
+//! recoverable even when no certificate forms for view `v`.
 //!
-//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
-//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
-//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
-//! is used as a seed in `v`).
+//! The value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v` and cannot be
+//! manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), so it is a sound beacon for leader election
+//! (where `seed(v)` determines the leader for `v+1`). It is **not** safe as a source of randomness for execution within view `v` itself: a
+//! coalition of `f` Byzantine participants recovers `seed(v)` after only `f+1` honest attestations, before the round resolves, letting a
+//! malicious leader front-run the outcome. Consume `seed(v)` only in a later view or epoch (see [scheme::bls12381_threshold::vrf] for
+//! extended discussion of the attack and the commit-then-reveal mitigation).
 //!
 //! #### Succinct Certificates
 //!
