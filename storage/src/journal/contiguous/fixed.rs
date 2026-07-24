@@ -1101,9 +1101,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // the first torn item, so an unsynced survivor could discard every synced blob
         // behind it.
         //
-        // Both hazards vanish once the barrier covers the new boundary: retained items below
-        // the barrier cannot tear, recovery truncates only above it, and the caller
-        // guarantees the boundary is justified by durable data (see [Mutable::prune]).
+        // If the barrier already covers the new boundary, skip the sync. Items below the
+        // barrier are durable and cannot tear, recovery truncates only above it, and the
+        // caller justified the boundary with durable data (see [Mutable::prune]).
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         if self.barrier.size() < new_boundary {
             let sync = self.blobs.start_sync().await;
