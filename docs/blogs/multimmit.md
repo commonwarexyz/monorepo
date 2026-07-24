@@ -13,7 +13,7 @@ katex: true
 
 A few years ago, I wrote [Vryx](https://hackmd.io/@patrickogrady/rys8mdl5p), an argument for reorienting State Machine Replication from (sequence → execute → replicate) to (replicate → sequence → execute). Decouple transaction dissemination from consensus, the reasoning went, and a blockchain can finalize transactions at roughly the rate validators can *download* them rather than the rate one leader can *upload* them. That reorientation is now standard among high-throughput designs. What never got settled is the seam between the two halves: when may consensus reference data still in flight?
 
-Wait until a block's availability is certified, and every transaction pays for certificate round trips it rarely needs. Reference blocks immediately and voters must fetch whatever they are missing, on the critical path, from the one node the whole design exists to unburden. Today we're sharing [Multimmit](https://github.com/commonwarexyz/monorepo/tree/main/pipeline/multimmit), a construction that combines [Minimmit](/blogs/minimmit.html)'s one-round-voting consensus (for $n \geq 5f+1$) with a chain of blocks per producer. Multimmit leaders reference blocks the moment they arrive, voters attest blocks the leader never saw, and certification runs in the background. A transaction block disseminated at time $t$ is finalized by $t+2\delta$ at best and $t+3\delta$ in expectation, where $\delta$ bounds message delay after GST. Those figures are measured from the block hitting the wire, not from the leader's proposal, and, for an honest chain's blocks, they hold while up to $f$ producers misbehave.
+Wait until a block's availability is certified, and every transaction pays for certificate round trips it rarely needs. Reference blocks immediately and voters must fetch whatever they are missing, on the critical path, from the one node the whole design exists to unburden. Today we're sharing [Multimmit](https://github.com/commonwarexyz/monorepo/tree/main/pipeline/multimmit), a construction developed with Andrew Lewis-Pye that combines [Minimmit](/blogs/minimmit.html)'s one-round-voting consensus (for $n \geq 5f+1$) with a chain of blocks per producer. Multimmit leaders reference blocks the moment they arrive, voters attest blocks the leader never saw, and certification runs in the background. A transaction block disseminated at time $t$ is finalized by $t+2\delta$ at best and $t+3\delta$ in expectation, where $\delta$ bounds message delay after GST. Those figures are measured from the block hitting the wire, not from the leader's proposal, and, for an honest chain's blocks, they hold while up to $f$ producers misbehave.
 
 ## The Ride to the Leader
 
@@ -34,6 +34,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
     aspect-ratio: 1024 / 384;
   }
 
+  .cw-loop-dagfetch {
+    aspect-ratio: 1024 / 408;
+  }
+
   @media (max-width: 600px) {
     .cw-loop {
       aspect-ratio: auto;
@@ -47,6 +51,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
 
     .cw-loop-dagstructure {
       height: 245px;
+    }
+
+    .cw-loop-dagfetch {
+      height: 260px;
     }
 
     .cw-loop svg {
@@ -164,13 +172,13 @@ Figure 6: Finality read out of the lattice, drawn with a Mysticeti-style three-r
 The coupling cuts both ways. A vertex may only enter round $r+1$ once $n-f$ round-$r$ vertices have arrived, so the whole network produces in lockstep, and nobody's next block can outrun the slowest quorum step of the last one. In certified DAGs like Narwhal, that step is a certificate round trip between every pair of consecutive vertices. In uncertified DAGs like Mysticeti, the round trip goes away and the fetch problem comes back: every vertex is a dependency of the vertices that reference it, so a validator missing a vertex must fetch it before processing anything built on top.
 
 ```{=html}
-<div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG with four validators. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. Validators 1 and 4 must fetch the missing vertex from validator 2 before they can proceed, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
-  <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. Validators 1 and 4 must fetch the missing dependency before processing that vertex, so round r+3 starts a fetch round trip late.</noscript>
+<div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagfetch" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG with four validators. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. A vertex is unusable until its full ancestry is held, so validators 1 and 4 must fetch the withheld vertex from validator 2 before they can build on validator 2's vertex, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
+  <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. A vertex is unusable without its full ancestry, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and round r+3 starts a fetch round trip late.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 7: The fetch problem. Validator 3 withholds its round-$(r+1)$ vertex, disclosing it only to validator 2, whose next vertex references it. Validators 1 and 4 cannot process that vertex until they fetch the missing dependency, so every lane's round $r+3$ starts late. Four validators leave no quorum slack, which is why a single hole stalls everything here. At larger scale the DAG routes around one hole, but every hole still puts a fetch on someone's critical path, and at real block rates sustained loss keeps holes in nearly every round (the measured blowup above). In Multimmit a reference never obligates a download: voters report how far they can support each chain and vote on schedule, so a withheld block costs its own chain's tally and nobody else's.
+Figure 7: The fetch problem. Validator 3 withholds its round-$(r+1)$ vertex, disclosing it only to validator 2, whose next vertex references it (red edge). A vertex is unusable until its full ancestry is held, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and without it they hold only two of the $n-f=3$ round-$(r+2)$ vertices that round $r+3$ requires. Every lane's round $r+3$ starts late. At larger scale the DAG routes around one hole, but every hole still puts a fetch on someone's critical path, and at real block rates sustained loss keeps holes in nearly every round (the measured blowup above). In Multimmit a reference never obligates a download: voters report how far they can support each chain and vote on schedule, so a withheld block costs its own chain's tally and nobody else's.
 :::
 
 ```{=html}
@@ -187,6 +195,6 @@ Multimmit's chains carry no cross-producer references, so there is nothing for a
 
 ## Onward
 
-Multimmit is the end of the thread Vryx started: transaction dissemination and consensus running concurrently, with neither ever blocking on the other. Blocks enter the ordering process the moment they hit the wire, availability is voted rather than fetched, and the failure of any producer is confined to its own chain. The draft specification includes proofs of consistency and liveness, an availability accounting for every block that enters the ordering, and matching lower bounds showing its extraction thresholds are exact.
+Multimmit is the end of the thread Vryx started: transaction dissemination and consensus running concurrently, with neither ever blocking on the other. Blocks enter the ordering process the moment they hit the wire, availability is voted rather than fetched, and the failure of any producer is confined to its own chain. The draft specification includes proofs of consistency and liveness, an availability accounting for every block that enters the ordering, and the exact extension threshold for every $n$, with the protocol's rules optimal at $n=5f+1$.
 
 Like Minimmit before it, Multimmit is not yet peer-reviewed or fully implemented, and we are releasing it under both MIT and Apache-2 licenses for others to build with and build upon. Have an idea to simplify, improve, or extend Multimmit? [Open a PR](https://github.com/commonwarexyz/monorepo/tree/main/pipeline/multimmit) or reach out at [multimmit@commonware.xyz](mailto:multimmit@commonware.xyz).

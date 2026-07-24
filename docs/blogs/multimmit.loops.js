@@ -281,7 +281,7 @@ const FIGURES = {
   },
 
   'multimmit-fig-dagfetch': {
-    height: 384,
+    height: 408,
     rows: [
       { id: 'v1', label: 'Validator 1' },
       { id: 'v2', label: 'Validator 2' },
@@ -329,6 +329,7 @@ const FIGURES = {
         { k: 'msg', from: 'v4', to: 'v2', t: 2.6, d: 1, style: 'ctl' },
         { k: 'msg', from: 'v2', to: 'v1', t: 3.6, d: 1, style: 'blk' },
         { k: 'msg', from: 'v2', to: 'v4', t: 3.6, d: 1, style: 'blk' },
+        { k: 'note', t: 2.6, tx: 4.3, y: 300, lines: ["v1 + v4 cannot use v2's vertex", 'until they fetch its ancestry'] },
         { k: 'mark', t: 3, sub: 'r+3 without the fault', ghost: true },
         { k: 'emit', row: 'v1', t: 4.7, color: RED, label: 'r+3' },
         { k: 'emit', row: 'v2', t: 4.7, color: RED },
@@ -708,6 +709,18 @@ function buildFigure(mount, cfg) {
         const frac = clamp((tau - ev.t) / ev.d, 0, 1);
         path.setAttribute('stroke-dashoffset', length * (1 - frac));
         if (labelEl) labelEl.setAttribute('opacity', frac > 0.3 ? 1 : 0);
+      };
+    },
+    note(ev) {
+      const els = ev.lines.map((line, i) =>
+        text(xOf(ev.tx), ev.y + i * 16, line, { 'text-anchor': 'middle', fill: GRAY, 'font-size': 14 })
+      );
+      for (const el of els) {
+        el.setAttribute('opacity', 0);
+        dyn.appendChild(el);
+      }
+      return tau => {
+        for (const el of els) el.setAttribute('opacity', tau >= ev.t ? 1 : 0);
       };
     },
     counter(ev) {
