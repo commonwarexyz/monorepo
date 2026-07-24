@@ -1,6 +1,6 @@
 ---
 title: "The Best of Both Worlds"
-description: "Blockchains that disseminate data across every validator buy throughput with user latency. Every block either waits on an availability proof or risks a fetch at the worst possible time. Multimmit does neither: every producer broadcasts in parallel, and blocks finalize as little as two message delays after they are sent, as fast as any consensus can go."
+description: "Blockchains that disseminate data concurrently buy throughput with user latency. Every block either waits on an availability proof or risks a fetch at the worst possible time. Multimmit does neither: every producer broadcasts at once, and a block can finalize just two message delays later, the fastest any consensus can go."
 date: "July 23rd, 2026"
 published-time: "2026-07-23T00:00:00Z"
 modified-time: "2026-07-23T00:00:00Z"
