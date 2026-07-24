@@ -155,8 +155,6 @@ The thresholds above are exact at $n=5f+1$, and they carry guarantees that go be
 - Extension votes make censorship unprofitable: a leader cannot finalize its own block while censoring someone else's. If a fresh honest block reaches the honest validators before they vote, then either the view finalizes nothing at all or that block's membership in the ledger is settled in that view, whatever the leader proposed.
 - Consensus messages stay tens of kilobytes per view, independent of transaction volume. With views lasting 100-200ms, a single view at line rate can order tens of megabytes of transactions on a commodity gigabit link.
 
-Multimmit can carry a reputation mechanism too, but as a refinement rather than a defense. With damage already confined to a faulty producer's own chain, blame only tunes where lagging chains sit in the ordering sweep, no guarantee depends on it, and forgiveness can be generous.
-
 *Leader rotation is itself a choice. A stable leader would run faster views, but every transaction on the planet must first travel to it, while a Multimmit producer can pre-confirm a transaction the moment it arrives, long before it could reach a leader an ocean away. For deployments comfortable with a stable leader's censorship profile, our prior work [Carnot](/blogs/carnot-bound.html) pushes that design to near line-rate throughput.*
 
 ## One Structure, Two Jobs
