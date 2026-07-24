@@ -150,10 +150,10 @@ O’Grady</a></div>
         class="math inline">t</span> finalizes by <span
         class="math inline">t+2\delta</span> at best and <span
         class="math inline">t+3\delta</span> in expectation, on a clock
-        that starts at the producer’s broadcast rather than a leader’s
-        proposal. The figures assume <span class="math inline">n \geq
-        5f+1</span> and hold for an honest producer’s blocks even while
-        up to <span class="math inline">f</span> producers misbehave. No
+        that starts when the block is sent, not when a leader proposes.
+        The figures assume <span class="math inline">n \geq 5f+1</span>
+        and hold for an honest producer’s blocks even while up to <span
+        class="math inline">f</span> producers misbehave. No
         fault-tolerant consensus can finalize in fewer than <a
         href="https://arxiv.org/abs/2102.07240">two message delays</a>,
         even in its best case, and that floor has belonged to leader
