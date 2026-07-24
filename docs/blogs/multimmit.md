@@ -157,7 +157,7 @@ Multimmit can carry a reputation mechanism too, but as a refinement rather than 
 
 ## DAGs Wait in Waves
 
-DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](https://arxiv.org/abs/2201.05677), [Mysticeti](https://arxiv.org/abs/2310.14821)) reach the same bandwidth goal, every validator disseminating in parallel, with a different coupling: the transaction-carrying structure *is* the consensus structure. Every validator's vertex carries transactions and must reference $n-f$ vertices from the previous round, and it is the reference pattern itself that the ordering logic interprets.
+DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](https://arxiv.org/abs/2201.05677), [Mysticeti](https://arxiv.org/abs/2310.14821)) reached the bandwidth goal first, every validator disseminating in parallel, and Autobahn and Raptr are in large part responses to their costs. The coupling is the difference: the transaction-carrying structure *is* the consensus structure. Every validator's vertex carries transactions and must reference $n-f$ vertices from the previous round, and it is the reference pattern itself that the ordering logic interprets.
 
 ```{=html}
 <div id="multimmit-fig-dagstructure" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG construction. Four validators each emit one vertex per round. As each new round of vertices appears, edges draw back from every vertex to three of the four vertices in the previous round, forming a lattice.">
