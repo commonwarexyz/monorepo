@@ -461,8 +461,8 @@ where
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// committed state.
 ///
-/// `finalize` applies the merkleized batch's changeset and starts
-/// committing it to disk, reporting durability on the returned handle.
+/// `finalize` applies the merkleized batch's changeset and starts syncing
+/// it to disk, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
