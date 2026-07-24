@@ -416,26 +416,57 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// Return the compact-sync state for `target`, or a stale-target error if the source's
-    /// current witness no longer matches.
-    pub(crate) fn compact_state(
+    /// Return the compact-sync state for `target`, or a stale-target error if no retained
+    /// witness commits it.
+    pub(crate) async fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
     ) -> CompactStateResult<F, V, H::Digest>
     where
         Operation<F, V>: Read<Cfg = C>,
     {
-        // Hold the witness lock only long enough to verify the requested target and snapshot the
-        // entry; decode outside it so concurrent readers do not contend.
-        let (entry, leaf_count) = self.witness.with(|w| {
-            if target.root != w.root || target.leaf_count != w.leaf_count() {
+        // Hold the witness lock only long enough to snapshot the tip entry; decode outside
+        // it so concurrent readers do not contend. A target below the tip is served from
+        // the retained witness journal: a syncing client's target trails the source by its
+        // fetch latency, and the client verifies the payload against its own target root.
+        // [`witness::Store::prune`] bounds how far back this reaches.
+        target
+            .validate()
+            .map_err(compact_sync::ServeError::InvalidTarget)?;
+        let tip = self.witness.with(|w| {
+            if target.leaf_count > w.leaf_count()
+                || (target.leaf_count == w.leaf_count() && target.root != w.root)
+            {
                 return Err(compact_sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
                 });
             }
-            Ok((w.witness.clone(), w.leaf_count()))
+            Ok((target.leaf_count == w.leaf_count()).then(|| w.witness.clone()))
         })?;
+        let (entry, pre_verified) = match tip {
+            Some(entry) => (entry, true),
+            // While an import is pending the journal still holds the previous partition's
+            // contents, so only the cached tip is servable.
+            None if self.witness.import_pending() => {
+                return Err(compact_sync::ServeError::StaleTarget {
+                    requested: target,
+                    current: self.target(),
+                });
+            }
+            None => {
+                let entry = self
+                    .witness
+                    .entry_at(target.leaf_count)
+                    .await
+                    .map_err(compact_sync::ServeError::Database)?
+                    .ok_or_else(|| compact_sync::ServeError::StaleTarget {
+                        requested: target.clone(),
+                        current: self.target(),
+                    })?;
+                (entry, false)
+            }
+        };
         let Witness {
             op_bytes,
             proof: last_commit_proof,
@@ -445,8 +476,25 @@ where
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
+        // The cached tip was verified when it was installed. A below-tip entry predates it,
+        // so re-check with the same verification the client runs: a payload that cannot
+        // authenticate against the requested root is declined instead of served, failing
+        // fast rather than spinning the client's retry loop.
+        if !pre_verified
+            && !crate::qmdb::verify_proof::<H, _, _>(
+                &last_commit_proof,
+                Location::new(*target.leaf_count - 1),
+                std::slice::from_ref(&op),
+                &target.root,
+            )
+        {
+            return Err(compact_sync::ServeError::StaleTarget {
+                requested: target,
+                current: self.target(),
+            });
+        }
         Ok(compact_sync::State {
-            leaf_count,
+            leaf_count: target.leaf_count,
             pinned_nodes,
             last_commit_op: op,
             last_commit_proof,

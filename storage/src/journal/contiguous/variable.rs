@@ -1558,10 +1558,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // entries is about to be removed. Data is flushed first, matching the ordering every
         // other durability path maintains.
         //
-        // All three hazards vanish once the barrier covers the new boundary: the barrier
-        // proves both data and offsets durable through it, retained items below it cannot
-        // tear, recovery truncates only above it, and the caller guarantees the boundary is
-        // justified by durable data (see [Mutable::prune]).
+        // If the barrier already covers the new boundary, skip the sync. Data and offsets
+        // below the barrier are durable, and the caller justified the boundary with durable
+        // data (see [Mutable::prune]).
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
         if self.barrier.size() < new_boundary {
             let data_sync = self.blobs.start_sync().await;
@@ -2451,8 +2450,9 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::prune(self, min_position).await
     }
 
-    fn barrier(&mut self) -> u64 {
-        self.0.barrier.size()
+    fn durable(&mut self) -> Range<u64> {
+        let start = Contiguous::bounds(self).start;
+        start..self.0.barrier.size()
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {

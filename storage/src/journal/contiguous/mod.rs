@@ -284,8 +284,8 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
-    /// The position below which every item is proven durable.
-    fn barrier(&mut self) -> u64;
+    /// The positions of durably persisted elements.
+    fn durable(&mut self) -> Range<u64>;
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///

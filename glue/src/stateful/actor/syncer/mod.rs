@@ -26,6 +26,8 @@ pub(crate) use actor::{Config, Syncer};
 
 mod mailbox;
 pub(crate) use mailbox::Mailbox;
+#[cfg(test)]
+pub(crate) use mailbox::Message as SyncerMessage;
 
 mod plan;
 pub use plan::SyncPlan;

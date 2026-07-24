@@ -52,6 +52,19 @@ enum SnapshotUndo<F: Family, K> {
     },
 }
 
+/// The db-level durable frontier: the state proven durable in the log, observed from the
+/// journal barrier.
+///
+/// Constructible only through [`Db::barrier`], so boundary math over durable state cannot
+/// accidentally read live fields.
+#[derive(Clone, Copy)]
+pub(crate) struct Barrier<F: Family> {
+    /// The highest inactivity floor declared by a commit proven durable in the log.
+    pub(crate) floor: Location<F>,
+    /// The operation count covered by the newest commit proven durable in the log.
+    pub(crate) size: Location<F>,
+}
+
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
 /// - [crate::qmdb::any::ordered::fixed::Db]
@@ -457,8 +470,7 @@ where
         // The prune target must be justified by a durable commit: recovery then lands on a
         // commit whose floor covers everything pruned. Commit first only when no durable
         // commit justifies the target yet.
-        self.advance_durable_floor();
-        if self.durable_floor < prune_loc {
+        if self.barrier().floor < prune_loc {
             self.log = self.log.commit().await?;
             self.mark_commits_durable();
         }
@@ -470,7 +482,7 @@ where
     /// Advance [Self::durable_floor] and [Self::durable_size] past every commit the log has
     /// proven durable.
     pub(crate) fn advance_durable_floor(&mut self) {
-        let barrier = Location::new(self.log.barrier());
+        let barrier = Location::new(self.log.durable().end);
         while let Some((commit_loc, floor)) = self.pending_commits.front().copied() {
             if commit_loc >= barrier {
                 break;
@@ -478,6 +490,19 @@ where
             self.durable_floor = floor;
             self.durable_size = Location::new(*commit_loc + 1);
             self.pending_commits.pop_front();
+        }
+    }
+
+    /// Observe the journal barrier and return the db-level durable frontier.
+    ///
+    /// Durable claims (pruning boundaries, watermarks) must be computed from this frontier,
+    /// never from live state: a durably recorded claim the durable log cannot justify
+    /// leaves recovery unable to rebuild it.
+    pub(crate) fn barrier(&mut self) -> Barrier<F> {
+        self.advance_durable_floor();
+        Barrier {
+            floor: self.durable_floor,
+            size: self.durable_size,
         }
     }
 

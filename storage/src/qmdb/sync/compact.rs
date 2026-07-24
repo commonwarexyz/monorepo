@@ -265,7 +265,8 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
-    /// The caller requested a target different from the source's current witness.
+    /// The source cannot serve the requested target: it is past the source's tip, diverges
+    /// from the source's retained state, or fell outside the retained window.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]
     StaleTarget {
         requested: Target<F, D>,
@@ -633,6 +634,26 @@ where
     })
 }
 
+/// Classify a serve-time database error: requests for state outside the retained window are
+/// declines (the client refetches with a fresher target), everything else is a genuine
+/// storage failure.
+fn serve_decline_or_error<F: Family, D: Digest>(
+    err: qmdb::Error<F>,
+    requested: &Target<F, D>,
+    current: &Target<F, D>,
+) -> ServeError<F, D> {
+    match err {
+        qmdb::Error::HistoricalFloorPruned(_)
+        | qmdb::Error::OperationPruned(_)
+        | qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+        | qmdb::Error::Merkle(crate::merkle::Error::ElementPruned(_)) => ServeError::StaleTarget {
+            requested: requested.clone(),
+            current: current.clone(),
+        },
+        err => ServeError::Database(err),
+    }
+}
+
 async fn fetch_state_from_full_source<F, Op, D, Current, Hist, HistFut, Pins, PinsFut>(
     target: Target<F, D>,
     current_target: Current,
@@ -649,10 +670,18 @@ where
     PinsFut: Future<Output = Result<Vec<D>, qmdb::Error<F>>>,
 {
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
-    // from the current tip commit plus the frontier pins at the requested tree size.
+    // from the historical commit proof plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
     let current = current_target();
-    if target.root != current.root || target.leaf_count != current.leaf_count {
+    // Serve any target at or below the tip: a syncing client's target trails the server by
+    // its fetch latency, and the client verifies the payload against its own target root.
+    // Targets past the tip, and targets that diverge from the tip at its own leaf count,
+    // are refused so the client refetches once the targets converge. Below the tip no root
+    // is available to check against, so divergence there surfaces as a client-side
+    // verification failure instead.
+    if target.leaf_count > current.leaf_count
+        || (target.leaf_count == current.leaf_count && target.root != current.root)
+    {
         return Err(ServeError::StaleTarget {
             requested: target,
             current,
@@ -660,9 +689,10 @@ where
     }
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let (last_commit_proof, mut operations) = historical_proof(leaf_count, last_commit_loc)
-        .await
-        .map_err(ServeError::Database)?;
+    let (last_commit_proof, mut operations) =
+        historical_proof(leaf_count, last_commit_loc)
+            .await
+            .map_err(|err| serve_decline_or_error(err, &target, &current))?;
     // Compact sync always authenticates exactly the final commit leaf.
     let last_commit_op =
         operations
@@ -672,7 +702,7 @@ where
             )))?;
     let pinned_nodes = pinned_nodes_at(leaf_count)
         .await
-        .map_err(ServeError::Database)?;
+        .map_err(|err| serve_decline_or_error(err, &target, &current))?;
     Ok(State {
         leaf_count,
         pinned_nodes,
@@ -943,7 +973,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target).map(Into::into)
+                self.compact_state(target).await.map(Into::into)
             }
         }
         impl_compact_resolver_compact_keyless!(@locked $db, $op, AsyncRwLock);
@@ -971,7 +1001,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
 
@@ -996,7 +1026,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
     };
@@ -1026,7 +1056,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target).map(Into::into)
+                self.compact_state(target).await.map(Into::into)
             }
         }
         impl_compact_resolver_compact_immutable!(@locked $db, $op, AsyncRwLock);
@@ -1055,7 +1085,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
 
@@ -1081,7 +1111,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
     };

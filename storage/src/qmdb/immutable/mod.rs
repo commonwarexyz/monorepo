@@ -521,7 +521,7 @@ where
         // Recovery rebuilds the snapshot by replaying the log from the recovered floor,
         // which trails the current floor while its commit is unflushed. Commit first so
         // replay never starts below the pruned boundary.
-        if self.journal.barrier() <= *self.last_commit_loc {
+        if self.journal.durable().end <= *self.last_commit_loc {
             self.journal = self.journal.commit().await?;
         }
         (self.journal, _) = self.journal.prune(loc).await?;

@@ -2068,9 +2068,11 @@ pub mod tests {
                 ));
             }
 
-            // Keep most ops-log history, but force bitmap pruning so rewind uses pinned-node
-            // reconstruction (`pruned_chunks > 0` path).
-            let db = db.prune(Location::new(1)).await.unwrap();
+            // Force bitmap pruning so rewind uses pinned-node reconstruction
+            // (`pruned_chunks > 0` path). Section-granular journal pruning keeps most
+            // ops-log history below the boundary.
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
             let bounds = db.bounds();
@@ -2974,10 +2976,10 @@ pub mod tests {
             }
             assert!(db.inactivity_floor_loc() > Location::new(64));
 
-            // Intentionally prune less than the inactivity floor: log retains older ops, but the
-            // bitmap still prunes to inactivity floor.
-            let prune_loc = Location::new(1);
-            let db = db.prune(prune_loc).await.unwrap();
+            // Prune to the boundary: the bitmap prunes to its chunk, while section-granular
+            // journal pruning retains older ops below it.
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(pruned_bits > 0);
             let retained_start = db.bounds().start;

@@ -523,6 +523,27 @@ where
         Ok(())
     }
 
+    /// Ensure the durable log justifies durably recording `boundary` as the bitmap pruning
+    /// boundary, committing the log first when it does not.
+    ///
+    /// The invariant lives here and nowhere else: pruning metadata must never record a
+    /// boundary the durable log cannot rebuild on reopen. The boundary a durable state
+    /// justifies depends on its floor AND its ops count (delayed-merge absorption), so it is
+    /// recomputed from the [`any::db::Barrier`](crate::qmdb::any::db::Barrier) with the same
+    /// helper that computes serving boundaries.
+    async fn ensure_barrier(mut self, boundary: Location<F>) -> Result<Self, Error<F>> {
+        let barrier = self.any.barrier();
+        let durable_boundary = self::sync_boundary::<F, N>(
+            *barrier.floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
+            *barrier.size,
+        );
+        if durable_boundary < boundary {
+            self.any.log = self.any.log.commit().await?;
+            self.any.mark_commits_durable();
+        }
+        Ok(self)
+    }
+
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -530,8 +551,10 @@ where
     /// uncommitted operations are not guaranteed to survive.
     ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
-    /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
-    /// tree advance to the sync boundary regardless of `prune_loc`.
+    /// advance past the point where the grafting overlay has been pruned. The bitmap and
+    /// grafted tree advance to `prune_loc`'s chunk boundary, never past the caller's target:
+    /// callers prune to a retention window, and a recorded boundary past the window's oldest
+    /// block would forbid rewinding to it.
     ///
     /// # Errors
     ///
@@ -550,24 +573,14 @@ where
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
         }
 
-        // The sync boundary may be advanced by applied-but-uncommitted operations, and the
-        // pruning metadata persisted below durably records it. A durable commit must justify
-        // that boundary before it is recorded: otherwise a crash recovers older durable state
-        // alongside newer pruning metadata and fails to initialize the bitmap. The boundary
-        // depends on the ops count as well as the floor (delayed-merge absorption), so it is
-        // recomputed from durable state. Commit first only when the durable boundary lags.
-        self.any.advance_durable_floor();
-        let durable_boundary = self::sync_boundary::<F, N>(
-            *self.any.durable_floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *self.any.durable_size,
-        );
-        if durable_boundary < sync_boundary {
-            self.any.log = self.any.log.commit().await?;
-            self.any.mark_commits_durable();
-        }
+        // The recorded boundary follows the caller's target, not the live boundary. Any chunk
+        // count at or below the live boundary is itself settled and absorbed (birth sizes are
+        // monotone in chunk count), so the target is always a valid boundary.
+        let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+        let bitmap_boundary = Location::new((*prune_loc / chunk_bits) * chunk_bits);
 
-        // Prune the bitmap to the sync boundary (most aggressive safe location).
-        self.any.prune_bitmap(sync_boundary);
+        self = self.ensure_barrier(bitmap_boundary).await?;
+        self.any.prune_bitmap(bitmap_boundary);
         self.prune_grafted_tree_to_bitmap()?;
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
@@ -1289,7 +1302,7 @@ mod tests {
         merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
-            current::{tests::fixed_config, unordered::fixed},
+            current::{BitmapPrunedBits as _, tests::fixed_config, unordered::fixed},
         },
         translator::OneCap,
     };
@@ -1297,7 +1310,8 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+    use commonware_utils::{TestRng, bitmap::Prunable as PrunableBitMap};
+    use rand::RngExt as _;
 
     const N: usize = sha256::Digest::SIZE;
 
@@ -1616,7 +1630,7 @@ mod tests {
             let boundary = db.sync_boundary();
             assert!(boundary > durable_floor);
             assert!(
-                *boundary <= crate::journal::contiguous::Mutable::barrier(&mut db.any.log),
+                *boundary <= crate::journal::contiguous::Mutable::durable(&mut db.any.log).end,
                 "the boundary must sit below the barrier",
             );
 
@@ -1721,6 +1735,301 @@ mod tests {
             assert!(db.any.bitmap.pruned_bits() >= *boundary);
             db.destroy().await.unwrap();
         });
+    }
+
+    /// A prune to a windowed target must keep rewinds within that window possible: the
+    /// durably recorded bitmap boundary follows the caller's target, not the live boundary.
+    /// Recording the live boundary would forbid the startup repair rewind to a retained
+    /// block whose size the live boundary has outrun, wedging every reopen.
+    #[test_traced]
+    fn test_current_prune_boundary_respects_windowed_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("prune-windowed-target", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Commit a small windowed block W: its size sits below the first chunk boundary.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+            let window_size = db.bounds().end;
+            let window_root = db.root();
+            let window_boundary = db.sync_boundary();
+            assert!(*window_size < 256);
+
+            // Advance far past W: repeated rewrites push the live boundary beyond W's size.
+            let mut db = db;
+            while *db.sync_boundary() < 256 {
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+            }
+            assert!(*db.sync_boundary() > *window_size);
+
+            // Prune to the windowed target only. The recorded boundary must not outrun it.
+            let db = db.prune(window_boundary).await.unwrap();
+            assert!(db.any.bitmap.pruned_bits() <= *window_boundary);
+
+            // The repair rewind back to W must remain possible.
+            let db = db
+                .rewind(window_size)
+                .await
+                .expect("rewind to the windowed block must survive a windowed prune");
+            assert_eq!(db.root(), window_root);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A generic simulation db: the concrete shape of [MmrDb]/[MmbDb] over any family.
+    type SimDb<F> = fixed::Db<
+        F,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
+
+    /// A committed state the simulation may later prune toward or rewind to: its size, its
+    /// root, and the sync boundary recorded when it was committed (the sync-target analog
+    /// of what glue passes to prune).
+    type SimCommit<F> = (Location<F>, sha256::Digest, Location<F>);
+
+    /// The simulation's repair window, mirroring glue's repair math: prune targets come from
+    /// the commit `SIM_WINDOW` entries back, so every younger commit must remain a valid
+    /// repair rewind target.
+    const SIM_WINDOW: usize = 4;
+
+    /// The window invariant, checked eagerly: every commit the repair window may rewind to
+    /// stays above both retention boundaries (the retained log start and the recorded
+    /// bitmap pruning boundary).
+    fn assert_window_rewindable<F: merkle::Graftable>(
+        db: &SimDb<F>,
+        commits: &[SimCommit<F>],
+        window: usize,
+    ) {
+        let retained = *db.bounds().start;
+        let pruned_bits = db.pruned_bits();
+        for (size, _, _) in commits.iter().rev().take(window) {
+            assert!(
+                **size > retained && **size >= pruned_bits,
+                "window commit at size {size} fell below retention \
+                 (retained start {retained}, pruned bits {pruned_bits})"
+            );
+        }
+    }
+
+    /// Reopen after a simulated crash, enforcing the recovery invariants: reopen always
+    /// succeeds, no recorded commit is lost, and a recorded commit recovered exactly carries
+    /// its recorded root. Commits above the recovered size (checkpoint recovery drops
+    /// unsynced state above the last durable commit) are forgotten.
+    #[boxed]
+    async fn sim_reopen<F: merkle::Graftable>(
+        ctx: &deterministic::Context,
+        partition: &str,
+        commits: &mut Vec<SimCommit<F>>,
+        index: u64,
+    ) -> SimDb<F> {
+        let db = SimDb::<F>::init(
+            ctx.child("reopen").with_attribute("index", index),
+            fixed_config::<OneCap>(partition, ctx),
+        )
+        .await
+        .expect("crash recovery must reopen");
+        let size = db.bounds().end;
+        if let Some((last_size, _, _)) = commits.last() {
+            assert!(*last_size <= size, "recovery lost a durable commit");
+        }
+        commits.retain(|(s, _, _)| *s <= size);
+        if let Some((s, root, _)) = commits.last()
+            && *s == size
+        {
+            assert_eq!(db.root(), *root, "recovered root diverged from its commit");
+        }
+        db
+    }
+
+    /// One phase of the crash-interleaving walk: reopen (or first-open), optionally
+    /// repair-rewind to the window floor, then random steps until a crash action or step
+    /// exhaustion ends the phase. Every phase boundary is an unclean shutdown: checkpoint
+    /// recovery drops unsynced state.
+    #[boxed]
+    async fn sim_phase<F: merkle::Graftable>(
+        ctx: deterministic::Context,
+        partition: &'static str,
+        phase: u64,
+        mut rng: TestRng,
+        mut commits: Vec<SimCommit<F>>,
+        mut next_key: u64,
+        append_heavy: bool,
+    ) -> (TestRng, Vec<SimCommit<F>>, u64) {
+        const STEPS_PER_PHASE: usize = 25;
+
+        let mut db = if phase == 0 {
+            SimDb::<F>::init(ctx.child("open"), fixed_config::<OneCap>(partition, &ctx))
+                .await
+                .unwrap()
+        } else {
+            let db = sim_reopen::<F>(&ctx, partition, &mut commits, phase).await;
+            assert_window_rewindable(&db, &commits, SIM_WINDOW);
+            db
+        };
+
+        // Repair-rewind to the window floor: the startup path glue drives when marshal's
+        // durable floor trails the db.
+        if phase > 0 && commits.len() > SIM_WINDOW && rng.random_range(0..2u32) == 0 {
+            let idx = commits.len() - 1 - SIM_WINDOW;
+            let (size, root, _) = commits[idx];
+            db = db
+                .rewind(size)
+                .await
+                .expect("repair rewind to a window commit must succeed");
+            assert_eq!(db.root(), root, "rewound root diverged from its commit");
+            commits.truncate(idx + 1);
+        }
+
+        for _ in 0..STEPS_PER_PHASE {
+            match rng.random_range(0..10u32) {
+                // Rewrite a small key pool and commit: raises the floor quickly.
+                0..=2 => {
+                    db = populate_fixed_db::<F, _>(db, next_key % 7, 3).await;
+                    next_key += 3;
+                    commits.push((db.bounds().end, db.root(), db.sync_boundary()));
+                }
+                // Append-heavy: a large batch of fresh keys jumps delayed-merge absorption
+                // thresholds far past the floor (fresh keys pin the floor below them).
+                // Floor-chasing: another small rewrite keeps the active set tiny so the
+                // floor keeps crossing chunk boundaries.
+                3 => {
+                    if append_heavy {
+                        db = populate_fixed_db::<F, _>(db, 1_000_000 + next_key, 80).await;
+                        next_key += 80;
+                    } else {
+                        db = populate_fixed_db::<F, _>(db, next_key % 7, 3).await;
+                        next_key += 3;
+                    }
+                    commits.push((db.bounds().end, db.root(), db.sync_boundary()));
+                }
+                // Commit through the pipelined path, awaiting the handle.
+                4 => {
+                    let key = Sha256::hash(&[&(next_key % 7).to_be_bytes()]);
+                    let value = Sha256::hash(&[&next_key.to_be_bytes()]);
+                    next_key += 1;
+                    let merkleized = db
+                        .new_batch()
+                        .write(key, Some(value))
+                        .merkleize(&db, None)
+                        .await
+                        .unwrap();
+                    let (next, _) = db.apply_batch(merkleized).await.unwrap();
+                    let handle;
+                    (db, handle) = next.start_sync().await.unwrap();
+                    handle.await.unwrap();
+                    commits.push((db.bounds().end, db.root(), db.sync_boundary()));
+                }
+                // Apply without any durability call: state a crash may or may not keep.
+                5 => {
+                    let key = Sha256::hash(&[&(next_key % 7).to_be_bytes()]);
+                    let value = Sha256::hash(&[&next_key.to_be_bytes()]);
+                    next_key += 1;
+                    let merkleized = db
+                        .new_batch()
+                        .write(key, Some(value))
+                        .merkleize(&db, None)
+                        .await
+                        .unwrap();
+                    (db, _) = db.apply_batch(merkleized).await.unwrap();
+                }
+                // Prune to the window floor's recorded boundary, exactly as glue does. The
+                // guard mirrors glue re-deriving targets after a repair rewind.
+                _ => {
+                    if commits.len() > SIM_WINDOW {
+                        let (_, _, boundary) = commits[commits.len() - 1 - SIM_WINDOW];
+                        if boundary <= db.sync_boundary() {
+                            db = db.prune(boundary).await.unwrap();
+                            assert_window_rewindable(&db, &commits, SIM_WINDOW);
+                        }
+                    }
+                }
+            }
+        }
+
+        // End the phase as an unclean shutdown: either a prune dropped between the metadata
+        // sync and the log prune (the crash cut that bricked reopen twice before), or a
+        // plain crash with the db dropped mid-life.
+        if commits.len() > SIM_WINDOW && rng.random_range(0..3u32) == 0 {
+            let (_, _, boundary) = commits[commits.len() - 1 - SIM_WINDOW];
+            if boundary <= db.sync_boundary() {
+                db.halt_before_prune_log = true;
+                let fut = db.prune(boundary);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+            }
+        }
+        (rng, commits, next_key)
+    }
+
+    /// Random-walk crash-interleaving simulation over one database family.
+    ///
+    /// Interleaves applies, every durability path (commit, pipelined start_sync), windowed
+    /// prunes, and prunes dropped between the metadata sync and the log prune, across
+    /// checkpoint-recovered phases whose boundaries are unclean shutdowns. Two invariants
+    /// hold at every step: reopen always succeeds, and every commit in the retention window
+    /// stays rewindable with its recorded root.
+    ///
+    /// The workload runs in one of two regimes, since their failure states are mutually
+    /// exclusive. Floor-chasing keeps a tiny active set so the floor crosses chunk
+    /// boundaries within the window span (the recorded-boundary-outruns-the-window states).
+    /// Append-heavy interleaves fresh-key batches so live leaves outrun the floor and the
+    /// durable state (the delayed-merge absorption states).
+    fn crash_interleaving_sim<F: merkle::Graftable>(
+        seed: u64,
+        partition: &'static str,
+        append_heavy: bool,
+    ) {
+        const PHASES: u64 = 6;
+
+        let mut rng = TestRng::new(seed);
+        let mut commits: Vec<SimCommit<F>> = Vec::new();
+        let mut next_key = 0u64;
+        let mut checkpoint = None;
+
+        for phase in 0..PHASES {
+            let runner = checkpoint.take().map_or_else(
+                || deterministic::Runner::seeded(seed),
+                deterministic::Runner::from,
+            );
+            let (out, next_checkpoint) = runner.start_and_recover(move |ctx| {
+                sim_phase::<F>(ctx, partition, phase, rng, commits, next_key, append_heavy)
+            });
+            (rng, commits, next_key) = out;
+            checkpoint = Some(next_checkpoint);
+        }
+
+        // A final clean phase proves the last crash recovers, then tears down.
+        let runner = deterministic::Runner::from(checkpoint.take().unwrap());
+        runner.start(move |ctx| async move {
+            let db = sim_reopen::<F>(&ctx, partition, &mut commits, PHASES).await;
+            assert_window_rewindable(&db, &commits, SIM_WINDOW);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Randomized crash-interleaving simulation for both families and both workload
+    /// regimes. Every pruning-window bug found on this branch was an interleaving of these
+    /// actions; this is the net for the class, not any single instance.
+    #[test_traced]
+    fn test_current_crash_interleaving_recovers_and_rewinds() {
+        for seed in 0..8u64 {
+            let append_heavy = seed.is_multiple_of(2);
+            crash_interleaving_sim::<mmr::Family>(seed, "sim-mmr", append_heavy);
+            crash_interleaving_sim::<mmb::Family>(seed, "sim-mmb", append_heavy);
+        }
     }
 
     #[test_traced]

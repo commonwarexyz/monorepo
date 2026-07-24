@@ -359,6 +359,14 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok(())
     }
 
+    /// The retained witness committing exactly `leaf_count` leaves, if any.
+    pub(crate) async fn entry_at(
+        &self,
+        leaf_count: Location<F>,
+    ) -> Result<Option<Witness<F, D>>, Error<F>> {
+        Ok(self.position_of(leaf_count).await?.map(|(_, entry)| entry))
+    }
+
     /// Find the journal position and entry committing exactly `target` leaves, or `None` if
     /// no retained entry does.
     async fn position_of(

@@ -203,7 +203,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// The node position below which every node is proven durable.
     pub(crate) fn barrier(&mut self) -> Position<F> {
-        Position::new(self.journal.barrier())
+        Position::new(self.journal.durable().end)
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.

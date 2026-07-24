@@ -610,9 +610,10 @@ where
         // Sync the Merkle structure before pruning the journal, otherwise its last element
         // could end up behind the journal's first element after a crash, and there would be
         // no way to replay the items between the structure's last element and the journal's
-        // first element. Every node for leaves below `prune_loc` sits below that leaf's
-        // position, so a Merkle barrier at or past it cannot fall behind the boundary and
-        // the sync is skipped. The backing journal defends its own barrier inside `prune`.
+        // first element. A Merkle barrier at or past `prune_loc`'s position guarantees the
+        // recovered leaf count covers the boundary (delayed-merge parents above the barrier
+        // are recomputed during replay), so the sync is skipped. The backing journal defends
+        // its own barrier inside `prune`.
         if self.merkle.barrier() < F::location_to_position(prune_loc) {
             self.merkle = self.merkle.sync().await?;
         }
@@ -995,8 +996,8 @@ where
         Ok((journal, pruned))
     }
 
-    fn barrier(&mut self) -> u64 {
-        self.journal.barrier()
+    fn durable(&mut self) -> Range<u64> {
+        self.journal.durable()
     }
 
     async fn rewind(self, size: u64) -> Result<Self, JournalError> {

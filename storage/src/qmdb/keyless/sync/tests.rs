@@ -1546,7 +1546,7 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_full_source_rejects_stale_target() {
+    fn test_compact_full_source_serves_below_tip_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-stale-full-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -1559,7 +1559,7 @@ mod compact_variable_mmr {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let window_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -1575,15 +1575,40 @@ mod compact_variable_mmr {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
-            assert_ne!(stale_target, current_target);
+            assert_ne!(window_target, current_target);
 
             let source = Arc::new(source);
+            // A target below the tip stays servable: a syncing client's target trails the
+            // source by its fetch latency, and the payload authenticates against the older
+            // root.
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
+                resolver: source.clone(),
+                target: window_target.clone(),
+                db_config: window_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.root(), window_target.root);
+            assert_eq!(client.get_metadata(), Some(vec![1]));
+            client.destroy().await.unwrap();
+
+            // A target past the tip is refused so the client refetches once the source
+            // catches up.
+            let ahead_target = sync::compact::Target {
+                root: current_target.root,
+                leaf_count: Location::new(*current_target.leaf_count + 1),
+            };
             let result =
-                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+                sync::compact::Resolver::get_compact_state(&source, ahead_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == stale_target && current == current_target
+                    if requested == ahead_target && current == current_target
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -1708,6 +1733,8 @@ mod compact_variable_mmr {
                     .await
                     .unwrap(),
             );
+            // The divergent target shares the tip's leaf count with a different root, so
+            // the tip root check refuses it with the current target.
             let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
                 context: context.child("stale_client"),
                 resolver: source.clone(),
@@ -1725,6 +1752,24 @@ mod compact_variable_mmr {
                     current
                 })) if requested == target2 && current == target3
             ));
+
+            // A retained below-tip witness stays servable after the tip advances past it.
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let window: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
+                resolver: source.clone(),
+                target: target1.clone(),
+                db_config: window_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(window.root(), target1.root);
+            assert_eq!(window.get_metadata(), Some(metadata1.clone()));
+            assert_eq!(window.inactivity_floor_loc(), floor1);
+            window.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
@@ -2286,7 +2331,7 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_full_source_rejects_stale_target() {
+    fn test_compact_full_source_serves_below_tip_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-stale-full-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -2299,7 +2344,7 @@ mod compact_variable_mmb {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let window_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -2315,15 +2360,40 @@ mod compact_variable_mmb {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
-            assert_ne!(stale_target, current_target);
+            assert_ne!(window_target, current_target);
 
             let source = Arc::new(source);
+            // A target below the tip stays servable: a syncing client's target trails the
+            // source by its fetch latency, and the payload authenticates against the older
+            // root.
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
+                resolver: source.clone(),
+                target: window_target.clone(),
+                db_config: window_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.root(), window_target.root);
+            assert_eq!(client.get_metadata(), Some(vec![1]));
+            client.destroy().await.unwrap();
+
+            // A target past the tip is refused so the client refetches once the source
+            // catches up.
+            let ahead_target = sync::compact::Target {
+                root: current_target.root,
+                leaf_count: Location::new(*current_target.leaf_count + 1),
+            };
             let result =
-                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+                sync::compact::Resolver::get_compact_state(&source, ahead_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == stale_target && current == current_target
+                    if requested == ahead_target && current == current_target
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -2449,6 +2519,8 @@ mod compact_variable_mmb {
                     .unwrap(),
             );
             assert_eq!(source.target(), target3);
+            // The divergent target shares the tip's leaf count with a different root, so
+            // the tip root check refuses it with the current target.
             let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
                 context: context.child("stale_client"),
                 resolver: source.clone(),
@@ -2466,6 +2538,24 @@ mod compact_variable_mmb {
                     current
                 })) if requested == target2 && current == target3
             ));
+
+            // A retained below-tip witness stays servable after the tip advances past it.
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let window: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
+                resolver: source.clone(),
+                target: target1.clone(),
+                db_config: window_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(window.root(), target1.root);
+            assert_eq!(window.get_metadata(), Some(metadata1.clone()));
+            assert_eq!(window.inactivity_floor_loc(), floor1);
+            window.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();

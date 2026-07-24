@@ -1718,8 +1718,9 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::prune(self, min_position).await
     }
 
-    fn barrier(&mut self) -> u64 {
-        self.0.barrier()
+    fn durable(&mut self) -> Range<u64> {
+        let start = super::Contiguous::bounds(self).start;
+        start..self.0.barrier()
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {

@@ -402,7 +402,7 @@ where
         // while the floor-declaring commit is unflushed (pruning it away would leave the
         // journal unopenable). Commit first so recovery always lands at or above the
         // boundary.
-        if self.journal.barrier() <= *self.last_commit_loc {
+        if self.journal.durable().end <= *self.last_commit_loc {
             self.journal = self.journal.commit().await?;
         }
         (self.journal, _) = self.journal.prune(loc).await?;
