@@ -159,12 +159,6 @@ pub enum StageOutcome {
         /// Whether the slot was freed because the ticket was already dropped.
         freed: bool,
     },
-    /// The ticket was dropped before this SQE could be staged, so the waiter
-    /// was retired locally and its slot freed.
-    Orphaned {
-        /// Active deadline tracking to remove from the timeout wheel, if any.
-        target_tick: Option<Tick>,
-    },
     /// The waiter is still active and produced an SQE for submission.
     Submit(SqueueEntry),
 }
@@ -409,8 +403,6 @@ impl Waiters {
     ///
     /// - [`StageOutcome::Submit`] leaves the waiter tracked and yields the next SQE.
     /// - [`StageOutcome::Timeout`] completes the waiter locally with timeout.
-    /// - [`StageOutcome::Orphaned`] frees the slot because the ticket was
-    ///   dropped before restaging.
     ///
     /// When this returns [`StageOutcome::Submit`], the waiter is marked as having an
     /// operation SQE outstanding immediately, so [`Waiters::is_in_flight`] will return
@@ -460,16 +452,16 @@ impl Waiters {
                     }
                 }
             }
-            WaiterState::Active { target_tick }
-                if slot.orphaned && request.orphan_stops_progress() =>
-            {
-                // The current request still owns all resources, but there is no
-                // ticket left to observe more progress, so retire it locally
-                // instead of issuing another SQE.
-                let _ = self.take(index);
-                StageOutcome::Orphaned { target_tick }
-            }
             WaiterState::Active { .. } => {
+                // An orphaned request whose kind stops on orphaning is moved
+                // to `CancelRequested` by `mark_orphaned` before it can ever
+                // be staged again, so it must never surface here: retiring it
+                // from this arm would silently resurrect stale wind-down
+                // logic if the state machine drifts.
+                assert!(
+                    !slot.orphaned || !request.orphan_stops_progress(),
+                    "orphan-stopping request staged while active"
+                );
                 assert!(
                     !slot.in_flight,
                     "stage called for waiter with op already in flight"

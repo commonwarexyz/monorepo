@@ -148,7 +148,20 @@ where
     /// wrapper exists (e.g. work deferred to a thread that has not started
     /// yet): the wrapper on the remote side owns `sender` and the paired
     /// abort registration, mirroring what [Handle::init] builds inline.
-    #[cfg_attr(not(feature = "iouring"), allow(dead_code))]
+    // The only caller lives in the ALPHA-scoped `iouring` module, so the
+    // allowance must cover every configuration that compiles the caller out:
+    // the feature being disabled, or any stability level above ALPHA.
+    #[cfg_attr(
+        any(
+            not(all(target_os = "linux", feature = "iouring")),
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ),
+        allow(dead_code)
+    )]
     pub(crate) const fn from_parts(
         receiver: oneshot::Receiver<Result<T, Error>>,
         abort_handle: AbortHandle,

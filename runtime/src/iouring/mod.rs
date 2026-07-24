@@ -37,6 +37,23 @@
 //! creates the ring and is the only submitter). The internal `eventfd` wake path also
 //! relies on io_uring multishot poll (Linux 5.13+).
 //!
+//! # Worker Affinity
+//!
+//! Every task spawned with [crate::Spawner::dedicated] (or [crate::Spawner::shared]
+//! with `blocking == true`) runs as the root of a worker on its own thread with its
+//! own ring. Ring-bound resources — [crate::Blob]s, [crate::Sink]s, [crate::Stream]s,
+//! [crate::Listener]s, and in-flight operation futures — are bound to the worker that
+//! created them: **using one from another worker panics** with "io_uring runtime
+//! operations must run on the runtime thread" (the panic is contained by the using
+//! task's wrapper, like any other task panic). Moving a blob or socket into a
+//! dedicated task works on the tokio runtime but not here; this is a deliberate
+//! trade — thread affinity is what lets the op path run without locks. Move plain
+//! data between workers and open resources on the worker that uses them.
+//!
+//! Everything else crosses workers freely: task handles, contexts (spawning,
+//! sleeping, stopping), channels, and *dropping* a ring-bound resource (foreign
+//! drops are routed back to the owning worker's loop and released there).
+//!
 //! # Architecture
 //!
 //! ## Event Loop
@@ -135,9 +152,11 @@
 //! ## Liveness Model
 //!
 //! This loop enforces a configured upper bound on in-flight requests. New submissions
-//! park on a FIFO capacity wait list when the slab is full, but already-admitted
-//! requests may be restaged ahead of fresh admissions according to the submission
-//! policy above.
+//! park on a capacity wait list when the slab is full; freeing a slot wakes every
+//! parked admission at once and losers re-register, so ordering among admissions is
+//! unspecified (a fresh submission may barge ahead of a long-parked one), and
+//! already-admitted requests may be restaged ahead of fresh admissions according to
+//! the submission policy above.
 //!
 //! This implies a bounded-liveness caveat: if all in-flight requests are waiting on operations
 //! that are still queued behind the capacity limit, the loop cannot make progress until some

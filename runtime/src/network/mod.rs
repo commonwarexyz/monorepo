@@ -10,7 +10,7 @@ stability_scope!(BETA {
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod tokio;
 });
-stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring")) {
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub(crate) mod iouring;
 });
 

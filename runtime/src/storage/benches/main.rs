@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     cfg.root = prepare_root(&cfg.root)?;
 
     cfg_if::cfg_if! {
-        if #[cfg(feature = "iouring")] {
+        if #[cfg(all(target_os = "linux", feature = "iouring"))] {
             // The io_uring runtime is single-threaded, so the tokio-specific
             // `worker_threads` and `global_queue_interval` knobs are ignored.
             // Size the ring generously relative to the requested concurrency

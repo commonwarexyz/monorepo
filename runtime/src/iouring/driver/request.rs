@@ -33,7 +33,37 @@ pub(super) enum WriteBuffers {
 /// Buffers and iovec scratch for a vectored write.
 pub(super) struct VectoredBuffers {
     bufs: IoBufs,
-    iovecs: Box<[libc::iovec]>,
+    iovecs: IovecScratch,
+}
+
+/// Reusable iovec scratch describing co-owned buffers to the kernel.
+///
+/// This newtype exists to carry the narrowest possible unsafe `Send`
+/// contract: `libc::iovec` contains raw pointers (making it `!Send` by
+/// default), so vouching at this level lets every containing type regain
+/// compiler-checked auto traits.
+struct IovecScratch(Box<[libc::iovec]>);
+
+// SAFETY: the scratch entries are initialized with dangling pointers and may
+// be stale between `build_sqe` calls, but they are never dereferenced in
+// Rust. Each `build_sqe` refreshes them from the co-owned `IoBufs` (owned by
+// the same waiter slot, itself `Send`) immediately before the kernel can
+// observe them, so the pointers never outlive or alias the buffers they
+// describe on any thread.
+unsafe impl Send for IovecScratch {}
+
+impl std::ops::Deref for IovecScratch {
+    type Target = [libc::iovec];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for IovecScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl From<IoBufs> for WriteBuffers {
@@ -52,7 +82,10 @@ impl From<IoBufs> for WriteBuffers {
                     max_iovecs,
                 )
                 .collect();
-                Self::Vectored(Box::new(VectoredBuffers { bufs, iovecs }))
+                Self::Vectored(Box::new(VectoredBuffers {
+                    bufs,
+                    iovecs: IovecScratch(iovecs),
+                }))
             }
         }
     }
@@ -88,16 +121,6 @@ impl WriteBuffers {
 /// SQE and [on_cqe](Self::on_cqe) to evaluate completions and produce the
 /// terminal [Output]. [timeout](Self::timeout) and [fail](Self::fail)
 /// resolve requests the kernel never completed.
-///
-// SAFETY: `WriteBuffers::Vectored` owns both the `IoBufs` backing storage and
-// the scratch `libc::iovec` array used to describe it to the kernel. The
-// iovec entries are initialized with dangling pointers and may be stale
-// between `build_sqe` calls, but they are never dereferenced in Rust. Each
-// `build_sqe` refreshes them from the co-owned `IoBufs` immediately before the
-// kernel can observe them, and the backing buffers remain owned by the same
-// waiter slot for the request lifetime.
-unsafe impl Send for Request {}
-
 pub(super) enum Request {
     Send(SendRequest),
     Recv(RecvRequest),
@@ -487,7 +510,16 @@ impl ReadAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Cancelled | CqeResult::Error(_) => Some(Err(Error::ReadFailed)),
+            // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
+            // does, so operators can distinguish failure causes.
+            CqeResult::Cancelled => {
+                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
+                Some(Err(Error::Io(err.into())))
+            }
+            CqeResult::Error(code) => {
+                let err = std::io::Error::from_raw_os_error(-code);
+                Some(Err(Error::Io(err.into())))
+            }
             CqeResult::Zero => Some(Err(Error::BlobInsufficientLength)),
             CqeResult::Positive(n) => {
                 let remaining = self.len - self.read;
@@ -574,9 +606,18 @@ impl WriteAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
-                Some(Err(Error::WriteFailed))
+            // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
+            // does; a zero-length write carries no errno and stays the
+            // kind-specific failure.
+            CqeResult::Cancelled => {
+                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
+                Some(Err(Error::Io(err.into())))
             }
+            CqeResult::Error(code) => {
+                let err = std::io::Error::from_raw_os_error(-code);
+                Some(Err(Error::Io(err.into())))
+            }
+            CqeResult::Zero => Some(Err(Error::WriteFailed)),
             CqeResult::Positive(n) => {
                 self.written += n;
                 self.write.advance(n);
@@ -814,6 +855,13 @@ impl ConnectRequest {
             CqeResult::Retry => None,
             // A reissued connect may observe the previous attempt still in
             // progress or already established. Neither is terminal failure.
+            // A connect reissued after a retry-classified completion (e.g.
+            // EINTR) can find the socket already in SYN_SENT. Requeueing
+            // retries immediately, which can spin the loop at full speed for
+            // up to an RTT: EALREADY completes without waiting. The spin is
+            // bounded by the connect deadline, and needs a prior retry to
+            // arise at all; retrying via a writability poll instead is
+            // deliberate future work.
             CqeResult::Error(code) if code == -libc::EALREADY => None,
             CqeResult::Error(code) if code == -libc::EISCONN => Some(Ok(())),
             CqeResult::Cancelled => Some(Err(Error::Timeout)),
@@ -1330,10 +1378,10 @@ mod tests {
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
             .expect("terminal CQE");
-        assert!(matches!(
-            unwrap_read_at(output),
-            Err((_, Error::ReadFailed))
-        ));
+        match unwrap_read_at(output) {
+            Err((_, Error::Io(err))) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
+            other => panic!("expected EIO read failure, got {other:?}"),
+        }
 
         // Timeout cancellation should also surface as a read failure.
         let mut request = Request::ReadAt(ReadAtRequest {
@@ -1346,10 +1394,10 @@ mod tests {
         let output = request
             .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
             .expect("terminal CQE");
-        assert!(matches!(
-            unwrap_read_at(output),
-            Err((_, Error::ReadFailed))
-        ));
+        match unwrap_read_at(output) {
+            Err((_, Error::Io(err))) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
+            other => panic!("expected cancelled read failure, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1434,7 +1482,10 @@ mod tests {
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
             .expect("terminal CQE");
-        assert!(matches!(unwrap_write_at(output), Err(Error::WriteFailed)));
+        match unwrap_write_at(output) {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
+            other => panic!("expected EIO write failure, got {other:?}"),
+        }
 
         // Synchronous writes use the same logical error surface as regular
         // writes, `sync` only changes the SQE flags.
@@ -1450,7 +1501,10 @@ mod tests {
         let output = request
             .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL)
             .expect("terminal CQE");
-        assert!(matches!(unwrap_write_at(output), Err(Error::WriteFailed)));
+        match unwrap_write_at(output) {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::EINVAL)),
+            other => panic!("expected EINVAL write failure, got {other:?}"),
+        }
 
         // Timeout cancellation should also surface as a write failure.
         let mut request = Request::WriteAt(WriteAtRequest {
@@ -1463,7 +1517,10 @@ mod tests {
         let output = request
             .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
             .expect("terminal CQE");
-        assert!(matches!(unwrap_write_at(output), Err(Error::WriteFailed)));
+        match unwrap_write_at(output) {
+            Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
+            other => panic!("expected cancelled write failure, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1730,6 +1787,124 @@ mod tests {
             accept.on_cqe(WaiterState::Active { target_tick: None }, raw_fd),
             Some(Err(Error::ConnectionFailed))
         ));
+    }
+
+    /// Ground truth for what a vectored `build_sqe` must describe to the
+    /// kernel: `chunks_vectored` is the same call `build_sqe` uses to fill
+    /// the scratch and compute the SQE's iovec count, so its output pins the
+    /// submitted pointers, lengths, and `iovcnt` without cracking the opaque
+    /// squeue entry.
+    fn expected_iovecs(bufs: &IoBufs, cap: usize) -> Vec<(*const u8, usize)> {
+        use crate::Buf as _;
+        let mut slices = vec![std::io::IoSlice::new(&[]); cap];
+        let filled = bufs.chunks_vectored(&mut slices);
+        slices[..filled]
+            .iter()
+            .map(|slice| (slice.as_ptr(), slice.len()))
+            .collect()
+    }
+
+    /// Assert the scratch prefix matches the ground-truth chunk pointers and
+    /// lengths (pointer identity, not mere non-nullness: a stale entry can
+    /// hold a plausible non-null pointer into freed memory).
+    fn check_vectored_scratch(write: &WriteBuffers, expected_lens: &[usize]) {
+        let WriteBuffers::Vectored(v) = write else {
+            panic!("expected vectored write buffers");
+        };
+        let expected = expected_iovecs(&v.bufs, v.iovecs.len());
+        assert_eq!(expected.len(), expected_lens.len());
+        for (i, (ptr, len)) in expected.iter().enumerate() {
+            assert_eq!(*len, expected_lens[i], "iovec {i} length");
+            assert_eq!(
+                v.iovecs[i].iov_base.cast::<u8>().cast_const(),
+                *ptr,
+                "iovec {i} must point at the current chunk"
+            );
+            assert_eq!(v.iovecs[i].iov_len, *len, "iovec {i} scratch length");
+        }
+    }
+
+    #[test]
+    fn test_vectored_build_sqe_refreshes_iovecs_across_restaging() {
+        // Verify the reusable iovec scratch is refreshed from the co-owned
+        // buffers on every staging: after partial progress drops a fully
+        // consumed chunk (freeing its backing memory), the rebuilt SQE must
+        // describe only the remaining bytes and never reuse a stale entry.
+        let mut vectored = IoBufs::default();
+        vectored.append(IoBuf::from(b"abc"));
+        vectored.append(IoBuf::from(b"defg"));
+        vectored.append(IoBuf::from(b"hi"));
+        let mut request = SendRequest {
+            fd: make_socket_fd(),
+            write: vectored.into(),
+            deadline: None,
+        };
+
+        // First staging describes all three chunks.
+        let _ = request.build_sqe();
+        check_vectored_scratch(&request.write, &[3, 4, 2]);
+
+        // Consume the first chunk plus one byte of the second: the freed
+        // chunk's iovec entry is now stale until the next staging.
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 4)
+                .is_none()
+        );
+
+        // Restaging refreshes the scratch from the advanced buffers.
+        let _ = request.build_sqe();
+        check_vectored_scratch(&request.write, &[3, 2]);
+
+        // Finish the request: the remaining five bytes complete it.
+        let output = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 5)
+            .expect("terminal CQE");
+        output.expect("vectored send should complete");
+    }
+
+    #[test]
+    fn test_vectored_build_sqe_caps_iovec_batch() {
+        // More chunks than IOVEC_BATCH_SIZE must clamp the SQE to the scratch
+        // capacity; later stagings pick up the tail as earlier chunks drain.
+        let mut vectored = IoBufs::default();
+        for _ in 0..(IOVEC_BATCH_SIZE + 4) {
+            vectored.append(IoBuf::from(b"x"));
+        }
+        let mut request = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: vectored.into(),
+            sync: false,
+        };
+
+        let _ = request.build_sqe();
+        {
+            let WriteBuffers::Vectored(v) = &request.write else {
+                panic!("expected vectored write buffers");
+            };
+            // The scratch (and so the submitted iovcnt) is clamped to the
+            // batch size even though more chunks are queued.
+            assert_eq!(v.iovecs.len(), IOVEC_BATCH_SIZE);
+        }
+        check_vectored_scratch(&request.write, &[1; IOVEC_BATCH_SIZE]);
+
+        // Drain one full batch; the remaining four chunks stage next.
+        assert!(
+            request
+                .on_cqe(
+                    WaiterState::Active { target_tick: None },
+                    IOVEC_BATCH_SIZE as i32
+                )
+                .is_none()
+        );
+        let _ = request.build_sqe();
+        check_vectored_scratch(&request.write, &[1, 1, 1, 1]);
+        let output = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 4)
+            .expect("terminal CQE");
+        output.expect("vectored write should complete");
     }
 
     #[test]

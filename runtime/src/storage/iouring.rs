@@ -16,6 +16,15 @@
 //!
 //! This implementation is enabled by using the `iouring` feature.
 //!
+//! ## Blocking Metadata Operations
+//!
+//! `open`, `remove`, and `scan` (and [crate::Blob::resize], tracked by #831) execute
+//! synchronous filesystem calls — including fsyncs — on the calling worker's thread,
+//! serialized across all workers by a runtime-wide lock. A slow metadata operation
+//! therefore stalls the calling worker's event loop, and other workers entering a
+//! metadata operation block on the same lock until it completes. Keep these off hot
+//! paths; data-path reads, writes, and syncs go through the ring and do not block.
+//!
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.

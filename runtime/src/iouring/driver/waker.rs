@@ -105,13 +105,19 @@ impl Drop for ArmGuard<'_> {
 /// - bits 0..2: wait target and wake state
 /// - bits 3..: submitted sequence (`submitted_seq`)
 ///
-/// Submitters always increment `submitted_seq` after enqueueing onto the MPSC. The
-/// loop tracks how many submissions it has drained from the MPSC (`processed_seq`,
-/// stored in loop-local state). After arming a wait target, the loop blocks only
-/// if the same post-arm snapshot still shows no latched wake and still carries
-/// the exact `submitted_seq == processed_seq` snapshot the loop armed against.
+/// The sequence bits belong to the retained (currently unexercised)
+/// cross-thread submission protocol: a producer would increment
+/// `submitted_seq` after publishing work, and the loop would track how much
+/// it has drained (`processed_seq`, stored in loop-local state). Today's
+/// producers — [`Tasks::queue`](crate::iouring), `queue_root`,
+/// `register_alarm`, and the driver's orphan mailbox — publish through their
+/// own synchronized containers and use only the out-of-band
+/// `WAKE_SIGNALLED_BIT` latch via [`Waker::wake`]. After arming a wait
+/// target, the loop blocks only if the same post-arm snapshot still shows no
+/// latched wake and still carries the exact `submitted_seq == processed_seq`
+/// snapshot the loop armed against.
 ///
-/// The loop bounds the rounded channel/ring size strictly below half the packed
+/// The loop bounds the rounded ring size strictly below half the packed
 /// sequence domain. That makes the modular delta `submitted_seq - processed_seq`
 /// directional: any non-zero delta smaller than half the domain means
 /// `submitted_seq` is ahead, while larger deltas mean the visible submission
@@ -228,13 +234,16 @@ impl Waker {
     /// the bit.
     ///
     /// All claimed wakes flow through this path, whether they come from
-    /// `publish()` on an armed epoch or from an out-of-band caller such as the
-    /// final sender disconnecting.
+    /// `publish()` on an armed epoch or from an out-of-band caller (a task
+    /// enqueue, an alarm registration, or an orphan-mailbox push from a
+    /// foreign thread).
     pub fn wake(&self) {
-        // `HandleInner::drop` uses this path without bumping the submission
-        // sequence. Publish that disconnect here so that after the loop resumes
-        // and `clear_wait()` acquires, the next channel check cannot observe
-        // the wake without also observing the disconnect that caused it.
+        // Out-of-band wakes carry no submission-sequence bump: their payload
+        // lives in a separately synchronized container (the ready queue, the
+        // alarm heap, or the orphan mailbox). The `Release` here pairs with
+        // `clear_wait()`'s `Acquire` so that once the loop resumes, its next
+        // pass over those containers cannot observe the wake without also
+        // observing the state change that caused it.
         let prev = self
             .inner
             .state
@@ -261,8 +270,8 @@ impl Waker {
     /// Publish one submitted operation and optionally wake the currently armed
     /// wait target.
     ///
-    /// Callers must invoke this only after successfully enqueueing work into
-    /// the MPSC channel.
+    /// A future cross-thread submitter must invoke this only after its work
+    /// is visible to the loop's staging pass.
     ///
     /// The common unarmed path performs only one `fetch_add`. When a wait is
     /// armed and no wake has yet been claimed for that epoch, this caller
@@ -275,8 +284,8 @@ impl Waker {
     #[inline]
     pub fn publish(&self) {
         // Use `Release` so that when `pending()` later observes a published-ahead
-        // sequence delta with its `Acquire` load, a following
-        // `self.receiver.try_recv()` in `fill_submission_queue()` must observe
+        // sequence delta with its `Acquire` load, the loop's following pass
+        // over the (future) cross-thread submission container must observe
         // the corresponding request.
         let prev = self
             .inner
@@ -498,9 +507,10 @@ impl Waker {
     #[inline]
     fn clear_wait(&self) {
         // Pair with `wake()`'s `Release`. This is the first common point after
-        // resuming from a wake and before the next channel check, so acquiring
-        // here ensures the loop cannot observe the wake without also observing
-        // the sender-side state change that caused it.
+        // resuming from a wake and before the loop's next pass over the
+        // producers' containers (ready queue, alarm heap, orphan mailbox), so
+        // acquiring here ensures the loop cannot observe the wake without
+        // also observing the producer-side state change that caused it.
         self.inner.state.fetch_and(!STATE_MASK, Ordering::Acquire);
     }
 

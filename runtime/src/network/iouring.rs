@@ -379,7 +379,10 @@ impl crate::Listener for Listener {
                 // The deadline exists so an abandoned accept cannot occupy a
                 // ring slot forever; an expired accept is simply reissued.
                 Err(Error::Timeout) => continue,
-                Err(err) => return Err(err),
+                // Match the tokio backend's contract: every accept failure
+                // surfaces as [Error::Closed], so portable callers observe
+                // the same error regardless of runtime.
+                Err(_) => return Err(Error::Closed),
             }
         }
     }

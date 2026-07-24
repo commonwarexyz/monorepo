@@ -17,10 +17,11 @@
 //! async-cancelled eagerly, while storage writes and syncs detach and keep
 //! running for durability parity with the tokio backend. Dropping an admitted
 //! op future or a [Ticket] (including one held inside a front-end object such
-//! as a listener) on a foreign thread cannot be rejected (drop must not
-//! panic), so it leaks the slot until shutdown; this is reachable only by
-//! deliberately moving one to a raw thread or another worker's thread, which
-//! the runtime documents as unsupported for ring-bound resources.
+//! as a listener) on a foreign thread cannot touch the table directly (drop
+//! must not panic, so the affinity check cannot reject it); it is routed
+//! through the [OrphanMailbox] and wound down by the loop on its next turn.
+//! Ring-bound resources may therefore be dropped from any thread, even
+//! though they must only be used on their owning worker.
 
 use super::{
     Tick,
@@ -29,8 +30,10 @@ use super::{
         SendRequest, SyncRequest, WriteAtRequest,
     },
     waiter::{DropOutcome, WaiterId, Waiters},
+    waker::Waker as RingWaker,
 };
 use crate::{Error, IoBufMut, IoBufs};
+use commonware_utils::sync::Mutex;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -39,7 +42,10 @@ use std::{
     net::SocketAddr,
     os::fd::OwnedFd,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, Waker},
     thread::{self, ThreadId},
     time::Instant,
@@ -258,14 +264,53 @@ impl Drop for Registration<'_> {
 #[derive(Clone)]
 pub(crate) struct Handle {
     ops: Arc<Affine<RefCell<Ops>>>,
+    /// Cross-thread wind-down mailbox for foreign-thread drops.
+    pub(super) orphans: Arc<OrphanMailbox>,
+}
+
+/// Waiter ids whose owning future or ticket was dropped on a foreign thread,
+/// where the thread-affine op table is unreachable.
+///
+/// Drop is the one op interaction that can legally arrive off-thread (drop
+/// must not panic, so the affinity check cannot reject it). Ids pushed here
+/// are wound down by the loop on its next turn exactly as an on-thread drop
+/// would have been, so foreign drops release their slots instead of leaking
+/// them until shutdown.
+pub(super) struct OrphanMailbox {
+    /// Fast-path gate so the loop's per-turn drain skips the lock when the
+    /// mailbox is empty (the common case).
+    pending: AtomicBool,
+    ids: Mutex<Vec<WaiterId>>,
+    /// Wakes the loop so a parked runtime winds the orphan down promptly.
+    waker: RingWaker,
+}
+
+impl OrphanMailbox {
+    fn push(&self, id: WaiterId) {
+        self.ids.lock().push(id);
+        self.pending.store(true, Ordering::Release);
+        self.waker.wake();
+    }
+
+    /// Take all pending foreign-drop ids.
+    ///
+    /// A push racing the gate check lands on the next turn: its `wake` latch
+    /// guarantees the loop runs again before parking indefinitely.
+    pub(super) fn take(&self) -> Vec<WaiterId> {
+        if !self.pending.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        self.pending.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *self.ids.lock())
+    }
 }
 
 impl Handle {
     /// Create the op state for a driver whose slab tracks at most `capacity`
-    /// requests.
+    /// requests, waking the loop through `waker` for foreign-thread drops.
     ///
     /// The calling thread becomes the owning (runtime) thread.
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize, waker: RingWaker) -> Self {
         Self {
             ops: Arc::new(Affine::new(RefCell::new(Ops {
                 waiters: Waiters::new(capacity),
@@ -275,6 +320,11 @@ impl Handle {
                 capacity: CapacityWaiters::new(),
                 closed: false,
             }))),
+            orphans: Arc::new(OrphanMailbox {
+                pending: AtomicBool::new(false),
+                ids: Mutex::new(Vec::new()),
+                waker,
+            }),
         }
     }
 
@@ -531,33 +581,48 @@ fn poll_completion(handle: &Handle, id: WaiterId, cx: &mut Context<'_>) -> Poll<
     output.map_or(Poll::Pending, Poll::Ready)
 }
 
+/// Apply the orphan wind-down for `id` on the op table.
+///
+/// Returns true when a slot was freed (the caller releases capacity waiters
+/// through its own wake path).
+pub(super) fn wind_down_orphan(ops: &mut Ops, id: WaiterId) -> bool {
+    match ops.waiters.mark_orphaned(id) {
+        // A parked result was dropped, freeing a slot.
+        DropOutcome::Freed => true,
+        DropOutcome::Cancel {
+            needs_sqe,
+            target_tick,
+        } => {
+            if needs_sqe {
+                ops.pending_cancels.push_back(id);
+            }
+            // Release deadline accounting for the transition out of active
+            // timeout tracking.
+            ops.released_deadlines.extend(target_tick);
+            false
+        }
+        DropOutcome::Detached => false,
+    }
+}
+
 /// Wind down an admitted request whose future or ticket is being dropped.
 ///
-/// Drop must not panic, so a foreign-thread drop cannot be rejected: the slot
-/// simply leaks until shutdown (drain force-cancels it). This is reachable
-/// only by moving an already-polled op future to a raw thread, which nothing
-/// in the workspace does.
+/// Drop must not panic, so a foreign-thread drop cannot touch the
+/// thread-affine table directly: it hands the id to the loop through the
+/// orphan mailbox instead, and the loop applies the same wind-down on its
+/// next turn.
 fn orphan(handle: &Handle, id: WaiterId) {
-    let wakers = handle.try_with(|ops| {
-        match ops.waiters.mark_orphaned(id) {
-            // A parked result was dropped, freeing a slot.
-            DropOutcome::Freed => ops.capacity.drain(),
-            DropOutcome::Cancel {
-                needs_sqe,
-                target_tick,
-            } => {
-                if needs_sqe {
-                    ops.pending_cancels.push_back(id);
-                }
-                // Release deadline accounting for the transition out of
-                // active timeout tracking.
-                ops.released_deadlines.extend(target_tick);
-                Vec::new()
-            }
-            DropOutcome::Detached => Vec::new(),
+    let Some(wakers) = handle.try_with(|ops| {
+        if wind_down_orphan(ops, id) {
+            ops.capacity.drain()
+        } else {
+            Vec::new()
         }
-    });
-    for waker in wakers.into_iter().flatten() {
+    }) else {
+        handle.orphans.push(id);
+        return;
+    };
+    for waker in wakers {
         waker.wake();
     }
 }

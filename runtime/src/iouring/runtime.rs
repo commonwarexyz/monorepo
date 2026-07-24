@@ -119,6 +119,9 @@ impl Metrics {
 }
 
 /// Configuration for the `iouring` runtime.
+///
+/// Worker-affinity rules (which resources may cross workers) are described
+/// in the [module documentation](crate::iouring#worker-affinity).
 #[derive(Clone)]
 pub struct Config {
     /// Configuration for the runtime's io_uring instance.
@@ -312,6 +315,36 @@ struct Shared {
     /// an accepted spawn) before the worker thread is launched, never
     /// cleared, so any worker observing its own teardown sees it set.
     spawned_workers: AtomicBool,
+    /// Panic payload from a worker joined by an opportunistic reap, resumed
+    /// when the runtime shuts down (reaps must not swallow worker panics).
+    worker_panic: Mutex<Option<Box<dyn std::any::Any + Send>>>,
+}
+
+impl Shared {
+    /// Join any finished worker threads, retaining live ones.
+    ///
+    /// Without reaping, every completed dedicated (or blocking shared) task
+    /// would hold its exited thread's `JoinHandle` (and stack mapping) until
+    /// shutdown. Called on every worker registration and on the process
+    /// metrics collector's cadence, which bounds retention by the reap
+    /// interval instead of the runtime's lifetime.
+    fn reap_workers(&self) {
+        let mut workers = self.workers.lock();
+        let Some(list) = workers.as_mut() else {
+            return;
+        };
+        let mut index = 0;
+        while index < list.len() {
+            if list[index].is_finished() {
+                let worker = list.swap_remove(index);
+                if let Err(payload) = worker.join() {
+                    let _ = self.worker_panic.lock().get_or_insert(payload);
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
 }
 
 /// The alarm queue of one worker's sleepers.
@@ -331,6 +364,21 @@ struct Sleeping {
     /// Tombstones hold no task resources and are dropped at their deadline
     /// or by compaction, whichever comes first.
     cancelled: usize,
+}
+
+impl Sleeping {
+    /// Rebuild the heap without tombstones once they outnumber live alarms.
+    ///
+    /// Checked after every operation that changes the tombstone-to-live
+    /// ratio (cancellation and firing), so the heap's size stays bounded by
+    /// twice the live sleeper count.
+    fn compact_if_needed(&mut self) {
+        if self.cancelled * 2 > self.alarms.len() {
+            self.alarms
+                .retain(|alarm| alarm.state.waker.lock().is_some());
+            self.cancelled = 0;
+        }
+    }
 }
 
 /// State shared between a heap [Alarm] and its [Sleeper].
@@ -375,7 +423,7 @@ impl Executor {
             earliest
         };
         if earliest {
-            self.tasks.unpark.wake();
+            self.tasks.unpark_foreign();
         }
     }
 
@@ -418,12 +466,7 @@ impl Executor {
             return;
         }
         sleeping.cancelled += 1;
-        if sleeping.cancelled * 2 > sleeping.alarms.len() {
-            sleeping
-                .alarms
-                .retain(|alarm| alarm.state.waker.lock().is_some());
-            sleeping.cancelled = 0;
-        }
+        sleeping.compact_if_needed();
     }
 
     /// Wake any sleepers whose deadlines have elapsed.
@@ -445,6 +488,10 @@ impl Executor {
                     None => sleeping.cancelled -= 1,
                 }
             }
+            // Popping live alarms can leave the heap tombstone-dominated
+            // even though no cancellation ran: recheck so the size bound
+            // holds at quiescence, not just at the last cancellation.
+            sleeping.compact_if_needed();
         }
         for waker in due {
             waker.wake();
@@ -708,6 +755,10 @@ impl Worker {
 }
 
 /// Implementation of [crate::Runner] for the `iouring` runtime.
+///
+/// Unlike the tokio runtime, resources opened on one worker must not be used
+/// from another: see the [worker affinity](crate::iouring#worker-affinity)
+/// rules before spawning dedicated or blocking tasks.
 pub struct Runner {
     cfg: Config,
 }
@@ -774,6 +825,7 @@ impl crate::Runner for Runner {
             storage_lock: Arc::new(Mutex::new(())),
             workers: Mutex::new(Some(Vec::new())),
             spawned_workers: AtomicBool::new(false),
+            worker_panic: Mutex::new(None),
         });
         let worker = Worker::new(Arc::clone(&shared));
 
@@ -783,10 +835,18 @@ impl crate::Runner for Runner {
         // we are using `runtime_registry` rather than the one provided by `Context`.
         let process = MeteredProcess::init(&mut runtime_registry);
         let process_executor = Arc::downgrade(&worker.executor);
-        let collector = process.collect(move |duration| Sleeper {
-            executor: process_executor.clone(),
-            time: Instant::now() + duration.min(MAX_SLEEP),
-            state: None,
+        let collector = process.collect(move |duration| {
+            // Piggyback the collector's cadence: reap finished worker threads
+            // so completed dedicated tasks don't retain exited threads until
+            // shutdown even when nothing spawns again.
+            if let Some(executor) = process_executor.upgrade() {
+                executor.shared.reap_workers();
+            }
+            Sleeper {
+                executor: process_executor.clone(),
+                time: Instant::now() + duration.min(MAX_SLEEP),
+                state: None,
+            }
         });
         let _ = Tasks::register(&worker.executor.tasks, collector);
 
@@ -836,12 +896,14 @@ impl crate::Runner for Runner {
         }
 
         // Resume the root worker's panic first: worker failures during
-        // teardown are usually its cascade.
+        // teardown are usually its cascade. A panic stashed by an earlier
+        // opportunistic reap takes precedence over join-loop panics (it
+        // happened first).
         let output = match output {
             Ok(output) => output,
             Err(payload) => resume_unwind(payload),
         };
-        if let Some(payload) = worker_panic {
+        if let Some(payload) = shared.worker_panic.lock().take().or(worker_panic) {
             resume_unwind(payload);
         }
 
@@ -1124,16 +1186,27 @@ impl Tasks {
     /// Enqueue an already registered task to be polled.
     fn queue(&self, task: Arc<dyn Erased>) {
         self.ready.lock().push(task);
-
-        // Wake the runtime thread in case it is parked. Wakes from the runtime
-        // thread itself only latch the (already awake) wake state.
-        self.unpark.wake();
+        self.unpark_foreign();
     }
 
     /// Mark the root task ready to be polled.
     fn queue_root(&self) {
         self.root_ready.store(true, Ordering::Release);
-        self.unpark.wake();
+        self.unpark_foreign();
+    }
+
+    /// Latch the loop's out-of-band wake state when called from any thread
+    /// but the worker's own.
+    ///
+    /// A same-thread wake can only happen while the loop is awake (polling a
+    /// task or draining completions), and the loop rechecks `has_ready` and
+    /// recomputes the next alarm before every park, so latching the wake
+    /// state would only force one spurious empty iteration (and possibly an
+    /// extra `io_uring_enter`) per wake.
+    fn unpark_foreign(&self) {
+        if thread::current().id() != self.owner {
+            self.unpark.wake();
+        }
     }
 
     /// Take the root task's readiness.
@@ -1293,6 +1366,10 @@ impl Context {
             worker.run(wrapped, tree);
         };
 
+        // Reap finished workers so retention is bounded by spawn activity
+        // rather than the runtime's lifetime.
+        shared.reap_workers();
+
         // Register the thread while the registry is open: `start` joins every
         // registered worker before returning, so a spawn racing final
         // teardown from a non-worker thread must not create a thread nobody
@@ -1435,9 +1512,10 @@ impl crate::Spawner for Context {
 
 /// Rayon workers execute compute-only work and never submit ring operations,
 /// so the pool is backed by plain OS threads (one per unit of parallelism)
-/// rather than runtime tasks: [crate::Spawner::dedicated] is unavailable on
-/// this runtime, and pool completions wake awaiting tasks through the loop's
-/// latched cross-thread wake state.
+/// rather than dedicated runtime workers, which would each carry an io_uring
+/// ring the compute work never uses. Pool completions wake awaiting tasks
+/// through the loop's latched cross-thread wake state, and the detached pool
+/// threads may briefly outlive [crate::Runner::start].
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
@@ -1667,7 +1745,11 @@ impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
         // Uses the host's DNS configuration via the system's libc resolver.
         // `getaddrinfo` is blocking, so resolution runs on a short-lived
-        // helper thread.
+        // helper thread. The helper is detached: joining it at shutdown could
+        // stall `Runner::start` for a full resolver timeout, so if the
+        // awaiting task is aborted the thread may briefly outlive the
+        // runtime (bounded by `getaddrinfo` itself), holding only its owned
+        // string and a dead oneshot sender.
         //
         // The `:0` port is required by `to_socket_addrs` but is not used for
         // DNS resolution.
@@ -1836,6 +1918,98 @@ mod tests {
         });
     }
 
+    /// Using a ring-bound resource from another worker fails loudly with the
+    /// documented affinity panic (the task fails, the runtime survives): the
+    /// io_uring runtime deliberately does not provide the tokio backend's
+    /// location transparency for blobs, sockets, and listeners.
+    #[test]
+    fn test_blob_use_on_other_worker_panics() {
+        let cfg = Config::default().with_catch_panics(true);
+        Runner::new(cfg).start(|context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let handle = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(move |_| async move {
+                    let _ = blob.read_at(0, 1).await;
+                });
+            assert!(matches!(handle.await, Err(Error::Exited)));
+        });
+    }
+
+    /// Dropping a `start_sync` completion handle on another worker must not
+    /// leak the origin worker's waiter slot: the foreign drop routes through
+    /// the orphan mailbox and the loop frees the parked result.
+    #[test]
+    fn test_start_sync_handle_dropped_on_other_worker() {
+        Runner::default().start(|context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, IoBuf::from(b"hello")).await.unwrap();
+            let sync_handle = blob.start_sync().await;
+
+            // Hand the completion handle to a dedicated task, which drops it
+            // without awaiting.
+            context
+                .child("dedicated")
+                .dedicated()
+                .spawn(move |_| async move {
+                    drop(sync_handle);
+                })
+                .await
+                .unwrap();
+
+            // The mailbox wind-down frees the slot on a subsequent turn:
+            // poll the runtime-wide gauge until it drains.
+            let pending = |metrics: String| -> i64 {
+                let line = metrics
+                    .lines()
+                    .find(|line| {
+                        line.starts_with("runtime_iouring_pending_operations")
+                            && !line.starts_with("runtime_iouring_pending_operations{")
+                    })
+                    .expect("pending_operations metric missing");
+                line.split_whitespace().nth(1).unwrap().parse().unwrap()
+            };
+            let start = std::time::Instant::now();
+            loop {
+                if pending(context.encode()) == 0 {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "waiter slot leaked by cross-worker handle drop"
+                );
+                context.sleep(Duration::from_millis(20)).await;
+            }
+        });
+    }
+
+    /// Worker threads of completed dedicated (or blocking shared) tasks must
+    /// not accumulate for the runtime's lifetime: an exited joinable thread
+    /// retains its stack mapping (and its `JoinHandle`) until joined, so a
+    /// long-lived runtime that periodically spawns blocking tasks would grow
+    /// without bound if completed workers were only reaped at shutdown.
+    #[test]
+    fn test_completed_workers_not_retained() {
+        const SPAWNS: usize = 64;
+        Runner::default().start(|context| async move {
+            for _ in 0..SPAWNS {
+                context
+                    .child("blocking")
+                    .shared(true)
+                    .spawn(|_| async move { 42 })
+                    .await
+                    .unwrap();
+            }
+            let executor = context.executor.upgrade().unwrap();
+            let retained = executor.shared.workers.lock().as_ref().unwrap().len();
+            assert!(
+                retained < SPAWNS,
+                "{retained} exited worker threads retained until shutdown"
+            );
+        });
+    }
+
     /// Completion of a dedicated task must abort the consumed context's node
     /// before the handle resolves (as the inline path does): contexts derived
     /// from it before the spawn cannot spawn afterwards.
@@ -1925,6 +2099,141 @@ mod tests {
             let after = executor.tasks.ready.lock().len();
             assert_eq!(after - before, 1, "duplicate wakes must coalesce");
         });
+    }
+
+    /// A task that wakes itself multiple times per poll (by ref and by
+    /// value) must complete exactly once, and any queue entries polled after
+    /// completion must be inert: arena slots freed at completion are
+    /// immediately reused by later spawns.
+    #[test]
+    // The by-value wake is deliberate: it exercises the consuming waker
+    // vtable path alongside `wake_by_ref`.
+    #[allow(clippy::waker_clone_wake)]
+    fn test_self_wake_storm_and_slot_reuse() {
+        struct SelfWakeStorm {
+            polls: usize,
+        }
+        impl Future for SelfWakeStorm {
+            type Output = usize;
+            fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<usize> {
+                self.polls += 1;
+                if self.polls >= 4 {
+                    return Poll::Ready(self.polls);
+                }
+                cx.waker().wake_by_ref();
+                cx.waker().wake_by_ref();
+                cx.waker().clone().wake();
+                Poll::Pending
+            }
+        }
+
+        Runner::default().start(|context| async move {
+            let storm = context.child("storm").spawn(|_| SelfWakeStorm { polls: 0 });
+            assert_eq!(storm.await.unwrap(), 4);
+
+            // Stale queued pointers from the storm must not have freed or
+            // corrupted the reused slots.
+            for i in 0..32u32 {
+                let handle = context.child("reuse").spawn(move |_| async move { i });
+                assert_eq!(handle.await.unwrap(), i);
+            }
+        });
+    }
+
+    /// A waker captured from a completed task must be inert: waking it (from
+    /// the runtime thread and from a foreign thread) after its arena slot was
+    /// freed and reused must neither double-free the slot nor disturb the
+    /// tasks that reused it.
+    #[test]
+    fn test_stale_waker_after_completion_and_slot_reuse() {
+        struct CaptureWaker(Arc<Mutex<Option<Waker>>>);
+        impl Future for CaptureWaker {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                *self.0.lock() = Some(cx.waker().clone());
+                Poll::Ready(())
+            }
+        }
+
+        Runner::default().start(|context| async move {
+            let slot = Arc::new(Mutex::new(None));
+            let captured = Arc::clone(&slot);
+            context
+                .child("victim")
+                .spawn(move |_| CaptureWaker(captured))
+                .await
+                .unwrap();
+
+            // The victim completed and freed its slot. Fire the stale waker
+            // repeatedly (cross-thread too) while replacements reuse it.
+            let waker = slot.lock().take().unwrap();
+            waker.wake_by_ref();
+            let cross = waker.clone();
+            std::thread::spawn(move || cross.wake()).join().unwrap();
+            for i in 0..8u32 {
+                let handle = context.child("reuse").spawn(move |_| async move { i });
+                assert_eq!(handle.await.unwrap(), i);
+                waker.wake_by_ref();
+            }
+        });
+    }
+
+    /// A waker that outlives the runtime must be inert: waking and dropping
+    /// it after `start` returned must not touch freed executor state.
+    #[test]
+    // The by-value wake is deliberate: it exercises the consuming waker
+    // vtable path alongside `wake_by_ref`.
+    #[allow(clippy::waker_clone_wake)]
+    fn test_waker_outlives_runtime() {
+        struct CaptureWaker(Arc<Mutex<Option<Waker>>>);
+        impl Future for CaptureWaker {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                *self.0.lock() = Some(cx.waker().clone());
+                Poll::Ready(())
+            }
+        }
+
+        let slot = Arc::new(Mutex::new(None::<Waker>));
+        let captured = Arc::clone(&slot);
+        Runner::default().start(|context| async move {
+            context
+                .child("victim")
+                .spawn(move |_| CaptureWaker(captured))
+                .await
+                .unwrap();
+        });
+
+        let waker = slot.lock().take().unwrap();
+        waker.wake_by_ref();
+        waker.clone().wake();
+        drop(waker);
+    }
+
+    /// Spawns registered from a dedicated worker onto a worker that is
+    /// concurrently tearing down must either run or resolve with
+    /// [Error::Closed] — never hang, panic, or leave a task polled after
+    /// teardown.
+    #[test]
+    fn test_cross_worker_spawn_races_teardown() {
+        for _ in 0..8 {
+            Runner::default().start(|context| async move {
+                let root_spawner = context.child("target");
+                let _dedicated = context.child("ded").dedicated().spawn(move |_| async move {
+                    // Register onto the root worker from this thread
+                    // while the root races into teardown.
+                    for i in 0..1024u32 {
+                        let handle = root_spawner.child("race").spawn(move |_| async move { i });
+                        match handle.await {
+                            Ok(value) => assert_eq!(value, i),
+                            Err(Error::Closed) => break,
+                            Err(err) => panic!("unexpected spawn error: {err}"),
+                        }
+                    }
+                });
+                // Return immediately: teardown races the foreign spawns.
+            });
+        }
     }
 
     /// A context moved to a raw thread can spawn a task back onto its origin
@@ -2161,6 +2470,77 @@ mod tests {
             let (len, cancelled) = alarms(&executor);
             assert_eq!(len - cancelled, baseline, "cancelled sleeps retained");
             assert!(cancelled * 2 <= len, "tombstones exceed compaction bound");
+        });
+    }
+
+    /// Race foreign-thread sleeps, cancellations, and re-polls against the
+    /// worker's alarm firing: sleeps must neither fire early nor hang, and
+    /// tombstone accounting must stay exact under churn (an accounting bug
+    /// underflows `cancelled` and panics).
+    #[test]
+    fn test_sleep_churn_stress() {
+        use futures::FutureExt as _;
+        Runner::default().start(|context| async move {
+            let executor = context.executor.upgrade().unwrap();
+
+            // Foreign threads: timed sleeps registered against a (mostly)
+            // parked runtime must complete promptly and never early.
+            let mut threads = Vec::new();
+            for t in 0..4 {
+                let clock = context.child("timed");
+                threads.push(std::thread::spawn(move || {
+                    for i in 0..50 {
+                        let d = Duration::from_micros(200 * ((t + i) % 7 + 1));
+                        let start = std::time::Instant::now();
+                        futures::executor::block_on(clock.sleep(d));
+                        assert!(start.elapsed() >= d, "sleep fired early");
+                    }
+                    drop(clock);
+                }));
+            }
+
+            // Foreign threads: register far-future alarms, poll them pending
+            // once, then drop them (cancel path + compaction churn), and race
+            // short-deadline drops against the worker popping due alarms
+            // (cancel-vs-fire on the tombstone accounting).
+            for _ in 0..4 {
+                let clock = context.child("cancelled");
+                threads.push(std::thread::spawn(move || {
+                    for i in 0..200 {
+                        let mut far = Box::pin(clock.sleep(Duration::from_secs(3600)));
+                        assert!(far.as_mut().now_or_never().is_none());
+                        let mut near =
+                            Box::pin(clock.sleep(Duration::from_micros(50 * (i % 5 + 1))));
+                        let _ = near.as_mut().now_or_never();
+                        // Let the deadline elapse so the drop below races the
+                        // worker's wake_ready_sleepers pop.
+                        std::thread::sleep(Duration::from_micros(50 * (i % 5 + 1)));
+                        drop(near);
+                        drop(far);
+                    }
+                    drop(clock);
+                }));
+            }
+
+            // Keep the worker's loop turning between parks while the churn
+            // runs, so alarms fire from both the parked and running paths.
+            while threads.iter().any(|thread| !thread.is_finished()) {
+                context.sleep(Duration::from_micros(500)).await;
+            }
+            for thread in threads {
+                thread.join().unwrap();
+            }
+
+            // All churned alarms are gone, up to tombstones bounded by the
+            // compaction invariant (checked after cancellation and firing).
+            let guard = executor.sleeping.lock();
+            let sleeping = guard.as_ref().unwrap();
+            assert!(
+                sleeping.alarms.len() <= 32,
+                "alarm heap retained churned sleeps: {}",
+                sleeping.alarms.len()
+            );
+            assert!(sleeping.cancelled * 2 <= sleeping.alarms.len().max(1));
         });
     }
 

@@ -192,7 +192,7 @@ impl IoUringLoop {
             Instant::now(),
         );
         let idle_spinner = Spinner::new(&cfg.idle_spinner, || waker.pending(0));
-        let handle = Handle::new(size);
+        let handle = Handle::new(size, waker.clone());
 
         (
             handle.clone(),
@@ -228,6 +228,16 @@ impl IoUringLoop {
         ops.capacity.drain_into(&mut self.pending_wakers);
     }
 
+    /// Wind down waiters whose owning future or ticket was dropped on a
+    /// foreign thread (see [handle::OrphanMailbox]).
+    fn process_orphans(&mut self, ops: &mut Ops) {
+        for id in self.handle.orphans.take() {
+            if handle::wind_down_orphan(ops, id) {
+                self.notify_capacity(ops);
+            }
+        }
+    }
+
     /// Make progress on the ring without blocking.
     ///
     /// Drains available CQEs (parking or requeuing their requests), advances
@@ -239,6 +249,10 @@ impl IoUringLoop {
         let handle = self.handle.clone();
         loop {
             let (fill_result, kernel_idle) = handle.with(|ops| {
+                // Wind down foreign-thread drops first: freed slots and
+                // cancel SQEs from the mailbox take effect this turn.
+                self.process_orphans(ops);
+
                 // Process available completions.
                 for cqe in ring.completion() {
                     self.handle_cqe(ops, cqe);
@@ -371,15 +385,6 @@ impl IoUringLoop {
                 if freed {
                     self.notify_capacity(ops);
                 }
-            }
-            StageOutcome::Orphaned { target_tick } => {
-                // The ticket disappeared before another SQE was issued, so all
-                // that remains is to release deadline tracking (the waiter, and
-                // associated resources, were already dropped inside `Waiters`).
-                if let Some(tick) = target_tick {
-                    self.timeout_wheel.remove(tick);
-                }
-                self.notify_capacity(ops);
             }
             StageOutcome::Submit(sqe) => {
                 // SAFETY:
@@ -644,6 +649,9 @@ impl IoUringLoop {
             // Always drain CQEs first, even after a timed wait: completions can
             // race with timeout expiry and still be pending in the queue.
             let pending = handle.with(|ops| {
+                // Foreign-thread drops during shutdown release parked slots
+                // and cancel in-flight work, speeding the drain.
+                self.process_orphans(ops);
                 for cqe in ring.completion() {
                     self.handle_cqe(ops, cqe);
                 }
@@ -675,6 +683,18 @@ impl IoUringLoop {
                     let mut submission_queue = ring.submission();
                     self.stage_cancellations(ops, &mut submission_queue);
                     self.stage_staged(ops, &mut submission_queue);
+                    // Keep the eventfd wake path live during shutdown: a
+                    // foreign-thread drop pushes into the orphan mailbox and
+                    // must be able to wake a drain blocked in
+                    // `submit_and_wait`. Rearm strictly AFTER staging so the
+                    // poll SQE can never displace the staging that retires
+                    // waiters (on a size-1 ring it would consume the whole
+                    // SQ and deadlock an unbounded wait). On a full SQ the
+                    // rearm retries next iteration, after `submit_and_wait`
+                    // flushes the queue.
+                    if self.wake_rearm_needed && self.waker.reinstall(&mut submission_queue) {
+                        self.wake_rearm_needed = false;
+                    }
                 }
                 ops.waiters.pending()
             });
@@ -1881,12 +1901,12 @@ mod tests {
     }
 
     #[test]
-    fn test_off_thread_drop_leaks_slot_until_shutdown() {
-        // Verify the documented off-thread drop behavior: the slot leaks
-        // (rather than freeing kernel-referenced buffers) and a bounded
-        // shutdown reclaims it.
+    fn test_off_thread_drop_reclaims_slot() {
+        // A future dropped on a foreign thread hands its slot to the loop
+        // through the orphan mailbox: subsequent turns wind it down
+        // (cancelling the in-flight recv) instead of leaking the slot until
+        // shutdown.
         let mut harness = TestLoop::new(RingConfig {
-            shutdown_timeout: Some(Duration::from_millis(200)),
             max_request_timeout: Duration::from_secs(60),
             ..Default::default()
         });
@@ -1906,25 +1926,23 @@ mod tests {
         assert_eq!(harness.tracked(), 1);
 
         // Drop the admitted future on a foreign thread: the affinity check
-        // rejects the orphan path, so the slot must stay tracked.
+        // cannot run the wind-down there, so it routes through the mailbox.
         std::thread::scope(|scope| {
             scope.spawn(move || drop(recv)).join().unwrap();
         });
-        harness.driver().turn();
-        assert_eq!(
-            harness.tracked(),
-            1,
-            "off-thread drop must leak the slot, not free it"
-        );
 
-        // The shutdown budget force-cancels the leaked op promptly.
+        // The loop winds the orphan down (async-cancelling the recv) and the
+        // slot frees without any shutdown budget.
         let start = Instant::now();
-        harness.shutdown();
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "shutdown did not reclaim the leaked slot: {:?}",
-            start.elapsed()
-        );
+        while harness.tracked() != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "foreign-thread drop did not reclaim the slot: {:?}",
+                start.elapsed()
+            );
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
+        }
     }
 
     #[test]
@@ -2020,6 +2038,132 @@ mod tests {
         for result in results {
             assert!(matches!(result, Err((_, Error::Timeout))));
         }
+    }
+
+    #[test]
+    fn test_completion_races_timeout_expiry() {
+        // Data arriving in the same window as deadline expiry must resolve
+        // to either success or timeout — never panic, double-remove a wheel
+        // tick, or leak the slot.
+        let mut harness = TestLoop::new(RingConfig {
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(1),
+            ..Default::default()
+        });
+        let driver = harness.handle.clone();
+        for i in 0..40u64 {
+            let (left, right) = UnixStream::pair().unwrap();
+            let mut recv = Box::pin(driver.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_millis(10),
+            ));
+            assert!(poll_once(&harness, &mut recv).is_pending());
+            harness.driver().turn();
+            // Race the write against deadline expiry from both sides.
+            std::thread::sleep(Duration::from_millis(if i % 2 == 0 { 9 } else { 11 }));
+            (&right).write_all(&[7]).unwrap();
+            match harness.block_on(recv) {
+                Ok((_, 1)) | Err((_, Error::Timeout)) => {}
+                other => panic!("unexpected recv result: {other:?}"),
+            }
+            assert_eq!(harness.tracked(), 0);
+        }
+        // No deadline accounting may survive the races.
+        harness.driver().turn();
+        assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
+    }
+
+    #[test]
+    fn test_exact_recv_partial_then_timeout() {
+        // An exact recv that made partial progress (requeued) must resolve
+        // with timeout at its deadline and return the buffer.
+        let mut harness = TestLoop::new(RingConfig {
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        });
+        let (left, right) = UnixStream::pair().unwrap();
+        (&right).write_all(&[1, 2]).unwrap();
+
+        let driver = harness.handle.clone();
+        let recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(4),
+            0,
+            4,
+            true,
+            Instant::now() + Duration::from_millis(80),
+        ));
+        let start = Instant::now();
+        match harness.block_on(recv) {
+            Err((mut buf, Error::Timeout)) => {
+                // The partial bytes were received before the deadline.
+                // SAFETY: the kernel filled 2 bytes before the requeue.
+                unsafe { buf.set_len(2) };
+                assert_eq!(buf.as_ref(), &[1, 2]);
+            }
+            other => panic!("expected timeout after partial progress, got {other:?}"),
+        }
+        assert!(
+            start.elapsed() >= Duration::from_millis(50),
+            "timeout fired too early: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(harness.tracked(), 0);
+    }
+
+    #[test]
+    fn test_drop_after_timeout_before_cancel_resolves() {
+        // Deadline expiry transitions the waiter to cancel-requested and
+        // releases its wheel tick; dropping the future in that window must
+        // not double-release deadline accounting or leak the slot.
+        let mut harness = TestLoop::new(RingConfig {
+            max_request_timeout: Duration::from_secs(1),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        });
+        let (left, _right) = UnixStream::pair().unwrap();
+
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_millis(30),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+        harness.driver().turn();
+        assert_eq!(harness.pending(), 1);
+
+        // Let the deadline elapse, then advance timeouts WITHOUT staging the
+        // cancel SQE or reaping its CQE: the waiter is now cancel-requested
+        // with its op still in flight.
+        std::thread::sleep(Duration::from_millis(50));
+        let driver = harness.driver();
+        handle.with(|ops| driver.inner.advance_timeouts(ops));
+        assert!(driver.inner.timeout_wheel.next_deadline().is_none());
+
+        // Drop the future in the cancel-requested window.
+        drop(recv);
+
+        // The slot must wind down through the normal cancel path.
+        let start = Instant::now();
+        while harness.tracked() != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "cancel-requested orphan still tracked after {:?}",
+                start.elapsed()
+            );
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
+        }
+        assert_eq!(harness.driver().inner.timeout_wheel.next_deadline(), None);
     }
 
     #[test]
