@@ -171,8 +171,7 @@ use io_uring::{
     types::{SubmitArgs, Timespec},
 };
 use request::{
-    ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WRITE_IOVEC_BATCH_SIZE,
-    WriteAtRequest, WriteBuffers,
+    IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest,
 };
 use std::{
     collections::VecDeque,
@@ -433,7 +432,7 @@ impl Handle {
             file,
             offset,
             written: 0,
-            write: WriteBuffers::for_storage(bufs),
+            write: bufs.into(),
             sync: false,
             result: None,
             sender: tx,
@@ -456,13 +455,13 @@ impl Handle {
         offset: u64,
         bufs: IoBufs,
     ) -> Result<(), Error> {
-        let fused = bufs.chunk_count() <= WRITE_IOVEC_BATCH_SIZE;
+        let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
             file: file.clone(),
             offset,
             written: 0,
-            write: WriteBuffers::for_storage(bufs),
+            write: bufs.into(),
             sync: fused,
             result: None,
             sender: tx,
