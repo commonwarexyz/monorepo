@@ -42,6 +42,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
     aspect-ratio: 1024 / 520;
   }
 
+  .cw-loop-spoiling {
+    aspect-ratio: 1024 / 500;
+  }
+
   @media (max-width: 600px) {
     .cw-loop {
       aspect-ratio: auto;
@@ -63,6 +67,10 @@ Start with the shape of most deployed protocols: one proposer at a time, drawn w
 
     .cw-loop-certificate {
       height: 330px;
+    }
+
+    .cw-loop-spoiling {
+      height: 315px;
     }
 
     .cw-loop svg {
@@ -143,16 +151,16 @@ Figure 4: Transaction block $b$ misses the leader block, crossing it on the wire
 
 Read the User row of either figure: submit to an API node, the API node's next block carries the transaction to every validator, and one round of votes finalizes it. There is no separate journey to the leader because there is nothing the leader must gather first. Averaged over the wait for the next vote event, a block disseminated at time $t$ is finalized by $t+3\delta$, and by $t+2\delta$ when the timing is favorable. Two message delays is optimal. Reported from the leader's proposal instead, the convention most consensus papers use, Multimmit's figure would simply read $2\delta$: the mechanisms above act on the leg that convention never measures. For comparison, Raptr finalizes a batch disseminated at time $t$ at $t+5\delta$ in expectation with *no* faults, degrading to $t+5.5\delta$ (and spoilable) once faulty producers show up. Multimmit's figures do not degrade: an honest chain's block still finalizes by $t+3\delta$ in expectation with $f$ faulty producers doing their worst, and at most waits one extra view for its slot in the total ordering behind a lagging faulty chain.
 
-Spoiling is worth seeing concretely. A Raptr proposal is one ordered sequence, and a vote is a single prefix length, so one hole caps every vote behind it.
+Spoiling is worth seeing concretely. A Raptr leader block is one flat sequence, and a vote is a single prefix length, so one hole caps every vote behind it.
 
 ```{=html}
-<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader proposes an ordered sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
-  <noscript>This figure animates easy spoiling: a Raptr proposal is an ordered sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
+<div id="multimmit-fig-spoiling" class="cw-loop cw-loop-spoiling" role="img" aria-label="Animated diagram of easy spoiling in Raptr. The leader block is drawn as a red container holding one flat sequence of six batches from six producers, P1 through P6. Producer P2 withholds batch 2, shown as a dashed hole. Votes arrive as dots, and nearly every vote supports only prefix 1 because it lacks batch 2, with a single vote reaching prefix 6. The proposal finalizes prefix 1 in gold, and batches 3 through 6 dim to gray: available, yet stranded behind the hole.">
+  <noscript>This figure animates easy spoiling: a Raptr leader block carries one flat sequence of six batches from six producers, producer P2 withholds batch 2, so nearly every vote supports only prefix 1. The proposal finalizes prefix 1, stranding batches 3-6 even though their data is fully available.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 5: Easy spoiling. A Raptr proposal is an ordered sequence of batches, and each voter supports the longest prefix whose data it holds. One withheld batch early in the sequence caps almost every vote at the hole, so the proposal finalizes prefix 1 and strands every available batch behind position 2. The batches belong to six different producers, so P2's hole strands the data of P3 through P6. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (next figure) report per chain instead of per prefix, so there is no position to poison: a withheld block costs its own chain and nothing else.
+Figure 5: Easy spoiling. A Raptr leader block carries one flat sequence of batches from many producers, and each voter supports the longest prefix whose data it holds. One withheld batch early in the sequence caps almost every vote at the hole, so the proposal finalizes prefix 1 and strands every available batch behind position 2. The batches belong to six different producers, so P2's hole strands the data of P3 through P6. Stranded batches eventually land through the certified slow path, which is exactly the path prefix voting exists to avoid. Multimmit's votes (next figure) report per chain instead of per prefix, so there is no position to poison: a withheld block costs its own chain and nothing else.
 :::
 
 
