@@ -314,7 +314,7 @@ const FIGURES = {
     ],
     rowTop: 90,
     rowGap: 62,
-    axis: { min: -0.5, max: 5.5, origin: null, unit: 'round' },
+    axis: { min: -0.5, max: 5.5, origin: null, unit: 'round', roundBase: -1 },
     variants: [{
       tag: 'an anchor commits only after more rounds build on it',
       end: 5.5,
@@ -566,7 +566,8 @@ function buildFigure(mount, cfg) {
     }));
     let label;
     if (cfg.axis.unit === 'round') {
-      label = t === 0 ? 'round r' : `r+${t}`;
+      const k = t + (cfg.axis.roundBase ?? 0);
+      label = k === 0 ? 'round r' : (k > 0 ? `r+${k}` : `r−${-k}`);
     } else if (cfg.axis.origin === null) {
       label = t === 0 ? '0' : `${t}δ`;
     } else {
