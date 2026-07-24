@@ -597,18 +597,23 @@ O’Grady</a></div>
         of certification, shown here filling a <span
         class="math inline">d=3</span> window under load.</p>
         </div>
-        <p>In Figure 2, consensus fixes the leader’s proposal cadence.
-        In Multimmit, each producer controls its own block cadence. Its
-        chain contains no cross-producer references, so it can extend as
-        transactions arrive and run as many as <span
-        class="math inline">d</span> blocks ahead of its last certified
-        block. Certificates form in the background. Under sustained
-        load, a chain can grow by <span class="math inline">d</span>
-        blocks per certificate round trip instead of one.</p>
-        <p>Consensus also proceeds without waiting for certification.
-        The leader checkpoints the blocks it has received, and voters
-        extend beyond anything the leader missed. Producers continue
-        building through leader failures and view changes. The first
+        <p>In Figure 2, the leader’s proposal cadence determines when a
+        transaction can enter a block at all. Multimmit separates that
+        production clock from consensus. Each producer controls when a
+        transaction enters its own block, and its chain contains no
+        cross-producer references, so it can run as many as <span
+        class="math inline">d</span> blocks ahead of certification while
+        certificates form in the background. Under sustained load, a
+        chain can grow by <span class="math inline">d</span> blocks per
+        certificate round trip instead of one.</p>
+        <p>Ordering remains view-driven. The next leader can checkpoint
+        a transaction block, or voters can attest it as an extension if
+        it reaches them before they vote, even when it misses the
+        proposal. This is still faster than leader-only production: the
+        block is already spreading while it waits and can catch the
+        current view after the proposal has passed. A block that misses
+        that vote event waits for the next view. Producers keep building
+        through leader failures and view changes, and the first
         successful view checkpoints the backlog.</p>
         <div id="multimmit-fig-blip" class="cw-loop cw-loop-dag" role="img" aria-label="Animated diagram of a Multimmit producer through a consensus blip. Two rows: consensus views above, one producer below. The producer emits a block every two-thirds of a message delay for the whole window, with certificate arcs forming behind each block. An early leader block finalizes the first two blocks with gold edges. Then a consensus blip begins, marked by dashed boundaries: two views time out, drawn as dashed hollow leader blocks, while the producer keeps emitting and certificates keep forming. When the blip ends, the first successful leader block draws gold edges back to the entire backlog, and one message delay later seven blocks finalize at once.">
           <noscript>This figure animates a consensus blip: two views time out while a Multimmit producer keeps emitting blocks on cadence, certificates forming behind them. The first successful view references the whole backlog, and one round of votes finalizes everything the blip delayed.</noscript>
