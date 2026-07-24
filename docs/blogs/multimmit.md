@@ -211,6 +211,6 @@ Multimmit's chains carry no cross-producer references, so there is nothing for a
 
 ## Onward
 
-Multimmit runs transaction dissemination and consensus concurrently, with neither ever blocking on the other. Blocks enter the ordering process the moment they hit the wire, availability is voted rather than fetched, and the failure of any producer is confined to its own chain. The [specification](https://arxiv.org/abs/2607.21021) includes proofs of consistency and liveness, an accounting of availability for every block that enters the ordering, and the exact extension threshold for every $n$, with the protocol's rules optimal at $n=5f+1$.
+Multimmit runs transaction dissemination and consensus concurrently, with neither ever blocking on the other. Blocks enter the ordering process the moment they hit the wire, availability is voted rather than fetched, and the failure of any producer is confined to its own chain. The [specification](https://arxiv.org/abs/2607.21021) includes proofs of consistency and liveness, an accounting of availability for every ordered block, and the exact extension threshold for every $n$, with the protocol's rules optimal at $n=5f+1$.
 
-Multimmit is not yet peer-reviewed or fully implemented, so we are releasing it the way it treats a fresh block: checkpointed now, certified in the background. It ships under both MIT and Apache-2 licenses. Extensions welcome.
+Multimmit is built for the user's clock: submit a transaction to any producer, and one round of votes later it is final.
