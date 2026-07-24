@@ -15,7 +15,8 @@
 //!   Twins mutator splits one compromised identity between a full engine and a
 //!   `Disrupter`.
 //!   Targets: `marshal_multi_node_liveness_standard`,
-//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins_standard`.
+//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins_standard`,
+//!   `marshal_multi_node_twins_randomized_app`.
 //! - [`inline`]: drives the standard inline and deferred block paths, including
 //!   split-header equivocation. Targets: `marshal_inline_standard`,
 //!   `marshal_deferred_standard`.
@@ -43,7 +44,7 @@ pub mod store;
 pub use inline::{MarshalInlineInput, fuzz_marshal_deferred, fuzz_marshal_inline};
 pub use multi_node::{
     MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins,
-    fuzz_marshal_twins_id_split_header,
+    fuzz_marshal_twins_id_split_header, fuzz_marshal_twins_randomized_app,
 };
 pub use single_node::{MarshalEvent, MarshalFuzzInput, VariantPublish, fuzz_marshal_single_node};
 pub use store::{MarshalStoreInput, fuzz_marshal_store};

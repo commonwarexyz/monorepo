@@ -10,8 +10,10 @@
 //! verification rejection is never reused during certification.
 
 use super::{
-    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, app::BlockBuilderApp,
-    input::MarshalTwinsInput, invariant,
+    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
+    app::{BlockBuilderApp, RandomizedBlockBuilderApp, RandomizedConfig},
+    input::MarshalTwinsInput,
+    invariant,
 };
 use crate::{
     BYZANTINE_IDX, NAMESPACE, NetworkChannels, POST_GST_WINDOW, SimplexCertificateMock, SimplexId,
@@ -57,6 +59,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt as _, oneshot},
     sync::Mutex,
 };
+use rand::RngExt as _;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -83,14 +86,45 @@ type PublicKeyOf<P> =
     <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
-type Builder<P> = Deferred<
-    deterministic::Context,
-    SchemeOf<P>,
-    BlockBuilderApp<Ctx<P>, SchemeOf<P>>,
-    B<P>,
-    FixedEpocher,
->;
+type Builder<P, A> = Deferred<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
+
+trait TwinsBlockBuilder<P: Simplex>:
+    commonware_consensus::Application<
+        deterministic::Context,
+        SigningScheme = SchemeOf<P>,
+        Context = Ctx<P>,
+        Block = B<P>,
+        Input = (),
+    > + Clone
+{
+    fn create(config: RandomizedConfig, verification_delay: Option<(View, Duration)>) -> Self;
+
+    fn rejects(config: RandomizedConfig, context: &Ctx<P>) -> bool;
+}
+
+impl<P: Simplex> TwinsBlockBuilder<P> for BlockBuilderApp<Ctx<P>, SchemeOf<P>> {
+    fn create(_config: RandomizedConfig, verification_delay: Option<(View, Duration)>) -> Self {
+        match verification_delay {
+            Some((view, delay)) => Self::with_verification_delay(view, delay),
+            None => Self::default(),
+        }
+    }
+
+    fn rejects(_config: RandomizedConfig, _context: &Ctx<P>) -> bool {
+        false
+    }
+}
+
+impl<P: Simplex> TwinsBlockBuilder<P> for RandomizedBlockBuilderApp<Ctx<P>, SchemeOf<P>> {
+    fn create(config: RandomizedConfig, verification_delay: Option<(View, Duration)>) -> Self {
+        Self::new(config, verification_delay)
+    }
+
+    fn rejects(config: RandomizedConfig, context: &Ctx<P>) -> bool {
+        config.rejects(context)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct AttackLayout {
@@ -383,25 +417,29 @@ async fn setup_validator<P: Simplex>(
 
 struct HeaderMismatchInvariant<P: Simplex> {
     verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
+    app_config: RandomizedConfig,
+    rejects: fn(RandomizedConfig, &Ctx<P>) -> bool,
 }
 
 impl<P: Simplex> Clone for HeaderMismatchInvariant<P> {
     fn clone(&self) -> Self {
         Self {
             verified_contexts: self.verified_contexts.clone(),
-        }
-    }
-}
-
-impl<P: Simplex> Default for HeaderMismatchInvariant<P> {
-    fn default() -> Self {
-        Self {
-            verified_contexts: Arc::new(Mutex::new(HashMap::new())),
+            app_config: self.app_config,
+            rejects: self.rejects,
         }
     }
 }
 
 impl<P: Simplex> HeaderMismatchInvariant<P> {
+    fn new(app_config: RandomizedConfig, rejects: fn(RandomizedConfig, &Ctx<P>) -> bool) -> Self {
+        Self {
+            verified_contexts: Arc::new(Mutex::new(HashMap::new())),
+            app_config,
+            rejects,
+        }
+    }
+
     fn record_verify(&self, context: Ctx<P>, digest: Sha256Digest) {
         self.verified_contexts
             .lock()
@@ -419,29 +457,31 @@ impl<P: Simplex> HeaderMismatchInvariant<P> {
         let Some(block) = mailbox.get_block(&digest).await else {
             return false;
         };
-        self.verified_contexts
+        let mismatch = self
+            .verified_contexts
             .lock()
             .get(&(round, digest))
-            .is_some_and(|contexts| contexts.iter().any(|context| context != &block.context()))
+            .is_some_and(|contexts| contexts.iter().any(|context| context != &block.context()));
+        mismatch && !(self.rejects)(self.app_config, &block.context())
     }
 }
 
 /// Passively observes the real [`Deferred`] automaton calls made by Simplex.
 ///
-/// The mock application accepts every well-formed block, so a failed certification
-/// after the same `(round, digest)` was verified under a context that differs from
-/// the block's embedded context means a header-scoped rejection leaked into the
-/// matching-header certification.
-struct ObservedDeferred<P: Simplex> {
+/// A failed certification after the same `(round, digest)` was verified under
+/// a context that differs from the block's embedded context means a
+/// header-scoped rejection leaked into matching-header certification, unless
+/// the selected application deliberately rejects the embedded context.
+struct ObservedDeferred<P: Simplex, A: TwinsBlockBuilder<P>> {
     validator: usize,
     probe_input: Arc<str>,
     context: Arc<Mutex<deterministic::Context>>,
-    inner: Builder<P>,
+    inner: Builder<P, A>,
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
     invariant: HeaderMismatchInvariant<P>,
 }
 
-impl<P: Simplex> Clone for ObservedDeferred<P> {
+impl<P: Simplex, A: TwinsBlockBuilder<P>> Clone for ObservedDeferred<P, A> {
     fn clone(&self) -> Self {
         Self {
             validator: self.validator,
@@ -454,7 +494,7 @@ impl<P: Simplex> Clone for ObservedDeferred<P> {
     }
 }
 
-impl<P: Simplex> Automaton for ObservedDeferred<P> {
+impl<P: Simplex, A: TwinsBlockBuilder<P>> Automaton for ObservedDeferred<P, A> {
     type Context = Ctx<P>;
     type Digest = Sha256Digest;
 
@@ -504,7 +544,7 @@ impl<P: Simplex> Automaton for ObservedDeferred<P> {
     }
 }
 
-impl<P: Simplex> CertifiableAutomaton for ObservedDeferred<P> {
+impl<P: Simplex, A: TwinsBlockBuilder<P>> CertifiableAutomaton for ObservedDeferred<P, A> {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         let result = self.inner.certify(round, digest).await;
         let (tx, rx) = oneshot::channel();
@@ -550,14 +590,14 @@ async fn register_engine_networks<P: Simplex>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_engine<P: Simplex, A>(
+fn start_engine<P: Simplex, A, App: TwinsBlockBuilder<P>>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     scheme: SchemeOf<P>,
     elector: crate::TwinsElector<P>,
     automaton: A,
-    relay: Builder<P>,
+    relay: Builder<P, App>,
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
     genesis: Sha256Digest,
     partition: String,
@@ -650,10 +690,11 @@ async fn wait_for_liveness<P: Simplex>(
     }
 }
 
-struct MarshalTwinsBackend<P: Simplex> {
+struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>> {
     input: MarshalTwinsInput,
     probe_input: Arc<str>,
-    _marker: std::marker::PhantomData<fn() -> P>,
+    app_config: RandomizedConfig,
+    _marker: std::marker::PhantomData<fn() -> (P, A)>,
 }
 
 struct MarshalTwinsState<P: Simplex> {
@@ -662,11 +703,23 @@ struct MarshalTwinsState<P: Simplex> {
     genesis: Sha256Digest,
 }
 
-impl<P: Simplex> MarshalTwinsBackend<P> {
+impl<P: Simplex, A: TwinsBlockBuilder<P>> MarshalTwinsBackend<P, A> {
     fn new(input: MarshalTwinsInput, probe_input: Arc<str>) -> Self {
+        let header_attack = matches!(
+            input.strategy,
+            StrategyChoice::HeaderScope { .. } | StrategyChoice::SplitHeader { .. }
+        );
+        let randomized_rounds = if header_attack {
+            input.rounds.max(4)
+        } else {
+            input.rounds
+        };
+        let mut rng = FuzzRng::new(input.raw_bytes.clone());
+        let app_config = RandomizedConfig::new(rng.random(), View::new(randomized_rounds.into()));
         Self {
             input,
             probe_input,
+            app_config,
             _marker: std::marker::PhantomData,
         }
     }
@@ -679,7 +732,7 @@ impl<P: Simplex> MarshalTwinsBackend<P> {
     }
 }
 
-impl<P: Simplex> TwinsBackend<P> for MarshalTwinsBackend<P> {
+impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsBackend<P> for MarshalTwinsBackend<P, A> {
     type State = MarshalTwinsState<P>;
     type Case = Option<AttackLayout>;
 
@@ -816,13 +869,15 @@ impl<P: Simplex> TwinsBackend<P> for MarshalTwinsBackend<P> {
             impl Receiver<PublicKey = PublicKeyOf<P>>,
         ),
     ) {
+        // The compromised primary may propose a block that the randomized
+        // honest application rejects; honest proposers never reject their own.
         let primary_builder = Deferred::new(
             context.child("deferred"),
             BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
             state.validators[idx].mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
         );
-        start_engine::<P, _>(
+        start_engine::<P, _, _>(
             context,
             oracle,
             validator,
@@ -860,15 +915,13 @@ impl<P: Simplex> TwinsBackend<P> for MarshalTwinsBackend<P> {
         topology: &TwinsTopology<P, Self::Case>,
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) {
-        let application = match topology.data {
+        let verification_delay = match topology.data {
             Some(layout) if layout.delayed_validators.contains(&idx) => {
-                BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::with_verification_delay(
-                    layout.precursor_view,
-                    ATTACK_VERIFY_DELAY,
-                )
+                Some((layout.precursor_view, ATTACK_VERIFY_DELAY))
             }
-            _ => BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
+            _ => None,
         };
+        let application = A::create(self.app_config, verification_delay);
         let builder = Deferred::new(
             context.child("deferred"),
             application,
@@ -878,15 +931,15 @@ impl<P: Simplex> TwinsBackend<P> for MarshalTwinsBackend<P> {
         state
             .honest
             .push((idx, state.validators[idx].application.clone()));
-        let observed: ObservedDeferred<P> = ObservedDeferred {
+        let observed: ObservedDeferred<P, A> = ObservedDeferred {
             validator: idx,
             probe_input: self.probe_input.clone(),
             context: Arc::new(Mutex::new(context.child("header_mismatch_invariant"))),
             inner: builder.clone(),
             mailbox: state.validators[idx].mailbox.clone(),
-            invariant: HeaderMismatchInvariant::default(),
+            invariant: HeaderMismatchInvariant::new(self.app_config, A::rejects),
         };
-        start_engine::<P, _>(
+        start_engine::<P, _, _>(
             context.child("honest"),
             oracle,
             validator,
@@ -931,7 +984,18 @@ impl<P: Simplex> TwinsBackend<P> for MarshalTwinsBackend<P> {
 
 /// Run one sampled end-to-end standard-marshal Twins mutator.
 pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
-    fuzz_marshal_twins_with::<SimplexCertificateMock>(input);
+    fuzz_marshal_twins_with::<
+        SimplexCertificateMock,
+        BlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
+    >(input);
+}
+
+/// Run standard-marshal Twins with input-derived application behavior.
+pub fn fuzz_marshal_twins_randomized_app(input: MarshalTwinsInput) {
+    fuzz_marshal_twins_with::<
+        SimplexCertificateMock,
+        RandomizedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
+    >(input);
 }
 
 /// Run the standard-marshal Twins mutator with ID crypto and the focused
@@ -941,10 +1005,12 @@ pub fn fuzz_marshal_twins_id_split_header(mut input: MarshalTwinsInput) {
         fault_rounds: input.rounds.into(),
         fault_rounds_bound: input.rounds.into(),
     };
-    fuzz_marshal_twins_with::<SimplexId>(input);
+    fuzz_marshal_twins_with::<SimplexId, BlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>>(
+        input,
+    );
 }
 
-fn fuzz_marshal_twins_with<P: Simplex>(input: MarshalTwinsInput) {
+fn fuzz_marshal_twins_with<P: Simplex, A: TwinsBlockBuilder<P>>(input: MarshalTwinsInput) {
     let probe_input: Arc<str> = if *VERIFY_PROBE {
         format!("{input:?}").into()
     } else {
@@ -955,7 +1021,7 @@ fn fuzz_marshal_twins_with<P: Simplex>(input: MarshalTwinsInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let mut backend = MarshalTwinsBackend::<P>::new(input, probe_input);
+        let mut backend = MarshalTwinsBackend::<P, A>::new(input, probe_input);
         run_twins_with_backend::<P, _>(&mut context, &mut backend).await;
     });
 }

@@ -33,7 +33,9 @@ mod twins;
 pub use engine::LiveMarshal;
 pub use input::{MarshalLivenessInput, MarshalTwinsInput};
 pub use runner::fuzz_marshal_liveness;
-pub use twins::{fuzz_marshal_twins, fuzz_marshal_twins_id_split_header};
+pub use twins::{
+    fuzz_marshal_twins, fuzz_marshal_twins_id_split_header, fuzz_marshal_twins_randomized_app,
+};
 
 /// Engine p2p channel ids, shared by the honest engines and Byzantine twins.
 /// Marshal hardcodes backfill=1 and broadcast=2 in `setup_validator_with`, so

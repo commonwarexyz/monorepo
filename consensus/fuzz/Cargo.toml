@@ -547,6 +547,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "marshal_multi_node_twins_randomized_app"
+path = "fuzz_targets/marshal_multi_node_twins_randomized_app.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "marshal_multi_node_twins_id_split_header"
 path = "fuzz_targets/marshal_multi_node_twins_id_split_header.rs"
 test = false

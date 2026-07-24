@@ -132,6 +132,7 @@ broadcast, and application-result transitions using structured libFuzzer input:
 cargo fuzz run marshal_inline_standard
 cargo fuzz run marshal_deferred_standard
 cargo fuzz run marshal_multi_node_twins_standard
+cargo fuzz run marshal_multi_node_twins_randomized_app
 cargo fuzz run marshal_multi_node_twins_id_split_header
 ```
 

@@ -24,7 +24,7 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    Digestible, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
+    Digestible, Hasher as _, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Clock as _, deterministic};
 use futures::StreamExt;
@@ -105,5 +105,146 @@ where
             runtime.sleep(delay).await;
         }
         true
+    }
+}
+
+const RANDOM_BUCKETS: u8 = 16;
+const PROPOSE_NONE_BUCKET: u8 = 0;
+const VERIFY_DELAY_BUCKETS: [u8; 2] = [0, 1];
+const VERIFY_REJECT_BUCKET: u8 = 2;
+
+/// Input-derived behavior shared by every randomized honest application.
+///
+/// Outcomes are keyed by consensus context rather than call order so honest
+/// validators make the same validity decision for the same proposal.
+#[derive(Clone, Copy)]
+pub(super) struct RandomizedConfig {
+    seed: u64,
+    randomized_through: View,
+}
+
+enum VerificationBehavior {
+    Delay(Duration),
+    Reject,
+    Accept,
+}
+
+impl RandomizedConfig {
+    pub(super) const fn new(seed: u64, randomized_through: View) -> Self {
+        Self {
+            seed,
+            randomized_through,
+        }
+    }
+
+    fn sample<C: Codec<Cfg = ()>>(&self, domain: &[u8], context: &C) -> Sha256Digest {
+        Sha256::hash(&[domain, &self.seed.to_be_bytes(), &context.encode()])
+    }
+
+    fn enabled<C: Viewable>(&self, context: &C) -> bool {
+        context.view() <= self.randomized_through
+    }
+
+    fn omit_proposal<C>(&self, context: &C) -> bool
+    where
+        C: Codec<Cfg = ()> + Viewable,
+    {
+        if !self.enabled(context) {
+            return false;
+        }
+        let sample = self.sample(b"marshal-fuzz-propose", context);
+        sample.as_ref()[0] % RANDOM_BUCKETS == PROPOSE_NONE_BUCKET
+    }
+
+    fn verification<C>(&self, context: &C) -> VerificationBehavior
+    where
+        C: Codec<Cfg = ()> + Viewable,
+    {
+        if !self.enabled(context) {
+            return VerificationBehavior::Accept;
+        }
+        let sample = self.sample(b"marshal-fuzz-verify", context);
+        let bytes: &[u8] = sample.as_ref();
+        match bytes[0] % RANDOM_BUCKETS {
+            bucket if VERIFY_DELAY_BUCKETS.contains(&bucket) => {
+                VerificationBehavior::Delay(Duration::from_secs(1 + u64::from(bytes[1] % 3)))
+            }
+            VERIFY_REJECT_BUCKET => VerificationBehavior::Reject,
+            _ => VerificationBehavior::Accept,
+        }
+    }
+
+    pub(super) fn rejects<C>(&self, context: &C) -> bool
+    where
+        C: Codec<Cfg = ()> + Viewable,
+    {
+        matches!(self.verification(context), VerificationBehavior::Reject)
+    }
+}
+
+/// Block-building application that explores transient construction failures,
+/// verification latency, and deterministic application rejection.
+pub(super) struct RandomizedBlockBuilderApp<C, S = DefaultSigningScheme> {
+    inner: BlockBuilderApp<C, S>,
+    config: RandomizedConfig,
+}
+
+impl<C, S> RandomizedBlockBuilderApp<C, S> {
+    pub(super) fn new(
+        config: RandomizedConfig,
+        verification_delay: Option<(View, Duration)>,
+    ) -> Self {
+        let inner = match verification_delay {
+            Some((view, delay)) => BlockBuilderApp::with_verification_delay(view, delay),
+            None => BlockBuilderApp::default(),
+        };
+        Self { inner, config }
+    }
+}
+
+impl<C, S> Clone for RandomizedBlockBuilderApp<C, S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            config: self.config,
+        }
+    }
+}
+
+impl<C, S> Application<deterministic::Context> for RandomizedBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
+    S: Scheme,
+{
+    type SigningScheme = S;
+    type Context = C;
+    type Block = Block<Sha256Digest, C>;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Option<Self::Block> {
+        // A proposer commits to verifying its own block, so skip contexts this
+        // application would permanently reject.
+        if self.config.rejects(&context.1) || self.config.omit_proposal(&context.1) {
+            return None;
+        }
+        self.inner.propose(context, ancestry, input).await
+    }
+
+    async fn verify(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        match self.config.verification(&context.1) {
+            VerificationBehavior::Delay(delay) => context.0.sleep(delay).await,
+            VerificationBehavior::Reject => return false,
+            VerificationBehavior::Accept => {}
+        }
+        self.inner.verify(context, ancestry).await
     }
 }
