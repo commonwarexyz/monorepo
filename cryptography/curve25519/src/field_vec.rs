@@ -1,39 +1,62 @@
-//! Eight field elements packed side by side, radix `2^52` (5 limbs spanning 260 bits, versus
-//! [`FieldElement`]'s radix `2^51`/255 bits): the layout batch signature verification's SIMD
-//! kernels operate on -- see the design notes' field layer section for why 52 rather than 51 (it
-//! matches the split point of the AVX-512 IFMA multiply-accumulate instructions, with no
-//! shift fixups needed between the low and high halves of a limb product).
+//! Eight field elements packed side by side in radix `2^51` -- the same radix as
+//! [`FieldElement`], so packing/unpacking is a pure lane transpose with no bit realignment -- the
+//! layout batch signature verification's SIMD kernels operate on.
 //!
-//! This module holds the *portable* (no target-feature-specific intrinsics) implementation: a
-//! straight loop over the 8 lanes, each doing the same radix-52 schoolbook multiply a vectorized
-//! backend would do 8-wide. It exists for three reasons: it is the correctness reference the
-//! accelerated backends are checked against, it is usable on every platform (including this
+//! # Why radix 51 (and not 52)
+//!
+//! AVX-512 IFMA's `vpmadd52lo`/`vpmadd52hi` split a limb product at bit 52, which makes radix
+//! `2^52` look natural (each product half lands exactly on a column boundary). An earlier version
+//! of this module used it. But 52-bit limbs are *saturated* from the multiplier's point of view:
+//! the instructions read exactly the low 52 bits of each input lane and silently discard anything
+//! above bit 51, so every multiply input had to be brought *strictly* below `2^52` first -- and
+//! because a carry into a limb could push it back over that exact boundary, reduction had to
+//! ripple *sequentially* through the limbs, three full passes' worth (~50 cycles of dependent
+//! latency per reduction site, measured on the EPYC 9354P this crate is tuned on; see
+//! `zen4_timing` results). That exact-boundary cliff was also the source of real silent-corruption
+//! bugs found on hardware.
+//!
+//! At radix `2^51` every limb keeps one spare bit below the multiplier's 52-bit ceiling. That
+//! turns reduction into a *single parallel pass* (all five carry-outs computed at once from the
+//! original limbs, all five masks applied at once, all five carry-ins added at once -- ~9 cycles
+//! measured, no ripple), and it means a freshly reduced value sits at `~2^51`, a factor of two
+//! below the IFMA cliff instead of one ULP below it. Additions and subtractions then never need
+//! their own carry: raw limb-wise sums accumulate a few bits of looseness, and the single parallel
+//! pass before the next multiply absorbs all of it at once. The price is that a product half split
+//! at bit 52 no longer lands on a column boundary (weight `2^(51(i+j)) * 2^52 = 2 *
+//! 2^(51(i+j+1))`), so high halves carry a coefficient of 2 -- handled by accumulating low-half
+//! and high-half terms in separate register chains and combining with one shift-free doubling add
+//! at the end (see [`avx512::mul_regs_loose`]). The multiply-accumulate count is unchanged (25
+//! `vpmadd52lo` + 25 `vpmadd52hi`, exactly as at radix 52).
+//!
+//! The `2^255 = 19` wraparound fold is computed as `19*z = (z << 4) + (z << 1) + z` -- plain
+//! shifts and adds -- rather than `vpmullq` (fast on Zen 4/5, slow on Intel) or extra IFMA
+//! operations (cheap on Intel's two 512-bit FMA ports, expensive on double-pumped Zen 4's one):
+//! shift/add is cheap on every AVX-512 core, so one code path serves all of them.
+//!
+//! This module holds the *portable* (no target-feature-specific intrinsics) implementation, which
+//! simply delegates to [`FieldElement`]'s scalar arithmetic lane by lane -- possible precisely
+//! because the radix now matches. It exists for three reasons: it is the correctness reference the
+//! accelerated backend is checked against, it is usable on every platform (including this
 //! development machine, which has no AVX-512), and it is the actual fallback path wherever no
 //! faster backend applies.
 //!
 //! # `Reduced` vs. `Unreduced`
 //!
 //! Two types represent the same physical layout (five rows of eight `u64` limbs) but carry
-//! different guarantees, because AVX-512's `vpmadd52lo`/`vpmadd52hi` instructions are far less
-//! forgiving than they look: they operate on *exactly* the low 52 bits of each 64-bit input lane,
-//! silently discarding anything above bit 51, whereas the portable backend's `u128` arithmetic
-//! tolerates a "loose" (not perfectly bounded) input of any reasonable width. A value with even
-//! one limb at bit 52 or higher, fed into [`avx512::mul`]/[`avx512::square`], produces a silently
-//! wrong result on real hardware -- confirmed by running this crate's test suite on an actual
-//! AVX-512 machine, not just cross-compiling and reasoning about the assembly.
+//! different guarantees:
 //!
-//! - [`Reduced`]: every limb is *strictly* less than `2^52`. The only type [`Reduced::mul`]/
-//!   [`Reduced::square`] accept, and the only type they produce, so multiplying/squaring is safe
-//!   to chain indefinitely (e.g. [`Reduced::pow_p58`]'s 251 chained squarings) without an
-//!   intermediate reduction. Obtained from an [`Unreduced`] only via [`Unreduced::reduce`].
-//! - [`Unreduced`]: no bound beyond fitting in a `u64` limb without overflowing during `add`/`sub`.
-//!   The natural result of [`Unreduced::add`]/[`Unreduced::sub`] (`vpaddq`/`vpsubq` tolerate any
-//!   reasonable input width, unlike the IFMA instructions), and of packing raw field elements via
-//!   [`Unreduced::from_lanes`]. A [`Reduced`] value casts to [`Unreduced`] for free (`From`) since
-//!   its bound is strictly tighter than `Unreduced` requires; going the other way needs an actual
-//!   reduction. Operations that consume two `Reduced` operands but don't themselves preserve the
-//!   `<2^52` bound (`add`, `sub`) are implemented directly on [`Reduced`] too, for convenience,
-//!   simply by casting both sides to `Unreduced` first -- see [`Reduced::add`]/[`Reduced::sub`].
+//! - [`Reduced`]: every limb is at most [`REDUCED_BOUND`] (`2^51 + 2^17`, comfortably below the
+//!   IFMA instructions' hard `2^52` input ceiling). The only type [`Reduced::mul`]/
+//!   [`Reduced::square`] accept, so multiplying/squaring is safe to chain indefinitely (e.g.
+//!   [`Reduced::pow_p58`]'s 251 chained squarings). Obtained from an [`Unreduced`] only via
+//!   [`Unreduced::reduce`], a single parallel carry pass.
+//! - [`Unreduced`]: limbs may run a few bits over 51 (every public constructor keeps them below
+//!   `~2^53`; the fused AVX-512 kernels privately track looser intermediates up to `~2^60`, per-
+//!   call-site -- see [`avx512`]). The natural result of [`Unreduced::add`]/[`Unreduced::sub`] and
+//!   of packing raw field elements via [`Unreduced::from_lanes`]. A [`Reduced`] value casts to
+//!   [`Unreduced`] for free (`From`); going the other way costs the one-pass [`Unreduced::reduce`].
+//!   Operations that consume two `Reduced` operands but don't preserve the reduced bound (`add`,
+//!   `sub`) are implemented on [`Reduced`] too, by casting both sides to `Unreduced` first.
 
 use crate::field::FieldElement;
 
@@ -64,23 +87,45 @@ pub(crate) fn simd_available() -> bool {
     }
 }
 
-const MASK_52: u64 = (1 << 52) - 1;
+const MASK_51: u64 = (1 << 51) - 1;
 
-/// `2^260 mod p`, used to fold a radix-52 schoolbook multiply's overflow (5 limbs span 260 bits,
-/// 5 more than `p`'s 255) back in: `2^260 = 2^5 * 2^255 = 32*(p + 19) = 32p + 608`, so
-/// `2^260 ≡ 608 (mod p)`.
-const FOLD_608: u64 = 608;
+/// Upper bound (inclusive) on every limb of a [`Reduced`] value: `2^51 + 2^17`.
+///
+/// Derivation: [`reduce_limbs`] (and its vectorized counterpart) accepts any input with limbs
+/// `<= 2^63`, computes carry-outs `c_i = l_i >> 51 <= 2^12`, and produces `(l_i & MASK_51) +
+/// c_{i-1} <= 2^51 - 1 + 2^12` for limbs 1-4 and `(l_0 & MASK_51) + 19*c_4 <= 2^51 - 1 + 19*2^12
+/// < 2^51 + 2^17` for limb 0. Every limb is therefore strictly below `2^52`, the IFMA multiply
+/// instructions' hard input ceiling, with roughly a factor-of-two margin -- unlike the radix-52
+/// predecessor of this module, which lived exactly one ULP below that cliff (see the module docs).
+pub(crate) const REDUCED_BOUND: u64 = (1 << 51) + (1 << 17);
 
-/// Radix-`2^52` limbs with no bound guarantee beyond fitting in a `u64` per limb without
-/// overflowing across a single `add`/`sub`. See the module docs for why this is split from
-/// [`Reduced`].
+/// `16*p` decomposed limb-wise at radix 51 (the same constant [`FieldElement::sub`] uses):
+/// added before a limb-wise subtraction so every limb stays non-negative without changing the
+/// value mod `p`. Every limb is `~2^55`, comfortably above any operand this module's subtractions
+/// ever see on the right-hand side (public [`Unreduced`] values are `< 2^53`; the fused kernels
+/// only ever subtract [`Reduced`]-quality right-hand operands -- see [`avx512`]) and small enough
+/// that even a loose (`~2^60`) left-hand operand plus this bias stays far from `u64` overflow.
+/// Only the AVX-512 backend subtracts limb-wise; the portable path delegates to
+/// [`FieldElement::sub`], which carries its own copy of this constant.
+#[cfg(target_arch = "x86_64")]
+const SUB_BIAS: [u64; 5] = [
+    16 * ((1u64 << 51) - 19),
+    16 * ((1u64 << 51) - 1),
+    16 * ((1u64 << 51) - 1),
+    16 * ((1u64 << 51) - 1),
+    16 * ((1u64 << 51) - 1),
+];
+
+/// Radix-`2^51` limbs with no bound guarantee beyond every public constructor's documented
+/// looseness (`< ~2^53` per limb; see the type-level docs in this module's header). See the module
+/// docs for why this is split from [`Reduced`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Unreduced {
     limbs: [[u64; LANES]; 5],
 }
 
-/// Radix-`2^52` limbs, every one strictly less than `2^52`. See the module docs for why this is
-/// split from [`Unreduced`].
+/// Radix-`2^51` limbs, every one at most [`REDUCED_BOUND`] -- safe as an IFMA multiply input. See
+/// the module docs for why this is split from [`Unreduced`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Reduced {
     limbs: [[u64; LANES]; 5],
@@ -94,187 +139,47 @@ impl From<Reduced> for Unreduced {
 
 #[cfg(all(test, target_arch = "x86_64"))]
 impl Reduced {
-    /// Constructs a `Reduced` from exact limbs, bit for bit, with no repacking -- for
-    /// reproducing a specific known bit pattern in a regression test (see
-    /// [`avx512::tests::mul_matches_portable_for_known_bad_value_on_real_hardware`]), which a
-    /// round trip through [`Unreduced::from_lanes`]/[`Unreduced::reduce`] cannot guarantee, since
-    /// multiple loose representations can encode the same value.
+    /// Constructs a `Reduced` from exact limbs, bit for bit, with no repacking -- for driving the
+    /// AVX-512 backend's adversarial worst-case tests (limbs at exactly [`REDUCED_BOUND`], a bit
+    /// pattern [`Unreduced::reduce`] rarely produces organically).
     pub(crate) fn from_raw_limbs_for_test(limbs: [[u64; LANES]; 5]) -> Self {
         Self { limbs }
     }
 }
 
-/// One ripple-carry pass: propagates each limb's overflow past bit 52 into the next, folding the
-/// final overflow (past bit 260) back in via `2^260 = 608`. Leaves every limb `< 2^52` *except*
-/// limb 1, which may be exactly `2^52` (the final `l[1] += l[0] >> 52` has no subsequent mask) --
-/// this is why a single pass is an [`Unreduced`]-to-`Unreduced` operation, not a path to
-/// [`Reduced`]; see [`reduce`] for the latter.
-const fn carry(mut l: [u64; 5]) -> [u64; 5] {
-    l[1] += l[0] >> 52;
-    l[0] &= MASK_52;
-    l[2] += l[1] >> 52;
-    l[1] &= MASK_52;
-    l[3] += l[2] >> 52;
-    l[2] &= MASK_52;
-    l[4] += l[3] >> 52;
-    l[3] &= MASK_52;
-    l[0] += (l[4] >> 52) * FOLD_608;
-    l[4] &= MASK_52;
-    l[1] += l[0] >> 52;
-    l[0] &= MASK_52;
-    l
-}
-
-/// Fully reduces radix-`2^52` limbs so every one is *strictly* `< 2^52` -- safe to feed into
-/// AVX-512's `vpmadd52lo`/`vpmadd52hi`, which [`carry`] alone is not (see the module docs and
-/// [`carry`]'s own doc comment for why). Three [`carry`] passes: exact worst-case bound propagation
-/// shows a single pass reaches a fixed point where every limb but one is already strictly bounded,
-/// leaving only limb 1 possibly exactly at `2^52`; concrete (non-interval) adversarial search found
-/// many inputs hitting that exact boundary after one pass, and a second pass resolved every one of
-/// them (see `reduce_settles_adversarial_boundary_cases` below, built from those exact search
-/// results); the third pass is margin, not load-bearing by that evidence. This is not a closed-form
-/// proof that a third occurrence is impossible, but the same test exercises this function directly
-/// against the concrete cases that motivated it.
+/// One parallel carry pass, the entire reduction at radix 51: all five carry-outs are computed
+/// from the *original* limbs (no ripple -- the spare bit below the multiplier's 52-bit ceiling is
+/// what makes one pass sufficient; see the module docs), all five limbs masked, and all five
+/// carry-ins added, with limb 4's carry folded onto limb 0 via `2^255 = 19 (mod p)`. Accepts any
+/// input with limbs `<= 2^63` and produces limbs `<= REDUCED_BOUND` (see that constant's
+/// derivation).
 const fn reduce_limbs(l: [u64; 5]) -> [u64; 5] {
-    carry(carry(carry(l)))
-}
-
-/// Re-expresses a radix-`2^52` value as radix-`2^51` limbs (the inverse bit realignment of
-/// [`from_radix_51`]), landing any bits past position 255 (i.e. `f[4] >> 47`) back in via
-/// `2^255 ≡ 19`. Every term is combined with addition rather than OR, so this tolerates "loose"
-/// (not perfectly bounded, e.g. a limb running a couple of bits over its nominal width) input the
-/// same way [`FieldElement`]'s own arithmetic does -- a carry that OR would silently drop instead
-/// lands correctly. The result is itself loose in exactly that same sense; that is fine, since
-/// downstream [`FieldElement`] arithmetic (and [`FieldElement::to_bytes`]/[`FieldElement::eq`] for
-/// final output) already normalizes loose values, same as any other `FieldElement` this crate
-/// produces.
-const fn to_radix_51(f: [u64; 5]) -> [u64; 5] {
-    const MASK_51: u64 = (1 << 51) - 1;
     [
-        (f[0] & MASK_51) + (f[4] >> 47) * 19,
-        (f[0] >> 51) + ((f[1] & ((1u64 << 50) - 1)) << 1),
-        (f[1] >> 50) + ((f[2] & ((1u64 << 49) - 1)) << 2),
-        (f[2] >> 49) + ((f[3] & ((1u64 << 48) - 1)) << 3),
-        (f[3] >> 48) + ((f[4] & ((1u64 << 47) - 1)) << 4),
+        (l[0] & MASK_51) + 19 * (l[4] >> 51),
+        (l[1] & MASK_51) + (l[0] >> 51),
+        (l[2] & MASK_51) + (l[1] >> 51),
+        (l[3] & MASK_51) + (l[2] >> 51),
+        (l[4] & MASK_51) + (l[3] >> 51),
     ]
 }
 
-/// The inverse of [`to_radix_51`]: re-expresses a radix-`2^51` value as radix-`2^52` limbs. Like
-/// `to_radix_51`, this combines every term with addition (not OR) so it tolerates the same "loose"
-/// limbs [`FieldElement`]'s own arithmetic produces -- unlike a round trip through
-/// [`FieldElement::to_bytes`]/[`FieldElement::from_bytes`], neither this nor `to_radix_51` does any
-/// modular reduction, which is what makes them cheap enough to use in a hot loop (e.g. once per
-/// MSM bucket update; see [`Unreduced::from_lanes`]/[`Unreduced::to_lanes`]).
-const fn from_radix_51(e: [u64; 5]) -> [u64; 5] {
-    [
-        e[0] + ((e[1] & 1) << 51),
-        (e[1] >> 1) + ((e[2] & 0b11) << 50),
-        (e[2] >> 2) + ((e[3] & 0b111) << 49),
-        (e[3] >> 3) + ((e[4] & 0b1111) << 48),
-        e[4] >> 4,
-    ]
-}
-
-/// `16*p` decomposed the same way any redundant radix-`2^52` value would be, analogous to
-/// [`FieldElement`]'s own `SUB_BIAS`: `2^260 - 608 = 32p` (see [`FOLD_608`]), so
-/// `16*(2^52 - 608) + 16*(2^52-1)*(2^52+2^104+2^156+2^208) = 16*(2^260 - 608) = 512p`, an exact
-/// multiple of `p`, with every limb comfortably above any legal rhs limb (`< 2^52`).
-const SUB_BIAS: [u64; 5] = [
-    16 * ((1u64 << 52) - 608),
-    16 * ((1u64 << 52) - 1),
-    16 * ((1u64 << 52) - 1),
-    16 * ((1u64 << 52) - 1),
-    16 * ((1u64 << 52) - 1),
-];
-
-/// `2 * EDWARDS_D`, radix-`2^52`, fully [`reduce_limbs`]-reduced, computed once at compile time --
-/// doubling each radix-`2^51` limb directly (rather than via `FieldElement::add`) is a "loose" but
-/// value-preserving radix-51 representation of `2*d`, which [`from_radix_51`] tolerates the same
-/// way it tolerates any other loose input (see its doc comment); `reduce_limbs` then brings it
-/// under the strict `< 2^52` bound [`Reduced::mul`] requires. Used by [`avx512::point_add`] so the
-/// fused point-addition formula never has to compute this per call -- `PointVec::add`'s own
-/// (non-fused, portable-only) formula used to via `Unreduced::splat(FieldElement::EDWARDS_D).
-/// reduce()` on every call.
+/// `2 * EDWARDS_D` splatted across all lanes, fully reduced at compile time. Used by
+/// [`avx512::point_add`] so the fused point-addition formula never has to compute this per call.
+/// [`FieldElement::EDWARDS_D2`]'s limbs are already carry-propagated (`const` addition ends in a
+/// carry), well under [`REDUCED_BOUND`]; with the radices now matching, splatting is a plain copy.
 #[cfg(target_arch = "x86_64")]
 pub(crate) const EDWARDS_D_TIMES_2: Reduced = {
-    let d = FieldElement::EDWARDS_D.0;
-    let doubled = [d[0] * 2, d[1] * 2, d[2] * 2, d[3] * 2, d[4] * 2];
-    let limbs52 = reduce_limbs(from_radix_51(doubled));
+    let d2 = FieldElement::EDWARDS_D2.0;
     Reduced {
         limbs: [
-            [limbs52[0]; LANES],
-            [limbs52[1]; LANES],
-            [limbs52[2]; LANES],
-            [limbs52[3]; LANES],
-            [limbs52[4]; LANES],
+            [d2[0]; LANES],
+            [d2[1]; LANES],
+            [d2[2]; LANES],
+            [d2[3]; LANES],
+            [d2[4]; LANES],
         ],
     }
 };
-
-/// Multiplies two single lanes' worth of radix-`2^52` limbs via schoolbook multiplication, folding
-/// overflow past 260 bits back in via [`FOLD_608`] using the same "pre-fold `b`'s upper limbs"
-/// technique as [`FieldElement::mul`] (there, folding via 19 at the 255-bit wraparound; here via
-/// 608 at the 260-bit one). Returns fully [`reduce_limbs`]-reduced output: every limb `< 2^52`.
-fn mul_lane(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
-    let b1_f = b[1] * FOLD_608;
-    let b2_f = b[2] * FOLD_608;
-    let b3_f = b[3] * FOLD_608;
-    let b4_f = b[4] * FOLD_608;
-
-    let m = |x: u64, y: u64| (x as u128) * (y as u128);
-
-    let c0 = m(a[0], b[0]) + m(a[1], b4_f) + m(a[2], b3_f) + m(a[3], b2_f) + m(a[4], b1_f);
-    let c1 = m(a[0], b[1]) + m(a[1], b[0]) + m(a[2], b4_f) + m(a[3], b3_f) + m(a[4], b2_f);
-    let c2 = m(a[0], b[2]) + m(a[1], b[1]) + m(a[2], b[0]) + m(a[3], b4_f) + m(a[4], b3_f);
-    let c3 = m(a[0], b[3]) + m(a[1], b[2]) + m(a[2], b[1]) + m(a[3], b[0]) + m(a[4], b4_f);
-    let c4 = m(a[0], b[4]) + m(a[1], b[3]) + m(a[2], b[2]) + m(a[3], b[1]) + m(a[4], b[0]);
-
-    let mask = MASK_52 as u128;
-    let c1 = c1 + (c0 >> 52);
-    let c0 = (c0 & mask) as u64;
-    let c2 = c2 + (c1 >> 52);
-    let c1 = (c1 & mask) as u64;
-    let c3 = c3 + (c2 >> 52);
-    let c2 = (c2 & mask) as u64;
-    let c4 = c4 + (c3 >> 52);
-    let c3 = (c3 & mask) as u64;
-    let carry4 = (c4 >> 52) as u64;
-    let c4 = (c4 & mask) as u64;
-
-    reduce_limbs([c0 + carry4 * FOLD_608, c1, c2, c3, c4])
-}
-
-/// Squares a single lane's worth of radix-`2^52` limbs. Dedicated formula rather than
-/// `mul_lane(a, a)`, mirroring [`FieldElement::square`] at radix 52 instead of 51: every cross
-/// term `a[i]*a[j]` (`i != j`) is computed once and doubled instead of computed twice, 15 limb
-/// multiplies here versus 25 in [`mul_lane`]. Returns fully [`reduce_limbs`]-reduced output: every
-/// limb `< 2^52`.
-fn square_lane(a: [u64; 5]) -> [u64; 5] {
-    let a3_f = a[3] * FOLD_608;
-    let a4_f = a[4] * FOLD_608;
-
-    let m = |x: u64, y: u64| (x as u128) * (y as u128);
-
-    let c0 = m(a[0], a[0]) + 2 * (m(a[1], a4_f) + m(a[2], a3_f));
-    let c1 = m(a[3], a3_f) + 2 * (m(a[0], a[1]) + m(a[2], a4_f));
-    let c2 = m(a[1], a[1]) + 2 * (m(a[0], a[2]) + m(a[4], a3_f));
-    let c3 = m(a[4], a4_f) + 2 * (m(a[0], a[3]) + m(a[1], a[2]));
-    let c4 = m(a[2], a[2]) + 2 * (m(a[0], a[4]) + m(a[1], a[3]));
-
-    let mask = MASK_52 as u128;
-    let c1 = c1 + (c0 >> 52);
-    let c0 = (c0 & mask) as u64;
-    let c2 = c2 + (c1 >> 52);
-    let c1 = (c1 & mask) as u64;
-    let c3 = c3 + (c2 >> 52);
-    let c2 = (c2 & mask) as u64;
-    let c4 = c4 + (c3 >> 52);
-    let c3 = (c3 & mask) as u64;
-    let carry4 = (c4 >> 52) as u64;
-    let c4 = (c4 & mask) as u64;
-
-    reduce_limbs([c0 + carry4 * FOLD_608, c1, c2, c3, c4])
-}
 
 impl Unreduced {
     /// Packs eight copies of the same field element into one `Unreduced`.
@@ -282,33 +187,26 @@ impl Unreduced {
         Self::from_lanes(&[value; LANES])
     }
 
-    /// Packs eight field elements into one `Unreduced`, via the cheap [`from_radix_51`] bit
-    /// realignment -- no modular reduction, so this is fast enough to call in a hot loop (e.g.
-    /// once per MSM bucket update), unlike a round trip through [`FieldElement::to_bytes`]. Not
-    /// `Reduced` directly: a source limb sitting at [`FieldElement`]'s own loose upper bound can,
-    /// after this bit realignment, land at exactly `2^52`, one past `Reduced`'s bound; callers
-    /// that need `Reduced` call [`Unreduced::reduce`] on the result.
+    /// Packs eight field elements into one `Unreduced`. With the radix matching
+    /// [`FieldElement`]'s, this is a pure transpose -- no bit realignment, no reduction -- so any
+    /// "loose" limbs a `FieldElement` carries (a few bits over 51, the normal state between scalar
+    /// operations) transfer verbatim, comfortably inside this type's invariant.
     pub(crate) fn from_lanes(lanes: &[FieldElement; LANES]) -> Self {
         let mut limbs = [[0u64; LANES]; 5];
         for (i, lane) in lanes.iter().enumerate() {
-            let f = from_radix_51(lane.0);
-            for (row, value) in limbs.iter_mut().zip(f) {
+            for (row, value) in limbs.iter_mut().zip(lane.0) {
                 row[i] = value;
             }
         }
         Self { limbs }
     }
 
-    /// Unpacks this value back into eight field elements, via the cheap [`to_radix_51`] bit
-    /// realignment -- the result is "loose" the same way any [`FieldElement`] arithmetic result
-    /// is loose (not necessarily the canonical representative in `[0, p)`), which is fine: callers
-    /// that need a canonical answer already call [`FieldElement::to_bytes`] or
-    /// [`FieldElement::eq`], same as with any other loose `FieldElement`.
+    /// Unpacks this value back into eight field elements: the inverse transpose of
+    /// [`Unreduced::from_lanes`]. The results are "loose" the same way any [`FieldElement`]
+    /// arithmetic result is (not necessarily canonical in `[0, p)`), which is fine: callers that
+    /// need a canonical answer already call [`FieldElement::to_bytes`] or [`FieldElement::eq`].
     pub(crate) fn to_lanes(self) -> [FieldElement; LANES] {
-        core::array::from_fn(|i| {
-            let f = core::array::from_fn(|limb| self.limbs[limb][i]);
-            FieldElement(to_radix_51(f))
-        })
+        core::array::from_fn(|i| FieldElement(core::array::from_fn(|limb| self.limbs[limb][i])))
     }
 
     /// Adds two values, dispatching to the AVX-512 backend when the running CPU supports it and
@@ -324,15 +222,7 @@ impl Unreduced {
     }
 
     fn add_portable(&self, rhs: &Self) -> Self {
-        let mut limbs = [[0u64; LANES]; 5];
-        for ((out_row, a_row), b_row) in limbs.iter_mut().zip(&self.limbs).zip(&rhs.limbs) {
-            for ((out, a), b) in out_row.iter_mut().zip(a_row).zip(b_row) {
-                *out = a + b;
-            }
-        }
-        let mut out = Self { limbs };
-        out.carry_in_place();
-        out
+        self.zip_lanes(rhs, |a, b| a.add(&b))
     }
 
     /// Subtracts two values, dispatching to the AVX-512 backend when the running CPU supports it
@@ -348,36 +238,27 @@ impl Unreduced {
     }
 
     fn sub_portable(&self, rhs: &Self) -> Self {
-        let mut limbs = [[0u64; LANES]; 5];
-        for (((out_row, a_row), b_row), bias) in limbs
-            .iter_mut()
-            .zip(&self.limbs)
-            .zip(&rhs.limbs)
-            .zip(SUB_BIAS)
-        {
-            for ((out, a), b) in out_row.iter_mut().zip(a_row).zip(b_row) {
-                *out = a + bias - b;
-            }
-        }
-        let mut out = Self { limbs };
-        out.carry_in_place();
-        out
+        self.zip_lanes(rhs, |a, b| a.sub(&b))
     }
 
-    fn carry_in_place(&mut self) {
-        for i in 0..LANES {
-            let l = core::array::from_fn(|limb| self.limbs[limb][i]);
-            let c = carry(l);
-            for (row, value) in self.limbs.iter_mut().zip(c) {
-                row[i] = value;
-            }
-        }
+    /// Applies a scalar [`FieldElement`] binary operation lane by lane -- the entire portable
+    /// backend for `add`/`sub`/`mul`/`square`, made possible by the radices matching (see the
+    /// module docs). Perf is a non-goal here: this path only runs where no vector backend exists,
+    /// and correctness-by-obviousness (one shared scalar implementation) is worth more than a
+    /// hand-unrolled second copy of the arithmetic.
+    fn zip_lanes(
+        &self,
+        rhs: &Self,
+        op: impl Fn(FieldElement, FieldElement) -> FieldElement,
+    ) -> Self {
+        let a = self.to_lanes();
+        let b = rhs.to_lanes();
+        Self::from_lanes(&core::array::from_fn(|i| op(a[i], b[i])))
     }
 
-    /// Fully reduces every lane so each of its 5 limbs is strictly `< 2^52` -- the only way to
-    /// obtain a [`Reduced`] value, and the only thing that makes it safe to feed into
-    /// [`Reduced::mul`]/[`Reduced::square`]'s AVX-512 backend. See [`reduce_limbs`] for why three
-    /// passes.
+    /// Reduces every lane to [`Reduced`]'s bound via one parallel carry pass (see
+    /// [`reduce_limbs`]) -- the only way to obtain a [`Reduced`] value, and what makes it safe to
+    /// feed into [`Reduced::mul`]/[`Reduced::square`]'s AVX-512 backend.
     pub(crate) fn reduce(&self) -> Reduced {
         #[cfg(target_arch = "x86_64")]
         if avx512::available() {
@@ -402,14 +283,14 @@ impl Unreduced {
 }
 
 impl Reduced {
-    /// `LANES` copies of zero, every limb trivially `< 2^52`.
+    /// `LANES` copies of zero, every limb trivially within bound.
     pub(crate) const ZERO: Self = Self {
         limbs: [[0; LANES]; 5],
     };
 
-    /// Adds two `Reduced` values. The sum is not itself guaranteed `< 2^52` per limb, so the
-    /// result is [`Unreduced`]; callers needing to multiply/square it call [`Unreduced::reduce`]
-    /// first.
+    /// Adds two `Reduced` values. The sum is not itself guaranteed to stay within [`Reduced`]'s
+    /// bound, so the result is [`Unreduced`]; callers needing to multiply/square it call
+    /// [`Unreduced::reduce`] first.
     pub(crate) fn add(&self, rhs: &Self) -> Unreduced {
         Unreduced::from(*self).add(&Unreduced::from(*rhs))
     }
@@ -442,17 +323,13 @@ impl Reduced {
         self.mul_portable(rhs)
     }
 
-    fn mul_portable(&self, rhs: &Self) -> Self {
-        let mut limbs = [[0u64; LANES]; 5];
-        for i in 0..LANES {
-            let a = core::array::from_fn(|limb| self.limbs[limb][i]);
-            let b = core::array::from_fn(|limb| rhs.limbs[limb][i]);
-            let c = mul_lane(a, b);
-            for (row, value) in limbs.iter_mut().zip(c) {
-                row[i] = value;
-            }
-        }
-        Self { limbs }
+    pub(crate) fn mul_portable(&self, rhs: &Self) -> Self {
+        // `FieldElement::mul` tolerates limbs a few bits over 51 (its `19*b` prefolds and `u128`
+        // column sums have ample headroom for anything within `REDUCED_BOUND`) and its output is
+        // carry-propagated, i.e. within `REDUCED_BOUND` again.
+        Unreduced::from(*self)
+            .zip_lanes(&Unreduced::from(*rhs), |a, b| a.mul(&b))
+            .assume_reduced()
     }
 
     /// Squares a `Reduced` value, dispatching to the AVX-512 IFMA backend when the running CPU
@@ -468,16 +345,11 @@ impl Reduced {
         self.square_portable()
     }
 
-    fn square_portable(&self) -> Self {
-        let mut limbs = [[0u64; LANES]; 5];
-        for i in 0..LANES {
-            let a = core::array::from_fn(|limb| self.limbs[limb][i]);
-            let c = square_lane(a);
-            for (row, value) in limbs.iter_mut().zip(c) {
-                row[i] = value;
-            }
-        }
-        Self { limbs }
+    pub(crate) fn square_portable(&self) -> Self {
+        // Same bound reasoning as `mul_portable`.
+        Unreduced::from(*self)
+            .zip_lanes(&Unreduced::from(*self), |a, _| a.square())
+            .assume_reduced()
     }
 
     /// Squares every lane `k` times in a row.
@@ -513,6 +385,22 @@ impl Reduced {
     /// multiply loop over this exponent's mostly-`1` bits (~252 squarings + ~251 multiplications).
     pub(crate) fn pow_p58(&self) -> Self {
         self.mul(&self.pow_2_250_minus_1().pow2k(2))
+    }
+}
+
+impl Unreduced {
+    /// Reinterprets this value as [`Reduced`] without running a reduction. Only for use by
+    /// operations whose per-lane arithmetic already guarantees the [`REDUCED_BOUND`] limb bound
+    /// (the portable `mul`/`square`, whose [`FieldElement`] kernels end in a carry propagation)
+    /// -- never a substitute for [`Unreduced::reduce`].
+    fn assume_reduced(self) -> Reduced {
+        debug_assert!(
+            self.limbs
+                .iter()
+                .all(|row| row.iter().all(|&limb| limb <= REDUCED_BOUND)),
+            "assume_reduced on a value outside REDUCED_BOUND"
+        );
+        Reduced { limbs: self.limbs }
     }
 }
 
@@ -689,65 +577,51 @@ mod tests {
         }
     }
 
-    /// Every limb of a [`Reduced`] value must be strictly `< 2^52` -- the whole point of the
-    /// type. `Unreduced::reduce` (backed by [`reduce_limbs`]) is the only way to produce one, so
-    /// this is the type's core safety property, checked here over many random inputs.
+    /// Every limb of a [`Reduced`] value must be at most [`REDUCED_BOUND`] -- the whole point of
+    /// the type. `Unreduced::reduce` (backed by [`reduce_limbs`]) is the only way to produce one,
+    /// so this is the type's core safety property, checked here over many random inputs.
     #[test]
-    fn reduce_produces_strictly_bounded_limbs() {
+    fn reduce_produces_bounded_limbs() {
         let mut rng = test_rng();
         for _ in 0..256 {
             let a = rand_lanes(&mut rng);
             let reduced = Unreduced::from_lanes(&a).reduce();
             for row in reduced.limbs {
                 for limb in row {
-                    assert!(limb < (1u64 << 52));
+                    assert!(limb <= REDUCED_BOUND);
                 }
             }
         }
     }
 
-    /// [`reduce_limbs`] against the exact adversarial cases found by deliberately constructing
-    /// 5-limb inputs designed to leave limb 1 at exactly `2^52` after one [`carry`] pass (the one
-    /// limb [`carry`]'s own doc comment says is not necessarily masked) -- see the design
-    /// analysis this crate's AVX-512 correctness fix was based on. A single [`carry`] pass landing
-    /// exactly on this boundary is the exact failure mode that silently corrupted AVX-512 results
-    /// (`vpmadd52lo`/`vpmadd52hi` truncate a `2^52` limb to zero); this checks `reduce_limbs`
-    /// (three passes) resolves every one of them to a strictly bounded value congruent to the
-    /// original mod `p`.
+    /// [`reduce_limbs`] at its documented worst case: every limb at the maximum the function
+    /// accepts (`2^63`), checking both the output bound ([`REDUCED_BOUND`]) and value congruence
+    /// mod `p`. At radix 51 there is no exact-boundary cliff to hunt for adversarially (the
+    /// radix-52 predecessor needed hand-constructed inputs that landed a limb at exactly `2^52`
+    /// after one ripple pass); the single parallel pass's bound follows directly from the carry
+    /// arithmetic, checked here at its extreme.
     #[test]
-    fn reduce_settles_adversarial_boundary_cases() {
-        const MASK: u64 = (1u64 << 52) - 1;
-        const B: u64 = 1u64 << 52;
-
-        // Each case: (l0, l1, l2, l3, l4) engineered so that, after one `carry()` pass, limb 1
-        // lands at exactly `2^52` (found via the exact/concrete search described in the design
-        // analysis, not sampled randomly; verified against a Python model of `carry()` before
-        // being hardcoded here).
+    fn reduce_handles_maximum_looseness() {
         let cases: &[[u64; 5]] = &[
-            [B - 608, B - 1, B - 1, B - 1, B],
-            [B - 1, B - 1, B - 1, B - 1, 1u64 << 60],
-            [B - 1000, B - 1, B - 1, B - 1, (1u64 << 60) + 12345],
+            [1u64 << 63; 5],
+            [(1u64 << 63) - 1; 5],
+            [
+                u64::MAX >> 1,
+                MASK_51,
+                u64::MAX >> 1,
+                MASK_51,
+                u64::MAX >> 1,
+            ],
+            [0, 0, 0, 0, 1u64 << 63],
         ];
-
         for &case in cases {
-            // Confirm the premise: one `carry()` pass really does land limb 1 at exactly 2^52 for
-            // this input (otherwise the case doesn't exercise what it claims to).
-            assert_eq!(
-                carry(case)[1],
-                B,
-                "test case no longer lands limb 1 at exactly 2^52 after one carry() pass"
-            );
-
             let reduced = reduce_limbs(case);
             for &limb in &reduced {
-                assert!(limb <= MASK, "limb {limb} not strictly < 2^52");
+                assert!(limb <= REDUCED_BOUND, "limb {limb} above REDUCED_BOUND");
             }
-
-            // Value congruence mod p is preserved through reduce_limbs (the same property the
-            // Python analysis checked): both are radix-2^52 representations of values congruent
-            // mod p, so re-expressing each as radix-2^51 (via `to_radix_51`, itself value-
-            // preserving) and comparing the canonical `FieldElement` encoding confirms it.
-            let to_bytes = |l: [u64; 5]| FieldElement(to_radix_51(l)).to_bytes();
+            // Value congruence mod p: both are radix-2^51 representations, so compare canonical
+            // encodings directly.
+            let to_bytes = |l: [u64; 5]| FieldElement(l).to_bytes();
             assert_eq!(to_bytes(case), to_bytes(reduced));
         }
     }
