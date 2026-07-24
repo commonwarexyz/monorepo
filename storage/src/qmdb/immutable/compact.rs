@@ -33,13 +33,14 @@ use crate::{
         batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
+            snapshot::StateSnapshot,
             witness::{self, VerifiedWitness, Witness},
         },
         operation::Key,
         sync::compact as compact_sync,
     },
 };
-use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
+use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -440,32 +441,21 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        // Hold the witness lock only long enough to verify the requested target and snapshot the
-        // entry; decode outside it so concurrent readers do not contend.
-        let (entry, leaf_count) = self.witness.with(|w| {
-            if target.root != w.root || target.leaf_count != w.leaf_count() {
-                return Err(compact_sync::ServeError::StaleTarget {
-                    requested: target.clone(),
-                    current: w.target(),
-                });
-            }
-            Ok((w.witness.clone(), w.leaf_count()))
-        })?;
-        let Witness {
-            op_bytes,
-            proof: last_commit_proof,
-            pinned_nodes,
-        } = entry;
-        let op = Operation::<F, K, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
-            .map_err(|_| {
-                compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
-            })?;
-        Ok(compact_sync::State {
-            leaf_count,
-            pinned_nodes,
-            last_commit_op: op,
-            last_commit_proof,
-        })
+        // Hold the witness lock only long enough to snapshot the entry; decode outside it so
+        // concurrent readers do not contend.
+        self.compact_snapshot().compact_state(target)
+    }
+
+    /// Capture an owned immutable [StateSnapshot] of the database's durable compact state.
+    ///
+    /// The snapshot is frozen at capture: it does not observe later mutations and serves the
+    /// captured commit's compact state while this database continues to mutate and persist.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn compact_snapshot(&self) -> StateSnapshot<F, H::Digest, Operation<F, K, V>, C>
+    where
+        Operation<F, K, V>: Read<Cfg = C>,
+    {
+        StateSnapshot::new(self.witness.with(Clone::clone), self.commit_codec_config.clone())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -683,6 +673,58 @@ mod tests {
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
+    }
+
+    /// A compact state snapshot keeps serving its captured commit — and rejects the live
+    /// database's newer target as stale — while the source advances past it.
+    #[test_traced("INFO")]
+    fn test_compact_state_snapshot_frozen_at_capture() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-snapshot").await;
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(10u8))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+
+            let snapshot = db.compact_snapshot();
+            let captured = db.target();
+            assert_eq!(snapshot.target(), captured);
+            assert_eq!(snapshot.root(), db.root());
+            let state = snapshot.compact_state(captured.clone()).unwrap();
+            assert_eq!(state.leaf_count, captured.leaf_count);
+
+            // Advance the live database to a new durable commit.
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(20u8))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+            let advanced = db.target();
+            assert_ne!(advanced, captured);
+
+            // The snapshot still serves the captured commit, byte-identically, and reports
+            // the live target as stale relative to its own.
+            let state2 = snapshot.compact_state(captured.clone()).unwrap();
+            assert_eq!(state.pinned_nodes, state2.pinned_nodes);
+            assert_eq!(state.last_commit_op, state2.last_commit_op);
+            assert!(matches!(
+                snapshot.compact_state(advanced.clone()),
+                Err(compact_sync::ServeError::StaleTarget { current, .. }) if current == captured
+            ));
+
+            // The live serve path (now delegating through a fresh snapshot) serves the new
+            // commit and rejects the old target.
+            assert!(db.compact_state(advanced).is_ok());
+            assert!(matches!(
+                db.compact_state(captured),
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+        });
     }
 
     #[test_traced("INFO")]
