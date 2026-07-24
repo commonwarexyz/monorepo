@@ -74,13 +74,7 @@ const FIGURES = {
         { k: 'mesh', among: VALIDATORS, t: 4, d: 1 },
         { k: 'mark', t: 5, label: 'finalized', sub: 'block + 3δ' },
       ],
-      token: [
-        { t0: -0.4, t1: 0, at: 'user' },
-        { t0: 0, t1: 1, from: 'user', to: 'api' },
-        { t0: 1, t1: 2, from: 'api', to: 'leader' },
-        { t0: 2, t1: 3, from: 'leader', to: 'v3' },
-        { t0: 3, t1: 99, at: 'v3' },
-      ],
+      token: [],
     }],
   },
 
@@ -114,12 +108,7 @@ const FIGURES = {
         { k: 'mesh', among: VALIDATORS, t: 6, d: 1 },
         { k: 'mark', t: 7, label: 'finalized', sub: 'batch + 6δ' },
       ],
-      token: [
-        { t0: -0.4, t1: 0, at: 'user' },
-        { t0: 0, t1: 1, from: 'user', to: 'api' },
-        { t0: 1, t1: 2, from: 'api', to: 'v3' },
-        { t0: 2, t1: 99, at: 'v3' },
-      ],
+      token: [],
     }],
   },
 
@@ -151,12 +140,7 @@ const FIGURES = {
         { k: 'mark', t: 5, sub: 'fig. 1', ghost: true },
         { k: 'mark', t: 7, sub: 'fig. 2', ghost: true },
       ],
-      token: [
-        { t0: -0.4, t1: 0, at: 'user' },
-        { t0: 0, t1: 1, from: 'user', to: 'api' },
-        { t0: 1, t1: 2, from: 'api', to: 'v3' },
-        { t0: 2, t1: 99, at: 'v3' },
-      ],
+      token: [],
     }],
   },
 
@@ -187,12 +171,7 @@ const FIGURES = {
         { k: 'mark', t: 5, sub: 'fig. 1', ghost: true },
         { k: 'mark', t: 7, sub: 'fig. 2', ghost: true },
       ],
-      token: [
-        { t0: -0.4, t1: 0, at: 'user' },
-        { t0: 0, t1: 1, from: 'user', to: 'api' },
-        { t0: 1, t1: 2, from: 'api', to: 'v3' },
-        { t0: 2, t1: 99, at: 'v3' },
-      ],
+      token: [],
     }],
   },
 
@@ -1010,7 +989,8 @@ function buildFigure(mount, cfg) {
 
     // The token's worldline: it glides right along a row while waiting
     // (x is time) and rides the diagonal while a message carries it.
-    const seg = activeVariant.token.findLast(s => tau >= s.t0);
+    let seg = null;
+    for (const s of activeVariant.token) if (tau >= s.t0) seg = s;
     if (seg) {
       const frac = clamp((tau - seg.t0) / (seg.t1 - seg.t0), 0, 1);
       if (seg.at) {
@@ -1039,7 +1019,12 @@ function initFigure(mount, cfg, reducedMotion, freezeSeconds) {
     const variant = cfg.variants[cfg.variants.length - 1];
     fig.mountVariant(variant);
     fig.render(variant.end + 0.01);
-    fig.svg.style.cursor = 'default';
+    // Motion on request: an explicit click opts this figure back into the
+    // animated loop, which reduced-motion guidance permits.
+    fig.svg.addEventListener('click', () => initFigure(mount, cfg, false, null), { once: true });
+    const tooltip = svgEl('title');
+    tooltip.textContent = 'Click to play';
+    fig.svg.appendChild(tooltip);
     return;
   }
 
