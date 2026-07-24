@@ -212,10 +212,10 @@ O’Grady</a></div>
         protocol, measured in message delays (<span
         class="math inline">\delta</span>) since submission. Figures 1,
         3, 5, and 6 use the same axis and omit the wait for the next
-        proposal or producer block. Here, the transaction reaches the
-        leader just as it is ready to propose. Consensus benchmarks
-        usually start their timers at “block”, after the inbound network
-        hops and any proposal wait.</p>
+        proposal or producer block, which Figure 2 draws. Here, the
+        transaction reaches the leader just as it is ready to propose.
+        Consensus benchmarks usually start their timers at “block”,
+        after the inbound network hops and any proposal wait.</p>
         </div>
         <p>From that “block” marker, finality takes two rounds of
         voting. A recent cohort (<a
@@ -228,25 +228,24 @@ O’Grady</a></div>
         <p>The user’s timer, however, started at submission. The
         transaction spends <span class="math inline">\delta</span>
         reaching an API node and another <span
-        class="math inline">\delta</span> reaching the leader. It can
-        then wait as long as <span class="math inline">2\delta</span>
-        for the leader’s next proposal, or <span
-        class="math inline">\delta</span> in expectation. Figure 2
-        isolates the source of this wait. Block production is tied to
-        the consensus proposal schedule, so identical final hops can
-        land on opposite sides of a proposal.</p>
-        <div id="multimmit-fig-cadence" class="cw-loop cw-loop-cadence" role="img" aria-label="Animated diagram of proposal arrival timing. Three rows: API node A, API node B, and the leader, whose proposals are spaced two message delays apart and drawn as red squares. Each API node forwards a transaction to the leader. Transaction B lands just before a proposal and waits almost nothing. Transaction A lands just after the same proposal, and a red arrow shows it waiting almost two message delays for the next one.">
-          <noscript>This figure compares two final-hop arrivals against the same proposal schedule, one proposal every 2δ. A transaction reaching the leader just before a proposal waits almost nothing, while one arriving just after waits almost 2δ. Averaged over arrival times, the wait is δ.</noscript>
+        class="math inline">\delta</span> reaching the leader, where
+        Figure 1 had it arrive exactly as the next block went out.
+        Blocks leave on a schedule of their own, so the same two hops
+        can just as easily land the moment after one, leaving the
+        transaction to wait out the rest of the interval: as long as
+        <span class="math inline">2\delta</span>, and <span
+        class="math inline">\delta</span> on average.</p>
+        <div id="multimmit-fig-cadence" class="cw-loop cw-loop-cadence" role="img" aria-label="Animated diagram of arrival timing against a block schedule. Three rows, user, API node and leader, on the same axis as Figure 1. The leader produces a block every two message delays, drawn as red squares. Transaction A travels user to API node to leader and reaches the leader exactly as a block is produced, so it waits nothing. Transaction B, submitted later in the cycle, takes the same two hops but lands just after a block, and a red arrow shows it waiting almost two message delays for the next one.">
+          <noscript>This figure replays Figure 1's two inbound hops for two submissions against a leader producing a block every 2δ. Transaction A reaches the leader exactly as a block is produced and waits nothing. Transaction B takes the same 2δ on the wire, lands just after a block, and waits almost 2δ for the next. Averaged over arrival times, the wait is δ.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 2: One proposal schedule, two arrival times. Both
-        transactions take <span class="math inline">\delta</span> to
-        travel from an API node to the leader. Transaction B arrives
-        just before a proposal and enters it almost immediately.
-        Transaction A arrives just after the same proposal and waits
-        almost <span class="math inline">2\delta</span> for the next.
-        The network delay is identical. Only their position relative to
-        the proposal changes.</p>
+        <p>Figure 2: The same inbound hops as Figure 1, drawn on the
+        same axis, for two submissions. Transaction A is Figure 1’s: it
+        reaches the leader exactly as a block goes out. Transaction B
+        spends the same <span class="math inline">2\delta</span> on the
+        wire but lands just after a block and waits almost the full
+        interval for the next one. Nothing about the network changed.
+        Only where the submission fell in the leader’s schedule.</p>
         </div>
         <p>Consensus latency usually excludes the two inbound hops and
         this scheduling wait. Its timer starts only when the leader
@@ -599,15 +598,21 @@ O’Grady</a></div>
         class="math inline">d=3</span> window under load.</p>
         </div>
         <p>Figure 2 showed the cost of coupling production to consensus:
-        miss a proposal, and the transaction cannot enter a block until
-        the next one. Multimmit separates block production from that
-        schedule. Each producer controls when a transaction enters its
-        own block, and its chain contains no cross-producer references,
-        so it can run as many as <span class="math inline">d</span>
-        blocks ahead of certification while certificates form in the
-        background. Under sustained load, a chain can grow by <span
-        class="math inline">d</span> blocks per certificate round trip
-        instead of one.</p>
+        a transaction that misses a proposal waits for the next one,
+        half the interval on average. Multimmit separates block
+        production from that schedule. Each producer controls when a
+        transaction enters its own block, and its chain contains no
+        cross-producer references, so it can run as many as <span
+        class="math inline">d</span> blocks ahead of certification while
+        certificates form in the background. Under sustained load, a
+        chain grows by <span class="math inline">d</span> blocks per
+        certificate round trip instead of one, cutting that wait to
+        <span class="math inline">\delta/d</span>, against the <span
+        class="math inline">\delta</span> a <span
+        class="math inline">2\delta</span> proposal schedule costs.
+        Producing faster gains little, since a chain contributes at most
+        <span class="math inline">d</span> new blocks to any one leader
+        block.</p>
         <p>Ordering remains view-driven. The next leader can checkpoint
         a transaction block, or voters can attest it as an extension if
         it reaches them before they vote, even when it misses the
