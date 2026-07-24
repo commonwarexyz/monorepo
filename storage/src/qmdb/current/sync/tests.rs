@@ -842,6 +842,51 @@ fn test_current_proof_snapshot_resolver_matches_live() {
         assert_eq!(still.proof.encode(), expected.proof.encode());
         assert_eq!(still.operations.encode(), expected.operations.encode());
 
+        // A pre-cancelled request never serves.
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        drop(cancel_tx);
+        let err = snapshot
+            .get_operations(op_count, start, max_ops, true, cancel_rx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::qmdb::Error::Cancelled));
+
         db.destroy().await.unwrap();
+    });
+}
+
+#[test_traced]
+fn test_current_live_resolver_honors_cancellation() {
+    use crate::qmdb::{any::sync::tests::SyncTestHarness as _, sync::resolver::Resolver as _};
+    use commonware_utils::channel::oneshot;
+    use harnesses::UnorderedFixedMmrHarness as H;
+    use std::{num::NonZeroU64, sync::Arc};
+
+    let executor = deterministic::Runner::default();
+    executor.start(|context: Context| async move {
+        let db = H::init_db(context).await;
+        let db = H::apply_ops(db, H::create_ops(10)).await;
+        let op_count = db.any.log.size();
+        let live = Arc::new(db);
+
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        drop(cancel_tx);
+        let err = live
+            .get_operations(
+                op_count,
+                crate::merkle::Location::new(0),
+                NonZeroU64::new(5).unwrap(),
+                true,
+                cancel_rx,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::qmdb::Error::Cancelled));
+
+        Arc::try_unwrap(live)
+            .unwrap_or_else(|_| panic!("live still shared"))
+            .destroy()
+            .await
+            .unwrap();
     });
 }

@@ -1797,8 +1797,8 @@ pub(crate) mod test {
             drop(serve);
             assert_eq!(Arc::strong_count(&resolver), 1);
 
-            // Cancelling one in-flight request wedges nothing: a subsequent serve over the
-            // same resolver succeeds.
+            // Cancelling one in-flight request wedges nothing, so a subsequent serve over
+            // the same resolver succeeds.
             let (cancel_tx, cancel_rx) = oneshot::channel();
             let pending =
                 resolver.get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx);

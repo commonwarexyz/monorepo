@@ -199,7 +199,7 @@ where
 /// Run `serve` to completion unless `cancel_rx` resolves first.
 ///
 /// The corresponding sender is dropped (or signaled) when the caller no longer needs the
-/// result: serving stops at its next await point and `cancelled` is returned. An
+/// result, so serving stops at its next await point and `cancelled` is returned. An
 /// already-cancelled receiver returns `cancelled` without polling `serve`.
 pub async fn serve_unless_cancelled<T, E>(
     cancel_rx: oneshot::Receiver<()>,
