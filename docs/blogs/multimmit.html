@@ -8,8 +8,7 @@
     <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
-    <title>commonware > Multimmit: Extending Blocks for Faster
-Finality</title>
+    <title>commonware > The Best of Both Worlds</title>
     <meta name="description" content="Every high-throughput consensus
 design must decide when a block may enter the ordering process: wait for
 a proof of availability and every transaction pays for round trips it
@@ -23,8 +22,7 @@ block as little as two message delays after it hits the wire.">
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/multimmit.png" />
-    <meta property="og:title" content="Multimmit: Extending Blocks for
-Faster Finality" />
+    <meta property="og:title" content="The Best of Both Worlds" />
     <meta property="og:description" content="Every high-throughput
 consensus design must decide when a block may enter the ordering
 process: wait for a proof of availability and every transaction pays for
@@ -41,8 +39,7 @@ wire." />
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/multimmit" />
-    <meta property="twitter:title" content="Multimmit: Extending Blocks
-for Faster Finality" />
+    <meta property="twitter:title" content="The Best of Both Worlds" />
     <meta property="twitter:description" content="Every high-throughput
 consensus design must decide when a block may enter the ordering
 process: wait for a proof of availability and every transaction pays for
@@ -107,54 +104,68 @@ wire." />
         </div>
     </div>
     <div class="content">
-        <h1>Multimmit: Extending Blocks for Faster Finality</h1>
+        <h1>The Best of Both Worlds</h1>
         <div class="meta">
 
                         <div class="author">By <a href="https://x.com/_patrickogrady">Patrick
 O’Grady</a></div>
                         <div class="date">July 23rd, 2026</div>
         </div>
-        <p>A few years ago, I wrote <a
-        href="https://hackmd.io/@patrickogrady/rys8mdl5p">Vryx</a>, an
-        argument for reorienting State Machine Replication from
-        (sequence → execute → replicate) to (replicate → sequence →
-        execute). Decouple transaction dissemination from consensus, the
-        reasoning went, and a blockchain can finalize transactions at
-        roughly the rate validators can <em>download</em> them rather
-        than the rate one leader can <em>upload</em> them. That
-        reorientation is now standard among high-throughput designs.
-        What never got settled is the seam between the two halves: when
-        may consensus reference data still in flight?</p>
-        <p>Wait until a block’s availability is certified, and every
-        transaction pays for certificate round trips it rarely needs.
-        Reference blocks immediately and voters must fetch whatever they
-        are missing, on the critical path, from the one node the whole
-        design exists to unburden. Today, we’re sharing <a
+        <p>A blockchain user’s clock starts at submission and ends at
+        finality. Consensus research keeps a different clock, from the
+        leader’s proposal to the decision, and everything before it
+        starts is expensive. A transaction first crosses the network to
+        whichever node leads next, then flows back out of that leader’s
+        uplink inside a block. The same uplink caps the whole network’s
+        throughput: every byte leaves one node while every other
+        validator’s bandwidth idles.</p>
+        <p>The well-understood fix is to decouple transaction
+        dissemination from consensus: every validator streams
+        transaction data in parallel, consensus orders references to it,
+        and the network finalizes transactions at roughly the rate
+        validators can <em>download</em> them rather than the rate one
+        leader can <em>upload</em> them. That split is <a
+        href="https://hackmd.io/@patrickogrady/rys8mdl5p">now standard
+        among high-throughput designs</a>.</p>
+        <p>Decoupling also created a new wait: consensus must never
+        finalize a reference to data the network cannot recover, and the
+        two known ways to establish availability each have a price.
+        Certify every block before consensus may reference it, and
+        throughput is bought with the user’s latency: every transaction
+        pays for certificate round trips it rarely needs. Reference
+        blocks immediately, and the latency of ordinary consensus
+        survives only until a producer misbehaves: voters must fetch
+        whatever they are missing at the worst possible time.</p>
+        <p>Today, we’re sharing <a
         href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
-        construction developed with Andrew Lewis-Pye that combines <a
-        href="/blogs/minimmit.html">Minimmit</a>’s one-round-voting
-        consensus (for <span class="math inline">n \geq 5f+1</span>)
-        with a chain of blocks per producer. Multimmit leaders reference
-        blocks the moment they arrive, voters attest blocks the leader
-        never saw, and certification runs in the background. A
-        transaction block disseminated at time <span
+        construction that pays neither cost: producers saturate their
+        network bandwidth, each extending its own chain of blocks
+        without waiting on the others, consensus references blocks the
+        moment they arrive, and the votes already being cast establish
+        availability, so no block waits on a certificate and no voter
+        waits on a fetch.</p>
+        <p>A transaction block disseminated at time <span
         class="math inline">t</span> is finalized by <span
         class="math inline">t+2\delta</span> at best and <span
-        class="math inline">t+3\delta</span> in expectation, where <span
-        class="math inline">\delta</span> bounds message delay after the
-        global stabilization time (GST). Those figures are measured from
-        the block hitting the wire, not from the leader’s proposal, and,
-        for an honest chain’s blocks, they hold while up to <span
-        class="math inline">f</span> producers misbehave.</p>
+        class="math inline">t+3\delta</span> in expectation (for <span
+        class="math inline">n \geq 5f+1</span>). The clock starts when
+        the producer broadcasts, not when a leader proposes, and those
+        figures hold for an honest producer’s blocks even while up to
+        <span class="math inline">f</span> producers misbehave. Two
+        message delays is <a
+        href="https://arxiv.org/abs/2102.07240">optimal</a> (no
+        fault-tolerant consensus can finalize faster, even in the best
+        case), and protocols that reach that floor do so only for the
+        leader’s own block. Multimmit puts every producer’s blocks there
+        at once, without handing back the throughput: the best of both
+        worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
         <p>Start with the shape of most deployed protocols: one proposer
         at a time, drawn with <a
         href="https://eprint.iacr.org/2023/463">Simplex</a>-style
-        notarize and finalize rounds. Consensus is usually benchmarked
-        in isolation, with the clock starting at the leader’s proposal.
-        A user’s clock starts at submission and ends at finality, so
-        that is the axis every figure in this post uses. Follow the
-        transaction rather than the block.</p>
+        notarize and finalize rounds. The figures below run on the
+        user’s clock, submission to finality. Follow the transaction
+        rather than the block.</p>
         <style>
           .cw-loop {
             aspect-ratio: 1024 / 464;
@@ -230,7 +241,11 @@ O’Grady</a></div>
         finalizing it finalizes everything below the referenced tips.
         This architecture also collapses the left side of figure 1,
         because the node that accepts your transaction <em>is</em> a
-        producer. Submission is dissemination.</p>
+        producer. Submission is dissemination. The lanes also run
+        regardless of consensus: a timed-out leader stops ordering,
+        never dissemination, and the first successful proposal commits
+        the whole backlog at once. Autobahn calls this
+        <em>seamlessness</em>: a consensus blip leaves no hangover.</p>
         <p>Autobahn then gives the latency right back. A leader may only
         reference a <em>certified</em> tip: validators return
         data-availability votes (DA-votes) to the producer, the producer
@@ -513,9 +528,10 @@ O’Grady</a></div>
         class="math inline">n-f</span> round-<span
         class="math inline">r</span> vertices have arrived, so the whole
         network produces in lockstep, and nobody’s next block can outrun
-        the slowest quorum step of the last one. In certified DAGs like
-        Narwhal, that step is a certificate round trip between every
-        pair of consecutive vertices. In uncertified DAGs like
+        the slowest quorum step of the last one (deployments add round
+        timeouts to keep the lattice well connected). In certified DAGs
+        like Narwhal, that step is a certificate round trip between
+        every pair of consecutive vertices. In uncertified DAGs like
         Mysticeti, the round trip goes away and the fetch problem comes
         back: every vertex is a dependency of the vertices that
         reference it, so a validator missing a vertex must fetch it
@@ -566,7 +582,10 @@ O’Grady</a></div>
         class="math inline">d</span> blocks per certificate round trip
         rather than one. Consensus never waits on certification either
         way: the leader checkpoints whatever has arrived, and the voters
-        extend past whatever the leader missed.</p>
+        extend past whatever the leader missed. Production never waits
+        on consensus: chains grow through leader failures and view
+        changes, and the first successful view checkpoints everything a
+        blip delayed.</p>
         <h2 id="onward">Onward</h2>
         <p>Multimmit is the end of the thread Vryx started: transaction
         dissemination and consensus running concurrently, with neither
