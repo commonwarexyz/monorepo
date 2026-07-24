@@ -115,28 +115,28 @@ O’Grady</a></div>
         a transaction to seeing it final. The protocols underneath are
         usually measured against something narrower: the time from a
         leader proposing a block to the network accepting it. The
-        difference is the trip your transaction makes first, across the
-        network to whichever node is leading and back out of that
-        leader’s uplink inside a block. The same uplink caps the whole
+        difference is the trip your transaction makes first, to
+        whichever node is leading and then back across the network
+        inside that leader’s block. That last leg also caps the
         network’s throughput: every byte leaves one node while every
         other validator’s bandwidth idles.</p>
-        <p>The well-understood fix is to decouple transaction
-        dissemination from consensus: every validator streams
-        transaction data in parallel, consensus orders references to it,
-        and the network finalizes transactions at roughly the rate
-        validators can <em>download</em> them rather than the rate one
-        leader can <em>upload</em> them. That split is <a
-        href="https://hackmd.io/@patrickogrady/rys8mdl5p">now standard
-        among high-throughput designs</a>.</p>
-        <p>Decoupling also created a new wait: consensus must never
-        finalize a reference to data the network cannot recover, and the
-        two known ways to establish availability each have a price.
-        Certify every block before consensus may reference it, and
-        throughput is bought with the user’s latency: every transaction
-        pays for certificate round trips it rarely needs. Reference
-        blocks immediately, and the latency of ordinary consensus
-        survives only until a producer misbehaves: voters must fetch
-        whatever they are missing at the worst possible time.</p>
+        <p>For throughput, the fix is well understood: decouple
+        transaction dissemination from consensus. Every validator
+        streams transaction data in parallel, consensus orders
+        references to it, and the network finalizes transactions at
+        roughly the rate validators can <em>download</em> them rather
+        than the rate one leader can <em>upload</em> them. That split is
+        <a href="https://hackmd.io/@patrickogrady/rys8mdl5p">now
+        standard among high-throughput designs</a>.</p>
+        <p>For latency, decoupling created a new wait: consensus must
+        never finalize a reference to data the network cannot recover,
+        and the two known ways to establish availability each have a
+        price. Certify every block before consensus may reference it,
+        and throughput is bought with the user’s latency: every
+        transaction pays for certificate round trips it rarely needs.
+        Reference blocks immediately, and the latency of ordinary
+        consensus survives only until a producer misbehaves: voters must
+        fetch whatever they are missing at the worst possible time.</p>
         <p>Today, we’re sharing <a
         href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
         construction that pays neither cost: producers saturate their
