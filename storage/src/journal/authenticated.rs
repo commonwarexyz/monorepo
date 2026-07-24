@@ -761,6 +761,11 @@ where
         )
         .await
     }
+
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+        self.nodes.pinned_nodes_at(loc).await.map_err(Into::into)
+    }
 }
 
 impl<F, E, R, H> Contiguous for View<F, E, R, H>

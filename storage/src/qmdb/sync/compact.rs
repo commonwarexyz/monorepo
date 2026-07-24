@@ -1095,6 +1095,29 @@ impl_compact_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableVal
 impl_compact_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
 impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
 
+// Resolver impl over an owned compact state snapshot. Serving reads the captured witness:
+// it never touches the live database or any lock. The capture is memory-only, so no
+// cancellation hook is needed; a dropped request future stops the serve.
+impl<F, D, Op, Cfg> Resolver for Arc<crate::qmdb::compact::snapshot::StateSnapshot<F, D, Op, Cfg>>
+where
+    F: Family,
+    D: Digest,
+    Op: Read<Cfg = Cfg> + Send + Sync + 'static,
+    Cfg: Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = D;
+    type Op = Op;
+    type Error = ServeError<F, D>;
+
+    async fn get_compact_state(
+        &self,
+        target: Target<Self::Family, Self::Digest>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.compact_state(target).map(Into::into)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, Database, FetchResult, Resolver, State, Target};

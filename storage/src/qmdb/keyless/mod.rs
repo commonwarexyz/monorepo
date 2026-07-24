@@ -689,6 +689,12 @@ where
             .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
             .await?)
     }
+
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`. Semantics match
+    /// [Keyless::pinned_nodes_at], bounded by this snapshot's frozen state.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+        Ok(self.log.pinned_nodes_at(loc).await?)
+    }
 }
 
 impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>

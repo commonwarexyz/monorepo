@@ -1709,6 +1709,68 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_any_fixed_snapshot_resolver_matches_live_db() {
+        use crate::qmdb::sync::resolver::Resolver as _;
+        use commonware_codec::Encode as _;
+        use commonware_utils::channel::oneshot;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let mut db = apply_ops(db, create_test_ops(20)).await;
+            let root = db.root();
+            let op_count = db.bounds().end;
+            let start_loc = Location::new(3);
+            let max_ops = NZU64!(5);
+
+            // Live output at this generation: the same calls the lock-backed resolvers make.
+            let (live_proof, live_ops) = db
+                .historical_proof(op_count, start_loc, max_ops)
+                .await
+                .unwrap();
+            let live_pins = db.pinned_nodes_at(start_loc).await.unwrap();
+
+            let snapshot;
+            (db, snapshot) = db.proof_snapshot().await.unwrap();
+            let resolver = Arc::new(snapshot);
+
+            // Resolver output over the snapshot matches the live database's output.
+            let (_cancel_tx, cancel_rx) = oneshot::channel();
+            let result = resolver
+                .get_operations(op_count, start_loc, max_ops, true, cancel_rx)
+                .await
+                .unwrap();
+            assert_eq!(result.proof.encode(), live_proof.encode());
+            assert_eq!(result.operations, live_ops);
+            assert_eq!(result.pinned_nodes, Some(live_pins));
+            assert!(verify_proof::<Sha256, _, _>(
+                &result.proof,
+                start_loc,
+                &result.operations,
+                &root,
+            ));
+
+            // Advance and prune the live database past the capture: the resolver's output is
+            // byte-identical to its pre-mutation output.
+            db = apply_ops(db, create_test_ops(30)).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start > start_loc);
+
+            let (_cancel_tx, cancel_rx) = oneshot::channel();
+            let result2 = resolver
+                .get_operations(op_count, start_loc, max_ops, true, cancel_rx)
+                .await
+                .unwrap();
+            assert_eq!(result2.proof.encode(), result.proof.encode());
+            assert_eq!(result2.operations, result.operations);
+            assert_eq!(result2.pinned_nodes, result.pinned_nodes);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

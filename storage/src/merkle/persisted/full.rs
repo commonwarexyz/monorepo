@@ -596,13 +596,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
-        if !loc.is_valid() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        let futs = F::nodes_to_pin(loc)
-            .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
-            .collect::<Vec<_>>();
-        futures::future::try_join_all(futs).await
+        pinned_nodes_over(self, loc).await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
@@ -954,6 +948,25 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 }
 
+/// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`, reading
+/// from any node [Storage](crate::merkle::storage::Storage).
+pub(crate) async fn pinned_nodes_over<F, S>(
+    storage: &S,
+    loc: Location<F>,
+) -> Result<Vec<S::Digest>, Error<F>>
+where
+    F: Family,
+    S: crate::merkle::storage::Storage<F>,
+{
+    if !loc.is_valid() {
+        return Err(Error::LocationOverflow(loc));
+    }
+    let futs = F::nodes_to_pin(loc)
+        .map(|p| async move { storage.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
+        .collect::<Vec<_>>();
+    futures::future::try_join_all(futs).await
+}
+
 /// Owned immutable view of a [Merkle] structure with bounds frozen at capture.
 ///
 /// Node reads combine the captured in-memory nodes with an owned snapshot of the node
@@ -986,6 +999,13 @@ impl<F: Family, E: Context, D: Digest> crate::merkle::storage::Storage<F> for Vi
             Err(JError::ItemPruned(_) | JError::ItemOutOfRange(_)) => Ok(None),
             Err(e) => Err(Error::Journal(e)),
         }
+    }
+}
+
+impl<F: Family, E: Context, D: Digest> View<F, E, D> {
+    /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
+        pinned_nodes_over(self, loc).await
     }
 }
 

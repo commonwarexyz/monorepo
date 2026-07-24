@@ -1025,6 +1025,15 @@ where
             .await
             .map_err(Into::into)
     }
+
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`. Semantics match
+    /// [Db::pinned_nodes_at], bounded by this snapshot's frozen state.
+    pub async fn pinned_nodes_at(
+        &self,
+        loc: Location<F>,
+    ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
+        self.log.pinned_nodes_at(loc).await.map_err(Into::into)
+    }
 }
 
 impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>

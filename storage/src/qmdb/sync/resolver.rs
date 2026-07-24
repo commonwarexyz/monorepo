@@ -1,10 +1,13 @@
 use crate::{
     Context,
+    journal::contiguous::Contiguous,
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
         any::{
-            FixedValue, VariableValue,
+            FixedValue, ValueEncoding, VariableValue,
+            db::ProofSnapshot as AnyProofSnapshot,
+            operation::{Operation as AnyOperation, update::Update},
             ordered::{
                 fixed::{Db as OrderedFixedDb, Operation as OrderedFixedOperation},
                 variable::{Db as OrderedVariableDb, Operation as OrderedVariableOperation},
@@ -15,10 +18,12 @@ use crate::{
             },
         },
         immutable::{
+            Operation as ImmutableOperation, ProofSnapshot as ImmutableProofSnapshot,
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
             variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
         },
         keyless::{
+            Operation as KeylessOperation, ProofSnapshot as KeylessProofSnapshot,
             fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
         },
@@ -27,6 +32,7 @@ use crate::{
     },
     translator::Translator,
 };
+use commonware_codec::{Codec, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -617,6 +623,113 @@ impl_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
 
 // Keyless Variable
 impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
+
+// Resolver impls over owned proof snapshots. Serving reads frozen state: it never touches the
+// live database or any lock, and stays valid while the source appends, syncs, and prunes.
+// One generic impl per snapshot family covers every backing journal and update type.
+
+impl<F, E, U, R, H> Resolver for Arc<AnyProofSnapshot<F, E, U, R, H>>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = AnyOperation<F, U>> + Send + Sync + 'static,
+    H: Hasher,
+    AnyOperation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = AnyOperation<F, U>;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        fetch_operations(
+            op_count,
+            start_loc,
+            max_ops,
+            include_pinned_nodes,
+            |op_count, start_loc, max_ops| self.historical_proof(op_count, start_loc, max_ops),
+            |start_loc| self.pinned_nodes_at(start_loc),
+        )
+        .await
+    }
+}
+
+impl<F, E, K, V, R, H> Resolver for Arc<ImmutableProofSnapshot<F, E, K, V, R, H>>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding + Send + Sync + 'static,
+    R: Contiguous<Item = ImmutableOperation<F, K, V>> + Send + Sync + 'static,
+    H: Hasher,
+    ImmutableOperation<F, K, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = ImmutableOperation<F, K, V>;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        fetch_operations(
+            op_count,
+            start_loc,
+            max_ops,
+            include_pinned_nodes,
+            |op_count, start_loc, max_ops| self.historical_proof(op_count, start_loc, max_ops),
+            |start_loc| self.pinned_nodes_at(start_loc),
+        )
+        .await
+    }
+}
+
+impl<F, E, V, R, H> Resolver for Arc<KeylessProofSnapshot<F, E, V, R, H>>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding + Send + Sync + 'static,
+    R: Contiguous<Item = KeylessOperation<F, V>> + Send + Sync + 'static,
+    H: Hasher,
+    KeylessOperation<F, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = KeylessOperation<F, V>;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        fetch_operations(
+            op_count,
+            start_loc,
+            max_ops,
+            include_pinned_nodes,
+            |op_count, start_loc, max_ops| self.historical_proof(op_count, start_loc, max_ops),
+            |start_loc| self.pinned_nodes_at(start_loc),
+        )
+        .await
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod tests {

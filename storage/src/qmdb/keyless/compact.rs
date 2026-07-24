@@ -711,6 +711,41 @@ mod tests {
         });
     }
 
+    /// The compact resolver over an owned state snapshot serves the same state as the live
+    /// database's serve path at the captured generation.
+    #[test_traced("INFO")]
+    fn test_compact_snapshot_resolver_matches_live_db() {
+        use crate::qmdb::sync::compact::Resolver as _;
+
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-snap-resolver").await;
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+
+            let target = db.target();
+            let live = db.compact_state(target.clone()).unwrap();
+            let resolver = std::sync::Arc::new(db.compact_snapshot());
+
+            let result = resolver.get_compact_state(target.clone()).await.unwrap();
+            assert_eq!(result.state.leaf_count, live.leaf_count);
+            assert_eq!(result.state.pinned_nodes, live.pinned_nodes);
+            assert_eq!(result.state.last_commit_op, live.last_commit_op);
+
+            // A mismatched target is rejected exactly like the live serve path.
+            let stale = compact_sync::Target::new(target.root, target.leaf_count + 1);
+            assert!(matches!(
+                resolver.get_compact_state(stale).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_compact_stale_batch_rejected() {
         deterministic::Runner::default().start(|context| async move {
