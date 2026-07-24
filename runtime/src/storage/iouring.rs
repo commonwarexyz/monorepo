@@ -18,12 +18,19 @@
 //!
 //! ## Blocking Metadata Operations
 //!
-//! `open`, `remove`, and `scan` (and [crate::Blob::resize], tracked by #831) execute
-//! synchronous filesystem calls — including fsyncs — on the calling worker's thread,
-//! serialized across all workers by a runtime-wide lock. A slow metadata operation
-//! therefore stalls the calling worker's event loop, and other workers entering a
-//! metadata operation block on the same lock until it completes. Keep these off hot
-//! paths; data-path reads, writes, and syncs go through the ring and do not block.
+//! `open`, `remove`, and `scan` execute synchronous filesystem calls — including
+//! fsyncs — on the calling worker's thread, serialized across all workers by a
+//! runtime-wide lock. A slow metadata operation therefore stalls the calling
+//! worker's event loop, and other workers entering a metadata operation block on
+//! the same lock until it completes. [crate::Blob::resize] (tracked by #831) is
+//! likewise a synchronous `set_len` on the worker, though it touches only the open
+//! file and takes no lock. Keep these off hot paths; data-path reads, writes, and
+//! syncs go through the ring and do not block.
+//!
+//! This blocking behavior is accepted debt, not a resolved design: offloading
+//! metadata operations belongs with the planned shared blocking pool (and
+//! `resize` with #831), so it is documented here rather than worked around
+//! piecemeal.
 //!
 //! ## Linux Only
 //!

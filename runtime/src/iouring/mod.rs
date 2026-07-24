@@ -44,9 +44,12 @@
 //! own ring. Ring-bound resources — [crate::Blob]s, [crate::Sink]s, [crate::Stream]s,
 //! [crate::Listener]s, and in-flight operation futures — are bound to the worker that
 //! created them: **using one from another worker panics** with "io_uring runtime
-//! operations must run on the runtime thread" (the panic is contained by the using
-//! task's wrapper, like any other task panic). Moving a blob or socket into a
-//! dedicated task works on the tokio runtime but not here; this is a deliberate
+//! operations must run on the runtime thread". Like any other task panic, it is
+//! caught by the using task's wrapper and resolves the task's handle with
+//! [Error::Exited](crate::Error::Exited) when the runtime is configured with
+//! `catch_panics(true)`; with the default `catch_panics(false)` the panic is
+//! forwarded to the root and unwinds [crate::Runner::start]. Moving a blob or
+//! socket into a dedicated task works on the tokio runtime but not here; this is a deliberate
 //! trade — thread affinity is what lets the op path run without locks. Move plain
 //! data between workers and open resources on the worker that uses them.
 //!

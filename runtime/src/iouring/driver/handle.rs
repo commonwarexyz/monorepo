@@ -141,7 +141,7 @@ pub(super) struct CapacityWaiters {
 }
 
 /// One admission attempt's registration in [CapacityWaiters].
-struct CapacitySlot {
+pub(super) struct CapacitySlot {
     epoch: u64,
     index: usize,
 }
@@ -186,7 +186,7 @@ impl CapacityWaiters {
 
     /// Cancel a registration whose admission attempt no longer exists,
     /// releasing its waker and recycling the slot.
-    fn cancel(&mut self, registration: CapacitySlot) {
+    pub(super) fn cancel(&mut self, registration: CapacitySlot) {
         if registration.epoch != self.epoch {
             return;
         }
@@ -253,7 +253,18 @@ impl Drop for Registration<'_> {
         let Some(slot) = self.slot.take() else {
             return;
         };
-        let _ = self.handle.try_with(|ops| ops.capacity.cancel(slot));
+        // A foreign-thread drop cannot touch the thread-affine table (drop
+        // must not panic): hand the slot to the loop so a saturated ring
+        // cannot accumulate cancelled registrations without bound.
+        let mut slot = Some(slot);
+        let cancelled = self.handle.try_with(|ops| {
+            let slot = slot.take().expect("capacity slot consumed twice");
+            ops.capacity.cancel(slot);
+        });
+        if cancelled.is_none() {
+            let slot = slot.take().expect("capacity slot lost on foreign drop");
+            self.handle.orphans.push(Orphan::Capacity(slot));
+        }
     }
 }
 
@@ -268,40 +279,49 @@ pub(crate) struct Handle {
     pub(super) orphans: Arc<OrphanMailbox>,
 }
 
-/// Waiter ids whose owning future or ticket was dropped on a foreign thread,
-/// where the thread-affine op table is unreachable.
+/// Wind-down work dropped on a foreign thread, where the thread-affine op
+/// table is unreachable.
 ///
 /// Drop is the one op interaction that can legally arrive off-thread (drop
-/// must not panic, so the affinity check cannot reject it). Ids pushed here
-/// are wound down by the loop on its next turn exactly as an on-thread drop
-/// would have been, so foreign drops release their slots instead of leaking
-/// them until shutdown.
+/// must not panic, so the affinity check cannot reject it). Entries pushed
+/// here are wound down by the loop on its next turn exactly as an on-thread
+/// drop would have been, so foreign drops release their state instead of
+/// leaking it until shutdown.
+pub(super) enum Orphan {
+    /// An admitted waiter whose future or ticket was dropped.
+    Waiter(WaiterId),
+    /// A capacity registration whose admission attempt was dropped while
+    /// parked on a full slab (before any waiter existed).
+    Capacity(CapacitySlot),
+}
+
+/// Cross-thread mailbox of [Orphan] wind-down work.
 pub(super) struct OrphanMailbox {
     /// Fast-path gate so the loop's per-turn drain skips the lock when the
     /// mailbox is empty (the common case).
     pending: AtomicBool,
-    ids: Mutex<Vec<WaiterId>>,
+    orphans: Mutex<Vec<Orphan>>,
     /// Wakes the loop so a parked runtime winds the orphan down promptly.
     waker: RingWaker,
 }
 
 impl OrphanMailbox {
-    fn push(&self, id: WaiterId) {
-        self.ids.lock().push(id);
+    fn push(&self, orphan: Orphan) {
+        self.orphans.lock().push(orphan);
         self.pending.store(true, Ordering::Release);
         self.waker.wake();
     }
 
-    /// Take all pending foreign-drop ids.
+    /// Take all pending foreign-drop work.
     ///
     /// A push racing the gate check lands on the next turn: its `wake` latch
     /// guarantees the loop runs again before parking indefinitely.
-    pub(super) fn take(&self) -> Vec<WaiterId> {
+    pub(super) fn take(&self) -> Vec<Orphan> {
         if !self.pending.load(Ordering::Acquire) {
             return Vec::new();
         }
         self.pending.store(false, Ordering::Relaxed);
-        std::mem::take(&mut *self.ids.lock())
+        std::mem::take(&mut *self.orphans.lock())
     }
 }
 
@@ -322,7 +342,7 @@ impl Handle {
             }))),
             orphans: Arc::new(OrphanMailbox {
                 pending: AtomicBool::new(false),
-                ids: Mutex::new(Vec::new()),
+                orphans: Mutex::new(Vec::new()),
                 waker,
             }),
         }
@@ -619,7 +639,7 @@ fn orphan(handle: &Handle, id: WaiterId) {
             Vec::new()
         }
     }) else {
-        handle.orphans.push(id);
+        handle.orphans.push(Orphan::Waiter(id));
         return;
     };
     for waker in wakers {

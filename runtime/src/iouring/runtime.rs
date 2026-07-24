@@ -1937,6 +1937,25 @@ mod tests {
         });
     }
 
+    /// With the default `catch_panics(false)`, the affinity panic is
+    /// forwarded to the root and unwinds `start` (the documented behavior).
+    #[test]
+    fn test_blob_use_on_other_worker_panics_uncaught() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let (blob, _) = context.open("partition", b"blob").await.unwrap();
+                let handle = context
+                    .child("dedicated")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let _ = blob.read_at(0, 1).await;
+                    });
+                let _ = handle.await;
+            })
+        }));
+        assert!(result.is_err(), "affinity panic must unwind start");
+    }
+
     /// Dropping a `start_sync` completion handle on another worker must not
     /// leak the origin worker's waiter slot: the foreign drop routes through
     /// the orphan mailbox and the loop frees the parked result.
@@ -2219,11 +2238,18 @@ mod tests {
         for _ in 0..8 {
             Runner::default().start(|context| async move {
                 let root_spawner = context.child("target");
+                let (entered_send, entered_recv) = oneshot::channel();
                 let _dedicated = context.child("ded").dedicated().spawn(move |_| async move {
                     // Register onto the root worker from this thread
                     // while the root races into teardown.
+                    let mut entered = Some(entered_send);
                     for i in 0..1024u32 {
                         let handle = root_spawner.child("race").spawn(move |_| async move { i });
+                        // Prove the loop started (first spawn issued) before
+                        // the root is allowed to tear down.
+                        if let Some(entered) = entered.take() {
+                            let _ = entered.send(());
+                        }
                         match handle.await {
                             Ok(value) => assert_eq!(value, i),
                             Err(Error::Closed) => break,
@@ -2231,7 +2257,9 @@ mod tests {
                         }
                     }
                 });
-                // Return immediately: teardown races the foreign spawns.
+                // Return as soon as the dedicated worker has provably entered
+                // its spawn loop: teardown races the remaining spawns.
+                let _ = entered_recv.await;
             });
         }
     }

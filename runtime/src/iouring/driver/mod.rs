@@ -228,12 +228,19 @@ impl IoUringLoop {
         ops.capacity.drain_into(&mut self.pending_wakers);
     }
 
-    /// Wind down waiters whose owning future or ticket was dropped on a
-    /// foreign thread (see [handle::OrphanMailbox]).
+    /// Wind down work dropped on a foreign thread (see
+    /// [handle::OrphanMailbox]): admitted waiters orphan exactly as an
+    /// on-thread drop would, and parked admission attempts release their
+    /// capacity slots.
     fn process_orphans(&mut self, ops: &mut Ops) {
-        for id in self.handle.orphans.take() {
-            if handle::wind_down_orphan(ops, id) {
-                self.notify_capacity(ops);
+        for orphan in self.handle.orphans.take() {
+            match orphan {
+                handle::Orphan::Waiter(id) => {
+                    if handle::wind_down_orphan(ops, id) {
+                        self.notify_capacity(ops);
+                    }
+                }
+                handle::Orphan::Capacity(slot) => ops.capacity.cancel(slot),
             }
         }
     }
@@ -689,9 +696,9 @@ impl IoUringLoop {
                     // `submit_and_wait`. Rearm strictly AFTER staging so the
                     // poll SQE can never displace the staging that retires
                     // waiters (on a size-1 ring it would consume the whole
-                    // SQ and deadlock an unbounded wait). On a full SQ the
-                    // rearm retries next iteration, after `submit_and_wait`
-                    // flushes the queue.
+                    // SQ and deadlock an unbounded wait). If staging filled
+                    // the SQ first, the flush below retries before any armed
+                    // wait.
                     if self.wake_rearm_needed && self.waker.reinstall(&mut submission_queue) {
                         self.wake_rearm_needed = false;
                     }
@@ -706,6 +713,17 @@ impl IoUringLoop {
                 break;
             }
 
+            // The wake poll must be live before any armed wait: with it
+            // terminated, an orphan wake writes the eventfd without
+            // producing a CQE and an unbounded wait sleeps through it. If
+            // staging filled the SQ before the rearm landed, flush without
+            // waiting and retry (each flush drains the SQ, and requeues need
+            // a CQE apiece, so the retry converges).
+            if self.wake_rearm_needed {
+                self.submit(ring).expect("unable to submit to ring");
+                continue;
+            }
+
             let timeout = match (remaining, self.timeout_wheel.next_deadline()) {
                 (Some(remaining), Some(deadline)) => Some(remaining.min(deadline)),
                 (Some(remaining), None) => Some(remaining),
@@ -713,15 +731,25 @@ impl IoUringLoop {
                 (None, None) => None,
             };
 
-            // Wait for at least one completion or timeout.
-            let start = Instant::now();
-            self.submit_and_wait(ring, 1, timeout)
-                .expect("unable to submit to ring");
+            // Wait for at least one completion or timeout, with the eventfd
+            // wake path armed: a foreign-thread drop pushes into the orphan
+            // mailbox and must be able to interrupt this wait (an unarmed
+            // wake only latches the state word without writing the eventfd).
+            // When a wake is already latched, skip blocking and let the next
+            // iteration process the mailbox; the guard's drop consumes the
+            // latch either way.
+            let arm = self.waker.arm(self.processed_seq);
+            if !arm.wake_latched() {
+                let start = Instant::now();
+                self.submit_and_wait(ring, 1, timeout)
+                    .expect("unable to submit to ring");
 
-            // Charge elapsed wall time against the shutdown budget.
-            if let Some(remaining) = remaining.as_mut() {
-                *remaining = remaining.saturating_sub(start.elapsed());
+                // Charge elapsed wall time against the shutdown budget.
+                if let Some(remaining) = remaining.as_mut() {
+                    *remaining = remaining.saturating_sub(start.elapsed());
+                }
             }
+            drop(arm);
         }
 
         let handle = self.handle.clone();
@@ -1448,6 +1476,148 @@ mod tests {
         assert_eq!(gauge.get(), 0);
 
         drop(ticket);
+    }
+
+    #[test]
+    fn test_foreign_drop_wakes_unbounded_drain() {
+        // A drain blocked in an unbounded `submit_and_wait` must be woken by
+        // a foreign-thread ticket drop: the orphan-mailbox push must reach
+        // the armed eventfd path and cancel the in-flight accept, instead of
+        // latching a wake nothing observes while the drain sleeps toward the
+        // distant wheel deadline.
+        let mut harness = TestLoop::new(RingConfig {
+            max_request_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fd: Arc<OwnedFd> = Arc::new(OwnedFd::from(listener));
+
+        let driver = harness.handle.clone();
+        let mut admit =
+            Box::pin(driver.start_accept(fd, Instant::now() + Duration::from_secs(3600)));
+        let noop = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&noop);
+        let Poll::Ready(ticket) = admit.as_mut().poll(&mut cx) else {
+            panic!("accept admission should not park on an empty slab");
+        };
+        harness.driver().turn();
+        assert_eq!(harness.pending(), 1);
+
+        // Drop the ticket on a foreign thread once the drain is underway.
+        let dropper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(ticket);
+        });
+
+        let start = Instant::now();
+        for waker in harness.driver().close() {
+            waker.wake();
+        }
+        harness.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "drain slept through the foreign-thread drop: {:?}",
+            start.elapsed()
+        );
+        dropper.join().unwrap();
+    }
+
+    #[test]
+    fn test_drain_rearms_wake_poll_before_armed_wait() {
+        // On a size-1 ring, staging can fill the SQ before the wake-poll
+        // rearm lands. The drain must flush and retry until the poll is live
+        // before blocking: with the poll terminated, a foreign-thread drop
+        // writes the eventfd without producing a CQE, and an unbounded wait
+        // sleeps through it toward the distant wheel deadline.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            max_request_timeout: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        let driver = harness.handle.clone();
+
+        // Admit a recv but never turn: at drain entry the request is still
+        // in the staged queue and the wake poll was never installed, so the
+        // drain's first staging pass fills the single-entry SQ before the
+        // rearm can land.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut recv = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(3600),
+        ));
+        assert!(poll_once(&harness, &mut recv).is_pending());
+
+        std::thread::scope(|scope| {
+            // Drop the recv on a foreign thread once the drain is blocked.
+            let dropper = scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(recv);
+            });
+
+            let start = Instant::now();
+            for waker in harness.driver().close() {
+                waker.wake();
+            }
+            harness.shutdown();
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "drain slept behind a dead wake poll: {:?}",
+                start.elapsed()
+            );
+            dropper.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn test_off_thread_drop_releases_capacity_slot() {
+        // An admission attempt parked on a full slab and dropped on a
+        // foreign thread must release its capacity registration through the
+        // orphan mailbox: a saturated ring never drains the wait list, so a
+        // retained registration would otherwise persist indefinitely.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+        let driver = harness.handle.clone();
+
+        let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
+        let mut blocker = Box::pin(driver.recv(
+            Arc::new(blocker_left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut blocker).is_pending());
+
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut parked = Box::pin(driver.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        assert!(poll_once(&harness, &mut parked).is_pending());
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 1));
+
+        // Drop the parked attempt on a foreign thread: the registration
+        // routes through the mailbox and the next turn releases it.
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(parked)).join().unwrap();
+        });
+        harness.driver().turn();
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
     }
 
     #[test]
