@@ -299,11 +299,27 @@
 //! its ancestry conflicts with a certificate it holds (a certified notarization for a skipped view, a nullification
 //! covering the proposal's parent, or a finalization above the proposal's parent) broadcasts that certificate so all
 //! honest participants eventually consider the same proposal ancestry valid. Honest leaders propose in every view
-//! after GST, so any surviving misalignment keeps triggering these objections until the split heals.
+//! after GST, so any surviving misalignment keeps triggering these objections until the split heals (typically
+//! within two views: one for a conflicting proposal to surface the objection and one to propose on the shared
+//! certificate).
+//!
+//! Recovery is a push by the evidence holder rather than a fetch by the participant missing evidence. Only the
+//! holder can detect the split (to everyone else, a covered view looks complete), and a proposal-triggered fetch
+//! would let a malicious proposer direct our requests, while an objection only ever retransmits a certificate we
+//! already verified and hold. Objections fire on conflict, never on absence: a refusal over evidence we
+//! merely lack stays silent (there is nothing to share, and the resolver already covers those gaps), so a healthy
+//! network broadcasts nothing extra.
+//!
+//! A malicious leader can elicit objections by naming a parent that conflicts with certificates honest
+//! participants hold (most cheaply, a parent below their finalized views). The cost is bounded and unattractive:
+//! each participant objects at most once per round, recipients discard certificates they already hold before
+//! verifying them, and the eliciting view nullifies on schedule regardless, so the leader burns its turn to make
+//! each honest participant rebroadcast a single certificate. A leader that is merely behind triggers the same
+//! objections, and for it the certificate is exactly the catch-up it needs.
 //!
 //! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
 //! finalization certificate after nullification, it would impose significant overhead under normal network
-//! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
+//! conditions (whereas objections only fire when certificates actually conflict). Recall, honest participants
 //! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
 //! be observed following severe network degradation)._
 //!
@@ -5618,8 +5634,8 @@ mod tests {
     /// participant can verify. The first finalization therefore lands
     /// strictly before `lone`'s first leader turn (nothing else delivers
     /// the missing certificates: the resolver considers both sides
-    /// complete). See #2149 for the split configurations that motivated
-    /// certificate-driven recovery.
+    /// complete). See the module documentation on fetching missing
+    /// certificates for the recovery design.
     fn certified_split_heals_without_lone_leader_turn<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

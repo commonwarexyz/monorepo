@@ -1024,7 +1024,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// broadcasts the conflicting certificate to converge the proposer's
     /// side. Refusals caused by evidence we merely lack stay silent: there
     /// is no certificate to share, and the resolver already fetches
-    /// nullification gaps above the floor. Each round objects at most once.
+    /// nullification gaps above the floor.
+    ///
+    /// A malicious leader can elicit an objection by naming a conflicting
+    /// parent, but gains little: each round objects at most once, the
+    /// certificate is one we already verified and hold, recipients
+    /// discard copies they already hold, and the eliciting view times out
+    /// regardless (see the module documentation on fetching missing
+    /// certificates).
     fn object(&mut self, view: View, err: ParentPayloadError) -> Option<Certificate<S, D>> {
         // The current round must exist (try_verify just consulted it). Skip
         // the certificate lookup once it has already objected.
