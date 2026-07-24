@@ -9,6 +9,7 @@ const PLOT_X0 = 170;
 const PLOT_X1 = 1014;
 
 const RED = '#d9251c';
+const GREEN = '#0e8f3e';
 const BLUE = '#1f1fd1';
 const BLUE_LIGHT = '#9a9aea';
 const GRAY = '#8a8a8a';
@@ -17,8 +18,11 @@ const GOLD = '#b89b37';
 const GOLD_FILL = '#fffbe8';
 
 const STYLES = {
-  tx: { stroke: RED, width: 2.4, opacity: 1 },
+  tx: { stroke: 'black', width: 2.4, opacity: 1 },
+  bad: { stroke: RED, width: 2.4, opacity: 1 },
   blk: { stroke: RED, width: 3.4, opacity: 0.95 },
+  bat: { stroke: GREEN, width: 3.4, opacity: 0.95 },
+  prop: { stroke: RED, width: 2, opacity: 0.9 },
   ctl: { stroke: BLUE, width: 2, opacity: 0.9 },
   mesh: { stroke: BLUE, width: 1.4, opacity: 0.45 },
   sup: { stroke: GOLD, width: 2.2, opacity: 0.95 },
@@ -99,13 +103,13 @@ const FIGURES = {
       ],
       events: [
         { k: 'msg', from: 'user', to: 'api', t: 0, d: 1, style: 'tx', label: 'tx' },
-        { k: 'emit', row: 'api', t: 1, color: RED, label: 'batch b' },
-        { k: 'fan', from: 'api', to: VALIDATORS, t: 1, d: 1, style: 'blk' },
+        { k: 'emit', row: 'api', t: 1, color: GREEN, label: 'batch b', labelSide: 'right' },
+        { k: 'fan', from: 'api', to: VALIDATORS, t: 1, d: 1, style: 'bat' },
         { k: 'fan', from: VALIDATORS, to: 'api', t: 2, d: 1, style: 'ctl' },
         { k: 'emit', row: 'api', t: 3, color: BLUE, label: 'PoA' },
         { k: 'fan', from: 'api', to: VALIDATORS, t: 3, d: 1, style: 'ctl' },
-        { k: 'emit', row: 'leader', t: 4, color: BLUE, label: 'block (refs PoA)', labelSide: 'right' },
-        { k: 'fan', from: 'leader', to: ['v2', 'v3', 'v4'], t: 4, d: 1, style: 'ctl' },
+        { k: 'emit', row: 'leader', t: 4, color: RED, label: 'leader block (refs PoA)', labelSide: 'right' },
+        { k: 'fan', from: 'leader', to: ['v2', 'v3', 'v4'], t: 4, d: 1, style: 'prop' },
         { k: 'mesh', among: VALIDATORS, t: 5, d: 1 },
         { k: 'mesh', among: VALIDATORS, t: 6, d: 1 },
         { k: 'mark', t: 7, label: 'finalized', sub: 'batch + 6δ' },
@@ -130,16 +134,16 @@ const FIGURES = {
       end: 4,
       phases: [
         { t: 0, d: 1, label: 'submit' },
-        { t: 1, d: 1, label: 'block' },
+        { t: 1, d: 1, label: 'tx block' },
         { t: 2, d: 1, label: 'proposal' },
         { t: 3, d: 1, label: 'votes' },
       ],
       events: [
         { k: 'msg', from: 'user', to: 'api', t: 0, d: 1, style: 'tx', label: 'tx' },
-        { k: 'emit', row: 'api', t: 1, color: RED, label: 'block b' },
-        { k: 'fan', from: 'api', to: VALIDATORS, t: 1, d: 1, style: 'blk' },
-        { k: 'emit', row: 'leader', t: 2, color: BLUE, label: 'refs b' },
-        { k: 'fan', from: 'leader', to: ['v2', 'v3', 'v4'], t: 2, d: 1, style: 'ctl' },
+        { k: 'emit', row: 'api', t: 1, color: GREEN, label: 'tx block b', labelSide: 'right' },
+        { k: 'fan', from: 'api', to: VALIDATORS, t: 1, d: 1, style: 'bat' },
+        { k: 'emit', row: 'leader', t: 2, color: RED, label: 'leader block (refs b)', labelSide: 'right' },
+        { k: 'fan', from: 'leader', to: ['v2', 'v3', 'v4'], t: 2, d: 1, style: 'prop' },
         { k: 'fan', from: VALIDATORS, to: 'api', t: 2, d: 1, style: 'bg' },
         { k: 'fan', from: 'api', to: VALIDATORS, t: 3, d: 1, style: 'bg' },
         { k: 'mesh', among: VALIDATORS, t: 3, d: 1 },
@@ -171,10 +175,10 @@ const FIGURES = {
       ],
       events: [
         { k: 'msg', from: 'user', to: 'api', t: 0, d: 1, style: 'tx', label: 'tx' },
-        { k: 'emit', row: 'api', t: 1, color: RED, label: 'block b' },
-        { k: 'fan', from: 'api', to: VALIDATORS, t: 1, d: 1, style: 'blk' },
-        { k: 'emit', row: 'leader', t: 1, color: BLUE, label: 'proposal (no b)', labelSide: 'left' },
-        { k: 'fan', from: 'leader', to: ['v2', 'v3', 'v4'], t: 1, d: 1, style: 'ctl' },
+        { k: 'emit', row: 'api', t: 1, color: GREEN, label: 'tx block b', labelSide: 'right' },
+        { k: 'fan', from: 'api', to: VALIDATORS, t: 1, d: 1, style: 'bat' },
+        { k: 'emit', row: 'leader', t: 1, color: RED, label: 'leader block', labelSide: 'left' },
+        { k: 'fan', from: 'leader', to: ['v2', 'v3', 'v4'], t: 1, d: 1, style: 'prop' },
         { k: 'mesh', among: VALIDATORS, t: 2, d: 1 },
         { k: 'fan', from: VALIDATORS, to: 'api', t: 2, d: 1, style: 'bg' },
         { k: 'fan', from: 'api', to: VALIDATORS, t: 3, d: 1, style: 'bg' },
@@ -189,6 +193,77 @@ const FIGURES = {
         { t0: 1, t1: 2, from: 'api', to: 'v3' },
         { t0: 2, t1: 99, at: 'v3' },
       ],
+    }],
+  },
+
+  'multimmit-fig-certificate': {
+    height: 464,
+    rows: [],
+    rowTop: 0,
+    rowGap: 0,
+    noAxis: true,
+    axis: { min: 0, max: 11, origin: null },
+    variants: [{
+      end: 10.8,
+      phases: [],
+      events: [
+        { k: 'note', static: true, t: 0, x: 282, y: 76, lines: ['1. read tips from the votes'], fill: 'black', size: 16, weight: 700 },
+        { k: 'note', static: true, t: 0, x: 785, y: 76, lines: ['2. sweep tips into the log'], fill: 'black', size: 16, weight: 700 },
+        { k: 'note', static: true, t: 0, x: 282, y: 100, lines: ['one chain of the proposal, n=11, f=2', 'an L-QC is any n−f = 9 votes'], size: 13 },
+        // Act 1: the proposal's positions on one chain, and the vote stack.
+        { k: 'cell', static: true, t: 0, x: 150, y: 336, w: 58, h: 58, label: 'anchor', fill: '#efefef' },
+        { k: 'cell', static: true, t: 0, x: 216, y: 336, w: 58, h: 58, label: '1' },
+        { k: 'cell', static: true, t: 0, x: 282, y: 336, w: 58, h: 58, label: '2' },
+        { k: 'cell', static: true, t: 0, x: 348, y: 336, w: 58, h: 58, label: '3', changes: [{ t: 5.2, fill: GOLD_FILL, stroke: GOLD, strokeWidth: 2.5 }] },
+        { k: 'cell', static: true, t: 0, x: 414, y: 336, w: 58, h: 58, label: '4', changes: [{ t: 7.0, stroke: BLUE, strokeWidth: 2.5 }] },
+        { k: 'note', static: true, t: 0, x: 282, y: 384, lines: ["the leader's proposed positions"], size: 13 },
+        { k: 'dot', t: 1.0, x: 414, y: 293, dims: [[4.6, 6.2]] },
+        { k: 'dot', t: 1.35, x: 348, y: 293 },
+        { k: 'dot', t: 1.7, x: 414, y: 267, dims: [[4.6, 6.2], [6.6, 99]] },
+        { k: 'dot', t: 2.05, x: 348, y: 267, dims: [[4.6, 6.2]] },
+        { k: 'dot', t: 2.4, x: 282, y: 293 },
+        { k: 'dot', t: 2.75, x: 348, y: 241, dims: [[4.6, 6.2]] },
+        { k: 'dot', t: 3.1, x: 414, y: 241, dims: [[4.6, 6.2], [6.6, 99]] },
+        { k: 'dot', t: 3.45, x: 216, y: 293 },
+        { k: 'dot', t: 3.8, x: 348, y: 215, dims: [[4.6, 6.2]] },
+        { k: 'note', t: 5.2, x: 348, y: 412, lines: ['finalized: drop the top 3f = 6 votes'], fill: GOLD, size: 14, weight: 700 },
+        { k: 'note', t: 7.0, x: 414, y: 438, lines: ['safe to extend: drop the top f = 2'], fill: BLUE, size: 14, weight: 700 },
+        // Act 2: the four-chain grid and the horizontal sweep.
+        { k: 'note', static: true, t: 0, x: 650, y: 207, lines: ['D'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 650, y: 269, lines: ['C'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 650, y: 331, lines: ['B'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 650, y: 393, lines: ['A'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 692, y: 430, lines: ['1'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 754, y: 430, lines: ['2'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 816, y: 430, lines: ['3'], size: 13 },
+        { k: 'note', static: true, t: 0, x: 878, y: 430, lines: ['4'], size: 13 },
+        { k: 'cell', static: true, t: 0, x: 692, y: 388, w: 58, h: 58, label: '1A', corner: true, fill: '#e2e2e2' },
+        { k: 'cell', static: true, t: 0, x: 692, y: 326, w: 58, h: 58, label: '1B', corner: true, changes: [{ t: 8.0, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 692, y: 264, w: 58, h: 58, label: '1C', corner: true, changes: [{ t: 9.2, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 692, y: 202, w: 58, h: 58, label: '1D', corner: true, changes: [{ t: 7.6, stroke: GOLD, strokeWidth: 2.5 }, { t: 10.4, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 754, y: 388, w: 58, h: 58, label: '2A', corner: true },
+        { k: 'cell', static: true, t: 0, x: 754, y: 326, w: 58, h: 58, label: '2B', corner: true, fill: '#e2e2e2' },
+        { k: 'cell', static: true, t: 0, x: 754, y: 264, w: 58, h: 58, label: '2C', corner: true, changes: [{ t: 8.3, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 754, y: 202, w: 58, h: 58, label: '2D', corner: true, changes: [{ t: 7.6, stroke: GOLD, strokeWidth: 2.5 }, { t: 9.5, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 816, y: 388, w: 58, h: 58, label: '3A', corner: true, fill: '#e2e2e2' },
+        { k: 'cell', static: true, t: 0, x: 816, y: 326, w: 58, h: 58, label: '3B', corner: true, changes: [{ t: 8.6, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 816, y: 264, w: 58, h: 58, label: '3C', corner: true, changes: [{ t: 7.6, stroke: GOLD, strokeWidth: 2.5 }, { t: 9.8, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 878, y: 388, w: 58, h: 58, label: '4A', corner: true, fill: '#e2e2e2' },
+        { k: 'cell', static: true, t: 0, x: 878, y: 326, w: 58, h: 58, label: '4B', corner: true, changes: [{ t: 8.9, fill: GOLD_FILL }] },
+        { k: 'cell', static: true, t: 0, x: 878, y: 264, w: 58, h: 58, label: '4C', corner: true, changes: [{ t: 7.6, stroke: GOLD, strokeWidth: 2.5 }, { t: 10.1, fill: GOLD_FILL }] },
+        { k: 'note', t: 7.6, x: 558, y: 290, lines: ['finalized tips,', 'per chain →'], size: 14 },
+        { k: 'note', t: 8.0, x: 785, y: 100, lines: ["each chain's first new block,", "then each chain's second"], size: 13 },
+        { k: 'stamp', t: 8.0, x: 692, y: 326, label: '1' },
+        { k: 'stamp', t: 8.3, x: 754, y: 264, label: '2' },
+        { k: 'stamp', t: 8.6, x: 816, y: 326, label: '3' },
+        { k: 'stamp', t: 8.9, x: 878, y: 326, label: '4' },
+        { k: 'stamp', t: 9.2, x: 692, y: 264, label: '5' },
+        { k: 'stamp', t: 9.5, x: 754, y: 202, label: '6' },
+        { k: 'stamp', t: 9.8, x: 816, y: 264, label: '7' },
+        { k: 'stamp', t: 10.1, x: 878, y: 264, label: '8' },
+        { k: 'stamp', t: 10.4, x: 692, y: 202, label: '9' },
+      ],
+      token: [],
     }],
   },
 
@@ -209,7 +284,7 @@ const FIGURES = {
       phases: [],
       events: [
         ...Array.from({ length: 6 }, (_, round) =>
-          ['v1', 'v2', 'v3', 'v4'].map(row => ({ k: 'emit', row, t: round, color: RED }))
+          ['v1', 'v2', 'v3', 'v4'].map(row => ({ k: 'emit', row, t: round, color: GREEN }))
         ).flat(),
         ...Array.from({ length: 5 }, (_, i) => {
           const round = i + 1;
@@ -253,7 +328,7 @@ const FIGURES = {
             const anchor = round === 1 && idx === 1;
             const inHistory = anchor || (round === 0 && idx !== 2);
             return {
-              k: 'emit', row, t: round, color: RED,
+              k: 'emit', row, t: round, color: GREEN,
               ...(anchor ? { label: 'A' } : {}),
               ...(inHistory ? { finalAt: 3.5 } : {}),
             };
@@ -297,14 +372,14 @@ const FIGURES = {
       end: 6.3,
       phases: [],
       events: [
-        { k: 'emit', row: 'v1', t: 0, color: RED, label: 'r' },
-        { k: 'emit', row: 'v2', t: 0, color: RED },
-        { k: 'emit', row: 'v3', t: 0, color: RED },
-        { k: 'emit', row: 'v4', t: 0, color: RED },
-        { k: 'emit', row: 'v1', t: 1, color: RED, label: 'r+1' },
-        { k: 'emit', row: 'v2', t: 1, color: RED },
-        { k: 'emit', row: 'v3', t: 1, color: RED, missingUntil: 4.6, label: 'withheld', labelSide: 'left' },
-        { k: 'emit', row: 'v4', t: 1, color: RED },
+        { k: 'emit', row: 'v1', t: 0, color: GREEN, label: 'r' },
+        { k: 'emit', row: 'v2', t: 0, color: GREEN },
+        { k: 'emit', row: 'v3', t: 0, color: GREEN },
+        { k: 'emit', row: 'v4', t: 0, color: GREEN },
+        { k: 'emit', row: 'v1', t: 1, color: GREEN, label: 'r+1' },
+        { k: 'emit', row: 'v2', t: 1, color: GREEN },
+        { k: 'emit', row: 'v3', t: 1, color: GREEN, missingUntil: 4.6, label: 'withheld', labelSide: 'left' },
+        { k: 'emit', row: 'v4', t: 1, color: GREEN },
         { k: 'edge', fromRow: 'v1', fromT: 1, toRow: 'v1', toT: 0, t: 1, d: 0.45 },
         { k: 'edge', fromRow: 'v1', fromT: 1, toRow: 'v3', toT: 0, t: 1, d: 0.45 },
         { k: 'edge', fromRow: 'v1', fromT: 1, toRow: 'v4', toT: 0, t: 1, d: 0.45 },
@@ -314,13 +389,13 @@ const FIGURES = {
         { k: 'edge', fromRow: 'v4', fromT: 1, toRow: 'v2', toT: 0, t: 1, d: 0.45 },
         { k: 'edge', fromRow: 'v4', fromT: 1, toRow: 'v3', toT: 0, t: 1, d: 0.45 },
         { k: 'edge', fromRow: 'v4', fromT: 1, toRow: 'v4', toT: 0, t: 1, d: 0.45 },
-        { k: 'emit', row: 'v1', t: 2, color: RED, label: 'r+2' },
-        { k: 'emit', row: 'v2', t: 2, color: RED },
-        { k: 'emit', row: 'v4', t: 2, color: RED },
+        { k: 'emit', row: 'v1', t: 2, color: GREEN, label: 'r+2' },
+        { k: 'emit', row: 'v2', t: 2, color: GREEN },
+        { k: 'emit', row: 'v4', t: 2, color: GREEN },
         { k: 'edge', fromRow: 'v1', fromT: 2, toRow: 'v1', toT: 1, t: 2, d: 0.45 },
         { k: 'edge', fromRow: 'v1', fromT: 2, toRow: 'v2', toT: 1, t: 2, d: 0.45 },
         { k: 'edge', fromRow: 'v1', fromT: 2, toRow: 'v4', toT: 1, t: 2, d: 0.45 },
-        { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v3', toT: 1, t: 2, d: 0.45, style: 'tx' },
+        { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v3', toT: 1, t: 2, d: 0.45, style: 'bad' },
         { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v1', toT: 1, t: 2, d: 0.45 },
         { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v4', toT: 1, t: 2, d: 0.45 },
         { k: 'edge', fromRow: 'v4', fromT: 2, toRow: 'v1', toT: 1, t: 2, d: 0.45 },
@@ -328,21 +403,21 @@ const FIGURES = {
         { k: 'edge', fromRow: 'v4', fromT: 2, toRow: 'v4', toT: 1, t: 2, d: 0.45 },
         { k: 'msg', from: 'v1', to: 'v2', t: 2.6, d: 1, style: 'ctl', label: 'fetch' },
         { k: 'msg', from: 'v4', to: 'v2', t: 2.6, d: 1, style: 'ctl' },
-        { k: 'msg', from: 'v2', to: 'v1', t: 3.6, d: 1, style: 'blk' },
-        { k: 'msg', from: 'v2', to: 'v4', t: 3.6, d: 1, style: 'blk' },
+        { k: 'msg', from: 'v2', to: 'v1', t: 3.6, d: 1, style: 'bat' },
+        { k: 'msg', from: 'v2', to: 'v4', t: 3.6, d: 1, style: 'bat' },
         { k: 'note', t: 2.6, tx: 4.3, y: 300, lines: ["v1 + v4 cannot use v2's vertex", 'until they fetch its ancestry'] },
         { k: 'mark', t: 3, sub: 'r+3 without the fault', ghost: true },
-        { k: 'emit', row: 'v1', t: 4.7, color: RED, label: 'r+3' },
-        { k: 'emit', row: 'v2', t: 4.7, color: RED },
-        { k: 'emit', row: 'v4', t: 4.7, color: RED },
+        { k: 'emit', row: 'v1', t: 4.7, color: GREEN, label: 'r+3' },
+        { k: 'emit', row: 'v2', t: 4.7, color: GREEN },
+        { k: 'emit', row: 'v4', t: 4.7, color: GREEN },
         ...['v1', 'v2', 'v4'].flatMap(row =>
           ['v1', 'v2', 'v4'].map(parent => (
             { k: 'edge', fromRow: row, fromT: 4.7, toRow: parent, toT: 2, t: 4.7, d: 0.45 }
           ))
         ),
-        { k: 'emit', row: 'v1', t: 5.7, color: RED, label: 'r+4' },
-        { k: 'emit', row: 'v2', t: 5.7, color: RED },
-        { k: 'emit', row: 'v4', t: 5.7, color: RED },
+        { k: 'emit', row: 'v1', t: 5.7, color: GREEN, label: 'r+4' },
+        { k: 'emit', row: 'v2', t: 5.7, color: GREEN },
+        { k: 'emit', row: 'v4', t: 5.7, color: GREEN },
         ...['v1', 'v2', 'v4'].flatMap(row =>
           ['v1', 'v2', 'v4'].map(parent => (
             { k: 'edge', fromRow: row, fromT: 5.7, toRow: parent, toT: 4.7, t: 5.7, d: 0.45 }
@@ -368,22 +443,22 @@ const FIGURES = {
       end: 8,
       phases: [],
       events: [
-        { k: 'emit', row: 'dag', t: 0, color: RED, label: 'v1', certAt: 2 },
+        { k: 'emit', row: 'dag', t: 0, color: GREEN, label: 'v1', certAt: 2 },
         { k: 'arc', row: 'dag', t: 0, d: 2, label: 'PoA' },
-        { k: 'emit', row: 'dag', t: 2, color: RED, label: 'v2', certAt: 4 },
+        { k: 'emit', row: 'dag', t: 2, color: GREEN, label: 'v2', certAt: 4 },
         { k: 'arc', row: 'dag', t: 2, d: 2 },
-        { k: 'emit', row: 'dag', t: 4, color: RED, label: 'v3', certAt: 6 },
+        { k: 'emit', row: 'dag', t: 4, color: GREEN, label: 'v3', certAt: 6 },
         { k: 'arc', row: 'dag', t: 4, d: 2 },
-        { k: 'emit', row: 'dag', t: 6, color: RED, label: 'v4', certAt: 8 },
+        { k: 'emit', row: 'dag', t: 6, color: GREEN, label: 'v4', certAt: 8 },
         { k: 'arc', row: 'dag', t: 6, d: 2 },
         { k: 'counter', row: 'dag', unit: 'blocks' },
-        { k: 'emit', row: 'mm', t: 0, color: RED, label: 'b1', certAt: 2 },
-        ...Array.from({ length: 10 }, (_, i) => (
-          { k: 'emit', row: 'mm', t: (i + 1) * 0.7, color: RED, certAt: (i + 1) * 0.7 + 2 }
+        { k: 'emit', row: 'mm', t: 0, color: GREEN, label: 'b1', certAt: 2 },
+        ...Array.from({ length: 12 }, (_, i) => (
+          { k: 'emit', row: 'mm', t: (i + 1) * 2 / 3, color: GREEN, certAt: (i + 1) * 2 / 3 + 2 }
         )),
         { k: 'arc', row: 'mm', t: 0, d: 2, label: 'PoA' },
-        ...Array.from({ length: 10 }, (_, i) => (
-          { k: 'arc', row: 'mm', t: (i + 1) * 0.7, d: 2, faint: true }
+        ...Array.from({ length: 12 }, (_, i) => (
+          { k: 'arc', row: 'mm', t: (i + 1) * 2 / 3, d: 2, faint: true }
         )),
         { k: 'counter', row: 'mm', unit: 'blocks' },
       ],
@@ -483,7 +558,7 @@ function buildFigure(mount, cfg) {
   svg.appendChild(staticLayer);
 
   const axisY = H - 34;
-  for (let t = Math.ceil(cfg.axis.min); t <= Math.floor(cfg.axis.max); t++) {
+  for (let t = Math.ceil(cfg.axis.min); !cfg.noAxis && t <= Math.floor(cfg.axis.max); t++) {
     const x = xOf(t);
     staticLayer.appendChild(svgEl('line', {
       x1: x, y1: 54, x2: x, y2: axisY - 12,
@@ -610,7 +685,7 @@ function buildFigure(mount, cfg) {
         const right = ev.labelSide === 'right';
         labelEl = text(left ? x - 12 : (right ? x + 12 : x), left ? y + 5 : y - 13, ev.label, {
           'text-anchor': left ? 'end' : (right ? 'start' : 'middle'),
-          fill: ev.missingUntil !== undefined ? GRAY : (ev.color === RED ? RED : BLUE), 'font-size': 14,
+          fill: ev.missingUntil !== undefined ? GRAY : ev.color, 'font-size': 14,
         });
         labelEl.setAttribute('opacity', 0);
         dyn.appendChild(labelEl);
@@ -646,11 +721,7 @@ function buildFigure(mount, cfg) {
         stroke: ev.ghost ? GRAY : GOLD, 'stroke-width': ev.ghost ? 1.5 : 2.5,
         'stroke-dasharray': ev.ghost ? '5 4' : 'none',
       });
-      const halo = svgEl('rect', {
-        x: x - 9, y: 54, width: 18, height: H - 100,
-        fill: GOLD_FILL, opacity: 0,
-      });
-      group.append(halo, lineEl);
+      group.append(lineEl);
       if (ev.label) {
         group.appendChild(text(x, 46, ev.label, {
           'text-anchor': 'middle', 'font-size': ev.ghost ? 14 : 17,
@@ -668,9 +739,7 @@ function buildFigure(mount, cfg) {
       (ev.ghost ? ghostLayer : dyn).appendChild(group);
       return tau => {
         // Ghost markers are comparison context, visible for the whole loop.
-        const on = ev.ghost || tau >= ev.t;
-        group.setAttribute('opacity', on ? 1 : 0);
-        if (!ev.ghost) halo.setAttribute('opacity', on ? clamp(1 - (tau - ev.t) / 0.8, 0, 1) * 0.9 : 0);
+        group.setAttribute('opacity', ev.ghost || tau >= ev.t ? 1 : 0);
       };
     },
     edge(ev) {
@@ -712,16 +781,74 @@ function buildFigure(mount, cfg) {
         if (labelEl) labelEl.setAttribute('opacity', frac > 0.3 ? 1 : 0);
       };
     },
+    cell(ev) {
+      const layer = ev.static ? ghostLayer : dyn;
+      const group = svgEl('g', { opacity: 0 });
+      const rect = svgEl('rect', {
+        x: ev.x - ev.w / 2, y: ev.y - ev.h / 2, width: ev.w, height: ev.h,
+        fill: ev.fill ?? 'white', stroke: ev.stroke ?? '#9a9a9a', 'stroke-width': 1.4,
+      });
+      group.appendChild(rect);
+      if (ev.label) {
+        group.appendChild(text(
+          ev.corner ? ev.x - ev.w / 2 + 5 : ev.x,
+          ev.corner ? ev.y - ev.h / 2 + 14 : ev.y + 5,
+          ev.label,
+          { 'text-anchor': ev.corner ? 'start' : 'middle', 'font-size': ev.corner ? 11 : 15, fill: ev.labelFill ?? 'black' },
+        ));
+      }
+      layer.appendChild(group);
+      return tau => {
+        group.setAttribute('opacity', ev.static || tau >= ev.t ? 1 : 0);
+        let fill = ev.fill ?? 'white';
+        let stroke = ev.stroke ?? '#9a9a9a';
+        let sw = 1.4;
+        for (const c of ev.changes ?? []) {
+          if (tau < c.t) continue;
+          fill = c.fill ?? fill;
+          stroke = c.stroke ?? stroke;
+          sw = c.strokeWidth ?? sw;
+        }
+        rect.setAttribute('fill', fill);
+        rect.setAttribute('stroke', stroke);
+        rect.setAttribute('stroke-width', sw);
+      };
+    },
+    dot(ev) {
+      const el = svgEl('circle', { cx: ev.x, cy: ev.y, r: 7, fill: BLUE, opacity: 0 });
+      dyn.appendChild(el);
+      return tau => {
+        if (tau < ev.t) {
+          el.setAttribute('opacity', 0);
+          return;
+        }
+        // Discarded votes dim while a rank rule is counting them out.
+        const dimmed = (ev.dims ?? []).some(w => tau >= w[0] && tau < w[1]);
+        el.setAttribute('opacity', dimmed ? 0.18 : 0.9);
+      };
+    },
+    stamp(ev) {
+      const el = text(ev.x, ev.y + 7, ev.label, {
+        'text-anchor': 'middle', 'font-size': 20, 'font-weight': 700, fill: 'black',
+      });
+      el.setAttribute('opacity', 0);
+      dyn.appendChild(el);
+      return tau => el.setAttribute('opacity', tau >= ev.t ? 1 : 0);
+    },
     note(ev) {
+      const layer = ev.static ? ghostLayer : dyn;
       const els = ev.lines.map((line, i) =>
-        text(xOf(ev.tx), ev.y + i * 16, line, { 'text-anchor': 'middle', fill: GRAY, 'font-size': 14 })
+        text(ev.x ?? xOf(ev.tx), ev.y + i * 16, line, {
+          'text-anchor': 'middle', fill: ev.fill ?? GRAY,
+          'font-size': ev.size ?? 14, 'font-weight': ev.weight ?? 400,
+        })
       );
       for (const el of els) {
         el.setAttribute('opacity', 0);
-        dyn.appendChild(el);
+        layer.appendChild(el);
       }
       return tau => {
-        for (const el of els) el.setAttribute('opacity', tau >= ev.t ? 1 : 0);
+        for (const el of els) el.setAttribute('opacity', ev.static || tau >= ev.t ? 1 : 0);
       };
     },
     counter(ev) {
@@ -736,7 +863,7 @@ function buildFigure(mount, cfg) {
     },
   };
 
-  const token = svgEl('circle', { r: 6, fill: RED, stroke: 'white', 'stroke-width': 1.5, opacity: 0 });
+  const token = svgEl('circle', { r: 6, fill: 'black', stroke: 'white', 'stroke-width': 1.5, opacity: 0 });
 
   let updaters = [];
   let activeVariant = null;
