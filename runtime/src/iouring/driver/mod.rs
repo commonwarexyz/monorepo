@@ -895,8 +895,31 @@ impl Driver {
 
     /// Drain in-flight ring work so kernel-owned buffers and descriptors are
     /// released, consuming the driver: the ring is destroyed afterwards.
+    ///
+    /// A panic inside the drain aborts the process: unwinding would destroy
+    /// the ring and release the driver's op-table reference while the kernel
+    /// may still write into request buffers.
     pub(crate) fn drain(mut self) {
+        // The guard must live inside this frame: locals drop before
+        // parameters during unwind, so the abort fires while `self` (the
+        // ring and its op-table reference) is still alive. A guard at any
+        // call site would run only after unwinding out of this frame had
+        // already dropped them.
+        let guard = AbortOnUnwind;
         self.inner.drain(&mut self.ring);
+        std::mem::forget(guard);
+    }
+}
+
+/// Aborts the process when dropped during an unwind (see [Driver::drain]).
+struct AbortOnUnwind;
+
+impl Drop for AbortOnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("io_uring drain panicked with operations in flight, aborting");
+            std::process::abort();
+        }
     }
 }
 
@@ -986,14 +1009,16 @@ pub(crate) mod testing {
             let Some(driver) = self.driver.take() else {
                 return;
             };
-            for waker in driver.close() {
-                waker.wake();
-            }
-            // Mirror the runtime's teardown: a drain panic must not unwind
-            // while the kernel may still write into slab-owned buffers.
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.drain())).is_err() {
-                eprintln!("io_uring drain panicked with operations in flight, aborting");
-                std::process::abort();
+            // Mirror the runtime's teardown: a waker panic must not skip the
+            // drain (drain panics abort inside [Driver::drain]).
+            let wakers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for waker in driver.close() {
+                    waker.wake();
+                }
+            }));
+            driver.drain();
+            if let Err(payload) = wakers {
+                std::panic::resume_unwind(payload);
             }
         }
 
@@ -1795,10 +1820,11 @@ mod tests {
             start.elapsed()
         );
 
-        // The cancelled recv parked its timeout result for the live future.
+        // The shutdown-cancelled recv parked a closed result for the live
+        // future: shutdown is distinguishable from an operation timeout.
         match poll_once(&harness, &mut recv) {
-            Poll::Ready(Err((_, Error::Timeout))) => {}
-            other => panic!("expected cancelled recv timeout, got {other:?}"),
+            Poll::Ready(Err((_, Error::Closed))) => {}
+            other => panic!("expected shutdown-cancelled recv to be closed, got {other:?}"),
         }
         assert_eq!(harness.tracked(), 0);
     }

@@ -9,6 +9,7 @@ use super::{
     Tick, UserData,
     request::{Output, Request},
 };
+use crate::Error;
 use io_uring::squeue::Entry as SqueueEntry;
 use std::task::Waker;
 use tracing::warn;
@@ -96,6 +97,30 @@ impl WaiterId {
     }
 }
 
+/// Why a request's cancellation was requested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelReason {
+    /// The request's deadline elapsed: the observer sees [Error::Timeout].
+    ///
+    /// Also used for drop-orphaned requests, whose parked result is never
+    /// observed (the reason is immaterial there).
+    Deadline,
+    /// The runtime is shutting down: the observer sees [Error::Closed],
+    /// distinguishing shutdown from an ordinary operation timeout or a
+    /// genuine kernel failure.
+    Shutdown,
+}
+
+impl CancelReason {
+    /// The error a cancelled request surfaces to its observer.
+    pub const fn into_error(self) -> Error {
+        match self {
+            Self::Deadline => Error::Timeout,
+            Self::Shutdown => Error::Closed,
+        }
+    }
+}
+
 /// Lifecycle state of a tracked request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaiterState {
@@ -113,8 +138,12 @@ pub enum WaiterState {
     ///
     /// If the request still has an operation SQE in flight, the loop stages an
     /// async cancel. If the request is only parked in the staged queue, the
-    /// loop completes it locally with timeout when that entry is revisited.
-    CancelRequested,
+    /// loop completes it locally with the reason's error when that entry is
+    /// revisited.
+    CancelRequested {
+        /// Why cancellation was requested (selects the observer's error).
+        reason: CancelReason,
+    },
 }
 
 /// Progress state of the logical request stored in a slot.
@@ -368,10 +397,12 @@ impl Waiters {
         }
         match slot.state {
             WaiterState::Active { .. } => {
-                slot.state = WaiterState::CancelRequested;
+                slot.state = WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                };
                 true
             }
-            WaiterState::CancelRequested => false,
+            WaiterState::CancelRequested { .. } => false,
         }
     }
 
@@ -390,7 +421,9 @@ impl Waiters {
             let WaiterState::Active { target_tick } = slot.state else {
                 continue;
             };
-            slot.state = WaiterState::CancelRequested;
+            slot.state = WaiterState::CancelRequested {
+                reason: CancelReason::Shutdown,
+            };
             cancelled.push((slot.id, target_tick, slot.in_flight));
         }
         cancelled
@@ -424,7 +457,7 @@ impl Waiters {
         };
 
         match slot.state {
-            WaiterState::CancelRequested => {
+            WaiterState::CancelRequested { reason } => {
                 // Cancellation marked while the request sat in the staged
                 // queue: an in-flight request is never restaged (its CQE
                 // requeues it with `in_flight` already cleared), and freeing
@@ -442,9 +475,11 @@ impl Waiters {
                         freed: true,
                     }
                 } else {
-                    // The timeout output moves the owned buffer out of the
-                    // request, so the emptied shell drops in place.
-                    let output = request.timeout();
+                    // The output moves the owned buffer out of the request,
+                    // so the emptied shell drops in place. The reason selects
+                    // what the observer sees: a deadline expiry surfaces as
+                    // timeout, a shutdown as closed.
+                    let output = request.interrupt(reason.into_error());
                     let waker = self.park_output_at(index, output);
                     StageOutcome::Timeout {
                         waker,
@@ -537,7 +572,7 @@ impl Waiters {
         // both cases, stop issuing SQEs for this waiter now.
         let target_tick = match state {
             WaiterState::Active { target_tick } => target_tick,
-            WaiterState::CancelRequested => None,
+            WaiterState::CancelRequested { .. } => None,
         };
 
         if orphaned {
@@ -636,7 +671,11 @@ impl Waiters {
         }
         match slot.state {
             WaiterState::Active { target_tick } => {
-                slot.state = WaiterState::CancelRequested;
+                // The ticket is gone, so the parked result (and its reason)
+                // is never observed.
+                slot.state = WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                };
                 DropOutcome::Cancel {
                     needs_sqe: slot.in_flight,
                     target_tick,
@@ -645,7 +684,7 @@ impl Waiters {
             // Cancellation was already requested (e.g. by timeout expiry,
             // which released deadline accounting), so the existing wind-down
             // path retires the slot.
-            WaiterState::CancelRequested => DropOutcome::Cancel {
+            WaiterState::CancelRequested { .. } => DropOutcome::Cancel {
                 needs_sqe: false,
                 target_tick: None,
             },
@@ -961,14 +1000,14 @@ mod tests {
         assert!(waiters.cancel(active));
         assert!(waiters.is_in_flight(active));
         let active_state = waiter_state(&waiters, active).expect("active waiter missing");
-        assert!(matches!(active_state, WaiterState::CancelRequested));
+        assert!(matches!(active_state, WaiterState::CancelRequested { .. }));
 
         // Then build a waiter that has been canceled before any SQE was staged.
         let ready = insert(&mut waiters, make_sync_request(), Some(3));
         assert!(waiters.cancel(ready));
         assert!(!waiters.is_in_flight(ready));
         let ready_state = waiter_state(&waiters, ready).expect("ready waiter missing");
-        assert!(matches!(ready_state, WaiterState::CancelRequested));
+        assert!(matches!(ready_state, WaiterState::CancelRequested { .. }));
     }
 
     #[test]
@@ -1153,7 +1192,7 @@ mod tests {
                 CompletionOutcome::Cancel
             ));
             let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
-            assert!(matches!(state, WaiterState::CancelRequested));
+            assert!(matches!(state, WaiterState::CancelRequested { .. }));
         }
     }
 
@@ -1171,7 +1210,7 @@ mod tests {
             CompletionOutcome::Cancel
         ));
         let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
-        assert!(matches!(state, WaiterState::CancelRequested));
+        assert!(matches!(state, WaiterState::CancelRequested { .. }));
     }
 
     #[test]
@@ -1274,5 +1313,30 @@ mod tests {
         assert_eq!(transitioned[0].0, in_flight);
         assert_eq!(transitioned[0].1, Some(2));
         assert!(transitioned[0].2);
+    }
+
+    #[test]
+    fn test_shutdown_cancellation_is_not_reported_as_deadline_timeout() {
+        // `cancel_active` is the shutdown-budget path. Its cancellation must
+        // remain distinguishable from `cancel`, which is also used by the
+        // request deadline path: a shutdown surfaces as closed, not as an
+        // ordinary operation timeout.
+        let mut waiters = Waiters::new(1);
+        let waiter_id = insert(&mut waiters, make_recv_request(), Some(7));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+        assert_eq!(waiters.cancel_active().len(), 1);
+
+        assert!(matches!(
+            waiters.on_completion(waiter_id.user_data(), -libc::ECANCELED),
+            CompletionOutcome::Complete { .. }
+        ));
+        let Some(Output::Recv(Err(error))) = waiters.poll_take(waiter_id, &noop_waker()) else {
+            panic!("shutdown-cancelled recv did not produce an error");
+        };
+        let (_, error) = *error;
+        assert!(
+            matches!(error, Error::Closed),
+            "expected shutdown cancellation to be Closed, got {error:?}"
+        );
     }
 }

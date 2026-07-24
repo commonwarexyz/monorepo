@@ -720,16 +720,17 @@ impl Worker {
         // requesting their cancellation), so e.g. an idle recv does not hold
         // its waiter slot until its deadline.
         //
-        // A panic inside the drain itself (an unrecoverable ring error) must
-        // not unwind past this point: the slab would be freed while the kernel
-        // may still write into its buffers, so abort instead.
-        for waker in driver.close() {
-            waker.wake();
-        }
-        if catch_unwind(AssertUnwindSafe(|| driver.drain())).is_err() {
-            eprintln!("io_uring drain panicked with operations in flight, aborting");
-            std::process::abort();
-        }
+        // Capacity wakers are arbitrary user code (any manually polled
+        // future supplies its own waker): a waker panic must not skip the
+        // drain, so it is retained and resumed only after the ring is
+        // quiesced. A panic inside the drain itself aborts the process
+        // before unwinding can free ring state (see [Driver::drain]).
+        let close_wakers = catch_unwind(AssertUnwindSafe(|| {
+            for waker in driver.close() {
+                waker.wake();
+            }
+        }));
+        driver.drain();
 
         // Assert no context escaped the runtime. The check is meaningful only
         // for runtimes that never spawned another worker: once one exists,
@@ -745,11 +746,13 @@ impl Worker {
         );
 
         // Handle the result — resume the original panic after cleanup if one
-        // was caught, preferring it over a panic from task teardown.
-        match (result, teardown) {
-            (Err(payload), _) => resume_unwind(payload),
-            (Ok(_), Err(payload)) => resume_unwind(payload),
-            (Ok(output), Ok(())) => output,
+        // was caught, preferring it over a panic from task teardown, and
+        // either over a close-waker panic.
+        match (result, teardown, close_wakers) {
+            (Err(payload), _, _) | (Ok(_), Err(payload), _) | (Ok(_), Ok(()), Err(payload)) => {
+                resume_unwind(payload)
+            }
+            (Ok(output), Ok(()), Ok(())) => output,
         }
     }
 }
@@ -866,6 +869,18 @@ impl crate::Runner for Runner {
             worker.run(panicked.interrupt(f(context)), Arc::clone(&root_tree))
         }));
 
+        // Snapshot reap-stashed panics before triggering any further
+        // teardown: a payload present at this point was captured while the
+        // root still ran, so it predates (and usually causes) any root
+        // panic. Taking it after the abort below would let a worker panicked
+        // BY that cascade (and reaped by a racing foreign-thread spawn)
+        // outrank the root panic it resulted from. A cascade panic from
+        // `run`'s own internal abort can still slip in through the same
+        // foreign-reap race; distinguishing it would require stamping
+        // stashes with a teardown epoch, which the diagnostic payoff does
+        // not justify.
+        let stashed = shared.worker_panic.lock().take();
+
         // `run` aborts the tree before it returns or unwinds, but a panic in
         // `f` itself never reaches `run`; abort again (idempotent) so every
         // worker observes its wind-down before being joined.
@@ -895,10 +910,14 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Resume the root worker's panic first: worker failures during
-        // teardown are usually its cascade. A panic stashed by an earlier
-        // opportunistic reap takes precedence over join-loop panics (it
-        // happened first).
+        // Panic precedence: earliest cause first. A worker panic stashed
+        // while the root still ran predates the root's own panic (and is
+        // usually its cause: a dead worker fails the tasks that depended on
+        // it), so it wins; the root panic beats join-loop and teardown-era
+        // payloads, which are its downstream cascade.
+        if let Some(payload) = stashed {
+            resume_unwind(payload);
+        }
         let output = match output {
             Ok(output) => output,
             Err(payload) => resume_unwind(payload),
@@ -1937,6 +1956,77 @@ mod tests {
         });
     }
 
+    /// A capacity waker panic during close must not skip the ring drain: the
+    /// accepted connection is parked by the drain and remains available
+    /// through the listener that escaped the root future.
+    #[test]
+    fn test_close_waker_panic_still_drains_ring() {
+        struct PanicWake;
+
+        impl std::task::Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("capacity wake panic");
+            }
+        }
+
+        let listener = Arc::new(Mutex::new(None));
+        let escaped = Arc::clone(&listener);
+        let (addr_send, addr_recv) = std::sync::mpsc::channel();
+        let connector = std::thread::spawn(move || {
+            let addr = addr_recv.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            std::net::TcpStream::connect(addr).unwrap()
+        });
+
+        let cfg = Config::default().with_ring(RingConfig {
+            size: 1,
+            ..RingConfig::default()
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(|context| async move {
+                // Occupy the only waiter slot with an accept whose ticket
+                // survives in the escaped listener.
+                let mut first = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let addr = first.local_addr().unwrap();
+                let mut accept = Box::pin(first.accept());
+                assert!(futures::poll!(accept.as_mut()).is_pending());
+                drop(accept);
+                *escaped.lock() = Some(first);
+
+                // Park a second admission on capacity with a panicking waker.
+                // It must stay registered until driver close.
+                let mut blocked = context
+                    .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .await
+                    .unwrap();
+                let waker = Waker::from(Arc::new(PanicWake));
+                let mut cx = task::Context::from_waker(&waker);
+                let mut accept = Box::pin(blocked.accept());
+                assert!(accept.as_mut().poll(&mut cx).is_pending());
+                std::mem::forget(accept);
+                std::mem::forget(blocked);
+
+                addr_send.send(addr).unwrap();
+            })
+        }));
+        assert!(result.is_err(), "capacity waker should panic");
+        let _connection = connector.join().unwrap();
+
+        // The root returned before the first accept was submitted. Only the
+        // shutdown drain can have completed its ticket.
+        let mut listener = listener.lock().take().unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = task::Context::from_waker(&waker);
+        let mut accept = Box::pin(listener.accept());
+        assert!(
+            matches!(accept.as_mut().poll(&mut cx), Poll::Ready(Ok(_))),
+            "close-time waker panic skipped the ring drain"
+        );
+    }
+
     /// With the default `catch_panics(false)`, the affinity panic is
     /// forwarded to the root and unwinds `start` (the documented behavior).
     #[test]
@@ -2027,6 +2117,68 @@ mod tests {
                 "{retained} exited worker threads retained until shutdown"
             );
         });
+    }
+
+    /// A worker panic already observed by an opportunistic reap happened
+    /// before a later root panic and must remain the payload propagated by
+    /// `start` (earliest cause wins over its cascade).
+    #[test]
+    fn test_reaped_worker_panic_precedes_root_panic() {
+        struct PanicOnDrop;
+
+        impl Future for PanicOnDrop {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<()> {
+                Poll::Ready(())
+            }
+        }
+
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("worker panic");
+            }
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let executor = context.executor.upgrade().unwrap();
+                let handle = context
+                    .child("panicking_worker")
+                    .dedicated()
+                    .spawn(|_| PanicOnDrop);
+                assert!(matches!(handle.await, Err(Error::Closed)));
+
+                // Wait until the worker has exited, then exercise the
+                // opportunistic reaper so its payload is stashed before the
+                // root panics.
+                loop {
+                    let finished = executor
+                        .shared
+                        .workers
+                        .lock()
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(std::thread::JoinHandle::is_finished);
+                    if finished {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                executor.shared.reap_workers();
+                assert!(executor.shared.worker_panic.lock().is_some());
+
+                panic!("root panic");
+            })
+        }));
+
+        let payload = result.expect_err("start should propagate the first panic");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("worker panic"));
     }
 
     /// Completion of a dedicated task must abort the consumed context's node

@@ -4,7 +4,7 @@
 //! [Request] that owns all resources (buffers, FDs, progress cursors) needed
 //! to build follow-up SQEs and produce a typed [Output].
 
-use super::waiter::{WaiterId, WaiterState};
+use super::waiter::{CancelReason, WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
@@ -256,22 +256,26 @@ impl Request {
         }
     }
 
+    /// Resolve a request the loop is retiring before completion (a deadline
+    /// expiry surfaces [Error::Timeout], a shutdown [Error::Closed]), moving
+    /// any owned buffer out of the request.
+    pub fn interrupt(&mut self, error: Error) -> Output {
+        match self {
+            Self::Send(_) => Output::Send(Err(Box::new(error))),
+            Self::Recv(r) => Output::Recv(Err(Box::new((std::mem::take(&mut r.buf), error)))),
+            Self::Accept(_) => Output::Accept(Err(Box::new(error))),
+            Self::Connect(_) => Output::Connect(Err(Box::new(error))),
+            Self::ReadAt(r) => Output::ReadAt(Err(Box::new((std::mem::take(&mut r.buf), error)))),
+            Self::WriteAt(_) => Output::WriteAt(Err(Box::new(error))),
+            Self::Sync(_) => Output::Sync(Err(Box::new(error))),
+        }
+    }
+
     /// Return a timeout result, moving any owned buffer out of the request.
     /// Used when a deadline expires before the current SQE could complete.
+    #[cfg(test)]
     pub fn timeout(&mut self) -> Output {
-        match self {
-            Self::Send(_) => Output::Send(Err(Box::new(Error::Timeout))),
-            Self::Recv(r) => {
-                Output::Recv(Err(Box::new((std::mem::take(&mut r.buf), Error::Timeout))))
-            }
-            Self::Accept(_) => Output::Accept(Err(Box::new(Error::Timeout))),
-            Self::Connect(_) => Output::Connect(Err(Box::new(Error::Timeout))),
-            Self::ReadAt(r) => {
-                Output::ReadAt(Err(Box::new((std::mem::take(&mut r.buf), Error::Timeout))))
-            }
-            Self::WriteAt(_) => Output::WriteAt(Err(Box::new(Error::Timeout))),
-            Self::Sync(_) => Output::Sync(Err(Box::new(Error::Timeout))),
-        }
+        self.interrupt(Error::Timeout)
     }
 }
 
@@ -293,9 +297,9 @@ impl Request {
 enum CqeResult {
     /// Transient kernel result that may be retried with another SQE.
     Retry,
-    /// `ECANCELED` for an operation whose waiter had already timed out and
-    /// requested async cancellation.
-    Cancelled,
+    /// `ECANCELED` for an operation whose waiter had already requested async
+    /// cancellation, carrying why (deadline expiry or runtime shutdown).
+    Cancelled(CancelReason),
     /// Non-retryable negative CQE result code.
     Error(i32),
     /// Successful CQE with zero progress.
@@ -312,8 +316,10 @@ impl CqeResult {
         // - EINTR: interrupted before completion
         if result == -libc::EAGAIN || result == -libc::EWOULDBLOCK || result == -libc::EINTR {
             Self::Retry
-        } else if result == -libc::ECANCELED && matches!(state, WaiterState::CancelRequested) {
-            Self::Cancelled
+        } else if result == -libc::ECANCELED
+            && let WaiterState::CancelRequested { reason } = state
+        {
+            Self::Cancelled(reason)
         } else if result < 0 {
             Self::Error(result)
         } else if result == 0 {
@@ -378,21 +384,23 @@ impl SendRequest {
     /// another SQE is needed.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                Some(Err(Error::Timeout))
-            }
-            CqeResult::Retry => None,
-            CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Retry => match state {
+                // Cancellation raced a retryable completion: resolve with the
+                // cancellation's error instead of issuing another SQE.
+                WaiterState::CancelRequested { reason } => Some(Err(reason.into_error())),
+                WaiterState::Active { .. } => None,
+            },
+            CqeResult::Cancelled(reason) => Some(Err(reason.into_error())),
             CqeResult::Error(_) | CqeResult::Zero => Some(Err(Error::SendFailed)),
             CqeResult::Positive(n) => {
                 self.write.advance(n);
                 if self.write.is_complete() {
                     Some(Ok(()))
-                } else if matches!(state, WaiterState::CancelRequested) {
+                } else if let WaiterState::CancelRequested { reason } = state {
                     // Any send error after partial progress means some prefix
                     // of the frame may already be on the wire. Callers must
                     // drop the connection rather than retrying on this sink.
-                    Some(Err(Error::Timeout))
+                    Some(Err(reason.into_error()))
                 } else {
                     None
                 }
@@ -443,11 +451,13 @@ impl RecvRequest {
     /// another SQE is needed.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<usize, Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                Some(Err(Error::Timeout))
-            }
-            CqeResult::Retry => None,
-            CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Retry => match state {
+                // Cancellation raced a retryable completion: resolve with the
+                // cancellation's error instead of issuing another SQE.
+                WaiterState::CancelRequested { reason } => Some(Err(reason.into_error())),
+                WaiterState::Active { .. } => None,
+            },
+            CqeResult::Cancelled(reason) => Some(Err(reason.into_error())),
             CqeResult::Error(_) | CqeResult::Zero => Some(Err(Error::RecvFailed)),
             CqeResult::Positive(n) => {
                 let remaining = self.len - self.offset;
@@ -458,8 +468,8 @@ impl RecvRequest {
                 self.offset += n;
                 if !self.exact || self.offset >= self.len {
                     Some(Ok(self.offset))
-                } else if matches!(state, WaiterState::CancelRequested) {
-                    Some(Err(Error::Timeout))
+                } else if let WaiterState::CancelRequested { reason } = state {
+                    Some(Err(reason.into_error()))
                 } else {
                     None
                 }
@@ -511,8 +521,10 @@ impl ReadAtRequest {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
-            // does, so operators can distinguish failure causes.
-            CqeResult::Cancelled => {
+            // does, so operators can distinguish failure causes. A shutdown
+            // cancellation is not a kernel failure: it surfaces as closed.
+            CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
+            CqeResult::Cancelled(CancelReason::Deadline) => {
                 let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
                 Some(Err(Error::Io(err.into())))
             }
@@ -608,8 +620,10 @@ impl WriteAtRequest {
             CqeResult::Retry => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
             // does; a zero-length write carries no errno and stays the
-            // kind-specific failure.
-            CqeResult::Cancelled => {
+            // kind-specific failure. A shutdown cancellation is not a kernel
+            // failure: it surfaces as closed.
+            CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
+            CqeResult::Cancelled(CancelReason::Deadline) => {
                 let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
                 Some(Err(Error::Io(err.into())))
             }
@@ -810,11 +824,13 @@ impl AcceptRequest {
             );
         }
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                Some(Err(Error::Timeout))
-            }
-            CqeResult::Retry => None,
-            CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Retry => match state {
+                // Cancellation raced a retryable completion: resolve with the
+                // cancellation's error instead of issuing another SQE.
+                WaiterState::CancelRequested { reason } => Some(Err(reason.into_error())),
+                WaiterState::Active { .. } => None,
+            },
+            CqeResult::Cancelled(reason) => Some(Err(reason.into_error())),
             CqeResult::Error(_) => Some(Err(Error::ConnectionFailed)),
             CqeResult::Zero | CqeResult::Positive(_) => {
                 unreachable!("non-negative accept results are handled above")
@@ -849,10 +865,12 @@ impl ConnectRequest {
     /// another SQE is needed.
     const fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                Some(Err(Error::Timeout))
-            }
-            CqeResult::Retry => None,
+            CqeResult::Retry => match state {
+                // Cancellation raced a retryable completion: resolve with the
+                // cancellation's error instead of issuing another SQE.
+                WaiterState::CancelRequested { reason } => Some(Err(reason.into_error())),
+                WaiterState::Active { .. } => None,
+            },
             // A reissued connect may observe the previous attempt still in
             // progress or already established. Neither is terminal failure.
             // A connect reissued after a retry-classified completion (e.g.
@@ -864,7 +882,7 @@ impl ConnectRequest {
             // deliberate future work.
             CqeResult::Error(code) if code == -libc::EALREADY => None,
             CqeResult::Error(code) if code == -libc::EISCONN => Some(Ok(())),
-            CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Cancelled(reason) => Some(Err(reason.into_error())),
             CqeResult::Error(_) => Some(Err(Error::ConnectionFailed)),
             CqeResult::Zero | CqeResult::Positive(_) => Some(Ok(())),
         }
@@ -889,7 +907,10 @@ impl SyncRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Cancelled => {
+            // A shutdown cancellation is not a kernel failure: it surfaces
+            // as closed.
+            CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
+            CqeResult::Cancelled(CancelReason::Deadline) => {
                 let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
                 Some(Err(Error::Io(err.into())))
             }
@@ -1094,7 +1115,12 @@ mod tests {
                 .is_none()
         );
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::EAGAIN)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::EAGAIN,
+            )
             .expect("terminal CQE");
         assert!(matches!(unwrap_send(output), Err(Error::Timeout)));
 
@@ -1110,7 +1136,12 @@ mod tests {
                 .is_none()
         );
         let output = request
-            .on_cqe(WaiterState::CancelRequested, 1)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                1,
+            )
             .expect("terminal CQE");
         assert!(matches!(unwrap_send(output), Err(Error::Timeout)));
 
@@ -1121,7 +1152,12 @@ mod tests {
             deadline: None,
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED,
+            )
             .expect("terminal CQE");
         assert!(matches!(unwrap_send(output), Err(Error::Timeout)));
 
@@ -1172,7 +1208,12 @@ mod tests {
             deadline: None,
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, 5)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                5,
+            )
             .expect("terminal CQE");
         unwrap_send(output).expect("send should complete successfully");
     }
@@ -1227,7 +1268,12 @@ mod tests {
                 .is_none()
         );
         let output = request
-            .on_cqe(WaiterState::CancelRequested, 1)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                1,
+            )
             .expect("terminal CQE");
         assert!(matches!(unwrap_recv(output), Err((_, Error::Timeout))));
 
@@ -1241,7 +1287,12 @@ mod tests {
             deadline: None,
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::EINTR)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::EINTR,
+            )
             .expect("terminal CQE");
         assert!(matches!(unwrap_recv(output), Err((_, Error::Timeout))));
 
@@ -1254,7 +1305,12 @@ mod tests {
             deadline: None,
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED,
+            )
             .expect("terminal CQE");
         assert!(matches!(unwrap_recv(output), Err((_, Error::Timeout))));
 
@@ -1268,7 +1324,12 @@ mod tests {
             deadline: None,
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, 5)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                5,
+            )
             .expect("terminal CQE");
         let (_buf, read) = unwrap_recv(output).expect("recv should complete successfully");
         assert_eq!(read, 5);
@@ -1392,7 +1453,12 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED,
+            )
             .expect("terminal CQE");
         match unwrap_read_at(output) {
             Err((_, Error::Io(err))) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
@@ -1515,7 +1581,12 @@ mod tests {
             sync: false,
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED,
+            )
             .expect("terminal CQE");
         match unwrap_write_at(output) {
             Err(Error::Io(err)) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
@@ -1542,7 +1613,12 @@ mod tests {
             file: make_file_fd(),
         });
         let output = request
-            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED,
+            )
             .expect("terminal CQE");
         let err = unwrap_sync(output).expect_err("expected timeout cancel error");
         match err {
@@ -1730,6 +1806,80 @@ mod tests {
         assert_eq!(RawSocketAddr::new_zeroed().to_socket_addr(), None);
     }
 
+    #[test]
+    fn test_shutdown_cancellation_resolves_retry_and_partial_races() {
+        // A retryable or partial-progress CQE racing a shutdown cancellation
+        // must resolve with the shutdown's error (Closed), not the deadline
+        // path's Timeout: only the reason distinguishes them.
+        let shutdown = WaiterState::CancelRequested {
+            reason: CancelReason::Shutdown,
+        };
+
+        // Retry races across all four network kinds.
+        let mut send = SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+        };
+        assert!(matches!(
+            send.on_cqe(shutdown, -libc::EAGAIN),
+            Some(Err(Error::Closed))
+        ));
+
+        let mut recv = RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+        };
+        assert!(matches!(
+            recv.on_cqe(shutdown, -libc::EAGAIN),
+            Some(Err(Error::Closed))
+        ));
+
+        let mut accept = AcceptRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::zeroed(),
+            deadline: None,
+        };
+        assert!(matches!(
+            accept.on_cqe(shutdown, -libc::EAGAIN),
+            Some(Err(Error::Closed))
+        ));
+
+        let target: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let mut connect = ConnectRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::boxed_from_socket_addr(&target),
+            deadline: None,
+        };
+        assert!(matches!(
+            connect.on_cqe(shutdown, -libc::EAGAIN),
+            Some(Err(Error::Closed))
+        ));
+
+        // Partial-progress races: a send with bytes still unsent and an
+        // exact recv with bytes still missing.
+        let mut send = SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+        };
+        assert!(matches!(send.on_cqe(shutdown, 2), Some(Err(Error::Closed))));
+
+        let mut recv = RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+        };
+        assert!(matches!(recv.on_cqe(shutdown, 2), Some(Err(Error::Closed))));
+    }
+
     fn make_accept() -> AcceptRequest {
         AcceptRequest {
             fd: make_socket_fd(),
@@ -1760,7 +1910,12 @@ mod tests {
         // Cancellation after a timeout maps to a logical timeout.
         let mut accept = make_accept();
         assert!(matches!(
-            accept.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
+            accept.on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED
+            ),
             Some(Err(Error::Timeout))
         ));
 
@@ -1772,7 +1927,12 @@ mod tests {
         let mut accept = make_accept();
         accept.addr = RawSocketAddr::boxed_from_socket_addr(&peer);
         let (owned, addr) = accept
-            .on_cqe(WaiterState::CancelRequested, raw_fd)
+            .on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                raw_fd,
+            )
             .expect("missing accept result")
             .expect("racing accept success should win over cancellation");
         assert_eq!(addr, peer);
@@ -1968,7 +2128,12 @@ mod tests {
         // Cancellation after a timeout maps to a logical timeout.
         let mut connect = make_connect();
         assert!(matches!(
-            connect.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
+            connect.on_cqe(
+                WaiterState::CancelRequested {
+                    reason: CancelReason::Deadline,
+                },
+                -libc::ECANCELED
+            ),
             Some(Err(Error::Timeout))
         ));
     }
