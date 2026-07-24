@@ -395,7 +395,7 @@ where
 }
 
 /// The freezer's state, boxed so the public [Freezer] handle stays pointer-sized.
-struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
+struct Inner<E: Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -433,7 +433,7 @@ struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     resizes: Counter,
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -1153,9 +1153,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 ///
 /// Mutating functions consume the freezer and return it only on success: an error (or a dropped
 /// future) destroys the handle.
-pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
+pub struct Freezer<E: Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Freezer<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> std::fmt::Debug for Freezer<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Freezer")
             .field("current_section", &self.0.current_section)
@@ -1164,7 +1164,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Fr
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
     ///
     /// Passing `None` or an empty [Checkpoint] deletes any existing freezer data and starts empty.
