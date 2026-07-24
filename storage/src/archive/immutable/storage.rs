@@ -108,6 +108,26 @@ struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        // Reject a partition-name collision up front so an invalid configuration fails without
+        // touching storage. All of the archive's partitions must be mutually distinct.
+        let partitions = [
+            cfg.metadata_partition.as_str(),
+            cfg.ordinal_partition.as_str(),
+            cfg.freezer_key_partition.as_str(),
+            cfg.freezer_value_partition.as_str(),
+            cfg.freezer_table_partition.as_str(),
+            cfg.freezer_metadata_partition.as_str(),
+        ];
+        for (i, partition) in partitions.iter().enumerate() {
+            if partitions[i + 1..].contains(partition) {
+                return Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                    format!(
+                        "immutable archive partitions must be distinct: {partition} used more than once"
+                    ),
+                )));
+            }
+        }
+
         // Initialize metadata
         let metadata = Metadata::<E, U64, Record>::init(
             context.child("metadata"),
@@ -136,6 +156,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 value_compression: cfg.freezer_value_compression,
                 value_write_buffer: cfg.freezer_value_write_buffer,
                 value_target_size: cfg.freezer_value_target_size,
+                metadata_partition: cfg.freezer_metadata_partition,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,

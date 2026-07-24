@@ -149,6 +149,7 @@
 //!         key_partition: "demo-index".into(),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
+//!         metadata_partition: "demo-metadata".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
@@ -184,8 +185,7 @@ pub struct Config<T: Translator, C> {
 
     /// The partition to use for the key journal (stores index+key metadata).
     ///
-    /// The companion `{key_partition}-metadata` partition is reserved for recovery watermarks and
-    /// must be distinct from `value_partition`.
+    /// Must be distinct from the value and metadata partitions.
     pub key_partition: String,
 
     /// The page cache to use for the key journal.
@@ -193,6 +193,11 @@ pub struct Config<T: Translator, C> {
 
     /// The partition to use for the value blob (stores values).
     pub value_partition: String,
+
+    /// The partition to use for the recovery-watermark metadata.
+    ///
+    /// Must be distinct from the key and value partitions.
+    pub metadata_partition: String,
 
     /// The compression level to use for the value blob.
     pub compression: Option<u8>,
@@ -226,8 +231,8 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
-        deterministic,
+        Blob as _, BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
+        Supervisor as _, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
             release_pending_syncs,
@@ -266,6 +271,7 @@ mod tests {
         Config {
             translator: FourCap,
             key_partition: "test-index".into(),
+            metadata_partition: "test-index-metadata".into(),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             codec_config: (),
@@ -816,6 +822,63 @@ mod tests {
         });
     }
 
+    /// Regression (#539): the archive uses only its explicitly configured `metadata_partition`
+    /// and never claims the previously-derived `{key_partition}-metadata` name. Foreign data
+    /// stored at that derived name by an unrelated component must be left untouched.
+    #[test_traced]
+    fn test_init_leaves_foreign_derived_metadata_untouched() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Seed foreign data at the historically-derived `{key_partition}-metadata` name.
+            let derived = "orders-metadata";
+            let (blob, _) = context
+                .open(derived, b"foreign")
+                .await
+                .expect("Failed to seed foreign partition");
+            blob.write_at_sync(0, vec![0xAB; 5]).await.unwrap();
+            drop(blob);
+
+            // Configure the archive with an explicit metadata partition distinct from the
+            // derived name.
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "orders".into(),
+                metadata_partition: "orders-watermarks".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "orders-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("archive"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+            archive = archive
+                .put(1, test_key("k"), 7)
+                .await
+                .expect("Failed to put");
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            // The foreign derived-name partition is byte-for-byte untouched.
+            let (blob, len) = context
+                .open(derived, b"foreign")
+                .await
+                .expect("foreign partition must survive");
+            assert_eq!(len, 5, "foreign derived-metadata partition was resized");
+            let data = blob.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(
+                data.as_ref(),
+                &[0xAB; 5][..],
+                "foreign derived-metadata bytes were modified"
+            );
+        });
+    }
+
     #[test_traced]
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
@@ -825,6 +888,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -856,6 +920,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -892,6 +957,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -957,6 +1023,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1016,6 +1083,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1127,6 +1195,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1190,6 +1259,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1298,6 +1368,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1349,6 +1420,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1484,6 +1556,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
+                metadata_partition: "test-index-metadata".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),

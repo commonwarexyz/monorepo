@@ -53,6 +53,7 @@ pub async fn init(ctx: Context, checkpoint: Option<Checkpoint>) -> FreezerType {
         key_write_buffer: NZUsize!(WRITE_BUFFER),
         key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: VALUE_PARTITION.into(),
+        metadata_partition: format!("{KEY_PARTITION}-metadata"),
         value_compression: None,
         value_write_buffer: NZUsize!(WRITE_BUFFER),
         value_target_size: VALUE_TARGET_SIZE,

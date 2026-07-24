@@ -32,6 +32,7 @@ impl StorageWorkload for ArchivePrunableWorkload {
         let config = prunable::Config {
             translator: TwoCap,
             key_partition: format!("archive-prunable-key-{seed}"),
+            metadata_partition: format!("archive-prunable-key-{seed}-metadata"),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: format!("archive-prunable-value-{seed}"),
             compression: None,
@@ -74,6 +75,7 @@ impl StorageWorkload for ArchiveImmutableWorkload {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: format!("archive-immutable-freezer-key-{seed}"),
+            freezer_metadata_partition: format!("archive-immutable-freezer-key-{seed}-metadata"),
             freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: format!("archive-immutable-freezer-value-{seed}"),
             freezer_value_target_size: 1024 * 1024,

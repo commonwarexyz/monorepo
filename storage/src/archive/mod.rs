@@ -251,6 +251,7 @@ mod tests {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test-key".into(),
+            metadata_partition: "test-key-metadata".into(),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             compression,
@@ -274,6 +275,7 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: "test-freezer-key".into(),
+            freezer_metadata_partition: "test-freezer-key-metadata".into(),
             freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: "test-freezer-value".into(),
             freezer_value_target_size: 1024 * 1024,

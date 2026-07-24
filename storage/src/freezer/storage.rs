@@ -642,18 +642,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        // A missing or empty checkpoint starts fresh: delete all existing freezer data
-        let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
-        let metadata_partition = format!("{}-metadata", config.key_partition);
-
         // Reject a partition-name collision before the destructive reset below, so an invalid
-        // configuration fails without deleting data. All four partitions must be distinct; the
-        // companion `{key_partition}-metadata` partition is reserved for recovery watermarks.
+        // configuration fails without deleting data. The key, value, table, and metadata
+        // partitions must all be distinct.
         let partitions = [
             config.key_partition.as_str(),
             config.value_partition.as_str(),
             config.table_partition.as_str(),
-            metadata_partition.as_str(),
+            config.metadata_partition.as_str(),
         ];
         for (i, partition) in partitions.iter().enumerate() {
             if partitions[i + 1..].contains(partition) {
@@ -663,12 +659,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             }
         }
 
+        // A missing or empty checkpoint starts fresh: delete all existing freezer data
+        let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
         if reset {
             for partition in [
                 &config.key_partition,
                 &config.value_partition,
                 &config.table_partition,
-                &metadata_partition,
+                &config.metadata_partition,
             ] {
                 match context.remove(partition, None).await {
                     Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
@@ -684,7 +682,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
-            metadata_partition,
+            metadata_partition: config.metadata_partition,
             index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
@@ -1322,6 +1320,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1377,6 +1376,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1438,6 +1438,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1484,6 +1485,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1557,8 +1559,9 @@ mod tests {
                     table_size: 0,
                 });
                 let key_partition = format!("collide-key-{label}");
-                // value_partition collides with the reserved `{key_partition}-metadata`.
-                let metadata_partition = format!("{key_partition}-metadata");
+                // The value and metadata partitions share a name; init must reject the
+                // configuration before its destructive reset runs.
+                let metadata_partition = format!("collide-shared-{label}");
                 let cfg = super::super::Config {
                     key_partition: key_partition.clone(),
                     key_write_buffer: NZUsize!(1024),
@@ -1567,6 +1570,7 @@ mod tests {
                     value_compression: None,
                     value_write_buffer: NZUsize!(1024),
                     value_target_size: 10 * 1024 * 1024,
+                    metadata_partition: metadata_partition.clone(),
                     table_partition: format!("collide-table-{label}"),
                     table_initial_size: 2,
                     table_resize_frequency: 1,
@@ -1630,6 +1634,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1674,6 +1679,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1720,6 +1726,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1773,6 +1780,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1809,6 +1817,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1896,6 +1905,7 @@ mod tests {
             // A tiny value target so every put seals a section
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
+                metadata_partition: "test-key-index-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
