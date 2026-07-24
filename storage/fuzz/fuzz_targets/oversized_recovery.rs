@@ -352,8 +352,9 @@ fn fuzz(input: FuzzInput) {
             {
                 return;
             }
-            // Mutating acknowledged bytes is external storage loss. Recovery must report it
-            // rather than silently rolling the section back.
+            // Raw mutation may damage acknowledged bytes, for which corruption is an allowed
+            // recovery result. Startup does not authenticate or fully revalidate the durable
+            // prefix.
             Err(JournalError::Corruption(_)) if durable_data_may_be_corrupted => return,
             Err(err) => panic!("Unexpected recovery failure: {err:?}"),
         };

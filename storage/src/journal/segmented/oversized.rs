@@ -38,9 +38,10 @@
 //! 3. Truncates both journals at the first invalid pair and removes orphan value sections
 //!
 //! This catches an interior value hole even if later index pages and values survived the same
-//! interrupted flush. Fixed-index replay then protects every recorded floor: corruption below one
-//! fails recovery rather than rolling acknowledged data back. Value checksums strictly below a
-//! floor remain lazy, so later external corruption there is reported by `get_value()`.
+//! interrupted flush. Fixed-index replay treats a checksum or layout failure it detects below a
+//! recorded floor as corruption rather than repairable crash debris. Recovery does not
+//! authenticate or fully revalidate the durable prefix: value checksums strictly below a floor
+//! remain lazy and later external corruption there is reported by `get_value()`.
 //!
 //! Rewinds lower the affected watermarks before moving data backward. Recovery truncations are
 //! made durable before returning, so neither a dropped index entry nor stale value bytes can
@@ -273,8 +274,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             let entry_count = index_size / chunk_size;
             let floor_count = watermark / chunk_size;
 
-            // Derive the value floor from the last durable entry. It must still be readable
-            // and checksum-valid; recovery never rolls back acknowledged data.
+            // Derive the value floor from the last durable entry. It must still be readable and
+            // checksum-valid so recovery does not roll back acknowledged data under the crash
+            // model.
             let mut glob_target = if floor_count == 0 {
                 0
             } else {
