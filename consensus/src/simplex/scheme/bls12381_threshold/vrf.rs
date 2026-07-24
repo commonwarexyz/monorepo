@@ -5,11 +5,26 @@
 //!
 //! # Using the VRF
 //!
-//! A malicious leader (colluding with at least 1 Byzantine validator) can observe the output of the
-//! VRF before deciding whether to publish their block to all participants (they uniquely see `2f` other
-//! partial signatures and can recover the seed by combining their own partial signature). As a result,
-//! it is **not safe** to use a round's randomness to affect execution in that same round (as the leader can
-//! bias execution to their advantage by deciding whether or not to publish their block).
+//! The seed for a round is a threshold signature over the round alone. Every vote cast in a round
+//! carries the same seed partial signature regardless of its type (`notarize` for any block,
+//! `nullify`, or `finalize`). Recovering `seed(v)` therefore takes `2f+1` seed partials but no
+//! agreement: they can be gathered across mutually incompatible votes, so no certificate
+//! (notarization, nullification, or finalization) need ever form.
+//!
+//! An adversary controlling the `f` Byzantine participants of a `3f+1` committee (one of them the
+//! round leader) thus recovers `seed(v)` after seeing only `f+1` honest votes, before the round
+//! resolves. A malicious leader can turn this into front-running: it sends up to `f+1` distinct valid
+//! blocks to `f+1` distinct honest participants and collects their incompatible `notarize` votes,
+//! which together with the `f` Byzantine seed partials recover the seed while no block is yet
+//! notarized. Knowing the seed, the leader picks whichever of the `f+1` candidates (or nullification)
+//! is most favorable and drives it to a certificate using the `f` honest participants it held back.
+//! The leader thus chooses among `f+2` outcomes rather than the binary publish-or-nullify. Only the
+//! chosen block is notarized, so the attack selects which transactions (if any) execute against a
+//! known seed rather than breaking safety. The seed leaks the moment the votes are cast, so detecting
+//! the equivocation never prevents the attack, and because the scheme is non-attributable (see below)
+//! it yields no third-party evidence against the leader.
+//!
+//! As a result, it is **not safe** to use a round's randomness to affect execution in that same round.
 //!
 //! Applications that want to incorporate this embedded VRF into execution should employ a "commit-then-reveal" pattern
 //! and require users to bind to the output of randomness in advance (i.e. `draw(view+k)` means execution uses VRF output
@@ -244,9 +259,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
     /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).
     ///
-    /// The encrypted message can only be decrypted using the seed signature
-    /// from a certificate of the target round (i.e. notarization, finalization,
-    /// or nullification).
+    /// The ciphertext can only be decrypted with the target round's seed signature, which is
+    /// recoverable from any `2f+1` seed partials for that round (every `notarize`, `nullify`, or
+    /// `finalize` vote carries one, regardless of block). Decryption is therefore possible as soon
+    /// as `2f+1` participants have voted in the target round, whether or not their votes form a
+    /// certificate (notarization, nullification, or finalization).
     #[stability(ALPHA)]
     pub fn encrypt<R: CryptoRng>(
         &self,
@@ -267,9 +284,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
 /// Encrypts a message for a future round using Timelock Encryption ([TLE](tle)).
 ///
-/// The encrypted message can only be decrypted using the seed signature
-/// from a certificate of the target round (i.e. notarization, finalization,
-/// or nullification).
+/// The ciphertext can only be decrypted with the target round's seed signature, which is recoverable
+/// from any `2f+1` seed partials for that round (every `notarize`, `nullify`, or `finalize` vote
+/// carries one, regardless of block). Decryption is therefore possible as soon as `2f+1` participants
+/// have voted in the target round, whether or not their votes form a certificate (notarization,
+/// nullification, or finalization).
 #[stability(ALPHA)]
 pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
@@ -456,8 +475,7 @@ impl<V: Variant> Seed<V> {
     }
 }
 
-/// Decrypts a [TLE](tle) ciphertext using the seed from a certificate (i.e.
-/// notarization, finalization, or nullification).
+/// Decrypts a [TLE](tle) ciphertext using a recovered seed for the target round.
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
