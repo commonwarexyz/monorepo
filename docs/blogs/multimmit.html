@@ -577,6 +577,11 @@ O’Grady</a></div>
         can support each chain and vote on schedule, so a withheld block
         costs its own chain’s tally and nobody else’s.</p>
         </div>
+        <p>Fetches stall rounds and certificates stretch them, but
+        either way the collective step paces every producer’s output.
+        Figure 10 sets one producer from each world side by side, paying
+        identical certificate round trips, and lets the gap
+        accumulate.</p>
         <div id="multimmit-fig-dag" class="cw-loop cw-loop-dag" role="img" aria-label="Animated comparison of block production over eight message delays. A DAG producer emits a vertex, waits for a two-delay certificate round trip, and only then emits the next, producing four vertices. A Multimmit producer emits a block every two-thirds of a message delay with certificate round trips overlapping in the background, producing thirteen blocks in the same time.">
           <noscript>This figure animates block production over 8δ. The DAG producer waits out a 2δ certificate round trip between consecutive vertices (4 vertices total). The Multimmit producer keeps emitting while certificates form in the background (13 blocks in the same window), constrained only by its pipelining window.</noscript>
         </div>
