@@ -276,12 +276,12 @@ O’Grady</a></div>
         later, the earliest the leader’s block may include it. The block
         stays red as in figure 1, but now carries only references.</p>
         </div>
-        <p>The escape is to reference blocks before they certify, and
-        the known ways to do it each break something. Autobahn sketches
-        uncertified references as an optimization: a voter missing a
-        referenced batch holds its vote and fetches the batch from the
-        leader. Faulty producers that disclose their latest batches to
-        the leader alone can then force <span
+        <p>Referencing blocks before they certify would skip the wait,
+        but the known ways to do it each break something. Autobahn
+        sketches uncertified references as an optimization: a voter
+        missing a referenced batch holds its vote and fetches the batch
+        from the leader. Faulty producers that disclose their latest
+        batches to the leader alone can then force <span
         class="math inline">\Omega(n^2)</span> batch transmissions
         through the leader’s uplink before the view can progress,
         exactly the traffic pattern producer chains exist to avoid.</p>
