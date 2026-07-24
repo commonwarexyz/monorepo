@@ -312,10 +312,11 @@
 //!
 //! A malicious leader can elicit objections by naming a parent that conflicts with certificates honest
 //! participants hold (most cheaply, a parent below their finalized views). The cost is bounded and unattractive:
-//! each participant objects at most once per round, recipients discard certificates they already hold before
-//! verifying them, and the eliciting view nullifies on schedule regardless, so the leader burns its turn to make
-//! each honest participant rebroadcast a single certificate. A leader that is merely behind triggers the same
-//! objections, and for it the certificate is exactly the catch-up it needs.
+//! each participant objects at most once per round, recipients verify at most one copy of a certificate per view
+//! (discarding the rest before verification), and objecting alters no timer, so eliciting objections costs the
+//! network one certificate broadcast per participant without slowing the view. A leader that is current on view
+//! but behind on finalizations triggers the same objections, and for it the certificate is exactly the catch-up
+//! it needs.
 //!
 //! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
 //! finalization certificate after nullification, it would impose significant overhead under normal network

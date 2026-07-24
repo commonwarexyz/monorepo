@@ -155,7 +155,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Marks that we broadcast a certificate justifying a refusal to verify
-    /// this round's proposal; returns `false` if one was already recorded.
+    /// this round's proposal. Returns `false` if one was already recorded.
     pub const fn try_object(&mut self) -> bool {
         !replace(&mut self.objected, true)
     }

@@ -1019,18 +1019,18 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     ///
     /// After a certificate split (say a notarization certified by some
     /// participants and a nullification held by the rest for the same view),
-    /// each side refuses the other's proposals and no proposal can reach
-    /// quorum. Only the evidence holder can detect the split, so it
-    /// broadcasts the conflicting certificate to converge the proposer's
-    /// side. Refusals caused by evidence we merely lack stay silent: there
-    /// is no certificate to share, and the resolver already fetches
-    /// nullification gaps above the floor.
+    /// each side refuses the other's proposals, and when neither side holds
+    /// a quorum on its own, no proposal can pass. Only the evidence holder
+    /// can detect the split, so it broadcasts the conflicting certificate
+    /// to converge the proposer's side. Refusals caused by evidence we
+    /// merely lack stay silent: there is no certificate to share, and the
+    /// resolver already fetches nullification gaps above the floor.
     ///
     /// A malicious leader can elicit an objection by naming a conflicting
     /// parent, but gains little: each round objects at most once, the
-    /// certificate is one we already verified and hold, recipients
-    /// discard copies they already hold, and the eliciting view times out
-    /// regardless (see the module documentation on fetching missing
+    /// certificate is one we already verified and hold, recipients discard
+    /// redundant copies before verifying them, and objecting alters no
+    /// timer (see the module documentation on fetching missing
     /// certificates).
     fn object(&mut self, view: View, err: ParentPayloadError) -> Option<Certificate<S, D>> {
         // The current round must exist (try_verify just consulted it). Skip
