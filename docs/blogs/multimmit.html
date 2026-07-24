@@ -113,11 +113,11 @@ O’Grady</a></div>
         a transaction to seeing it final. The protocols underneath,
         however, are usually measured against something narrower, the
         time from a leader proposing a block to the network accepting
-        it. The difference is the first leg of the trip, where your
-        transaction crosses the network to whichever node is leading
-        before it can appear in a block. The return leg caps the
-        network’s throughput, with every byte flowing back out of that
-        one node while every other validator’s bandwidth idles.</p>
+        it. The gap between the two is the trip to the leader.
+        Traditionally, a transaction must reach whichever node is
+        leading before it can appear in a block. Everything then flows
+        back out of that same node, whose bandwidth caps the whole
+        network while every other validator idles.</p>
         <p>For throughput, the well-understood fix is to decouple
         transaction dissemination from consensus. Every validator
         becomes a <em>producer</em>, streaming transaction data in
@@ -127,13 +127,13 @@ O’Grady</a></div>
         <em>upload</em> them. That split is <a
         href="https://hackmd.io/@patrickogrady/rys8mdl5p">now standard
         among high-throughput designs</a>.</p>
-        <p>For latency, decoupling created a new wait. Consensus must
-        never finalize a reference to data the network cannot recover,
-        and the two known ways to establish availability each have a
-        price. Certify every block before consensus may reference it,
-        and throughput is bought with the user’s latency, every
-        transaction paying for certificate round trips it rarely needs.
-        Reference blocks immediately, and the latency of ordinary
+        <p>For latency, decoupling swapped one wait for another.
+        Consensus must never finalize a reference to data the network
+        cannot recover, and the two known ways to establish availability
+        each have a price. Certify every block before consensus may
+        reference it, and throughput is bought with the user’s latency,
+        every transaction paying for certificate round trips it rarely
+        needs. Reference blocks immediately, and the latency of ordinary
         consensus survives only until a producer misbehaves, voters
         fetching whatever they are missing at the worst possible
         time.</p>
