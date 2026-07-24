@@ -584,7 +584,7 @@ where
     /// Prune both the Merkle structure and journal to the given location.
     ///
     /// Callers must ensure `prune_loc` is justified by durable data (see
-    /// [`Mutable::prune`](crate::journal::contiguous::Mutable::prune)). Each component
+    /// [`crate::journal::contiguous::Mutable::prune`]). Each component
     /// syncs before removing anything only when its own barrier has not yet covered the
     /// boundary.
     ///
