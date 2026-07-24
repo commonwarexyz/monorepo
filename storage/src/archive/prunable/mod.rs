@@ -146,10 +146,10 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
+//!         metadata_partition: "demo-metadata".into(),
 //!         key_partition: "demo-index".into(),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
-//!         metadata_partition: "demo-metadata".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
@@ -183,6 +183,12 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
+    /// The partition to use for the archive's durable-size checkpoint.
+    ///
+    /// The checkpoint records how much of each section a completed sync made durable, so recovery
+    /// can tell unacknowledged crash debris apart from damage to data the archive acknowledged.
+    pub metadata_partition: String,
+
     /// The partition to use for the key journal (stores index+key metadata).
     pub key_partition: String,
 
@@ -191,12 +197,6 @@ pub struct Config<T: Translator, C> {
 
     /// The partition to use for the value blob (stores values).
     pub value_partition: String,
-
-    /// The partition to use for the archive's durable-size checkpoint.
-    ///
-    /// The checkpoint records how much of each section a completed sync made durable, so recovery
-    /// can tell unacknowledged crash debris apart from damage to data the archive acknowledged.
-    pub metadata_partition: String,
 
     /// The compression level to use for the value blob.
     pub compression: Option<u8>,
@@ -269,8 +269,8 @@ mod tests {
     ) -> Config<FourCap, ()> {
         Config {
             translator: FourCap,
-            key_partition: "test-index".into(),
             metadata_partition: "test-index-metadata".into(),
+            key_partition: "test-index".into(),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             codec_config: (),
@@ -841,8 +841,8 @@ mod tests {
             // derived name.
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "orders".into(),
                 metadata_partition: "orders-watermarks".into(),
+                key_partition: "orders".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "orders-value".into(),
                 codec_config: (),
@@ -1033,8 +1033,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1065,8 +1065,8 @@ mod tests {
             // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1102,8 +1102,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1168,8 +1168,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1228,8 +1228,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1340,8 +1340,8 @@ mod tests {
             let items_per_section = 256u64;
             let cfg = Config {
                 translator: TwoCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1404,8 +1404,8 @@ mod tests {
             // Reinitialize the archive
             let cfg = Config {
                 translator: TwoCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1513,8 +1513,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1565,8 +1565,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1701,8 +1701,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
