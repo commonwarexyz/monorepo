@@ -20,6 +20,7 @@ const STYLES = {
   blk: { stroke: RED, width: 3.4, opacity: 0.95 },
   ctl: { stroke: BLUE, width: 2, opacity: 0.9 },
   mesh: { stroke: BLUE, width: 1.4, opacity: 0.45 },
+  sup: { stroke: GOLD, width: 2.2, opacity: 0.95 },
   bg: { stroke: FAINT, width: 1.6, opacity: 0.6 },
 };
 
@@ -222,6 +223,129 @@ const FIGURES = {
           });
           return edges;
         }).flat(),
+      ],
+      token: [],
+    }],
+  },
+
+  'multimmit-fig-dagfinality': {
+    height: 360,
+    rows: [
+      { id: 'v1', label: 'Validator 1' },
+      { id: 'v2', label: 'Validator 2' },
+      { id: 'v3', label: 'Validator 3' },
+      { id: 'v4', label: 'Validator 4' },
+    ],
+    rowTop: 78,
+    rowGap: 62,
+    axis: { min: -0.5, max: 5.5, origin: null, unit: 'round' },
+    variants: [{
+      tag: 'an anchor commits only after more rounds build on it',
+      end: 5.5,
+      phases: [],
+      events: [
+        ...Array.from({ length: 6 }, (_, round) =>
+          ['v1', 'v2', 'v3', 'v4'].map((row, idx) => {
+            // Anchor A is validator 2's round-1 vertex. Its causal history
+            // is its three round-0 parents (the skip rule below excludes
+            // index 2), and exactly that set turns gold at the commit.
+            const anchor = round === 1 && idx === 1;
+            const inHistory = anchor || (round === 0 && idx !== 2);
+            return {
+              k: 'emit', row, t: round, color: RED,
+              ...(anchor ? { label: 'A' } : {}),
+              ...(inHistory ? { finalAt: 3.5 } : {}),
+            };
+          })
+        ).flat(),
+        ...Array.from({ length: 5 }, (_, i) => {
+          const round = i + 1;
+          const edges = [];
+          ['v1', 'v2', 'v3', 'v4'].forEach((row, childIdx) => {
+            ['v1', 'v2', 'v3', 'v4'].forEach((parent, parentIdx) => {
+              if (parentIdx === (childIdx + round) % 4) return;
+              // Round-2 references to A are its support, drawn gold.
+              const sup = round === 2 && parentIdx === 1;
+              edges.push({
+                k: 'edge', fromRow: row, fromT: round, toRow: parent, toT: round - 1,
+                t: round, d: 0.45, ...(sup ? { style: 'sup' } : {}),
+              });
+            });
+          });
+          return edges;
+        }).flat(),
+        { k: 'mark', t: 3.5, label: 'A finalized', sub: 'A + 2 rounds' },
+      ],
+      token: [],
+    }],
+  },
+
+  'multimmit-fig-dagfetch': {
+    height: 360,
+    rows: [
+      { id: 'v1', label: 'Validator 1' },
+      { id: 'v2', label: 'Validator 2' },
+      { id: 'v3', label: 'Validator 3' },
+      { id: 'v4', label: 'Validator 4' },
+    ],
+    rowTop: 78,
+    rowGap: 62,
+    axis: { min: -0.5, max: 6.6, origin: null },
+    variants: [{
+      tag: 'one withheld vertex stalls the whole DAG',
+      end: 6.3,
+      phases: [],
+      events: [
+        { k: 'emit', row: 'v1', t: 0, color: RED, label: 'r' },
+        { k: 'emit', row: 'v2', t: 0, color: RED },
+        { k: 'emit', row: 'v3', t: 0, color: RED },
+        { k: 'emit', row: 'v4', t: 0, color: RED },
+        { k: 'emit', row: 'v1', t: 1, color: RED, label: 'r+1' },
+        { k: 'emit', row: 'v2', t: 1, color: RED },
+        { k: 'emit', row: 'v3', t: 1, color: RED, missingUntil: 4.6, label: 'withheld', labelSide: 'left' },
+        { k: 'emit', row: 'v4', t: 1, color: RED },
+        { k: 'edge', fromRow: 'v1', fromT: 1, toRow: 'v1', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v1', fromT: 1, toRow: 'v3', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v1', fromT: 1, toRow: 'v4', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v2', fromT: 1, toRow: 'v1', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v2', fromT: 1, toRow: 'v2', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v2', fromT: 1, toRow: 'v4', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v4', fromT: 1, toRow: 'v2', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v4', fromT: 1, toRow: 'v3', toT: 0, t: 1, d: 0.45 },
+        { k: 'edge', fromRow: 'v4', fromT: 1, toRow: 'v4', toT: 0, t: 1, d: 0.45 },
+        { k: 'emit', row: 'v1', t: 2, color: RED, label: 'r+2' },
+        { k: 'emit', row: 'v2', t: 2, color: RED },
+        { k: 'emit', row: 'v4', t: 2, color: RED },
+        { k: 'edge', fromRow: 'v1', fromT: 2, toRow: 'v1', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v1', fromT: 2, toRow: 'v2', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v1', fromT: 2, toRow: 'v4', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v3', toT: 1, t: 2, d: 0.45, style: 'tx' },
+        { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v1', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v2', fromT: 2, toRow: 'v4', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v4', fromT: 2, toRow: 'v1', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v4', fromT: 2, toRow: 'v2', toT: 1, t: 2, d: 0.45 },
+        { k: 'edge', fromRow: 'v4', fromT: 2, toRow: 'v4', toT: 1, t: 2, d: 0.45 },
+        { k: 'msg', from: 'v1', to: 'v2', t: 2.6, d: 1, style: 'ctl', label: 'fetch' },
+        { k: 'msg', from: 'v4', to: 'v2', t: 2.6, d: 1, style: 'ctl' },
+        { k: 'msg', from: 'v2', to: 'v1', t: 3.6, d: 1, style: 'blk' },
+        { k: 'msg', from: 'v2', to: 'v4', t: 3.6, d: 1, style: 'blk' },
+        { k: 'mark', t: 3, sub: 'r+3 without the fault', ghost: true },
+        { k: 'emit', row: 'v1', t: 4.7, color: RED, label: 'r+3' },
+        { k: 'emit', row: 'v2', t: 4.7, color: RED },
+        { k: 'emit', row: 'v4', t: 4.7, color: RED },
+        ...['v1', 'v2', 'v4'].flatMap(row =>
+          ['v1', 'v2', 'v4'].map(parent => (
+            { k: 'edge', fromRow: row, fromT: 4.7, toRow: parent, toT: 2, t: 4.7, d: 0.45 }
+          ))
+        ),
+        { k: 'emit', row: 'v1', t: 5.7, color: RED, label: 'r+4' },
+        { k: 'emit', row: 'v2', t: 5.7, color: RED },
+        { k: 'emit', row: 'v4', t: 5.7, color: RED },
+        ...['v1', 'v2', 'v4'].flatMap(row =>
+          ['v1', 'v2', 'v4'].map(parent => (
+            { k: 'edge', fromRow: row, fromT: 5.7, toRow: parent, toT: 4.7, t: 5.7, d: 0.45 }
+          ))
+        ),
       ],
       token: [],
     }],
@@ -484,20 +608,32 @@ function buildFigure(mount, cfg) {
         const right = ev.labelSide === 'right';
         labelEl = text(left ? x - 12 : (right ? x + 12 : x), left ? y + 5 : y - 13, ev.label, {
           'text-anchor': left ? 'end' : (right ? 'start' : 'middle'),
-          fill: ev.color === RED ? RED : BLUE, 'font-size': 14,
+          fill: ev.missingUntil !== undefined ? GRAY : (ev.color === RED ? RED : BLUE), 'font-size': 14,
         });
         labelEl.setAttribute('opacity', 0);
         dyn.appendChild(labelEl);
       }
+      let holeEl = null;
+      if (ev.missingUntil !== undefined) {
+        holeEl = text(x, y + 5, '?', { 'text-anchor': 'middle', fill: GRAY, 'font-size': 13, 'font-weight': 700 });
+        holeEl.setAttribute('opacity', 0);
+        dyn.appendChild(holeEl);
+      }
       return tau => {
         const on = tau >= ev.t;
-        // Certification swaps the fill so in-flight blocks read as pending.
+        // Certification swaps the fill so in-flight blocks read as pending,
+        // an anchor's commit turns ordered vertices gold, and a withheld
+        // vertex is a dashed hole until fetched.
         const certified = ev.certAt !== undefined && tau >= ev.certAt;
+        const finalized = ev.finalAt !== undefined && tau >= ev.finalAt;
+        const missing = ev.missingUntil !== undefined && tau < ev.missingUntil;
         rect.setAttribute('opacity', on ? 1 : 0);
-        rect.setAttribute('fill', certified ? 'white' : ev.color);
-        rect.setAttribute('stroke', certified ? ev.color : 'black');
-        rect.setAttribute('stroke-width', certified ? 2 : 1);
+        rect.setAttribute('fill', missing ? 'white' : (finalized ? GOLD_FILL : (certified ? 'white' : ev.color)));
+        rect.setAttribute('stroke', missing ? GRAY : (finalized ? GOLD : (certified ? ev.color : 'black')));
+        rect.setAttribute('stroke-width', finalized || certified ? 2 : 1);
+        rect.setAttribute('stroke-dasharray', missing ? '3 2' : 'none');
         if (labelEl) labelEl.setAttribute('opacity', on ? 1 : 0);
+        if (holeEl) holeEl.setAttribute('opacity', on && missing ? 1 : 0);
       };
     },
     mark(ev) {

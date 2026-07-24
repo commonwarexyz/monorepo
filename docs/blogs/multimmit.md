@@ -147,7 +147,29 @@ DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](ht
 Figure 5: How a DAG mempool is built. Each round, every validator emits a vertex referencing $n-f$ vertices of the previous round. The references are the protocol: they carry availability and voting information, so the ordering logic can read finality out of the lattice.
 :::
 
-The coupling cuts both ways. A vertex may only enter round $r+1$ once $n-f$ round-$r$ vertices have arrived, so the whole network produces in lockstep, and nobody's next block can outrun the slowest quorum step of the last one. In certified DAGs like Narwhal, that step is a certificate round trip between every pair of consecutive vertices. In uncertified DAGs like Mysticeti, the round trip goes away and the fetch problem comes back.
+Reading finality out of the lattice takes more rounds still. A reference is not finality on its own: the ordering logic designates an anchor vertex each round, and the anchor commits only once the following rounds' reference pattern proves enough of the network built on top of it. Committing the anchor then orders every vertex in its causal history, and everything else waits for a later anchor.
+
+```{=html}
+<div id="multimmit-fig-dagfinality" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG finality. Four validators emit one vertex per round. Validator 2's round-r vertex, labeled A, is the anchor. Gold reference edges from round r+1 mark its support, and once round r+2 lands, A and its causal history turn gold, two rounds after A entered the DAG. Every other vertex stays pending until a later anchor commits.">
+  <noscript>This figure animates DAG finality: anchor A enters in round r, is referenced by n−f round r+1 vertices, and commits only once round r+2 lands, ordering its causal history with it. Finality arrives two rounds of DAG growth after the vertex itself.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 6: Finality read out of the lattice, drawn with a Mysticeti-style three-round pattern. Anchor $A$ enters in round $r$, gathers support (gold references) in $r+1$, and commits once the $r+2$ pattern lands, ordering its causal history (gold) with it. Every other vertex waits for a later anchor, and in a certified DAG each of these rounds is itself a certificate round trip.
+:::
+
+The coupling cuts both ways. A vertex may only enter round $r+1$ once $n-f$ round-$r$ vertices have arrived, so the whole network produces in lockstep, and nobody's next block can outrun the slowest quorum step of the last one. In certified DAGs like Narwhal, that step is a certificate round trip between every pair of consecutive vertices. In uncertified DAGs like Mysticeti, the round trip goes away and the fetch problem comes back: every vertex is a dependency of the vertices that reference it, so a vertex some validators never received must be fetched before the DAG can grow past it.
+
+```{=html}
+<div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. Validators 1 and 4 must fetch the missing vertex from validator 2 before they can proceed, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
+  <noscript>This figure animates a fetch stall in an uncertified DAG: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. Validators 1 and 4 must fetch the missing dependency before processing that vertex, so the whole DAG stalls for a fetch round trip before round r+3 can start.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 7: The fetch problem. Validator 3 withholds its round-$(r+1)$ vertex, disclosing it only to validator 2, whose next vertex references it. Validators 1 and 4 cannot process that vertex until they fetch the missing dependency, so every lane's round $r+3$ starts late. In Multimmit a reference never obligates a download: voters report how far they can support each chain and vote on schedule, so a withheld block costs its own chain's tally and nobody else's.
+:::
 
 ```{=html}
 <div id="multimmit-fig-dag" class="cw-loop cw-loop-dag" role="img" aria-label="Animated comparison of block production over eight message delays. A DAG producer emits a vertex, waits for a two-delay certificate round trip, and only then emits the next, producing four vertices. A Multimmit producer emits a block roughly every 0.7 message delays with certificate round trips overlapping in the background, producing eleven blocks in the same time.">
@@ -156,7 +178,7 @@ The coupling cuts both ways. A vertex may only enter round $r+1$ once $n-f$ roun
 ```
 
 ::: {.image-caption}
-Figure 6: One producer, identical $2\delta$ certificate round trips. The DAG producer's next vertex waits for the previous round's certificates. The Multimmit producer extends only its own chain and runs ahead of certification, up to $d$ uncertified blocks in flight (drawn with production paced by load, filling the $d=3$ window).
+Figure 8: One producer, identical $2\delta$ certificate round trips. The DAG producer's next vertex waits for the previous round's certificates. The Multimmit producer extends only its own chain and runs ahead of certification, up to $d$ uncertified blocks in flight (drawn with production paced by load, filling the $d=3$ window).
 :::
 
 Multimmit's chains carry no cross-producer references, so there is nothing for a producer to wait on. Each producer extends its own chain as transactions arrive and may run up to $d$ blocks ahead of its last certified block, with certificates forming behind it. Under sustained load a chain grows up to $d$ blocks per certificate round trip rather than one, and consensus never waits on certification either way: the leader checkpoints whatever has arrived, and the voters extend past whatever the leader missed.
