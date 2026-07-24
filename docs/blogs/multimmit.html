@@ -116,27 +116,26 @@ O’Grady</a></div>
         it. The gap between the two is the trip to the leader.
         Traditionally, a transaction must reach whichever node is
         leading before it can appear in a block. Everything then flows
-        back out of that same node, whose bandwidth caps the whole
-        network while every other validator idles.</p>
+        back out of that same node, whose egress caps the whole network
+        while every other validator idles.</p>
         <p>For throughput, the well-understood fix is to decouple
         transaction dissemination from consensus. Every validator
         becomes a <em>producer</em>, streaming transaction data in
         parallel, consensus orders references to it, and the network
         finalizes transactions at roughly the rate validators can
-        <em>download</em> them rather than the rate one leader can
-        <em>upload</em> them. That split is <a
+        <em>ingress</em> them rather than the rate one leader can
+        <em>egress</em> them. That split is <a
         href="https://hackmd.io/@patrickogrady/rys8mdl5p">now standard
         among high-throughput designs</a>.</p>
         <p>For latency, decoupling swapped one wait for another.
         Consensus must never finalize a reference to data the network
         cannot recover, and the two known ways to establish availability
         each have a price. Certify every block before consensus may
-        reference it, and throughput is bought with the user’s latency,
-        every transaction paying for certificate round trips it rarely
-        needs. Reference blocks immediately, and the latency of ordinary
-        consensus survives only until a producer misbehaves, voters
-        fetching whatever they are missing at the worst possible
-        time.</p>
+        reference it, and every transaction waits out certificate round
+        trips that only matter when a producer misbehaves. Reference
+        blocks immediately, and the latency of ordinary consensus lasts
+        only until a producer misbehaves, when voters must fetch
+        whatever they are missing before they can vote.</p>
         <p>Today, we’re sharing <a
         href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
         construction that pays neither cost: producers saturate their
@@ -231,12 +230,12 @@ O’Grady</a></div>
         mempool until the leader’s next proposal, all before the
         reported clock starts. Worse, every one of those bytes must flow
         <em>out</em> of the leader again inside the block: the leader’s
-        uplink is the throughput ceiling for the entire network.
+        egress is the throughput ceiling for the entire network.
         One-round voting fixes nothing on the left side.</p>
         <h2 id="many-chains-gated-on-certificates">Many Chains, Gated on
         Certificates</h2>
         <p><a href="https://arxiv.org/abs/2401.10369">Autobahn</a> fixes
-        the uplink. Every producer builds its own <em>lane</em> of
+        the egress. Every producer builds its own <em>lane</em> of
         transaction batches, streaming each batch to all validators as
         it is produced, so transaction data crosses the network exactly
         once. Blocks still exist, but they shrink: the leader’s block
@@ -283,7 +282,7 @@ O’Grady</a></div>
         from the leader. Faulty producers that disclose their latest
         batches to the leader alone can then force <span
         class="math inline">\Omega(n^2)</span> batch transmissions
-        through the leader’s uplink before the view can progress,
+        through the leader’s egress before the view can progress,
         exactly the traffic pattern producer chains exist to avoid.</p>
         <p><a href="https://arxiv.org/abs/2504.18649">Raptr</a>
         eliminates the fetch: voters support the longest prefix of the
