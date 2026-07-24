@@ -303,6 +303,14 @@ where
         Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
 
+    /// Return the range of locations this db can prove.
+    ///
+    /// This is [`Self::bounds`] narrowed to what the Merkle structure still retains, which a sync
+    /// can leave ahead of the operations log's own pruning boundary.
+    pub fn provable_bounds(&self) -> Range<Location<F>> {
+        self.journal.provable_start()..Location::new(self.journal.bounds().end)
+    }
+
     /// Update state gauges from the current database state.
     fn update_metrics(&self) {
         let bounds = self.journal.bounds();
@@ -449,8 +457,7 @@ where
     /// if `start_loc` >= `op_count`.
     /// Returns [`crate::journal::Error::ItemPruned`] if `start_loc` has been pruned.
     /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
-    /// because pruning removed the commit that would have governed `op_count`.
+    /// commit op, meaning the caller passed a non-commit-boundary `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",

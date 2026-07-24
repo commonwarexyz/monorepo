@@ -76,7 +76,7 @@ use commonware_utils::{
     sync::{AsyncRwLock, TracedAsyncRwLock},
 };
 use futures::future::{Either, pending};
-use std::{future::Future, num::NonZeroU64, sync::Arc};
+use std::{future::Future, num::NonZeroU64, ops::Range, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
 ///
@@ -634,35 +634,16 @@ where
     })
 }
 
-/// Classify a serve-time database error: requests for state outside the retained window are
-/// declines (the client refetches with a fresher target), everything else is a genuine
-/// storage failure.
-fn serve_decline_or_error<F: Family, D: Digest>(
-    err: qmdb::Error<F>,
-    requested: &Target<F, D>,
-    current: &Target<F, D>,
-) -> ServeError<F, D> {
-    match err {
-        qmdb::Error::HistoricalFloorPruned(_)
-        | qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
-        | qmdb::Error::Merkle(crate::merkle::Error::ElementPruned(_)) => ServeError::StaleTarget {
-            requested: requested.clone(),
-            current: current.clone(),
-        },
-        err => ServeError::Database(err),
-    }
-}
-
-async fn fetch_state_from_full_source<F, Op, D, Current, Hist, HistFut, Pins, PinsFut>(
+async fn fetch_state_from_full_source<F, Op, D, Source, Hist, HistFut, Pins, PinsFut>(
     target: Target<F, D>,
-    current_target: Current,
+    source: Source,
     historical_proof: Hist,
     pinned_nodes_at: Pins,
 ) -> Result<State<F, Op, D>, ServeError<F, D>>
 where
     F: Family,
     D: Digest,
-    Current: FnOnce() -> Target<F, D>,
+    Source: FnOnce() -> (D, Range<Location<F>>),
     Hist: FnOnce(Location<F>, Location<F>) -> HistFut,
     HistFut: Future<Output = Result<(Proof<F, D>, Vec<Op>), qmdb::Error<F>>>,
     Pins: FnOnce(Location<F>) -> PinsFut,
@@ -671,23 +652,34 @@ where
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
     // from the historical commit proof plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
-    let current = current_target();
-    // Serve any target at or below the tip: a syncing client's target trails the server by
-    // its fetch latency, and the client verifies every payload against its own target root,
-    // so divergence surfaces as a client-side verification failure and a refetch. Targets
-    // past the tip are refused so the client refetches once the server catches up.
-    if target.leaf_count > current.leaf_count {
+    let (root, provable) = source();
+    let current = Target::new(root, provable.end);
+    let leaf_count = target.leaf_count;
+    let last_commit_loc = Location::new(*leaf_count - 1);
+    // Serve any commit the source can still prove: a syncing client's target trails the server by
+    // its fetch latency, and the client verifies every payload against its own target root, so
+    // divergence surfaces as a client-side verification failure and a refetch. Targets past the
+    // tip or below the provable window are declined so the client refetches a servable one.
+    if leaf_count > current.leaf_count || last_commit_loc < provable.start {
         return Err(ServeError::StaleTarget {
             requested: target,
             current,
         });
     }
-    let leaf_count = target.leaf_count;
-    let last_commit_loc = Location::new(*leaf_count - 1);
-    let (last_commit_proof, mut operations) =
-        historical_proof(leaf_count, last_commit_loc)
-            .await
-            .map_err(|err| serve_decline_or_error(err, &target, &current))?;
+    // The window check keeps both the commit and its Merkle nodes provable, so pruning cannot
+    // reach the reads below. `HistoricalFloorPruned` therefore means only that the operation
+    // preceding `leaf_count` is not a commit, which a source reaches honestly after a rewind and
+    // regrow. That target does not describe this source's history, so it is declined rather than
+    // failed.
+    let (last_commit_proof, mut operations) = historical_proof(leaf_count, last_commit_loc)
+        .await
+        .map_err(|err| match err {
+        qmdb::Error::HistoricalFloorPruned(_) => ServeError::StaleTarget {
+            requested: target.clone(),
+            current: current.clone(),
+        },
+        err => ServeError::Database(err),
+    })?;
     // Compact sync always authenticates exactly the final commit leaf.
     let last_commit_op =
         operations
@@ -697,7 +689,7 @@ where
             )))?;
     let pinned_nodes = pinned_nodes_at(leaf_count)
         .await
-        .map_err(|err| serve_decline_or_error(err, &target, &current))?;
+        .map_err(ServeError::Database)?;
     Ok(State {
         leaf_count,
         pinned_nodes,
@@ -729,7 +721,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(self.root(), self.bounds().end),
+                    || (self.root(), self.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -768,7 +760,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -804,7 +796,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -847,7 +839,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(self.root(), self.bounds().end),
+                    || (self.root(), self.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -889,7 +881,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -928,7 +920,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,

@@ -639,6 +639,18 @@ where
     H: Hasher,
     S: Strategy,
 {
+    /// Oldest location this journal can prove.
+    ///
+    /// Sync places the Merkle structure's boundary exactly at the sync range's start while the
+    /// operations log prunes on section boundaries, so the log can retain operations whose Merkle
+    /// nodes are already gone. Proofs are available only at or above the later of the two.
+    pub fn provable_start(&self) -> Location<F> {
+        std::cmp::max(
+            Location::new(self.journal.bounds().start),
+            self.merkle.bounds().start,
+        )
+    }
+
     /// Generate a proof of inclusion for items starting at `start_loc`.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
@@ -1066,7 +1078,7 @@ mod tests {
         },
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use futures::StreamExt as _;
     use std::{
         future::Future,
@@ -2435,6 +2447,55 @@ mod tests {
     fn test_prune_empty_journal_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_prune_empty_journal_inner::<mmb::Family>);
+    }
+
+    /// Sync places the Merkle boundary exactly at the sync range's start while the operations log
+    /// prunes on section boundaries, so the log can retain operations the Merkle structure can no
+    /// longer prove. `provable_start` must report the later of the two boundaries.
+    async fn test_provable_start_follows_merkle_boundary_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let suffix = "provable-start";
+        let journal = create_journal_with_ops::<F>(context.child("build"), suffix, 20).await;
+        drop(journal);
+
+        // Reopen the components the way sync does: the Merkle structure is initialized at the
+        // range start while the operations log keeps everything it already had.
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+            context.child("merkle"),
+            crate::merkle::full::SyncConfig {
+                config: merkle_config(suffix, &context),
+                range: non_empty_range!(Location::<F>::new(9), Location::<F>::new(20)),
+                pinned_nodes: None,
+            },
+        )
+        .await
+        .unwrap();
+        let log = ContiguousJournal::<Context, TestOp<F>>::init(
+            context.child("log"),
+            journal_config(suffix, &context),
+        )
+        .await
+        .unwrap();
+        let journal = TestJournal::<F>::from_components(merkle, log, hasher, APPLY_BATCH_SIZE)
+            .await
+            .unwrap();
+
+        assert_eq!(journal.bounds().start, 0);
+        assert_eq!(journal.provable_start(), Location::<F>::new(9));
+    }
+
+    #[test_traced("INFO")]
+    fn test_provable_start_follows_merkle_boundary_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_provable_start_follows_merkle_boundary_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_provable_start_follows_merkle_boundary_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_provable_start_follows_merkle_boundary_inner::<mmb::Family>);
     }
 
     /// Verify that pruning to a specific location works correctly.
