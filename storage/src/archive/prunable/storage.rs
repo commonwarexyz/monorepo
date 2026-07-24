@@ -604,16 +604,24 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // without issuing a new sync.
         self.requested.append(&mut self.pending);
         let sizes = self.sizes(&self.requested)?;
+
+        // Decide what to publish before starting any sync. Publication covers every completion
+        // observable now, one interval behind the sync being returned. Metadata permits only one
+        // write at a time, so skip publication rather than waiting when its previous write is
+        // still in flight, and let a later sync carry the accumulated updates. Reading that state
+        // first also keeps a failure it surfaces from stranding a data sync the caller can no
+        // longer observe.
+        self.observe_unproven();
+        let publish = self.checkpoint_dirty && self.metadata.poll_sync()?;
+
         let handle;
         (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
         let completion: SyncCompletion = handle.boxed().shared();
+        for (section, size) in sizes {
+            self.unproven.insert(section, (size, completion.clone()));
+        }
 
-        // Publish every completion now observable, one interval behind the sync being returned.
-        // Metadata permits only one write at a time, so skip publication rather than waiting when
-        // its previous write is still in flight. The accumulated in-memory updates will be
-        // included by a later sync.
-        self.observe_unproven();
-        let checkpoint_handle = if self.checkpoint_dirty && self.metadata.poll_sync()? {
+        let checkpoint_handle = if publish {
             let (metadata, handle) = self.metadata.start_sync().await?;
             self.metadata = metadata;
             self.checkpoint_dirty = false;
@@ -621,9 +629,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         } else {
             Handle::ready(Ok(()))
         };
-        for (section, size) in sizes {
-            self.unproven.insert(section, (size, completion.clone()));
-        }
 
         Ok((
             self,
