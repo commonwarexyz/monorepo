@@ -69,6 +69,9 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalize: bool,
     broadcast_finalization: bool,
     certify: CertifyState,
+    // Whether we already broadcast a certificate justifying a refusal to
+    // verify this round's proposal (see [super::state::State::take_objection]).
+    objected: bool,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -95,6 +98,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_finalize: false,
             broadcast_finalization: false,
             certify: CertifyState::Ready,
+            objected: false,
         }
     }
 
@@ -142,6 +146,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return false;
         }
         self.proposal.request_verify()
+    }
+
+    /// Returns whether this round already broadcast a certificate justifying
+    /// a refusal to verify its proposal.
+    pub const fn objected(&self) -> bool {
+        self.objected
+    }
+
+    /// Marks that we broadcast a certificate justifying a refusal to verify
+    /// this round's proposal; returns `false` if one was already recorded.
+    pub const fn try_object(&mut self) -> bool {
+        !replace(&mut self.objected, true)
     }
 
     /// Attempt to certify this round's proposal.

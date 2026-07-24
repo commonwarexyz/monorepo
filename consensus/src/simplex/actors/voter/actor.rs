@@ -66,9 +66,7 @@ enum Resolved {
 struct Staged<S: Scheme<D>, D: Digest> {
     notarize: Option<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
-    /// A nullification certificate, with the parent certificate of our proposal
-    /// (the "floor") if we were the leader of the nullified view.
-    nullification: Option<(Nullification<S>, Option<Certificate<S, D>>)>,
+    nullification: Option<Nullification<S>>,
     finalize: Option<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
 }
@@ -555,16 +553,12 @@ impl<
     }
 
     /// Builds and records a nullification certificate if the round provides a candidate.
-    ///
-    /// Also returns the best notarization or finalization we know of (i.e. the "floor")
-    /// if we were the leader in the provided view (regardless of whether we built a proposal).
-    #[allow(clippy::type_complexity)]
     async fn prepare_nullification(
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         resolved: Resolved,
-    ) -> (Self, Option<(Nullification<S>, Option<Certificate<S, D>>)>) {
+    ) -> (Self, Option<Nullification<S>>) {
         // Construct the nullification certificate.
         let Some(nullification) = self.state.broadcast_nullification(view) else {
             return (self, None);
@@ -577,14 +571,7 @@ impl<
         }
         // Track the certificate locally to avoid rebuilding it.
         self = self.handle_nullification(nullification.clone()).await;
-        // If we were the leader, emit the parent certificate (a notarization or
-        // finalization) of our proposal so peers can catch up.
-        let floor = self
-            .state
-            .leader_index(view)
-            .filter(|&leader| self.state.is_me(leader))
-            .and_then(|_| self.state.parent_certificate(view));
-        (self, Some((nullification, floor)))
+        (self, Some(nullification))
     }
 
     /// Builds and records a finalize vote if the round provides a candidate.
@@ -895,11 +882,7 @@ impl<
             );
             self.reporter.report(Activity::Notarization(notarization));
         }
-        if let Some((nullification, floor)) = staged.nullification {
-            if let Some(floor) = floor {
-                warn!(?floor, "broadcasting nullification floor");
-                self.broadcast_certificate(certificate_sender, floor);
-            }
+        if let Some(nullification) = staged.nullification {
             debug!(round=?nullification.round(), "broadcasting nullification");
             self.broadcast_certificate(
                 certificate_sender,
@@ -1110,6 +1093,17 @@ impl<
                 // If needed, verify current view
                 if pending_verify.is_none() {
                     pending_verify = self.try_verify().await;
+                }
+
+                // Broadcast any certificate staged to justify a refusal to
+                // verify the current proposal, so the proposer's side of a
+                // certificate split converges on ours. We don't worry about
+                // recording this certificate because it must've already
+                // existed (in our journal or the configured floor).
+                if let Some(objection) = self.state.take_objection() {
+                    assert!(!self.dirty, "journal must be synced before broadcast");
+                    debug!(view = %objection.view(), "broadcasting objection");
+                    self.broadcast_certificate(&mut certificate_sender, objection);
                 }
 
                 // Attempt to certify any views that we have notarizations for.
