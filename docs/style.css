@@ -376,6 +376,7 @@ details.podcast-episode summary.podcast-title {
 /* Match inline KaTeX's visual size to the surrounding monospace text. */
 .math.inline .katex {
     font-size: 0.95em !important;
+    line-height: 1;
 }
 
 /* Prevent raw and rendered display math from widening the page on mobile. */

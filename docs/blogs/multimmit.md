@@ -74,12 +74,12 @@ Consider a typical deployed protocol with one proposer at a time and [Simplex](h
 ```
 
 ::: {.image-caption}
-Figure 1: A transaction's path through a single-proposer protocol, measured in message delays ($\delta$) since submission. Figures 1, 3, 5, and 6 use the same axis and omit the wait for the next proposal or producer block. Figure 1 therefore shows favorable alignment: the transaction reaches the leader just as it is ready to propose. Figure 2 isolates the omitted proposal wait, while a producer controls its own block cadence. Consensus papers typically start their timers at "block", after the user has already waited $2\delta$.
+Figure 1: A transaction's path through a single-proposer protocol, measured in message delays ($\delta$) since submission. Figures 1, 3, 5, and 6 use the same axis and omit the wait for the next proposal or producer block. Here, the transaction reaches the leader just as it is ready to propose. Consensus benchmarks usually start their timers at "block", after the inbound network hops and any proposal wait.
 :::
 
-After the leader broadcasts a block, finality takes two rounds of voting. A recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) reduces this to one round when $n \geq 5f+1$ (Multimmit uses the same consensus skeleton in Figures 5 and 6).
+From that "block" marker, finality takes two rounds of voting. A recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) reduces this to one round when $n \geq 5f+1$ (Multimmit uses the same consensus skeleton in Figures 5 and 6).
 
-Before the broadcast, however, the transaction must reach an API node, travel again to the leader, and wait for the leader's next proposal. Because proposals are $2\delta$ apart, that wait alone adds $0$ to $2\delta$, or $\delta$ in expectation. Figure 2 isolates this scheduling penalty by placing two identical final hops on opposite sides of the same proposal.
+The user's timer, however, started at submission. The transaction spends $\delta$ reaching an API node and another $\delta$ reaching the leader. It can then wait as long as $2\delta$ for the leader's next proposal, or $\delta$ in expectation. Figure 2 isolates the source of this wait. Block production is tied to the consensus proposal schedule, so identical final hops can land on opposite sides of a proposal.
 
 ```{=html}
 <div id="multimmit-fig-cadence" class="cw-loop cw-loop-cadence" role="img" aria-label="Animated diagram of proposal arrival timing. Three rows: API node A, API node B, and the leader, whose proposals are spaced two message delays apart and drawn as red squares. Each API node forwards a transaction to the leader. Transaction B lands just before a proposal and waits almost nothing. Transaction A lands just after the same proposal, and a red arrow shows it waiting almost two message delays for the next one.">
@@ -88,10 +88,10 @@ Before the broadcast, however, the transaction must reach an API node, travel ag
 ```
 
 ::: {.image-caption}
-Figure 2: One proposal schedule, two arrival times. Both transactions have already reached an API node and take $\delta$ to travel from there to the leader. Transaction B arrives just before a proposal and enters it almost immediately. Transaction A arrives just after the same proposal and waits almost $2\delta$ before the leader can broadcast a block carrying it. Averaged over arrival times, the wait is $\delta$.
+Figure 2: One proposal schedule, two arrival times. Both transactions take $\delta$ to travel from an API node to the leader. Transaction B arrives just before a proposal and enters it almost immediately. Transaction A arrives just after the same proposal and waits almost $2\delta$ for the next. The network delay is identical. Only their position relative to the proposal changes.
 :::
 
-That wait is usually excluded from reported consensus latency. The leader must then send every transaction back out inside its block, making its egress the throughput limit for the entire network. One-round voting only improves the part after the broadcast.
+Consensus latency usually excludes the two inbound hops and this scheduling wait. Its timer starts only when the leader begins sending every transaction back out inside the block—the same broadcast that makes one node's egress the network's throughput limit. One-round voting shortens what follows. It changes neither the hidden wait nor the leader bottleneck.
 
 ## Removing the Leader Bottleneck
 
@@ -235,7 +235,7 @@ Whether the protocol waits for fetches or certificates, a collective step limits
 Figure 11: One producer with identical $2\delta$ certificate round trips. The DAG producer waits for the previous round's certificates before creating its next vertex (assuming every other producer's certificate arrives with its votes, since spreading them costs a certified DAG a third delay per round). The Multimmit producer runs as many as $d$ blocks ahead of certification, shown here filling a $d=3$ window under load.
 :::
 
-In Figure 2, the leader's proposal cadence determines when a transaction can enter a block at all. Multimmit separates that production clock from consensus. Each producer controls when a transaction enters its own block, and its chain contains no cross-producer references, so it can run as many as $d$ blocks ahead of certification while certificates form in the background. Under sustained load, a chain can grow by $d$ blocks per certificate round trip instead of one.
+Figure 2 showed the cost of coupling production to consensus: miss a proposal, and the transaction cannot enter a block until the next one. Multimmit separates block production from that schedule. Each producer controls when a transaction enters its own block, and its chain contains no cross-producer references, so it can run as many as $d$ blocks ahead of certification while certificates form in the background. Under sustained load, a chain can grow by $d$ blocks per certificate round trip instead of one.
 
 Ordering remains view-driven. The next leader can checkpoint a transaction block, or voters can attest it as an extension if it reaches them before they vote, even when it misses the proposal. This is still faster than leader-only production: the block is already spreading while it waits and can catch the current view after the proposal has passed. A block that misses that vote event waits for the next view. Producers keep building through leader failures and view changes, and the first successful view checkpoints the backlog.
 
