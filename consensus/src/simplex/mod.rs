@@ -223,13 +223,12 @@
 //! produces a nullification. In the common case (no faults, no timeouts), exclusion cannot
 //! happen.
 //!
-//! One nullify trigger remains available to a Byzantine leader even when its proposal is valid,
-//! certifiable, and timely: broadcasting `nullify(v)` after its own proposal is notarized. Every
-//! honest participant still in view `v` treats that `nullify(v)` as immediate timeout expiry and
-//! responds with its own (and the leader's vote counts toward the `2f+1` quorum), so a Byzantine
-//! leader can single-handedly cause a covering nullification. Speculative finality for view `v`
-//! therefore also assumes the term's leader (constant across `[term_start(v), v]`) does not
-//! nullify its own proposals.
+//! A Byzantine leader, however, can exclude even its own valid, certifiable, and timely proposal:
+//! honest participants treat the leader's `nullify(v)` as an immediate timeout, so a leader can
+//! single-handedly revoke its own notarized proposal. This is no new power. A leader can achieve
+//! the same exclusion by delivering its proposal so late that honest participants notarize it but
+//! time out before certifying. Speculative finality therefore assumes the term's leader wants its
+//! proposal to survive.
 //!
 //! ### Unchained Finalization
 //!
