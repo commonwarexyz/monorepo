@@ -477,15 +477,15 @@ O’Grady</a></div>
         <p>DAG-based protocols (<a
         href="https://arxiv.org/abs/2105.11827">Narwhal</a>, <a
         href="https://arxiv.org/abs/2201.05677">Bullshark</a>, <a
-        href="https://arxiv.org/abs/2310.14821">Mysticeti</a>) were the
-        first to have every validator disseminate transactions in
-        parallel. The costs of this approach motivated designs like
-        Autobahn and Raptr. In a DAG, the transaction-carrying structure
-        is also the consensus structure. Every validator’s vertex
-        carries transactions and references <span
-        class="math inline">n-f</span> vertices from the previous round.
-        Consensus determines finality by interpreting this pattern of
-        references.</p>
+        href="https://arxiv.org/abs/2310.14821">Mysticeti</a>)
+        popularized the idea of having every validator disseminate
+        transactions in parallel. The costs of this approach motivated
+        designs like Autobahn and Raptr. In a DAG, the
+        transaction-carrying structure is also the consensus structure.
+        Every validator’s vertex carries transactions and references
+        <span class="math inline">n-f</span> vertices from the previous
+        round. Consensus determines finality by interpreting this
+        pattern of references.</p>
         <div id="multimmit-fig-dagstructure" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG construction. Four validators each emit one vertex per round. As each new round of vertices appears, edges draw back from every vertex to three of the four vertices in the previous round, forming a lattice.">
           <noscript>This figure animates DAG construction: four validators emit one vertex per round, and each new vertex draws reference edges back to n−f (here 3 of 4) vertices of the previous round.</noscript>
         </div>

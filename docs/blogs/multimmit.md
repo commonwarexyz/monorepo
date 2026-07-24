@@ -169,7 +169,7 @@ At $n=5f+1$, these thresholds provide three other useful properties:
 
 ## Why Not a DAG?
 
-DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](https://arxiv.org/abs/2201.05677), [Mysticeti](https://arxiv.org/abs/2310.14821)) were the first to have every validator disseminate transactions in parallel. The costs of this approach motivated designs like Autobahn and Raptr. In a DAG, the transaction-carrying structure is also the consensus structure. Every validator's vertex carries transactions and references $n-f$ vertices from the previous round. Consensus determines finality by interpreting this pattern of references.
+DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](https://arxiv.org/abs/2201.05677), [Mysticeti](https://arxiv.org/abs/2310.14821)) popularized the idea of having every validator disseminate transactions in parallel. The costs of this approach motivated designs like Autobahn and Raptr. In a DAG, the transaction-carrying structure is also the consensus structure. Every validator's vertex carries transactions and references $n-f$ vertices from the previous round. Consensus determines finality by interpreting this pattern of references.
 
 ```{=html}
 <div id="multimmit-fig-dagstructure" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG construction. Four validators each emit one vertex per round. As each new round of vertices appears, edges draw back from every vertex to three of the four vertices in the previous round, forming a lattice.">
