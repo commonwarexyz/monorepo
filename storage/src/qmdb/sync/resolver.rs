@@ -624,7 +624,7 @@ impl_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
 // Keyless Variable
 impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
 
-// Resolver impls over owned proof snapshots. Serving reads frozen state: it never touches the
+// Resolver impls over owned proof snapshots. Serving reads frozen state, never touches the
 // live database or any lock, and stays valid while the source appends, syncs, and prunes.
 // One generic impl per snapshot family covers every backing journal and update type.
 

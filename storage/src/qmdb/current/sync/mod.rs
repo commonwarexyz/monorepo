@@ -533,3 +533,41 @@ impl_current_resolver!(
     CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
     OrderedVariableOp<F, K, V>: CodecShared,
 );
+
+// Resolver over the owned proof snapshot. Serving reads frozen ops-level state and never
+// touches the live database or any lock. One generic impl covers every current variant.
+impl<F, E, U, R, H> crate::qmdb::sync::Resolver for Arc<db::ProofSnapshot<F, E, U, R, H>>
+where
+    F: Graftable,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = Operation<F, U>> + Send + Sync + 'static,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = DigestOf<H>;
+    type Op = Operation<F, U>;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<F>,
+        start_loc: Location<F>,
+        max_ops: std::num::NonZeroU64,
+        include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
+        fetch_operations(
+            op_count,
+            start_loc,
+            max_ops,
+            include_pinned_nodes,
+            |op_count, start_loc, max_ops| {
+                self.ops().historical_proof(op_count, start_loc, max_ops)
+            },
+            |start_loc| self.ops().pinned_nodes_at(start_loc),
+        )
+        .await
+    }
+}

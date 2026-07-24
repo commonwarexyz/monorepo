@@ -1357,6 +1357,12 @@ where
             .historical_proof(historical_size, start_loc, max_ops)
             .await
     }
+
+    /// The ops-level snapshot of the wrapped Any database. Sync serving reads through it,
+    /// and its proofs verify against [Self::ops_root], matching [Db::ops_historical_proof].
+    pub const fn ops(&self) -> &any::db::ProofSnapshot<F, E, U, R, H> {
+        &self.ops
+    }
 }
 
 impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>

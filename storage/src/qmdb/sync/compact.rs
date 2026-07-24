@@ -1095,9 +1095,9 @@ impl_compact_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableVal
 impl_compact_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
 impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
 
-// Resolver impl over an owned compact state snapshot. Serving reads the captured witness:
-// it never touches the live database or any lock. The capture is memory-only, so no
-// cancellation hook is needed; a dropped request future stops the serve.
+// Resolver impl over an owned compact state snapshot. Serving reads the captured witness
+// and never touches the live database or any lock. The capture is memory-only, so no
+// cancellation hook is needed and a dropped request future stops the serve.
 impl<F, D, Op, Cfg> Resolver for Arc<crate::qmdb::compact::snapshot::StateSnapshot<F, D, Op, Cfg>>
 where
     F: Family,

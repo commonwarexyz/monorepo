@@ -1723,7 +1723,7 @@ pub(crate) mod test {
             let start_loc = Location::new(3);
             let max_ops = NZU64!(5);
 
-            // Live output at this generation: the same calls the lock-backed resolvers make.
+            // Live output at this generation, from the same calls the lock-backed resolvers make.
             let (live_proof, live_ops) = db
                 .historical_proof(op_count, start_loc, max_ops)
                 .await
@@ -1750,8 +1750,8 @@ pub(crate) mod test {
                 &root,
             ));
 
-            // Advance and prune the live database past the capture: the resolver's output is
-            // byte-identical to its pre-mutation output.
+            // Advance and prune the live database past the capture, then confirm the
+            // resolver's output is byte-identical to its pre-mutation output.
             db = apply_ops(db, create_test_ops(30)).await;
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();

@@ -795,3 +795,53 @@ current_sync_tests_for_harness!(harnesses::OrderedFixedMmrHarness, ordered_fixed
 current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+
+#[test_traced]
+fn test_current_proof_snapshot_resolver_matches_live() {
+    use crate::qmdb::{any::sync::tests::SyncTestHarness as _, sync::resolver::Resolver as _};
+    use commonware_codec::Encode as _;
+    use commonware_utils::channel::oneshot;
+    use harnesses::UnorderedFixedMmrHarness as H;
+    use std::{num::NonZeroU64, sync::Arc};
+
+    let executor = deterministic::Runner::default();
+    executor.start(|context: Context| async move {
+        let db = H::init_db(context).await;
+        let db = H::apply_ops(db, H::create_ops(50)).await;
+        let (db, snapshot) = db.proof_snapshot().await.unwrap();
+        let snapshot = Arc::new(snapshot);
+        let live = Arc::new(db);
+
+        let op_count = snapshot.op_count();
+        let start = crate::merkle::Location::new(0);
+        let max_ops = NonZeroU64::new(20).unwrap();
+
+        // Snapshot serving is byte-identical to the live database at the same generation.
+        let (_live_tx, live_rx) = oneshot::channel();
+        let expected = live
+            .get_operations(op_count, start, max_ops, true, live_rx)
+            .await
+            .unwrap();
+        let (_snap_tx, snap_rx) = oneshot::channel();
+        let got = snapshot
+            .get_operations(op_count, start, max_ops, true, snap_rx)
+            .await
+            .unwrap();
+        assert_eq!(got.proof.encode(), expected.proof.encode());
+        assert_eq!(got.operations.encode(), expected.operations.encode());
+        assert_eq!(got.pinned_nodes, expected.pinned_nodes);
+
+        // Serving stays identical after the live database advances past the capture.
+        let db = Arc::try_unwrap(live).unwrap_or_else(|_| panic!("live still shared"));
+        let db = H::apply_ops(db, H::create_ops_seeded(25, 7)).await;
+        let (_snap_tx, snap_rx) = oneshot::channel();
+        let still = snapshot
+            .get_operations(op_count, start, max_ops, true, snap_rx)
+            .await
+            .unwrap();
+        assert_eq!(still.proof.encode(), expected.proof.encode());
+        assert_eq!(still.operations.encode(), expected.operations.encode());
+
+        db.destroy().await.unwrap();
+    });
+}
