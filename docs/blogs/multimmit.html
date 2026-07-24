@@ -110,14 +110,14 @@ O’Grady</a></div>
                         <div class="date">July 23rd, 2026</div>
         </div>
         <p>For users, a blockchain’s speed is the time from submitting a
-        transaction to seeing it final. The protocols underneath,
-        however, are usually measured against something narrower, the
-        time from a leader proposing a block to the network accepting
-        it. The gap between the two is the trip to the leader.
-        Traditionally, a transaction must reach whichever node is
-        leading before it can appear in a block. Everything then flows
-        back out of that same node, whose egress caps the whole network
-        while every other validator waits.</p>
+        transaction to seeing it final, while the protocols underneath
+        are usually measured against something narrower, the time from a
+        leader proposing a block to the network accepting it. The gap
+        between the two is the trip to the leader. Traditionally, a
+        transaction must reach whichever node is leading before it can
+        appear in a block, and everything then flows back out of that
+        same node, whose egress caps the whole network while every other
+        validator waits.</p>
         <p>For throughput, the well-understood fix is to decouple
         transaction dissemination from consensus. Every validator
         becomes a <em>producer</em>, streaming transaction data in
