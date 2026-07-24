@@ -149,6 +149,10 @@ impl<B: Blob> Writer<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
+        // The page cache serves this blob's reads, so its writes need not populate the
+        // OS page cache (see [crate::Blob::hint_uncached_writes]).
+        blob.hint_uncached_writes();
+
         let (partial_page_state, pages, invalid_data_found) =
             Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
         if invalid_data_found {

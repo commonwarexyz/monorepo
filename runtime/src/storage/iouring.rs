@@ -34,7 +34,7 @@ use std::{
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
@@ -266,6 +266,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Submit writes with `RWF_DONTCACHE` (see [crate::Blob::hint_uncached_writes]).
+    /// Cleared on the first EOPNOTSUPP so unsupported stacks fall back to cached writes.
+    uncached: Arc<AtomicBool>,
 }
 
 impl Clone for Blob {
@@ -277,6 +280,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            uncached: self.uncached.clone(),
         }
     }
 }
@@ -298,6 +302,7 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            uncached: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -362,7 +367,7 @@ impl crate::Blob for Blob {
         }
 
         self.io_handle
-            .write_at(self.file.clone(), offset, bufs)
+            .write_at(self.file.clone(), offset, bufs, self.uncached.clone())
             .await
     }
 
@@ -381,7 +386,7 @@ impl crate::Blob for Blob {
         }
 
         self.io_handle
-            .write_at_sync(self.file.clone(), offset, bufs)
+            .write_at_sync(self.file.clone(), offset, bufs, self.uncached.clone())
             .await
     }
 
@@ -421,6 +426,11 @@ impl crate::Blob for Blob {
                 Err(_) => Err(Error::Closed),
             }
         })
+    }
+
+    fn hint_uncached_writes(&self) {
+        self.uncached
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

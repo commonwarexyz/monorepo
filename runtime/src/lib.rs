@@ -776,6 +776,16 @@ stability_scope!(BETA {
         /// Awaiting this future waits until the sync has started. Awaiting the returned
         /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
+
+        /// Advise that this blob's writes need not populate the OS page cache, because the
+        /// caller maintains its own cache over the data (see [crate::buffer::paged]).
+        ///
+        /// Advisory and one-way for the handle's lifetime: implementations may ignore it,
+        /// and wrappers should forward it. On Linux backends, writes are submitted with
+        /// `RWF_DONTCACHE` where the kernel and filesystem support it, falling back to
+        /// cached writes automatically otherwise. Writeback is started at submission, so
+        /// later syncs wait on less.
+        fn hint_uncached_writes(&self) {}
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

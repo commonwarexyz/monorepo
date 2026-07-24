@@ -12,7 +12,10 @@ use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
     os::fd::{AsRawFd, OwnedFd},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -521,6 +524,9 @@ pub(super) struct WriteAtRequest {
     pub(super) write: WriteBuffers,
     /// Whether the write should be durably persisted before completion.
     pub(super) sync: bool,
+    /// The owning blob's uncached-writes hint (see [crate::Blob::hint_uncached_writes]).
+    /// Shared so an EOPNOTSUPP can clear it for the blob and resubmit cached.
+    pub(super) uncached: Arc<AtomicBool>,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
     pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
@@ -528,9 +534,17 @@ pub(super) struct WriteAtRequest {
 }
 
 impl WriteAtRequest {
-    /// Return the flags for this write request, setting `RWF_SYNC` when `sync` is set.
-    const fn rw_flags(&self) -> i32 {
-        if self.sync { libc::RWF_SYNC } else { 0 }
+    /// Return the flags for this write request: `RWF_DSYNC` when `sync` is set (data
+    /// durability is the contract, so timestamp-only commits are skipped), plus
+    /// `RWF_DONTCACHE` while the blob's uncached hint holds.
+    fn rw_flags(&self) -> i32 {
+        let sync = if self.sync { libc::RWF_DSYNC } else { 0 };
+        let uncached = if self.uncached.load(Ordering::Relaxed) {
+            libc::RWF_DONTCACHE
+        } else {
+            0
+        };
+        sync | uncached
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -612,7 +626,9 @@ impl SyncRequest {
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
-        opcode::Fsync::new(fd).build()
+        opcode::Fsync::new(fd)
+            .flags(io_uring::types::FsyncFlags::DATASYNC)
+            .build()
     }
 
     /// Classify one fsync CQE and decide whether the logical request completes
@@ -1185,6 +1201,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         };
@@ -1200,6 +1217,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });
@@ -1221,6 +1239,7 @@ mod tests {
             written: 0,
             write: vectored.into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });
@@ -1239,6 +1258,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });
@@ -1256,6 +1276,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });
@@ -1275,10 +1296,11 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: true,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         };
-        assert_eq!(write.rw_flags(), libc::RWF_SYNC);
+        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
         let mut request = Request::WriteAt(write);
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL));
         request.complete();
@@ -1295,6 +1317,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });
@@ -1452,6 +1475,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });
@@ -1537,6 +1561,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
+            uncached: Arc::new(AtomicBool::new(false)),
             result: None,
             sender: tx,
         });

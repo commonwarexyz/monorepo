@@ -239,6 +239,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             partition = %self.partition,
         )))
     }
+
+    fn hint_uncached_writes(&self) {
+        self.inner.hint_uncached_writes()
+    }
 }
 
 #[cfg(test)]

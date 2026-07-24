@@ -177,7 +177,7 @@ use std::{
     collections::VecDeque,
     fs::File,
     os::fd::OwnedFd,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -426,7 +426,13 @@ impl Handle {
 
     /// Submit a logical positioned write request and wait for its completion.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    pub async fn write_at(&self, file: Arc<File>, offset: u64, bufs: IoBufs) -> Result<(), Error> {
+    pub async fn write_at(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        bufs: IoBufs,
+        uncached: Arc<AtomicBool>,
+    ) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
             file,
@@ -434,6 +440,7 @@ impl Handle {
             written: 0,
             write: bufs.into(),
             sync: false,
+            uncached,
             result: None,
             sender: tx,
         }))
@@ -444,7 +451,7 @@ impl Handle {
 
     /// Submit a logical positioned write with per-write sync and wait for its completion.
     ///
-    /// Durability is fused into the write (`RWF_SYNC`) only when the whole write fits one
+    /// Durability is fused into the write (`RWF_DSYNC`) only when the whole write fits one
     /// submission: fusing every submission would serialize the submissions behind per-SQE
     /// durability waits. A larger write is submitted plain and made durable with one
     /// trailing fsync, which keeps the device pipelined and pays a single wait at the end.
@@ -454,6 +461,7 @@ impl Handle {
         file: Arc<File>,
         offset: u64,
         bufs: IoBufs,
+        uncached: Arc<AtomicBool>,
     ) -> Result<(), Error> {
         let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
         let (tx, rx) = oneshot::channel();
@@ -463,6 +471,7 @@ impl Handle {
             written: 0,
             write: bufs.into(),
             sync: fused,
+            uncached,
             result: None,
             sender: tx,
         }))

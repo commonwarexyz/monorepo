@@ -7,16 +7,17 @@
 
 use commonware_runtime::{
     Storage,
-    buffer::paged::{CacheRef, Writer},
+    buffer::paged::{CacheRef, Writer, page_size},
 };
-use commonware_utils::NZU16;
 use criterion::{criterion_group, criterion_main};
 use std::num::NonZeroU16;
 
 mod append;
 mod read;
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+// An aligned physical page (4096 on disk), so benches measure the layout production
+// should use (see paged::page_size).
+const PAGE_SIZE: NonZeroU16 = page_size(4096);
 const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;

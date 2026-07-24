@@ -440,6 +440,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         }
         self.inner.start_sync().await
     }
+
+    fn hint_uncached_writes(&self) {
+        self.inner.hint_uncached_writes()
+    }
 }
 
 #[cfg(test)]
