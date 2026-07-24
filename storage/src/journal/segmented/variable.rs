@@ -658,6 +658,13 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                             }
                             // Buffer still has data - continue to try decoding
                         }
+                        Err(commonware_runtime::Error::InvalidChecksum)
+                            if current.reader.remaining() > 0 =>
+                        {
+                            // The bad page follows a checksum-valid buffered prefix. Decode any
+                            // complete frames in that prefix before treating the bad page as the
+                            // section boundary.
+                        }
                         Err(commonware_runtime::Error::InvalidChecksum) => {
                             // A torn page in the unsynced tail. A synced page cannot tear, so
                             // this is unacknowledged data past the last durable sync; repair it
@@ -1925,6 +1932,76 @@ mod tests {
             assert_eq!(items[0].1, 1);
             assert_eq!(items[1].0, 2);
             assert_eq!(items[1].1, 5);
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_replay_preserves_complete_small_items_before_torn_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Fill and durably sync one logical page with two-byte frames.
+            let mut journal = init_journal(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            for i in 0..512u16 {
+                (journal, _, _) = journal
+                    .append(1, &(i as u8))
+                    .await
+                    .expect("failed to append first page");
+            }
+            journal = journal.sync_all().await.expect("failed to sync first page");
+
+            // Materialize a multi-page candidate tail, then construct the state of an interrupted
+            // later sync: the second page is torn while a later page survives.
+            for i in 512..1600u16 {
+                (journal, _, _) = journal
+                    .append(1, &(i as u8))
+                    .await
+                    .expect("failed to append tail");
+            }
+            journal = journal
+                .sync_all()
+                .await
+                .expect("failed to materialize tail");
+            drop(journal);
+
+            let (blob, _) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            // Physical pages contain 1024 logical bytes followed by a 12-byte CRC record.
+            let physical_page_size = PAGE_SIZE.get() as u64 + 12;
+            blob.write_at_sync(physical_page_size + 10, vec![0xFFu8; 16])
+                .await
+                .expect("failed to corrupt second physical page");
+            drop(blob);
+
+            let mut replay =
+                Journal::<_, u8>::init(context.child("second"), cfg.clone(), NZUsize!(1024 * 1024))
+                    .await
+                    .expect("failed to re-initialize journal");
+            let mut items = Vec::new();
+            while let Some(result) = replay.next().await {
+                let (_, _, _, item) = result.expect("replay should repair the torn page");
+                items.push(item);
+            }
+            let journal = replay.finish().expect("failed to finish replay");
+
+            let expected = (0..512u16).map(|i| i as u8).collect::<Vec<_>>();
+            assert_eq!(items, expected);
+            assert_eq!(
+                journal.size(1).expect("missing section"),
+                PAGE_SIZE.get() as u64
+            );
+            journal.destroy().await.expect("failed to destroy journal");
         });
     }
 
