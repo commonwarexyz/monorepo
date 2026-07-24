@@ -1288,8 +1288,8 @@ impl<
                         .previous()
                         .and_then(|view| self.state.certified_proposal(view));
 
-                    // If the leader nullified or is inactive, reduce leader
-                    // timeout to now
+                    // If the leader nullified or is inactive, the batcher
+                    // responds with a timeout that expires the view immediately
                     let (span, finalized) = self.state.batcher_context(current_view);
                     batcher.update(span, current_view, leader, finalized, certified_proposal);
                 }

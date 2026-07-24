@@ -2987,6 +2987,81 @@ mod tests {
         });
     }
 
+    /// Reproduces the restart equivocation trace at the state level: our
+    /// replayed vote conflicts with the leader's re-forwarded proposal, then
+    /// the network's finalization for the conflicting proposal arrives. The
+    /// finalized proposal must drive parent lookups for the next view.
+    #[test]
+    fn restart_equivocation_parent_payload_tracks_finalized_proposal() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes,
+                participants,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let mut state = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: round_robin(&verifier),
+                    epoch,
+                    view_retention: ViewDelta::new(5),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // The initial view is led by the equivocating leader (participant 2).
+            let view = View::new(1);
+            assert_eq!(state.current_view(), view);
+            assert_eq!(state.leader_index(view), Some(Participant::new(2)));
+
+            // Restart: replay our journaled notarize for the leader's first proposal.
+            let proposal_x = Proposal::new(
+                Rnd::new(epoch, view),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
+            let local_vote = Notarize::sign(&schemes[1], proposal_x).unwrap();
+            state.replay(&Artifact::Notarize(local_vote));
+
+            // The rebuilt batcher re-forwards the leader's notarize, now
+            // carrying the conflicting proposal.
+            let proposal_y = Proposal::new(
+                Rnd::new(epoch, view),
+                GENESIS_VIEW,
+                Sha256Digest::from([2u8; 32]),
+            );
+            assert!(!state.set_proposal(view, proposal_y.clone()));
+
+            // The rest of the network (the leader and the other two honest
+            // participants) finalized the conflicting proposal.
+            let others = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let finalization = build_finalization(&verifier, &others, &proposal_y);
+            let (added, equivocator) = state.add_finalization(finalization);
+            assert!(added);
+            assert_eq!(equivocator.unwrap(), participants[2]);
+
+            // Verification of the next view's proposal must be offered the
+            // finalized payload as the parent.
+            let next = state.current_view();
+            assert_eq!(next, View::new(2));
+            let child = Proposal::new(Rnd::new(epoch, next), view, Sha256Digest::from([3u8; 32]));
+            assert!(state.set_proposal(next, child.clone()));
+            let Verify::Ready(context, proposal) = state.try_verify() else {
+                panic!("verification context");
+            };
+            assert_eq!(proposal, child);
+            assert_eq!(context.parent, (view, proposal_y.payload));
+        });
+    }
+
     #[test]
     fn certification_lifecycle() {
         let runtime = deterministic::Runner::default();
