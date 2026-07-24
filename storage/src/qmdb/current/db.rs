@@ -531,7 +531,7 @@ where
     /// justifies depends on its floor AND its ops count (delayed-merge absorption), so it is
     /// recomputed from the [`any::db::Barrier`](crate::qmdb::any::db::Barrier) with the same
     /// helper that computes serving boundaries.
-    async fn ensure_barrier(mut self, boundary: Location<F>) -> Result<Self, Error<F>> {
+    async fn ensure_durable(mut self, boundary: Location<F>) -> Result<Self, Error<F>> {
         let barrier = self.any.barrier();
         let durable_boundary = self::sync_boundary::<F, N>(
             *barrier.floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
@@ -579,7 +579,7 @@ where
         let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
         let bitmap_boundary = Location::new((*prune_loc / chunk_bits) * chunk_bits);
 
-        self = self.ensure_barrier(bitmap_boundary).await?;
+        self = self.ensure_durable(bitmap_boundary).await?;
         self.any.prune_bitmap(bitmap_boundary);
         self.prune_grafted_tree_to_bitmap()?;
 
