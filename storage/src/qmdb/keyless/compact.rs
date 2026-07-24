@@ -475,11 +475,6 @@ where
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
-        // The cached tip was verified when it was installed. A below-tip entry predates it,
-        // so re-check it with the same verification the client runs (commit proof, frontier
-        // pins, and floor bound): a payload that cannot authenticate against the requested
-        // root is declined instead of served, failing fast rather than spinning the
-        // client's retry loop.
         Ok(compact_sync::State {
             leaf_count: target.leaf_count,
             pinned_nodes,
