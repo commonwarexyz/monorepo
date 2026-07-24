@@ -674,14 +674,10 @@ where
     target.validate().map_err(ServeError::InvalidTarget)?;
     let current = current_target();
     // Serve any target at or below the tip: a syncing client's target trails the server by
-    // its fetch latency, and the client verifies the payload against its own target root.
-    // Targets past the tip, and targets that diverge from the tip at its own leaf count,
-    // are refused so the client refetches once the targets converge. Below the tip no root
-    // is available to check against, so divergence there surfaces as a client-side
-    // verification failure instead.
-    if target.leaf_count > current.leaf_count
-        || (target.leaf_count == current.leaf_count && target.root != current.root)
-    {
+    // its fetch latency, and the client verifies every payload against its own target root,
+    // so divergence surfaces as a client-side verification failure and a refetch. Targets
+    // past the tip are refused so the client refetches once the server catches up.
+    if target.leaf_count > current.leaf_count {
         return Err(ServeError::StaleTarget {
             requested: target,
             current,

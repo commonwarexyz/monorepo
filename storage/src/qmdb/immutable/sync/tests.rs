@@ -1435,6 +1435,97 @@ mod compact_variable_mmr {
         });
     }
 
+    /// A valid payload that authenticates a different root than the client's target fails
+    /// client validation, and sync completes once a payload for the requested root arrives.
+    #[test_traced("WARN")]
+    fn test_compact_sync_recovers_after_divergent_root() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-divergent-{}", context.next_u64());
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&format!("{suffix}-a"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().end,
+            };
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+
+            // A second source with the same shape but different contents commits the same
+            // leaf count under a different root.
+            let divergent = SourceDb::init(
+                context.child("divergent"),
+                source_config(&format!("{suffix}-b"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = divergent
+                .new_batch()
+                .set(sha256::Digest::from([4; 32]), vec![10, 11, 12])
+                .merkleize(&divergent, Some(vec![2]), Location::new(1))
+                .await;
+            let (divergent, _) = divergent.apply_batch(batch).await.unwrap();
+            let divergent = divergent.commit().await.unwrap();
+            let divergent_target = sync::compact::Target {
+                root: divergent.root(),
+                leaf_count: divergent.bounds().end,
+            };
+            assert_eq!(divergent_target.leaf_count, target.leaf_count);
+            assert_ne!(divergent_target.root, target.root);
+            let divergent = Arc::new(divergent);
+            let divergent_state =
+                sync::compact::Resolver::get_compact_state(&divergent, divergent_target)
+                    .await
+                    .unwrap()
+                    .state;
+
+            // The divergent payload fails client validation; the retry completes with the
+            // payload for the requested root.
+            let states = Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                divergent_state.into(),
+                good_state.into(),
+            ])));
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: SequenceResolver {
+                    states: states.clone(),
+                },
+                target: target.clone(),
+                db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert!(
+                states.lock().is_empty(),
+                "the divergent payload must be rejected and retried past"
+            );
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+            let divergent =
+                Arc::try_unwrap(divergent).unwrap_or_else(|_| panic!("single divergent ref"));
+            divergent.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -1671,20 +1762,6 @@ mod compact_variable_mmr {
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
 
-            // A tip-sized target with a divergent root is refused: the source knows its own
-            // tip root.
-            let divergent_target = sync::compact::Target {
-                root: window_target.root,
-                leaf_count: current_target.leaf_count,
-            };
-            let result =
-                sync::compact::Resolver::get_compact_state(&source, divergent_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == divergent_target && current == current_target
-            ));
-
             // A target past the tip is refused so the client refetches once the source
             // catches up.
             let ahead_target = sync::compact::Target {
@@ -1796,10 +1873,6 @@ mod compact_variable_mmr {
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
-            // The regrown tip shares target2's leaf count: the divergent stanza below
-            // exercises the tip root check, not the retained-window paths.
-            assert_eq!(target2.leaf_count, target3.leaf_count);
-
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
@@ -1821,26 +1894,6 @@ mod compact_variable_mmr {
                     .await
                     .unwrap(),
             );
-            // The divergent target shares the tip's leaf count with a different root, so
-            // the tip root check refuses it with the current target.
-            let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("stale_client"),
-                resolver: source.clone(),
-                target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Resolver(sync::compact::ServeError::StaleTarget {
-                    requested,
-                    current
-                })) if requested == target2 && current == target3
-            ));
-
             // A retained below-tip witness stays servable after the tip advances past it.
             let window_cfg = client_config(&format!("{suffix}-window"), &context);
             let window: ClientDb = sync::compact::sync(sync::compact::Config {
@@ -2254,6 +2307,97 @@ mod compact_variable_mmb {
         });
     }
 
+    /// A valid payload that authenticates a different root than the client's target fails
+    /// client validation, and sync completes once a payload for the requested root arrives.
+    #[test_traced("WARN")]
+    fn test_compact_sync_recovers_after_divergent_root() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-divergent-{}", context.next_u64());
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&format!("{suffix}-a"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().end,
+            };
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+
+            // A second source with the same shape but different contents commits the same
+            // leaf count under a different root.
+            let divergent = SourceDb::init(
+                context.child("divergent"),
+                source_config(&format!("{suffix}-b"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = divergent
+                .new_batch()
+                .set(sha256::Digest::from([4; 32]), vec![10, 11, 12])
+                .merkleize(&divergent, Some(vec![2]), Location::new(1))
+                .await;
+            let (divergent, _) = divergent.apply_batch(batch).await.unwrap();
+            let divergent = divergent.commit().await.unwrap();
+            let divergent_target = sync::compact::Target {
+                root: divergent.root(),
+                leaf_count: divergent.bounds().end,
+            };
+            assert_eq!(divergent_target.leaf_count, target.leaf_count);
+            assert_ne!(divergent_target.root, target.root);
+            let divergent = Arc::new(divergent);
+            let divergent_state =
+                sync::compact::Resolver::get_compact_state(&divergent, divergent_target)
+                    .await
+                    .unwrap()
+                    .state;
+
+            // The divergent payload fails client validation; the retry completes with the
+            // payload for the requested root.
+            let states = Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                divergent_state.into(),
+                good_state.into(),
+            ])));
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: SequenceResolver {
+                    states: states.clone(),
+                },
+                target: target.clone(),
+                db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert!(
+                states.lock().is_empty(),
+                "the divergent payload must be rejected and retried past"
+            );
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+            let divergent =
+                Arc::try_unwrap(divergent).unwrap_or_else(|_| panic!("single divergent ref"));
+            divergent.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -2493,20 +2637,6 @@ mod compact_variable_mmb {
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
 
-            // A tip-sized target with a divergent root is refused: the source knows its own
-            // tip root.
-            let divergent_target = sync::compact::Target {
-                root: window_target.root,
-                leaf_count: current_target.leaf_count,
-            };
-            let result =
-                sync::compact::Resolver::get_compact_state(&source, divergent_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == divergent_target && current == current_target
-            ));
-
             // A target past the tip is refused so the client refetches once the source
             // catches up.
             let ahead_target = sync::compact::Target {
@@ -2618,10 +2748,6 @@ mod compact_variable_mmb {
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
-            // The regrown tip shares target2's leaf count: the divergent stanza below
-            // exercises the tip root check, not the retained-window paths.
-            assert_eq!(target2.leaf_count, target3.leaf_count);
-
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
@@ -2644,26 +2770,6 @@ mod compact_variable_mmb {
                     .unwrap(),
             );
             assert_eq!(source.target(), target3);
-            // The divergent target shares the tip's leaf count with a different root, so
-            // the tip root check refuses it with the current target.
-            let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("stale_client"),
-                resolver: source.clone(),
-                target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Resolver(sync::compact::ServeError::StaleTarget {
-                    requested,
-                    current
-                })) if requested == target2 && current == target3
-            ));
-
             // A retained below-tip witness stays servable after the tip advances past it.
             let window_cfg = client_config(&format!("{suffix}-window"), &context);
             let window: ClientDb = sync::compact::sync(sync::compact::Config {

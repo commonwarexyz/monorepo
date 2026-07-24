@@ -449,9 +449,7 @@ where
             .validate()
             .map_err(compact_sync::ServeError::InvalidTarget)?;
         let tip = self.witness.with(|w| {
-            if target.leaf_count > w.leaf_count()
-                || (target.leaf_count == w.leaf_count() && target.root != w.root)
-            {
+            if target.leaf_count > w.leaf_count() {
                 return Err(compact_sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
@@ -459,8 +457,8 @@ where
             }
             Ok((target.leaf_count == w.leaf_count()).then(|| w.witness.clone()))
         })?;
-        let (entry, pre_verified) = match tip {
-            Some(entry) => (entry, true),
+        let entry = match tip {
+            Some(entry) => entry,
             // While an import is pending the journal still holds the previous partition's
             // contents, so only the cached tip is servable.
             None if self.witness.import_pending() => {
@@ -469,18 +467,19 @@ where
                     current: self.target(),
                 });
             }
-            None => {
-                let entry = self
-                    .witness
-                    .entry_at(target.leaf_count)
-                    .await
-                    .map_err(compact_sync::ServeError::Database)?
-                    .ok_or_else(|| compact_sync::ServeError::StaleTarget {
-                        requested: target.clone(),
-                        current: self.target(),
-                    })?;
-                (entry, false)
-            }
+            // A below-tip entry is this db's own durable write: reads are checksummed, so
+            // whatever decodes is what was written, and the client verifies every payload
+            // against its own target root. A divergent target at a retained leaf count
+            // therefore surfaces as client-side rejection, not a serve-time check.
+            None => self
+                .witness
+                .entry_at(target.leaf_count)
+                .await
+                .map_err(compact_sync::ServeError::Database)?
+                .ok_or_else(|| compact_sync::ServeError::StaleTarget {
+                    requested: target.clone(),
+                    current: self.target(),
+                })?,
         };
         let Witness {
             op_bytes,
@@ -496,28 +495,6 @@ where
         // pins, and floor bound): a payload that cannot authenticate against the requested
         // root is declined instead of served, failing fast rather than spinning the
         // client's retry loop.
-        if !pre_verified {
-            let last_commit_loc = Location::new(*target.leaf_count - 1);
-            let frontier_root = match &op {
-                Operation::Commit(_, floor) if *floor <= last_commit_loc => {
-                    witness::frontier_root::<F, H>(target.leaf_count, *floor, pinned_nodes.clone())
-                }
-                _ => None,
-            };
-            if frontier_root != Some(target.root)
-                || !crate::qmdb::verify_proof::<H, _, _>(
-                    &last_commit_proof,
-                    last_commit_loc,
-                    std::slice::from_ref(&op),
-                    &target.root,
-                )
-            {
-                return Err(compact_sync::ServeError::StaleTarget {
-                    requested: target,
-                    current: self.target(),
-                });
-            }
-        }
         Ok(compact_sync::State {
             leaf_count: target.leaf_count,
             pinned_nodes,
@@ -1185,61 +1162,6 @@ mod tests {
             )
             .await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
-        });
-    }
-
-    /// A historical witness with tampered pinned nodes is declined, not served: the source
-    /// re-runs the client's verification before serving below-tip entries.
-    #[test_traced("INFO")]
-    fn test_compact_state_declines_tampered_historical_pinned_nodes() {
-        deterministic::Runner::default().start(|context| async move {
-            let partition = "immutable-tampered-historical-pins";
-            let db = open_db::<mmr::Family>(context.child("db"), partition).await;
-            let batch = db
-                .new_batch()
-                .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
-                .merkleize(&db, None, Location::new(1))
-                .await;
-            let (db, _) = db.apply_batch(batch).unwrap();
-            let db = db.sync().await.unwrap();
-            let historical_target = db.target();
-            let batch = db
-                .new_batch()
-                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
-                .merkleize(&db, None, Location::new(1))
-                .await;
-            let (db, _) = db.apply_batch(batch).unwrap();
-            let db = db.sync().await.unwrap();
-            let tip_target = db.target();
-            drop(db);
-
-            // Tamper the historical entry's frontier while keeping its operation and proof
-            // intact (the journal holds bootstrap, historical, tip).
-            let mut journal = open_witness_journal(context.child("corrupt"), partition).await;
-            journal = witness::tests::corrupt_entry(journal, 1, |entry| {
-                entry.pinned_nodes[0] = Sha256::fill(0xff);
-            })
-            .await;
-            drop(journal);
-
-            // The tip entry is intact, so reopen succeeds.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen"),
-                witness_config(partition, &context),
-                (),
-            )
-            .await
-            .unwrap();
-            assert_eq!(reopened.target(), tip_target);
-
-            // The tampered frontier cannot authenticate against the requested root.
-            assert!(matches!(
-                reopened.compact_state(historical_target).await,
-                Err(compact_sync::ServeError::StaleTarget { .. })
-            ));
-            reopened.destroy().await.unwrap();
         });
     }
 
