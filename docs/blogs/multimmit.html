@@ -224,7 +224,7 @@ O’Grady</a></div>
         href="https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana">Alpenglow</a>,
         <a href="https://arxiv.org/abs/2505.08771">Kudzu</a>) cuts it to
         one round when <span class="math inline">n \geq 5f+1</span>
-        (Multimmit inherits exactly that skeleton, and figures 4 and 5
+        (Multimmit inherits exactly that skeleton, and Figures 4 and 5
         draw it). On the left, the transaction crosses to an API node,
         crosses again to the leader, and in expectation sits in a
         mempool until the leader’s next proposal, all before the
@@ -241,7 +241,7 @@ O’Grady</a></div>
         once. Blocks still exist, but they shrink: the leader’s block
         carries references to lane tips instead of transactions, and
         finalizing it finalizes everything below the referenced tips.
-        This architecture also collapses the left side of figure 1,
+        This architecture also collapses the left side of Figure 1,
         because the node that accepts your transaction <em>is</em> a
         producer. Submission is dissemination. The lanes also run
         regardless of consensus: a timed-out leader stops ordering,
@@ -268,12 +268,12 @@ O’Grady</a></div>
         </div>
         <div class="image-caption">
         <p>Figure 2: Producer lanes with certified tips, over the same
-        Simplex-style two-round consensus as figure 1 (three message
+        Simplex-style two-round consensus as Figure 1 (three message
         delays from proposal to finality, the same total as Autobahn’s
         fast path). The batch (green) carries the transaction data and
         crosses the network once. Its PoA follows two message delays
         later, the earliest the leader’s block may include it. The block
-        stays red as in figure 1, but now carries only references.</p>
+        stays red as in Figure 1, but now carries only references.</p>
         </div>
         <p>Referencing blocks before they certify would skip the wait,
         but the known ways to do it each break something. Autobahn
@@ -312,7 +312,7 @@ O’Grady</a></div>
         prefix 1, stranding P3 through P6’s available data behind P2’s
         hole. Stranded batches eventually land through the certified
         slow path, which is exactly the path prefix voting exists to
-        avoid. Multimmit’s votes (figure 6) report per chain instead of
+        avoid. Multimmit’s votes (Figure 6) report per chain instead of
         per prefix, so there is no shared position to poison: a withheld
         block costs its own chain and nothing else.</p>
         </div>
@@ -333,7 +333,7 @@ O’Grady</a></div>
         chain: every producer signs its own sequence of transaction
         blocks, each referencing its parent by hash, extended as
         transactions arrive. DA-votes and PoAs still form for every
-        block, as in figure 2, but they pace production rather than
+        block, as in Figure 2, but they pace production rather than
         consensus: a producer may run up to <span
         class="math inline">d</span> blocks ahead of its last certified
         block, so every chain stays recoverable up to a short
@@ -354,17 +354,17 @@ O’Grady</a></div>
         withheld block lowers one chain’s tally and nothing else: no
         timeout, no fetch, no spoiled proposal. A vote that simply
         supports every proposed tip is constant size.</p>
-        <div id="multimmit-fig-checkpoint" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's checkpoint path. The API node broadcasts a transaction block, the leader references it in the next leader block before any certificate forms, and one round of votes finalizes it three message delays after the block broadcast, four after submission. Dashed markers show where figures 1 and 2 finalized on the same axis.">
+        <div id="multimmit-fig-checkpoint" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's checkpoint path. The API node broadcasts a transaction block, the leader references it in the next leader block before any certificate forms, and one round of votes finalizes it three message delays after the block broadcast, four after submission. Dashed markers show where Figures 1 and 2 finalized on the same axis.">
           <noscript>This figure animates Multimmit's checkpoint path: the leader block references the uncertified transaction block and one vote round finalizes it at block + 3δ, while DA-votes and the PoA form in the background.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 4: Transaction block <span
-        class="math inline">b</span> (green, as batches in figure 2)
+        class="math inline">b</span> (green, as batches in Figure 2)
         reaches the leader in time and is checkpointed in the leader
         block before any PoA forms. Minimmit’s single round of votes
         finalizes it <span class="math inline">3\delta</span> after its
         broadcast. The faint arrows are the DA-votes and PoA, forming
-        off the critical path. The dashed markers are where figures 1
+        off the critical path. The dashed markers are where Figures 1
         and 2 finalized on the same axis. No transaction data flows
         through the leader here.</p>
         </div>
@@ -420,7 +420,7 @@ O’Grady</a></div>
         class="math inline">f</span> faulty producers doing their
         worst.</p>
         <p>What does one round of votes actually pin down? The
-        difference from figure 3 is the shape of the vote. Multimmit’s
+        difference from Figure 3 is the shape of the vote. Multimmit’s
         vote carries an independent coordinate per chain, and the
         interleaving is not voted on at all: it is computed afterwards
         from the finalized tips, so a hole in one coordinate cannot cap
@@ -449,7 +449,7 @@ O’Grady</a></div>
         previous tip 1A. An L-QC is any <span
         class="math inline">n-f=9</span> votes for the leader block, and
         each vote reports, per chain, the highest entry it supports, so
-        one vote covers every chain independently, unlike figure 3’s
+        one vote covers every chain independently, unlike Figure 3’s
         single prefix. Dropping the top <span
         class="math inline">3f=6</span> finalizes 1D (gold), backed by
         <span class="math inline">3f+1=7</span> votes. The low votes
