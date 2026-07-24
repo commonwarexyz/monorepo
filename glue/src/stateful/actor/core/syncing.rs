@@ -417,7 +417,7 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 2,
             freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_metadata_partition: format!("{partition}-freezer-key-metadata"),
+            freezer_metadata_partition: format!("{partition}-freezer-metadata"),
             freezer_key_page_cache: page_cache,
             freezer_value_partition: format!("{partition}-freezer-value"),
             freezer_value_target_size: 128,

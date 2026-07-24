@@ -1320,7 +1320,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1376,7 +1376,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1438,7 +1438,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1485,7 +1485,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1625,7 +1625,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1670,7 +1670,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1717,7 +1717,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1771,7 +1771,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1808,7 +1808,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
@@ -1896,7 +1896,7 @@ mod tests {
             // A tiny value target so every put seals a section
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),

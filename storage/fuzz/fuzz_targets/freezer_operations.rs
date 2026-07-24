@@ -52,7 +52,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             key_partition: "fuzz-key".into(),
-            metadata_partition: "fuzz-key-metadata".into(),
+            metadata_partition: "fuzz-metadata".into(),
             key_write_buffer: NZUsize!(1024 * 1024),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "fuzz-value".into(),

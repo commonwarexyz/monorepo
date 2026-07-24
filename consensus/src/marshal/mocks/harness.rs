@@ -1872,7 +1872,7 @@ impl TestHarness for StandardHarness {
                     config.partition_prefix
                 ),
                 freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-key-metadata",
+                    "{}-finalizations-by-height-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
@@ -1918,7 +1918,7 @@ impl TestHarness for StandardHarness {
                     config.partition_prefix
                 ),
                 freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-key-metadata",
+                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
@@ -2099,7 +2099,7 @@ impl TestHarness for StandardHarness {
                 translator: EightCap,
                 key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
                 metadata_partition: format!(
-                    "{}-finalizations-by-height-key-metadata",
+                    "{}-finalizations-by-height-metadata",
                     partition_prefix
                 ),
                 key_page_cache: page_cache.clone(),
@@ -2120,7 +2120,7 @@ impl TestHarness for StandardHarness {
             prunable::Config {
                 translator: EightCap,
                 key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                metadata_partition: format!("{}-finalized-blocks-key-metadata", partition_prefix),
+                metadata_partition: format!("{}-finalized-blocks-metadata", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalized-blocks-value", partition_prefix),
                 compression: None,
@@ -2662,7 +2662,7 @@ impl TestHarness for CodingHarness {
                     config.partition_prefix
                 ),
                 freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-key-metadata",
+                    "{}-finalizations-by-height-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
@@ -2708,7 +2708,7 @@ impl TestHarness for CodingHarness {
                     config.partition_prefix
                 ),
                 freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-key-metadata",
+                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
@@ -2946,7 +2946,7 @@ impl TestHarness for CodingHarness {
                 translator: EightCap,
                 key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
                 metadata_partition: format!(
-                    "{}-finalizations-by-height-key-metadata",
+                    "{}-finalizations-by-height-metadata",
                     partition_prefix
                 ),
                 key_page_cache: page_cache.clone(),
@@ -2967,7 +2967,7 @@ impl TestHarness for CodingHarness {
             prunable::Config {
                 translator: EightCap,
                 key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                metadata_partition: format!("{}-finalized-blocks-key-metadata", partition_prefix),
+                metadata_partition: format!("{}-finalized-blocks-metadata", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalized-blocks-value", partition_prefix),
                 compression: None,

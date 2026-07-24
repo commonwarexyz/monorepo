@@ -55,7 +55,7 @@ pub(super) fn archive_config<C>(
     prunable::Config {
         translator: TwoCap,
         key_partition: format!("{prefix}-{name}-key"),
-        metadata_partition: format!("{prefix}-{name}-key-metadata"),
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),
         compression: None,

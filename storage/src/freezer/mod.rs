@@ -323,7 +323,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -398,7 +398,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -451,7 +451,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -509,7 +509,7 @@ mod tests {
             // Initialize the freezer with a very small table to force collisions
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -577,7 +577,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -653,7 +653,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -758,7 +758,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -831,7 +831,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -894,7 +894,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -963,7 +963,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -1042,7 +1042,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -1117,7 +1117,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -1199,7 +1199,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -1266,7 +1266,7 @@ mod tests {
         executor.start(|mut context| async move {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
@@ -1430,7 +1430,7 @@ mod tests {
             // Initialize the freezer
             let cfg = Config {
                 key_partition: "test-key-index".into(),
-                metadata_partition: "test-key-index-metadata".into(),
+                metadata_partition: "test-metadata".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),

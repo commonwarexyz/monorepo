@@ -416,7 +416,7 @@ mod tests {
                     "{partition_prefix}-finalizations-by-height-freezer-key"
                 ),
                 freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-key-metadata"
+                    "{partition_prefix}-finalizations-by-height-freezer-metadata"
                 ),
                 freezer_key_page_cache: page_cache.clone(),
                 freezer_value_partition: format!(
@@ -448,7 +448,7 @@ mod tests {
                 freezer_table_resize_chunk_size: 10,
                 freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
                 freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-key-metadata"
+                    "{partition_prefix}-finalized_blocks-freezer-metadata"
                 ),
                 freezer_key_page_cache: page_cache,
                 freezer_value_partition: format!(
@@ -551,9 +551,7 @@ mod tests {
                 prunable::Config {
                     translator: TwoCap,
                     key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
-                    metadata_partition: format!(
-                        "{cache_prefix}-cache-{epoch}-notarized-key-metadata"
-                    ),
+                    metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
                     key_page_cache: page_cache,
                     value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
                     items_per_section: NonZeroU64::new(10).unwrap(),
@@ -4028,7 +4026,7 @@ mod tests {
                     "{partition_prefix}-finalizations-by-height-freezer-key"
                 ),
                 freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-key-metadata"
+                    "{partition_prefix}-finalizations-by-height-freezer-metadata"
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
@@ -4059,7 +4057,7 @@ mod tests {
                 freezer_table_resize_chunk_size: 10,
                 freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
                 freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-key-metadata"
+                    "{partition_prefix}-finalized_blocks-freezer-metadata"
                 ),
                 freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
@@ -6611,7 +6609,7 @@ mod tests {
                 prunable::Config {
                     translator: EightCap,
                     key_partition: format!("{partition_prefix}-fbh-key"),
-                    metadata_partition: format!("{partition_prefix}-fbh-key-metadata"),
+                    metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                     key_page_cache: page_cache.clone(),
                     value_partition: format!("{partition_prefix}-fbh-value"),
                     compression: None,
@@ -6629,7 +6627,7 @@ mod tests {
                 prunable::Config {
                     translator: EightCap,
                     key_partition: format!("{partition_prefix}-fb-key"),
-                    metadata_partition: format!("{partition_prefix}-fb-key-metadata"),
+                    metadata_partition: format!("{partition_prefix}-fb-metadata"),
                     key_page_cache: page_cache,
                     value_partition: format!("{partition_prefix}-fb-value"),
                     compression: None,
@@ -6956,7 +6954,7 @@ mod tests {
             prunable::Config {
                 translator: EightCap,
                 key_partition: format!("{partition_prefix}-fbh-key"),
-                metadata_partition: format!("{partition_prefix}-fbh-key-metadata"),
+                metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-fbh-value"),
                 compression: None,
@@ -6974,7 +6972,7 @@ mod tests {
             prunable::Config {
                 translator: EightCap,
                 key_partition: format!("{partition_prefix}-fb-key"),
-                metadata_partition: format!("{partition_prefix}-fb-key-metadata"),
+                metadata_partition: format!("{partition_prefix}-fb-metadata"),
                 key_page_cache: page_cache,
                 value_partition: format!("{partition_prefix}-fb-value"),
                 compression: None,

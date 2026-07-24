@@ -26,7 +26,7 @@ impl StorageWorkload for FreezerWorkload {
     ) -> Result<(), Self::Error> {
         let config = Config {
             key_partition: format!("freezer-key-conformance-{seed}"),
-            metadata_partition: format!("freezer-key-conformance-{seed}-metadata"),
+            metadata_partition: format!("freezer-metadata-conformance-{seed}"),
             key_write_buffer: WRITE_BUFFER,
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: format!("freezer-value-conformance-{seed}"),

@@ -67,7 +67,7 @@ impl Archive {
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
                     freezer_key_partition: "archive-bench-freezer-key".into(),
-                    freezer_metadata_partition: "archive-bench-freezer-key-metadata".into(),
+                    freezer_metadata_partition: "archive-bench-freezer-metadata".into(),
                     freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                     freezer_value_partition: "archive-bench-freezer-value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
@@ -86,7 +86,7 @@ impl Archive {
                 let cfg = prunable::Config {
                     translator: TwoCap,
                     key_partition: "archive-bench-key".into(),
-                    metadata_partition: "archive-bench-key-metadata".into(),
+                    metadata_partition: "archive-bench-metadata".into(),
                     key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                     value_partition: "archive-bench-value".into(),
                     compression,
