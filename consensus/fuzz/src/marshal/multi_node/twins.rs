@@ -14,8 +14,9 @@ use super::{
     input::MarshalTwinsInput, invariant,
 };
 use crate::{
-    BYZANTINE_IDX, NAMESPACE, POST_GST_WINDOW, SimplexCertificateMock, SimplexId, simplex::Simplex,
-    start_disrupter_with_epoch, strategy::StrategyChoice, twins_network,
+    BYZANTINE_IDX, NAMESPACE, NetworkChannels, POST_GST_WINDOW, SimplexCertificateMock, SimplexId,
+    TwinsBackend, TwinsCase, TwinsDisrupter, TwinsSetup, TwinsTopology, run_twins_with_backend,
+    simplex::Simplex, strategy::StrategyChoice,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -33,9 +34,7 @@ use commonware_consensus::{
         resolver::p2p as resolver,
         standard::{Deferred, Standard},
     },
-    simplex::{
-        Engine, Floor, config, elector::RoundRobin, mocks::twins, types::Context as SimplexContext,
-    },
+    simplex::{Engine, Floor, config, mocks::twins, types::Context as SimplexContext},
     types::{Delta, Epoch, FixedEpocher, Height, Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -46,10 +45,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{
     Receiver, Sender,
-    simulated::{
-        Config as NetworkConfig, Network as SimulatedNetwork, Oracle,
-        Receiver as SimulatedReceiver, Sender as SimulatedSender,
-    },
+    simulated::{Config as NetworkConfig, Network as SimulatedNetwork, Oracle},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -94,12 +90,7 @@ type Builder<P> = Deferred<
     B<P>,
     FixedEpocher,
 >;
-type TwinElector = twins::Elector<RoundRobin<Sha256>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
-type Network<P> = (
-    SimulatedSender<PublicKeyOf<P>, deterministic::Context>,
-    SimulatedReceiver<PublicKeyOf<P>>,
-);
 
 #[derive(Clone, Copy)]
 struct AttackLayout {
@@ -195,12 +186,6 @@ fn attack_layout<P: Simplex>(
         }
     }
     None
-}
-
-struct ConsensusNetworks<P: Simplex> {
-    vote: Network<P>,
-    certificate: Network<P>,
-    resolver: Network<P>,
 }
 
 struct Validator<P: Simplex> {
@@ -553,7 +538,7 @@ impl<P: Simplex> CertifiableAutomaton for ObservedDeferred<P> {
 async fn register_engine_networks<P: Simplex>(
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
-) -> ConsensusNetworks<P> {
+) -> NetworkChannels<PublicKeyOf<P>> {
     let control = oracle.control(validator);
     let vote = control.register(ENGINE_VOTE, TEST_QUOTA).await.unwrap();
     let certificate = control
@@ -561,11 +546,7 @@ async fn register_engine_networks<P: Simplex>(
         .await
         .unwrap();
     let resolver = control.register(ENGINE_RESOLVER, TEST_QUOTA).await.unwrap();
-    ConsensusNetworks {
-        vote,
-        certificate,
-        resolver,
-    }
+    (vote, certificate, resolver)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -574,7 +555,7 @@ fn start_engine<P: Simplex, A>(
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     scheme: SchemeOf<P>,
-    elector: TwinElector,
+    elector: crate::TwinsElector<P>,
     automaton: A,
     relay: Builder<P>,
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
@@ -669,6 +650,285 @@ async fn wait_for_liveness<P: Simplex>(
     }
 }
 
+struct MarshalTwinsBackend<P: Simplex> {
+    input: MarshalTwinsInput,
+    probe_input: Arc<str>,
+    _marker: std::marker::PhantomData<fn() -> P>,
+}
+
+struct MarshalTwinsState<P: Simplex> {
+    validators: Vec<Validator<P>>,
+    honest: Vec<(usize, Application<B<P>>)>,
+    genesis: Sha256Digest,
+}
+
+impl<P: Simplex> MarshalTwinsBackend<P> {
+    fn new(input: MarshalTwinsInput, probe_input: Arc<str>) -> Self {
+        Self {
+            input,
+            probe_input,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn header_attack(&self) -> bool {
+        matches!(
+            self.input.strategy,
+            StrategyChoice::HeaderScope { .. } | StrategyChoice::SplitHeader { .. }
+        )
+    }
+}
+
+impl<P: Simplex> TwinsBackend<P> for MarshalTwinsBackend<P> {
+    type State = MarshalTwinsState<P>;
+    type Case = Option<AttackLayout>;
+
+    async fn setup(&mut self, context: &mut deterministic::Context) -> TwinsSetup<P, Self::State> {
+        let (participants, schemes) = P::setup(context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network::<P>(context.child("network"), participants.clone()).await;
+        setup_network_links::<P>(&mut oracle, &participants).await;
+        let genesis_block = genesis_block::<P>(participants[0].clone());
+        let genesis = genesis_block.digest();
+        let mut validators = Vec::with_capacity(participants.len());
+        let mut registrations = HashMap::with_capacity(participants.len());
+        for (idx, validator) in participants.iter().enumerate() {
+            let setup = setup_validator::<P>(
+                context
+                    .child("validator")
+                    .with_attribute("index", idx)
+                    .child("marshal"),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[idx].clone()),
+                genesis_block.clone(),
+            )
+            .await;
+            let networks = register_engine_networks::<P>(&oracle, validator.clone()).await;
+            validators.push(setup);
+            registrations.insert(validator.clone(), networks);
+        }
+        TwinsSetup {
+            oracle,
+            participants,
+            schemes,
+            registrations,
+            state: MarshalTwinsState {
+                validators,
+                honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
+                genesis,
+            },
+        }
+    }
+
+    fn term_length(&self) -> TermLength {
+        TermLength::ONE
+    }
+
+    fn framework(
+        &mut self,
+        _context: &mut deterministic::Context,
+        participants: usize,
+    ) -> twins::Framework {
+        let header_attack = self.header_attack();
+        twins::Framework {
+            participants,
+            faults: 1,
+            rounds: if header_attack {
+                self.input.rounds.max(4).into()
+            } else {
+                self.input.rounds.into()
+            },
+            mode: if header_attack || !self.input.sustained {
+                twins::Mode::Sampled
+            } else {
+                twins::Mode::Sustained
+            },
+            max_cases: if header_attack {
+                ATTACK_MAX_CASES
+            } else {
+                MAX_CASES
+            },
+        }
+    }
+
+    fn select_case(
+        &mut self,
+        _context: &mut deterministic::Context,
+        participants: &[PublicKeyOf<P>],
+        cases: Vec<twins::Case>,
+    ) -> Option<TwinsCase<Self::Case>> {
+        let fixed_cases = cases
+            .into_iter()
+            .filter(|case| case.compromised.as_slice() == [BYZANTINE_IDX])
+            .collect::<Vec<_>>();
+        let (case, attack) = if self.header_attack() {
+            let attack_cases = fixed_cases
+                .into_iter()
+                .filter_map(|case| {
+                    attack_layout::<P>(&case.scenario, participants).map(|layout| (case, layout))
+                })
+                .collect::<Vec<_>>();
+            let count = attack_cases.len();
+            let (case, layout) = attack_cases
+                .into_iter()
+                .nth(self.input.case_selector as usize % count.max(1))?;
+            (case, Some(layout))
+        } else {
+            let count = fixed_cases.len();
+            let case = fixed_cases
+                .into_iter()
+                .nth(self.input.case_selector as usize % count.max(1))?;
+            (case, None)
+        };
+        if *VERIFY_PROBE && let Some(layout) = attack {
+            eprintln!(
+                "[marshal-twins] attack layout: precursor={} attack={} victim={} slow={} fast={}",
+                layout.precursor_view, layout.attack_view, layout.victim, layout.slow, layout.fast
+            );
+        }
+        Some(TwinsCase {
+            scenario: case.scenario,
+            compromised: case.compromised,
+            data: attack,
+        })
+    }
+
+    fn spawn_primary(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        _participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        vote: (
+            impl Sender<PublicKey = PublicKeyOf<P>>,
+            impl Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        certificate: (
+            impl Sender<PublicKey = PublicKeyOf<P>>,
+            impl Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        resolver: (
+            impl Sender<PublicKey = PublicKeyOf<P>>,
+            impl Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+    ) {
+        let primary_builder = Deferred::new(
+            context.child("deferred"),
+            BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
+            state.validators[idx].mailbox.clone(),
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
+        );
+        start_engine::<P, _>(
+            context,
+            oracle,
+            validator,
+            scheme,
+            topology.elector.clone(),
+            primary_builder.clone(),
+            primary_builder,
+            state.validators[idx].mailbox.clone(),
+            state.genesis,
+            "marshal-twins-primary".into(),
+            self.input.forwarding,
+            vote,
+            certificate,
+            resolver,
+        );
+    }
+
+    fn disrupter(&self) -> Option<TwinsDisrupter> {
+        Some(TwinsDisrupter {
+            strategy: self.input.strategy,
+            required_containers: self.input.rounds.into(),
+            epoch: Epoch::zero(),
+        })
+    }
+
+    fn spawn_honest(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        _participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        channels: NetworkChannels<PublicKeyOf<P>>,
+    ) {
+        let application = match topology.data {
+            Some(layout) if layout.delayed_validators.contains(&idx) => {
+                BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::with_verification_delay(
+                    layout.precursor_view,
+                    ATTACK_VERIFY_DELAY,
+                )
+            }
+            _ => BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
+        };
+        let builder = Deferred::new(
+            context.child("deferred"),
+            application,
+            state.validators[idx].mailbox.clone(),
+            FixedEpocher::new(BLOCKS_PER_EPOCH),
+        );
+        state
+            .honest
+            .push((idx, state.validators[idx].application.clone()));
+        let observed: ObservedDeferred<P> = ObservedDeferred {
+            validator: idx,
+            probe_input: self.probe_input.clone(),
+            context: Arc::new(Mutex::new(context.child("header_mismatch_invariant"))),
+            inner: builder.clone(),
+            mailbox: state.validators[idx].mailbox.clone(),
+            invariant: HeaderMismatchInvariant::default(),
+        };
+        start_engine::<P, _>(
+            context.child("honest"),
+            oracle,
+            validator,
+            scheme,
+            topology.elector.clone(),
+            observed,
+            builder,
+            state.validators[idx].mailbox.clone(),
+            state.genesis,
+            format!("marshal-twins-honest-{idx}"),
+            self.input.forwarding,
+            channels.0,
+            channels.1,
+            channels.2,
+        );
+    }
+
+    async fn observe_liveness(
+        &mut self,
+        context: &deterministic::Context,
+        state: &mut Self::State,
+        prefix_end: View,
+    ) {
+        wait_for_liveness::<P>(
+            context,
+            &state.honest,
+            prefix_end,
+            self.input.trailing_blocks.into(),
+        )
+        .await;
+    }
+
+    fn check_invariants(
+        &mut self,
+        _context: &deterministic::Context,
+        state: &mut Self::State,
+        _topology: &TwinsTopology<P, Self::Case>,
+    ) {
+        invariant::check_all_blocks(self.input.trailing_blocks.into(), &state.honest);
+    }
+}
+
 /// Run one sampled end-to-end standard-marshal Twins mutator.
 pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
     fuzz_marshal_twins_with::<SimplexCertificateMock>(input);
@@ -695,250 +955,7 @@ fn fuzz_marshal_twins_with<P: Simplex>(input: MarshalTwinsInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (participants, schemes) = P::setup(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let participants: Arc<[PublicKeyOf<P>]> = participants.into();
-        let header_attack = matches!(
-            &input.strategy,
-            StrategyChoice::HeaderScope { .. } | StrategyChoice::SplitHeader { .. }
-        );
-        // A sustained canonical scenario never elects the fixed
-        // `BYZANTINE_IDX` identity. Header-attack inputs therefore sample
-        // multiple adjacent rounds and retain only cases with the complete W/W+1
-        // topology. Other strategies keep the original scenario selection.
-        let mode = if header_attack {
-            twins::Mode::Sampled
-        } else if input.sustained {
-            twins::Mode::Sustained
-        } else {
-            twins::Mode::Sampled
-        };
-        let rounds = if header_attack {
-            input.rounds.max(4)
-        } else {
-            input.rounds
-        };
-        let cases = twins::cases(
-            &mut context,
-            twins::Framework {
-                participants: participants.len(),
-                faults: 1,
-                rounds: rounds.into(),
-                mode,
-                max_cases: if header_attack {
-                    ATTACK_MAX_CASES
-                } else {
-                    MAX_CASES
-                },
-            },
-        );
-        let fixed_cases = cases
-            .into_iter()
-            .filter(|case| case.compromised.as_slice() == [BYZANTINE_IDX])
-            .collect::<Vec<_>>();
-        let (scenario, attack) = if header_attack {
-            let attack_cases = fixed_cases
-                .into_iter()
-                .filter_map(|case| {
-                    attack_layout::<P>(&case.scenario, participants.as_ref())
-                        .map(|layout| (case.scenario, layout))
-                })
-                .collect::<Vec<_>>();
-            let attack_case_count = attack_cases.len();
-            let Some((scenario, layout)) = attack_cases
-                .into_iter()
-                .nth(input.case_selector as usize % attack_case_count.max(1))
-            else {
-                return;
-            };
-            (scenario, Some(layout))
-        } else {
-            let Some(case) =
-                fixed_cases.get(input.case_selector as usize % fixed_cases.len().max(1))
-            else {
-                return;
-            };
-            (case.scenario.clone(), None)
-        };
-        if *VERIFY_PROBE && let Some(layout) = attack {
-            eprintln!(
-                "[marshal-twins] attack layout: precursor={} attack={} victim={} slow={} fast={}",
-                layout.precursor_view, layout.attack_view, layout.victim, layout.slow, layout.fast
-            );
-        }
-        let term_length = TermLength::ONE;
-        let elector = twins::Elector::new(
-            RoundRobin::<Sha256>::default(),
-            &scenario,
-            participants.len(),
-        );
-
-        let mut oracle = setup_network::<P>(context.child("network"), participants.to_vec()).await;
-        setup_network_links::<P>(&mut oracle, participants.as_ref()).await;
-        let genesis_block = genesis_block::<P>(participants[0].clone());
-
-        let mut validators = Vec::with_capacity(participants.len());
-        let mut networks = Vec::with_capacity(participants.len());
-        for (idx, validator) in participants.iter().enumerate() {
-            let setup = setup_validator::<P>(
-                context
-                    .child("validator")
-                    .with_attribute("index", idx)
-                    .child("marshal"),
-                &mut oracle,
-                validator.clone(),
-                ConstantProvider::new(schemes[idx].clone()),
-                genesis_block.clone(),
-            )
-            .await;
-            validators.push(setup);
-            networks.push(Some(
-                register_engine_networks::<P>(&oracle, validator.clone()).await,
-            ));
-        }
-
-        let genesis = genesis_block.digest();
-        let mut honest = Vec::with_capacity(participants.len() - 1);
-        for idx in 0..participants.len() {
-            let validator = participants[idx].clone();
-            let validator_context = context.child("validator").with_attribute("index", idx);
-            let validator_networks = networks[idx]
-                .take()
-                .expect("validator networks must be registered once");
-
-            if idx != BYZANTINE_IDX {
-                let application = match attack {
-                    Some(layout) if layout.delayed_validators.contains(&idx) => {
-                        BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::with_verification_delay(
-                            layout.precursor_view,
-                            ATTACK_VERIFY_DELAY,
-                        )
-                    }
-                    _ => BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
-                };
-                let builder = Deferred::new(
-                    validator_context.child("deferred"),
-                    application,
-                    validators[idx].mailbox.clone(),
-                    FixedEpocher::new(BLOCKS_PER_EPOCH),
-                );
-                honest.push((idx, validators[idx].application.clone()));
-                let observed: ObservedDeferred<P> = ObservedDeferred {
-                    validator: idx,
-                    probe_input: probe_input.clone(),
-                    context: Arc::new(Mutex::new(
-                        validator_context.child("header_mismatch_invariant"),
-                    )),
-                    inner: builder.clone(),
-                    mailbox: validators[idx].mailbox.clone(),
-                    invariant: HeaderMismatchInvariant::default(),
-                };
-                start_engine::<P, _>(
-                    validator_context.child("honest"),
-                    &oracle,
-                    validator,
-                    schemes[idx].clone(),
-                    elector.clone(),
-                    observed,
-                    builder,
-                    validators[idx].mailbox.clone(),
-                    genesis,
-                    format!("marshal-twins-honest-{idx}"),
-                    input.forwarding,
-                    validator_networks.vote,
-                    validator_networks.certificate,
-                    validator_networks.resolver,
-                );
-                continue;
-            }
-
-            let primary_builder = Deferred::new(
-                validator_context.child("deferred_primary"),
-                BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
-                validators[idx].mailbox.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
-            let (vote_sender, vote_receiver) = validator_networks.vote;
-            let (certificate_sender, certificate_receiver) = validator_networks.certificate;
-            let (resolver_sender, resolver_receiver) = validator_networks.resolver;
-            let (vote_sender_primary, vote_sender_secondary) =
-                vote_sender.split_with(twins_network::vote_forwarder::<P>(
-                    participants.clone(),
-                    scenario.clone(),
-                    term_length,
-                ));
-            let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-                validator_context.child("vote_split"),
-                twins_network::vote_router::<P>(
-                    participants.clone(),
-                    scenario.clone(),
-                    term_length,
-                ),
-            );
-            let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
-                .split_with(twins_network::certificate_forwarder::<P>(
-                    participants.clone(),
-                    scenario.clone(),
-                    term_length,
-                    schemes[idx].clone(),
-                ));
-            let (certificate_receiver_primary, certificate_receiver_secondary) =
-                certificate_receiver.split_with(
-                    validator_context.child("certificate_split"),
-                    twins_network::certificate_router::<P>(
-                        participants.clone(),
-                        scenario.clone(),
-                        term_length,
-                        schemes[idx].clone(),
-                    ),
-                );
-            let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(twins_network::resolver_forwarder::<P>(
-                    participants.clone(),
-                    scenario.clone(),
-                    term_length,
-                    schemes[idx].clone(),
-                ));
-            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(
-                    validator_context.child("resolver_split"),
-                    twins_network::resolver_router::<P>(
-                        participants.clone(),
-                        scenario.clone(),
-                        term_length,
-                        schemes[idx].clone(),
-                    ),
-                );
-
-            start_engine::<P, _>(
-                validator_context.child("primary"),
-                &oracle,
-                validator.clone(),
-                schemes[idx].clone(),
-                elector.clone(),
-                primary_builder.clone(),
-                primary_builder,
-                validators[idx].mailbox.clone(),
-                genesis,
-                "marshal-twins-primary".into(),
-                input.forwarding,
-                (vote_sender_primary, vote_receiver_primary),
-                (certificate_sender_primary, certificate_receiver_primary),
-                (resolver_sender_primary, resolver_receiver_primary),
-            );
-            start_disrupter_with_epoch::<P>(
-                validator_context.child("secondary"),
-                schemes[idx].clone(),
-                &input.strategy,
-                input.rounds.into(),
-                Epoch::zero(),
-                (vote_sender_secondary, vote_receiver_secondary),
-                (certificate_sender_secondary, certificate_receiver_secondary),
-                (resolver_sender_secondary, resolver_receiver_secondary),
-            );
-        }
-
-        let prefix_end = View::new(scenario.rounds().len() as u64);
-        wait_for_liveness::<P>(&context, &honest, prefix_end, input.trailing_blocks.into()).await;
-        invariant::check_all_blocks(input.trailing_blocks.into(), &honest);
+        let mut backend = MarshalTwinsBackend::<P>::new(input, probe_input);
+        run_twins_with_backend::<P, _>(&mut context, &mut backend).await;
     });
 }

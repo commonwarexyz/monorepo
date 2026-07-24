@@ -78,7 +78,7 @@ pub use simplex::{
     SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     num::{NonZeroU16, NonZeroUsize},
     panic,
@@ -563,7 +563,7 @@ struct RunAudit {
     happens_before: Option<happens_before::Summary>,
 }
 
-type NetworkChannels<P> = (
+pub(crate) type NetworkChannels<P> = (
     (
         commonware_p2p::simulated::Sender<P, deterministic::Context>,
         commonware_p2p::simulated::Receiver<P>,
@@ -2349,7 +2349,7 @@ enum TwinsRole {
     Campaign,
 }
 
-type TwinsElector<P> = twins::Elector<<P as simplex::Simplex>::Elector>;
+pub(crate) type TwinsElector<P> = twins::Elector<<P as simplex::Simplex>::Elector>;
 
 /// Observation retained for one Twins engine. Existing Twins targets use the
 /// summary variant; dedicated audit targets use the recording variant only for
@@ -2405,6 +2405,324 @@ where
     }
 }
 
+/// Network and stack state prepared by a [`TwinsBackend`].
+pub(crate) struct TwinsSetup<P: simplex::Simplex, S> {
+    pub(crate) oracle: Oracle<PublicKeyOf<P>, deterministic::Context>,
+    pub(crate) participants: Vec<PublicKeyOf<P>>,
+    pub(crate) schemes: Vec<P::Scheme>,
+    pub(crate) registrations: HashMap<PublicKeyOf<P>, NetworkChannels<PublicKeyOf<P>>>,
+    pub(crate) state: S,
+}
+
+/// One selected Twins scenario plus backend-specific case metadata.
+pub(crate) struct TwinsCase<C> {
+    pub(crate) scenario: twins::Scenario,
+    pub(crate) compromised: Vec<usize>,
+    pub(crate) data: C,
+}
+
+/// Shared topology passed to every stack-specific Twins hook.
+pub(crate) struct TwinsTopology<P: simplex::Simplex, C> {
+    pub(crate) scenario: twins::Scenario,
+    pub(crate) compromised: HashSet<usize>,
+    pub(crate) elector: TwinsElector<P>,
+    pub(crate) term_length: TermLength,
+    pub(crate) data: C,
+}
+
+/// Configuration for a secondary twin implemented by the existing Disrupter.
+#[derive(Clone, Copy)]
+pub(crate) struct TwinsDisrupter {
+    pub(crate) strategy: StrategyChoice,
+    pub(crate) required_containers: u64,
+    pub(crate) epoch: Epoch,
+}
+
+/// Stack-specific hooks for the shared Twins topology driver.
+///
+/// The driver owns scenario generation, compromised-node iteration, channel
+/// splitting/routing, twin role dispatch, Disrupter startup, and honest-node
+/// iteration. A backend owns its network/validator stack, engine construction,
+/// liveness observation, and final invariants.
+pub(crate) trait TwinsBackend<P: simplex::Simplex> {
+    type State;
+    type Case;
+
+    fn setup(
+        &mut self,
+        context: &mut deterministic::Context,
+    ) -> impl std::future::Future<Output = TwinsSetup<P, Self::State>> + Send;
+
+    fn term_length(&self) -> TermLength;
+
+    /// Select the framework whose cases the shared driver will generate.
+    fn framework(
+        &mut self,
+        context: &mut deterministic::Context,
+        participants: usize,
+    ) -> twins::Framework;
+
+    /// Select one generated case and attach backend-specific metadata.
+    fn select_case(
+        &mut self,
+        context: &mut deterministic::Context,
+        participants: &[PublicKeyOf<P>],
+        cases: Vec<twins::Case>,
+    ) -> Option<TwinsCase<Self::Case>>;
+
+    fn spawn_primary(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        vote: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        certificate: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        resolver: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+    );
+
+    /// Return a Disrupter configuration when the shared driver should own the
+    /// secondary half. `None` delegates secondary engine construction to the
+    /// backend.
+    fn disrupter(&self) -> Option<TwinsDisrupter>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_secondary(
+        &mut self,
+        _context: deterministic::Context,
+        _state: &mut Self::State,
+        _oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        _participants: &Arc<[PublicKeyOf<P>]>,
+        _scheme: P::Scheme,
+        _validator: PublicKeyOf<P>,
+        _idx: usize,
+        _topology: &TwinsTopology<P, Self::Case>,
+        _vote: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        _certificate: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        _resolver: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+    ) {
+        panic!("backend secondary hook called while configured for a Disrupter");
+    }
+
+    /// Called after every twin pair is started and before honest construction.
+    fn finish_twins(&mut self, _state: &mut Self::State, _topology: &TwinsTopology<P, Self::Case>) {
+    }
+
+    fn spawn_honest(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        channels: NetworkChannels<PublicKeyOf<P>>,
+    );
+
+    fn observe_liveness(
+        &mut self,
+        context: &deterministic::Context,
+        state: &mut Self::State,
+        prefix_end: View,
+    ) -> impl std::future::Future<Output = ()> + Send;
+
+    fn check_invariants(
+        &mut self,
+        context: &deterministic::Context,
+        state: &mut Self::State,
+        topology: &TwinsTopology<P, Self::Case>,
+    );
+}
+
+/// Run one Twins scenario over a stack supplied by `backend`.
+pub(crate) async fn run_twins_with_backend<P, B>(
+    context: &mut deterministic::Context,
+    backend: &mut B,
+) where
+    P: simplex::Simplex,
+    B: TwinsBackend<P>,
+{
+    let mut setup = backend.setup(context).await;
+    let participants: Arc<[PublicKeyOf<P>]> = setup.participants.into();
+    let term_length = backend.term_length();
+    let framework = backend.framework(context, participants.len());
+    let cases = twins::cases(context, framework);
+    let Some(case) = backend.select_case(context, participants.as_ref(), cases) else {
+        return;
+    };
+    assert!(
+        !case.compromised.is_empty(),
+        "Twins case must compromise at least one participant"
+    );
+    assert!(
+        case.compromised.iter().all(|idx| *idx < participants.len()),
+        "Twins case contains a participant index outside the validator set"
+    );
+    let compromised = case.compromised.iter().copied().collect::<HashSet<_>>();
+    let topology = TwinsTopology {
+        elector: twins::Elector::new(P::elector(term_length), &case.scenario, participants.len()),
+        scenario: case.scenario,
+        compromised,
+        term_length,
+        data: case.data,
+    };
+
+    for idx in case.compromised {
+        let validator = participants[idx].clone();
+        let node_context = context.child("validator").with_attribute("index", idx);
+        let scheme = setup.schemes[idx].clone();
+        let (vote_network, certificate_network, resolver_network) = setup
+            .registrations
+            .remove(&validator)
+            .expect("twin validator should be registered");
+        let (vote_sender, vote_receiver) = vote_network;
+        let (certificate_sender, certificate_receiver) = certificate_network;
+        let (resolver_sender, resolver_receiver) = resolver_network;
+
+        let (vote_sender_primary, vote_sender_secondary) =
+            vote_sender.split_with(twins_network::vote_forwarder::<P>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+            ));
+        let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+            node_context.child("vote_split"),
+            twins_network::vote_router::<P>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+            ),
+        );
+        let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
+            .split_with(twins_network::certificate_forwarder::<P>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+                scheme.clone(),
+            ));
+        let (certificate_receiver_primary, certificate_receiver_secondary) = certificate_receiver
+            .split_with(
+                node_context.child("certificate_split"),
+                twins_network::certificate_router::<P>(
+                    participants.clone(),
+                    topology.scenario.clone(),
+                    term_length,
+                    scheme.clone(),
+                ),
+            );
+        let (resolver_sender_primary, resolver_sender_secondary) =
+            resolver_sender.split_with(twins_network::resolver_forwarder::<P>(
+                participants.clone(),
+                topology.scenario.clone(),
+                term_length,
+                scheme.clone(),
+            ));
+        let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+            .split_with(
+                node_context.child("resolver_split"),
+                twins_network::resolver_router::<P>(
+                    participants.clone(),
+                    topology.scenario.clone(),
+                    term_length,
+                    scheme.clone(),
+                ),
+            );
+
+        backend.spawn_primary(
+            node_context.child("primary"),
+            &mut setup.state,
+            &setup.oracle,
+            &participants,
+            scheme.clone(),
+            validator.clone(),
+            idx,
+            &topology,
+            (vote_sender_primary, vote_receiver_primary),
+            (certificate_sender_primary, certificate_receiver_primary),
+            (resolver_sender_primary, resolver_receiver_primary),
+        );
+        if let Some(disrupter) = backend.disrupter() {
+            start_disrupter_with_epoch::<P>(
+                node_context.child("secondary"),
+                scheme,
+                &disrupter.strategy,
+                disrupter.required_containers,
+                disrupter.epoch,
+                (vote_sender_secondary, vote_receiver_secondary),
+                (certificate_sender_secondary, certificate_receiver_secondary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
+            );
+        } else {
+            backend.spawn_secondary(
+                node_context.child("secondary"),
+                &mut setup.state,
+                &setup.oracle,
+                &participants,
+                scheme,
+                validator,
+                idx,
+                &topology,
+                (vote_sender_secondary, vote_receiver_secondary),
+                (certificate_sender_secondary, certificate_receiver_secondary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
+            );
+        }
+    }
+
+    backend.finish_twins(&mut setup.state, &topology);
+    for (idx, validator) in participants.iter().enumerate() {
+        if topology.compromised.contains(&idx) {
+            continue;
+        }
+        let channels = setup
+            .registrations
+            .remove(validator)
+            .expect("honest validator should be registered");
+        backend.spawn_honest(
+            context.child("validator").with_attribute("index", idx),
+            &mut setup.state,
+            &setup.oracle,
+            &participants,
+            setup.schemes[idx].clone(),
+            validator.clone(),
+            idx,
+            &topology,
+            channels,
+        );
+    }
+
+    let prefix_end =
+        View::new(topology.scenario.rounds().len() as u64 * topology.term_length.get());
+    backend
+        .observe_liveness(context, &mut setup.state, prefix_end)
+        .await;
+    backend.check_invariants(context, &mut setup.state, &topology);
+}
+
 fn run_with_twins_mutator<P: simplex::Simplex>(
     input: FuzzInput,
     state_coverage: bool,
@@ -2431,6 +2749,508 @@ fn run_with_twins_campaign<P: simplex::Simplex>(
         happens_before,
         false,
     );
+}
+
+struct MockTwinsBackend<P: simplex::Simplex> {
+    input: FuzzInput,
+    role: TwinsRole,
+    state_coverage: bool,
+    record_audit: bool,
+    hb_log: Option<happens_before::capture::EventLog>,
+    warn_dispatch: Option<Dispatch>,
+    _marker: std::marker::PhantomData<fn() -> P>,
+}
+
+struct MockTwinsState<P: simplex::Simplex> {
+    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    reporters: Vec<TwinsReporter<P>>,
+    twin_observers: Vec<TwinsReporter<P>>,
+    honest_start: usize,
+}
+
+impl<P: simplex::Simplex> MockTwinsBackend<P> {
+    fn new(
+        input: FuzzInput,
+        role: TwinsRole,
+        state_coverage: bool,
+        record_audit: bool,
+        hb_log: Option<happens_before::capture::EventLog>,
+        warn_dispatch: Option<Dispatch>,
+    ) -> Self {
+        Self {
+            input,
+            role,
+            state_coverage,
+            record_audit,
+            hb_log,
+            warn_dispatch,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_twin_engine(
+        &self,
+        context: deterministic::Context,
+        state: &MockTwinsState<P>,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, ()>,
+        partition: String,
+        vote: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        certificate: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        resolver: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+    ) -> reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
+        let reporter_cfg = reporter::Config {
+            participants: participants
+                .as_ref()
+                .try_into()
+                .expect("public keys are unique"),
+            scheme: scheme.clone(),
+            elector: topology.elector.clone(),
+        };
+        let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+        let app_cfg = application::Config::<Sha256, _> {
+            relay: state.relay.clone(),
+            me: validator.clone(),
+            propose_latency: (10.0, 5.0),
+            verify_latency: (10.0, 5.0),
+            certify_latency: (10.0, 5.0),
+            should_certify: application::Certifier::Always,
+        };
+        let (actor, application) =
+            application::Application::new(context.child("application"), app_cfg);
+        actor.start();
+        let engine = Engine::new(
+            context.child("engine"),
+            config::Config {
+                blocker: oracle.control(validator),
+                scheme,
+                elector: topology.elector.clone(),
+                automaton: application.clone(),
+                relay: application,
+                reporter: reporter.clone(),
+                partition,
+                mailbox_size: self.input.mailbox_size,
+                epoch: Epoch::new(EPOCH),
+                floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_millis(1_500),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                view_retention: Delta::new(10),
+                skip_timeout: Duration::from_secs(11),
+                fetch_concurrent: self.input.fetch_concurrent,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+                forwarding: self.input.forwarding,
+            },
+        );
+        engine.start(vote, certificate, resolver);
+        let _ = idx;
+        reporter
+    }
+}
+
+impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
+    type State = MockTwinsState<P>;
+    type Case = ();
+
+    async fn setup(&mut self, context: &mut deterministic::Context) -> TwinsSetup<P, Self::State> {
+        let (mut oracle, participants, schemes, registrations) =
+            setup_network::<P>(context, &self.input).await;
+        link_peers(
+            &mut oracle,
+            &participants,
+            Action::Update(Link {
+                latency: Duration::from_millis(500),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            }),
+            self.input.partition.set_partition(),
+        )
+        .await;
+        TwinsSetup {
+            oracle,
+            participants,
+            schemes,
+            registrations,
+            state: MockTwinsState {
+                relay: Arc::new(relay::Relay::new()),
+                reporters: Vec::new(),
+                twin_observers: Vec::new(),
+                honest_start: 0,
+            },
+        }
+    }
+
+    fn term_length(&self) -> TermLength {
+        P::effective_term_length(self.input.term_length)
+    }
+
+    fn framework(
+        &mut self,
+        context: &mut deterministic::Context,
+        participants: usize,
+    ) -> twins::Framework {
+        let mode = if rand::RngExt::random_bool(context, 0.5) {
+            twins::Mode::Sampled
+        } else {
+            twins::Mode::Sustained
+        };
+        twins::Framework {
+            participants,
+            faults: self.input.configuration.faults as usize,
+            rounds: (self.input.required_containers as usize).clamp(1, 8),
+            mode,
+            max_cases: 16,
+        }
+    }
+
+    fn select_case(
+        &mut self,
+        context: &mut deterministic::Context,
+        _participants: &[PublicKeyOf<P>],
+        cases: Vec<twins::Case>,
+    ) -> Option<TwinsCase<Self::Case>> {
+        if cases.is_empty() {
+            return None;
+        }
+        let case_idx = rand::RngExt::random_range(context, 0..cases.len());
+        let case = cases.into_iter().nth(case_idx)?;
+        Some(TwinsCase {
+            scenario: case.scenario,
+            compromised: case.compromised,
+            data: (),
+        })
+    }
+
+    fn spawn_primary(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        vote: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        certificate: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        resolver: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+    ) {
+        let reporter = self.spawn_twin_engine(
+            context,
+            state,
+            oracle,
+            participants,
+            scheme,
+            validator,
+            idx,
+            topology,
+            format!("twin_{idx}_primary"),
+            vote,
+            certificate,
+            resolver,
+        );
+        match self.role {
+            TwinsRole::Campaign => state.reporters.push(TwinsReporter::Summary(reporter)),
+            TwinsRole::Mutator => state.twin_observers.push(TwinsReporter::Summary(reporter)),
+        }
+    }
+
+    fn disrupter(&self) -> Option<TwinsDisrupter> {
+        (matches!(self.role, TwinsRole::Mutator)).then_some(TwinsDisrupter {
+            strategy: self.input.strategy,
+            required_containers: self.input.required_containers,
+            epoch: Epoch::new(EPOCH),
+        })
+    }
+
+    fn spawn_secondary(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        vote: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        certificate: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+        resolver: (
+            impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+            impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+        ),
+    ) {
+        assert!(
+            matches!(self.role, TwinsRole::Campaign),
+            "mock secondary engine is only used by TwinsCampaign"
+        );
+        let reporter = self.spawn_twin_engine(
+            context,
+            state,
+            oracle,
+            participants,
+            scheme,
+            validator,
+            idx,
+            topology,
+            format!("twin_{idx}_secondary"),
+            vote,
+            certificate,
+            resolver,
+        );
+        state.reporters.push(TwinsReporter::Summary(reporter));
+    }
+
+    fn finish_twins(&mut self, state: &mut Self::State, _topology: &TwinsTopology<P, Self::Case>) {
+        state.honest_start = state.reporters.len();
+    }
+
+    fn spawn_honest(
+        &mut self,
+        context: deterministic::Context,
+        state: &mut Self::State,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        topology: &TwinsTopology<P, Self::Case>,
+        channels: NetworkChannels<PublicKeyOf<P>>,
+    ) {
+        let ambiguous: Arc<[u32]> = {
+            let mut indices = topology
+                .compromised
+                .iter()
+                .map(|&index| index as u32)
+                .collect::<Vec<_>>();
+            indices.sort_unstable();
+            indices.into()
+        };
+        let (pending, recovered, resolver) = channels;
+        let pending = {
+            let (vote_sender, vote_receiver) = pending;
+            let sink = sniff_sink(&self.hb_log, idx as u32, participants, &ambiguous);
+            let cfg = scheme.certificate_codec_config();
+            (
+                vote_sender,
+                SniffingReceiver::<P, _>::new(vote_receiver, SniffChannel::Vote, cfg, sink),
+            )
+        };
+        let recovered = {
+            let (cert_sender, cert_receiver) = recovered;
+            let sink = sniff_sink(&self.hb_log, idx as u32, participants, &ambiguous);
+            let cfg = scheme.certificate_codec_config();
+            (
+                cert_sender,
+                SniffingReceiver::<P, _>::new(cert_receiver, SniffChannel::Certificate, cfg, sink),
+            )
+        };
+        let resolver = {
+            let (backfill_sender, backfill_receiver) = resolver;
+            let sink = sniff_sink(&self.hb_log, idx as u32, participants, &ambiguous);
+            let cfg = scheme.certificate_codec_config();
+            (
+                backfill_sender,
+                SniffingReceiver::<P, _>::new(backfill_receiver, SniffChannel::Resolver, cfg, sink),
+            )
+        };
+        let spawn = || {
+            if self.record_audit {
+                TwinsReporter::Recording(spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                    context,
+                    oracle,
+                    participants.as_ref(),
+                    scheme,
+                    validator,
+                    topology.elector.clone(),
+                    state.relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_millis(1_500),
+                    self.input.mailbox_size,
+                    self.input.fetch_concurrent,
+                    self.input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    self.input.certify,
+                    self.input.reporting,
+                ))
+            } else {
+                TwinsReporter::Summary(spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                    context,
+                    oracle,
+                    participants.as_ref(),
+                    scheme,
+                    validator,
+                    topology.elector.clone(),
+                    state.relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_millis(1_500),
+                    self.input.mailbox_size,
+                    self.input.fetch_concurrent,
+                    self.input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    self.input.certify,
+                    self.input.reporting,
+                ))
+            }
+        };
+        let reporter = match &self.hb_log {
+            Some(log) => {
+                let mut subscriber =
+                    happens_before::capture::NodeSubscriber::new(idx as u32, log.clone());
+                if let Some(inner) = &self.warn_dispatch {
+                    subscriber = subscriber.with_inner(inner.clone());
+                }
+                let dispatch = Dispatch::new(subscriber);
+                dispatcher::with_default(&dispatch, spawn)
+            }
+            None => spawn(),
+        };
+        state.reporters.push(reporter);
+    }
+
+    async fn observe_liveness(
+        &mut self,
+        context: &deterministic::Context,
+        state: &mut Self::State,
+        prefix_end: View,
+    ) {
+        if !self.input.configuration.is_valid() {
+            context.sleep(MAX_SLEEP_DURATION).await;
+            return;
+        }
+        let mut finalizers = Vec::new();
+        for (i, reporter) in state
+            .reporters
+            .iter_mut()
+            .skip(state.honest_start)
+            .enumerate()
+        {
+            let required = self.input.required_containers;
+            match self.role {
+                TwinsRole::Mutator => {
+                    let (mut latest, mut monitor): (View, Receiver<View>) =
+                        reporter.subscribe().await;
+                    finalizers.push(context.child("finalizer").with_attribute("index", i).spawn(
+                        move |_| async move {
+                            while latest.get() < required {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        },
+                    ));
+                }
+                TwinsRole::Campaign => {
+                    let (_latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.child("finalizer").with_attribute("index", i).spawn(
+                        move |_| async move {
+                            let mut count = 0u64;
+                            while count < required {
+                                let view = monitor.recv().await.expect("event missing");
+                                if view > prefix_end {
+                                    count += 1;
+                                }
+                            }
+                        },
+                    ));
+                }
+            }
+        }
+        join_all(finalizers).await;
+    }
+
+    fn check_invariants(
+        &mut self,
+        context: &deterministic::Context,
+        state: &mut Self::State,
+        topology: &TwinsTopology<P, Self::Case>,
+    ) {
+        let config = self.input.configuration;
+        if !config.is_valid() {
+            return;
+        }
+        if let Some(log) = &self.hb_log {
+            let summary = log.summary();
+            let mut tokens = summary.tokens();
+            if let Some(bucket) = summary.dispersion_bucket() {
+                tokens.insert(format!("hb:dispersion={bucket}"));
+            }
+            tokens.extend(summary.lsh_tokens());
+            state_cov::observe_tokens(tokens);
+        }
+        let honest_reporters = &state.reporters[state.honest_start..];
+        let honest_summaries = honest_reporters
+            .iter()
+            .map(TwinsReporter::summary)
+            .collect::<Vec<_>>();
+        let observers = state
+            .twin_observers
+            .iter()
+            .chain(state.reporters.iter())
+            .map(TwinsReporter::summary)
+            .collect::<Vec<_>>();
+        invariants::check_vote_invariants_with_byzantine(
+            &topology.compromised,
+            topology.elector.clone(),
+            Epoch::new(EPOCH),
+            topology.term_length,
+            &observers,
+        );
+        if self.state_coverage {
+            let reporter_states =
+                state_cov::encode_reporter_states(&honest_summaries, config.n as usize);
+            state_cov::observe_with_metrics(&reporter_states, &context.encode());
+        }
+        if self.record_audit {
+            let recordings = honest_reporters
+                .iter()
+                .filter_map(TwinsReporter::recording)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                recordings.len(),
+                honest_reporters.len(),
+                "every correct Twins reporter must record in audit mode"
+            );
+            invariants::check::<P>(topology.term_length, recordings.as_slice());
+        } else {
+            invariants::check::<P>(topology.term_length, invariants::extract(honest_summaries));
+        }
+    }
 }
 
 /// Unified twins driver. The two existing modes (TwinsMutator / TwinsCampaign)
@@ -2472,504 +3292,15 @@ fn run_twins<P: simplex::Simplex>(
     let hb_log_run = hb_log.clone();
     let execute = |warn_dispatch: Option<Dispatch>| {
         executor.start(|mut context| async move {
-            let hb_log = hb_log_run;
-            let (mut oracle, participants, schemes, mut registrations) =
-                setup_network::<P>(&mut context, &input).await;
-            let participants: Arc<[_]> = participants.into();
-            let n = input.configuration.n as usize;
-            let faults = input.configuration.faults as usize;
-
-            link_peers(
-                &mut oracle,
-                participants.as_ref(),
-                Action::Update(Link {
-                    latency: Duration::from_millis(500),
-                    jitter: Duration::from_millis(500),
-                    success_rate: 1.0,
-                }),
-                input.partition.set_partition(),
-            )
-            .await;
-
-            let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
-            let mut reporters: Vec<TwinsReporter<P>> = Vec::new();
-            let mut twin_observers: Vec<TwinsReporter<P>> = Vec::new();
-            let config = input.configuration;
-            let term_length = P::effective_term_length(input.term_length);
-
-            // Sample a multi-round twins scenario from the deterministic FuzzRng. Both
-            // the scenario (per-round partitions and scripted leaders) and the
-            // compromised-assignment from the case are consumed: twin indices come from
-            // `case.compromised` and the byzantine set is forwarded to
-            // `check_vote_invariants_with_byzantine`.
-            let mode = if rand::RngExt::random_bool(&mut context, 0.5) {
-                twins::Mode::Sampled
-            } else {
-                twins::Mode::Sustained
-            };
-            let rounds = (input.required_containers as usize).clamp(1, 8);
-            let cases = twins::cases(
-                &mut context,
-                twins::Framework {
-                    participants: n,
-                    faults,
-                    rounds,
-                    mode,
-                    max_cases: 16,
-                },
+            let mut backend = MockTwinsBackend::<P>::new(
+                input,
+                role,
+                state_coverage,
+                record_audit,
+                hb_log_run,
+                warn_dispatch,
             );
-            if cases.is_empty() {
-                return;
-            }
-            let case_idx = rand::RngExt::random_range(&mut context, 0..cases.len());
-            let case = cases.into_iter().nth(case_idx).unwrap();
-            let scenario = case.scenario.clone();
-            let compromised: std::collections::HashSet<usize> =
-                case.compromised.iter().copied().collect();
-
-            // Twins-aware elector with scripted leaders for the first `rounds` terms.
-            let twin_elector = twins::Elector::new(P::elector(term_length), &scenario, n);
-
-            // Spawn Byzantine twins (indices from `case.compromised`):
-            // primary (legitimate engine) + secondary (Disrupter). Twin halves
-            // are never happens-before captured (no subscriber, no sniffing).
-            for idx in case.compromised.iter().copied() {
-                let validator = participants[idx].clone();
-                let context = context.child("twin").with_attribute("index", idx);
-                let scheme = schemes[idx].clone();
-                let (vote_network, certificate_network, resolver_network) = registrations
-                    .remove(&validator)
-                    .expect("validator should be registered");
-
-                let (vote_sender, vote_receiver) = vote_network;
-                let (certificate_sender, certificate_receiver) = certificate_network;
-                let (resolver_sender, resolver_receiver) = resolver_network;
-
-                let (vote_sender_primary, vote_sender_secondary) =
-                    vote_sender.split_with(twins_network::vote_forwarder::<P>(
-                        participants.clone(),
-                        scenario.clone(),
-                        term_length,
-                    ));
-                let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
-                    context.child("pending_split"),
-                    twins_network::vote_router::<P>(
-                        participants.clone(),
-                        scenario.clone(),
-                        term_length,
-                    ),
-                );
-                let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
-                    .split_with(twins_network::certificate_forwarder::<P>(
-                        participants.clone(),
-                        scenario.clone(),
-                        term_length,
-                        schemes[idx].clone(),
-                    ));
-                let (certificate_receiver_primary, certificate_receiver_secondary) =
-                    certificate_receiver.split_with(
-                        context.child("recovered_split"),
-                        twins_network::certificate_router::<P>(
-                            participants.clone(),
-                            scenario.clone(),
-                            term_length,
-                            schemes[idx].clone(),
-                        ),
-                    );
-                let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
-                    .split_with(twins_network::resolver_forwarder::<P>(
-                        participants.clone(),
-                        scenario.clone(),
-                        term_length,
-                        schemes[idx].clone(),
-                    ));
-                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                    .split_with(
-                        context.child("resolver_split"),
-                        twins_network::resolver_router::<P>(
-                            participants.clone(),
-                            scenario.clone(),
-                            term_length,
-                            schemes[idx].clone(),
-                        ),
-                    );
-
-                // Primary: legitimate engine driven by the twins-aware elector.
-                let primary_context = context.child("primary");
-                let primary_elector = twin_elector.clone();
-                let reporter_cfg = reporter::Config {
-                    participants: participants
-                        .as_ref()
-                        .try_into()
-                        .expect("public keys are unique"),
-                    scheme: scheme.clone(),
-                    elector: primary_elector.clone(),
-                };
-                let reporter =
-                    reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
-
-                let app_cfg = application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: application::Certifier::Always,
-                };
-                let (actor, application) =
-                    application::Application::new(primary_context.child("application"), app_cfg);
-                actor.start();
-
-                let blocker = oracle.control(validator.clone());
-                let engine_cfg = config::Config {
-                    blocker,
-                    scheme: scheme.clone(),
-                    elector: primary_elector,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    partition: format!("twin_{idx}_primary"),
-                    mailbox_size: input.mailbox_size,
-                    epoch: Epoch::new(EPOCH),
-                    floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_millis(1_500),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
-                    view_retention: Delta::new(10),
-                    skip_timeout: Duration::from_secs(11),
-                    fetch_concurrent: input.fetch_concurrent,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    strategy: Sequential,
-                    forwarding: input.forwarding,
-                };
-                let engine = Engine::new(primary_context.child("engine"), engine_cfg);
-                engine.start(
-                    (vote_sender_primary, vote_receiver_primary),
-                    (certificate_sender_primary, certificate_receiver_primary),
-                    (resolver_sender_primary, resolver_receiver_primary),
-                );
-                // `Campaign` pushes the primary into `reporters` (liveness and
-                // extraction boundary); `Mutator` retains it as a vote/fault
-                // observer only.
-                match role {
-                    TwinsRole::Campaign => reporters.push(TwinsReporter::Summary(reporter.clone())),
-                    TwinsRole::Mutator => {
-                        twin_observers.push(TwinsReporter::Summary(reporter.clone()))
-                    }
-                }
-
-                // Secondary: depends on role.
-                match role {
-                    TwinsRole::Mutator => {
-                        start_disrupter::<P>(
-                            context.child("secondary"),
-                            scheme.clone(),
-                            &input.strategy,
-                            input.required_containers,
-                            (vote_sender_secondary, vote_receiver_secondary),
-                            (certificate_sender_secondary, certificate_receiver_secondary),
-                            (resolver_sender_secondary, resolver_receiver_secondary),
-                        );
-                    }
-                    TwinsRole::Campaign => {
-                        let secondary_label = format!("twin_{idx}_secondary");
-                        let secondary_context = context.child("secondary");
-                        let secondary_elector = twin_elector.clone();
-                        let secondary_reporter_cfg = reporter::Config {
-                            participants: participants
-                                .as_ref()
-                                .try_into()
-                                .expect("public keys are unique"),
-                            scheme: scheme.clone(),
-                            elector: secondary_elector.clone(),
-                        };
-                        let secondary_reporter = reporter::Reporter::new(
-                            secondary_context.child("reporter"),
-                            secondary_reporter_cfg,
-                        );
-                        reporters.push(TwinsReporter::Summary(secondary_reporter.clone()));
-
-                        let secondary_app_cfg = application::Config::<Sha256, _> {
-                            relay: relay.clone(),
-                            me: validator.clone(),
-                            propose_latency: (10.0, 5.0),
-                            verify_latency: (10.0, 5.0),
-                            certify_latency: (10.0, 5.0),
-                            should_certify: application::Certifier::Always,
-                        };
-                        let (secondary_actor, secondary_application) =
-                            application::Application::new(
-                                secondary_context.child("application"),
-                                secondary_app_cfg,
-                            );
-                        secondary_actor.start();
-
-                        let secondary_blocker = oracle.control(validator.clone());
-                        let secondary_engine_cfg = config::Config {
-                            blocker: secondary_blocker,
-                            scheme: scheme.clone(),
-                            elector: secondary_elector,
-                            automaton: secondary_application.clone(),
-                            relay: secondary_application.clone(),
-                            reporter: secondary_reporter,
-                            partition: secondary_label,
-                            mailbox_size: input.mailbox_size,
-                            epoch: Epoch::new(EPOCH),
-                            floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(
-                                EPOCH,
-                            ))),
-                            leader_timeout: Duration::from_secs(1),
-                            certification_timeout: Duration::from_millis(1_500),
-                            timeout_retry: Duration::from_secs(10),
-                            fetch_timeout: Duration::from_secs(1),
-                            view_retention: Delta::new(10),
-                            skip_timeout: Duration::from_secs(11),
-                            fetch_concurrent: input.fetch_concurrent,
-                            replay_buffer: NZUsize!(1024 * 1024),
-                            write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(
-                                &secondary_context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
-                            strategy: Sequential,
-                            forwarding: input.forwarding,
-                        };
-                        let secondary_engine =
-                            Engine::new(secondary_context.child("engine"), secondary_engine_cfg);
-                        secondary_engine.start(
-                            (vote_sender_secondary, vote_receiver_secondary),
-                            (certificate_sender_secondary, certificate_receiver_secondary),
-                            (resolver_sender_secondary, resolver_receiver_secondary),
-                        );
-                    }
-                }
-            }
-
-            // Boundary in `reporters`. For `Mutator` no twin reporters were pushed,
-            // so `honest_start = 0`; for `Campaign` it's `2 * compromised.len()`.
-            let honest_start = reporters.len();
-
-            // Spawn honest validators (every index NOT in `case.compromised`).
-            // They share the twins-aware elector so leaders agree across twin and
-            // honest engines for the scripted prefix.
-            let ambiguous: Arc<[u32]> = compromised
-                .iter()
-                .map(|&i| i as u32)
-                .collect::<Vec<_>>()
-                .into();
-            for (idx, validator) in participants.iter().enumerate() {
-                if compromised.contains(&idx) {
-                    continue;
-                }
-                let ctx = context.child("honest").with_attribute("index", idx);
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                let pending = {
-                    let (vote_sender, vote_receiver) = pending;
-                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
-                    let cfg = schemes[idx].certificate_codec_config();
-                    (
-                        vote_sender,
-                        SniffingReceiver::<P, _>::new(vote_receiver, SniffChannel::Vote, cfg, sink),
-                    )
-                };
-                let recovered = {
-                    let (cert_sender, cert_receiver) = recovered;
-                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
-                    let cfg = schemes[idx].certificate_codec_config();
-                    (
-                        cert_sender,
-                        SniffingReceiver::<P, _>::new(
-                            cert_receiver,
-                            SniffChannel::Certificate,
-                            cfg,
-                            sink,
-                        ),
-                    )
-                };
-                let resolver = {
-                    let (backfill_sender, backfill_receiver) = resolver;
-                    let sink = sniff_sink(&hb_log, idx as u32, &participants, &ambiguous);
-                    let cfg = schemes[idx].certificate_codec_config();
-                    (
-                        backfill_sender,
-                        SniffingReceiver::<P, _>::new(
-                            backfill_receiver,
-                            SniffChannel::Resolver,
-                            cfg,
-                            sink,
-                        ),
-                    )
-                };
-                let spawn = || {
-                    if record_audit {
-                        TwinsReporter::Recording(spawn_audited_validator::<P, _, _, _, _, _, _, _>(
-                            ctx,
-                            &oracle,
-                            participants.as_ref(),
-                            schemes[idx].clone(),
-                            validator.clone(),
-                            twin_elector.clone(),
-                            relay.clone(),
-                            Duration::from_secs(1),
-                            Duration::from_millis(1_500),
-                            input.mailbox_size,
-                            input.fetch_concurrent,
-                            input.forwarding,
-                            pending,
-                            recovered,
-                            resolver,
-                            input.certify,
-                            input.reporting,
-                        ))
-                    } else {
-                        TwinsReporter::Summary(spawn_honest_validator::<P, _, _, _, _, _, _, _>(
-                            ctx,
-                            &oracle,
-                            participants.as_ref(),
-                            schemes[idx].clone(),
-                            validator.clone(),
-                            twin_elector.clone(),
-                            relay.clone(),
-                            Duration::from_secs(1),
-                            Duration::from_millis(1_500),
-                            input.mailbox_size,
-                            input.fetch_concurrent,
-                            input.forwarding,
-                            pending,
-                            recovered,
-                            resolver,
-                            input.certify,
-                            input.reporting,
-                        ))
-                    }
-                };
-                let reporter = match &hb_log {
-                    Some(log) => {
-                        let mut subscriber =
-                            happens_before::capture::NodeSubscriber::new(idx as u32, log.clone());
-                        if let Some(inner) = &warn_dispatch {
-                            subscriber = subscriber.with_inner(inner.clone());
-                        }
-                        let dispatch = Dispatch::new(subscriber);
-                        dispatcher::with_default(&dispatch, spawn)
-                    }
-                    None => spawn(),
-                };
-                reporters.push(reporter);
-            }
-
-            // Wait for liveness on honest reporters only. The wait shape depends on
-            // role: `Mutator` uses absolute view targets, `Campaign` counts
-            // finalizations after the adversarial prefix.
-            if config.is_valid() {
-                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
-                let mut finalizers = Vec::new();
-                for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
-                    let required = input.required_containers;
-                    match role {
-                        TwinsRole::Mutator => {
-                            let (mut latest, mut monitor): (View, Receiver<View>) =
-                                reporter.subscribe().await;
-                            finalizers.push(
-                                context.child("finalizer").with_attribute("index", i).spawn(
-                                    move |_| async move {
-                                        while latest.get() < required {
-                                            latest = monitor.recv().await.expect("event missing");
-                                        }
-                                    },
-                                ),
-                            );
-                        }
-                        TwinsRole::Campaign => {
-                            let (_latest, mut monitor) = reporter.subscribe().await;
-                            finalizers.push(
-                                context.child("finalizer").with_attribute("index", i).spawn(
-                                    move |_| async move {
-                                        let mut count = 0u64;
-                                        while count < required {
-                                            let view = monitor.recv().await.expect("event missing");
-                                            if view > prefix_end {
-                                                count += 1;
-                                            }
-                                        }
-                                    },
-                                ),
-                            );
-                        }
-                    }
-                }
-                join_all(finalizers).await;
-            } else {
-                context.sleep(MAX_SLEEP_DURATION).await;
-            }
-
-            // State extraction (agreement invariants) uses honest reporters
-            // only: twin halves are expected to disagree internally per the
-            // scenario. Signer-filtered vote/fault checks instead observe ALL
-            // reporters, with the compromised identities excluded by signer.
-            if config.is_valid() {
-                // Observe the happens-before interleaving BEFORE the invariant checks,
-                // so a run that panics in an invariant still credits the interleaving
-                // that found the bug (matching the standard path). Twins force a valid
-                // configuration, so this gate always holds here.
-                if let Some(log) = &hb_log {
-                    let summary = log.summary();
-                    let mut tokens = summary.tokens();
-                    if let Some(bucket) = summary.dispersion_bucket() {
-                        tokens.insert(format!("hb:dispersion={bucket}"));
-                    }
-                    tokens.extend(summary.lsh_tokens());
-                    state_cov::observe_tokens(tokens);
-                }
-                let honest_reporters = &reporters[honest_start..];
-                let honest_summaries: Vec<_> = honest_reporters
-                    .iter()
-                    .map(TwinsReporter::summary)
-                    .collect();
-                // Vote/fault checks run over ALL reporters (twin halves and the
-                // Mutator primary included): a twin reporter can be the sole
-                // observer of evidence against a correct signer, and the
-                // compromised filter already excludes the twin identities.
-                let observers: Vec<_> = twin_observers
-                    .iter()
-                    .chain(reporters.iter())
-                    .map(TwinsReporter::summary)
-                    .collect();
-                invariants::check_vote_invariants_with_byzantine(
-                    &compromised,
-                    twin_elector.clone(),
-                    Epoch::new(EPOCH),
-                    term_length,
-                    &observers,
-                );
-                if state_coverage {
-                    let reporter_states =
-                        state_cov::encode_reporter_states(&honest_summaries, config.n as usize);
-                    let metrics = context.encode();
-                    state_cov::observe_with_metrics(&reporter_states, &metrics);
-                }
-                if record_audit {
-                    let recordings: Vec<_> = honest_reporters
-                        .iter()
-                        .filter_map(TwinsReporter::recording)
-                        .collect();
-                    assert_eq!(
-                        recordings.len(),
-                        honest_reporters.len(),
-                        "every correct Twins reporter must record in audit mode"
-                    );
-                    invariants::check::<P>(term_length, recordings.as_slice());
-                } else {
-                    let states = invariants::extract(honest_summaries);
-                    invariants::check::<P>(term_length, states);
-                }
-            }
+            run_twins_with_backend::<P, _>(&mut context, &mut backend).await;
         });
     };
 
