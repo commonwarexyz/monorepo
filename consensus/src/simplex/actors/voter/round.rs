@@ -812,6 +812,103 @@ mod tests {
         assert_eq!(round.construct_finalize(), None);
     }
 
+    /// Reproduces the restart equivocation trace: our journaled notarize for
+    /// the leader's first proposal is replayed, the restarted batcher (whose
+    /// state is not persisted) re-forwards the leader's conflicting proposal
+    /// as a vote, and then the network's finalization for that conflicting
+    /// proposal arrives. The finalized proposal must win over the equivocated
+    /// local vote or later parent lookups serve the losing payload.
+    #[test]
+    fn restart_equivocation_finalization_overrides_local_vote() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes,
+            participants,
+            verifier,
+            ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal_x = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
+        let proposal_y = Proposal::new(round_info, View::new(0), Sha256Digest::from([2u8; 32]));
+
+        // We are participant 1; participant 0 is the equivocating leader.
+        let mut round = Round::new(schemes[1].clone(), round_info, SystemTime::UNIX_EPOCH);
+        round.set_leader(Participant::new(0));
+
+        // Restart: replay our journaled notarize for the leader's first proposal.
+        let notarize = Notarize::sign(&schemes[1], proposal_x).expect("notarize");
+        round.replay(&Artifact::Notarize(notarize));
+
+        // The rebuilt batcher re-forwards the leader's notarize, now carrying
+        // the conflicting proposal.
+        assert!(!round.set_proposal(proposal_y.clone()));
+
+        // The rest of the network finalized the conflicting proposal.
+        let finalize_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Finalize::sign(scheme, proposal_y.clone()).unwrap())
+            .collect();
+        let finalization =
+            Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential).unwrap();
+        let (added, equivocator) = round.add_finalization(finalization);
+        assert!(added);
+        assert_eq!(equivocator.unwrap(), participants[0]);
+
+        // The finalized proposal must be served as this round's certified proposal.
+        assert_eq!(round.certified_proposal(), Some(&proposal_y));
+    }
+
+    /// Same restart trace, but a notarization certificate arrives instead of
+    /// a finalization: certification must target the certificate's proposal.
+    #[test]
+    fn restart_equivocation_notarization_overrides_local_vote() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes,
+            participants,
+            verifier,
+            ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal_x = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
+        let proposal_y = Proposal::new(round_info, View::new(0), Sha256Digest::from([2u8; 32]));
+
+        // We are participant 1; participant 0 is the equivocating leader.
+        let mut round = Round::new(schemes[1].clone(), round_info, SystemTime::UNIX_EPOCH);
+        round.set_leader(Participant::new(0));
+
+        // Restart: replay our journaled notarize for the leader's first proposal.
+        let notarize = Notarize::sign(&schemes[1], proposal_x).expect("notarize");
+        round.replay(&Artifact::Notarize(notarize));
+
+        // The rebuilt batcher re-forwards the leader's notarize, now carrying
+        // the conflicting proposal.
+        assert!(!round.set_proposal(proposal_y.clone()));
+
+        // The rest of the network notarized the conflicting proposal.
+        let notarize_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Notarize::sign(scheme, proposal_y.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential).unwrap();
+        let (added, equivocator) = round.add_notarization(notarization);
+        assert!(added);
+        assert_eq!(equivocator.unwrap(), participants[0]);
+
+        // Certification must proceed on the certificate's proposal.
+        let candidate = round.try_certify().expect("certify candidate");
+        assert_eq!(candidate, proposal_y);
+
+        // Even certified, an equivocated round must not emit a finalize vote.
+        round.certified(true);
+        assert!(round.construct_finalize().is_none());
+    }
+
     #[test]
     fn no_equivocation_on_matching_certificate() {
         let mut rng = test_rng();

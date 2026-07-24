@@ -18,12 +18,17 @@ pub enum Change<D>
 where
     D: Digest,
 {
+    /// First proposal recorded for the round.
     New,
+    /// Proposal matches the recorded one.
     Unchanged,
+    /// Proposal conflicts with the recorded one. `retained` is what the slot
+    /// now holds and `dropped` is the discarded proposal.
     Equivocated {
         dropped: Proposal<D>,
         retained: Proposal<D>,
     },
+    /// Vote ignored because equivocation was already recorded.
     Skipped,
 }
 
@@ -122,10 +127,20 @@ where
         true
     }
 
+    /// Records a proposal observed via a vote (`recovered = false`) or a
+    /// certificate (`recovered = true`).
+    ///
+    /// Certificates are authoritative: on conflict they replace the slot's
+    /// proposal, even after equivocation was recorded. Votes never replace
+    /// the slot and are skipped entirely once equivocation is recorded.
+    /// Either conflict marks the slot [Status::Equivocated], which suppresses
+    /// our own votes for the round.
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {
         // Once we detect equivocation we refuse to record any additional
-        // proposals, even if they target the original payload.
-        if self.status == Status::Equivocated {
+        // proposals from votes, even if they target the original payload.
+        // Certificates remain authoritative and take the override branch
+        // below, keeping the slot consistent with any stored certificate.
+        if self.status == Status::Equivocated && !recovered {
             return Change::Skipped;
         }
 
@@ -311,7 +326,7 @@ mod tests {
         assert_eq!(slot.status(), Status::Equivocated);
         // Verifier completion arriving afterwards must be ignored.
         assert!(!slot.mark_verified());
-        assert!(matches!(slot.update(&conflicting, true), Change::Skipped));
+        assert!(matches!(slot.update(&conflicting, true), Change::Unchanged));
     }
 
     #[test]
@@ -335,6 +350,35 @@ mod tests {
     }
 
     #[test]
+    fn recovered_certificate_overrides_equivocated_vote() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(Epoch::new(27), View::new(5));
+        let ours = Proposal::new(round, View::new(4), Sha256Digest::from([19u8; 32]));
+        let winner = Proposal::new(round, View::new(4), Sha256Digest::from([20u8; 32]));
+
+        // Our own (replayed) vote holds the slot, then the leader's conflicting
+        // proposal arrives as a vote: equivocation retains our proposal.
+        assert!(matches!(slot.update(&ours, false), Change::New));
+        assert!(matches!(
+            slot.update(&winner, false),
+            Change::Equivocated { .. }
+        ));
+        assert_eq!(slot.proposal(), Some(&ours));
+
+        // A certificate for the conflicting proposal is authoritative: the slot
+        // must adopt it even though equivocation was already recorded.
+        match slot.update(&winner, true) {
+            Change::Equivocated { dropped, retained } => {
+                assert_eq!(dropped, ours);
+                assert_eq!(retained, winner);
+            }
+            other => panic!("expected equivocation override, got {other:?}"),
+        }
+        assert_eq!(slot.proposal(), Some(&winner));
+        assert_eq!(slot.status(), Status::Equivocated);
+    }
+
+    #[test]
     fn certificate_does_not_clear_equivocated() {
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(Epoch::new(25), View::new(7));
@@ -346,8 +390,12 @@ mod tests {
             slot.update(&proposal_b, true),
             Change::Equivocated { .. }
         ));
-        assert!(matches!(slot.update(&proposal_b, true), Change::Skipped));
+        assert!(matches!(slot.update(&proposal_b, true), Change::Unchanged));
         assert_eq!(slot.status(), Status::Equivocated);
+
+        // Votes stay suppressed once equivocation is recorded.
+        assert!(matches!(slot.update(&proposal_a, false), Change::Skipped));
+        assert_eq!(slot.proposal(), Some(&proposal_b));
     }
 
     #[test]
