@@ -1597,6 +1597,20 @@ mod compact_variable_mmr {
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
 
+            // A tip-sized target with a divergent root is refused: the source knows its own
+            // tip root.
+            let divergent_target = sync::compact::Target {
+                root: window_target.root,
+                leaf_count: current_target.leaf_count,
+            };
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, divergent_target.clone()).await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == divergent_target && current == current_target
+            ));
+
             // A target past the tip is refused so the client refetches once the source
             // catches up.
             let ahead_target = sync::compact::Target {
@@ -1710,6 +1724,9 @@ mod compact_variable_mmr {
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
+            // The regrown tip shares target2's leaf count: the divergent stanza below
+            // exercises the tip root check, not the retained-window paths.
+            assert_eq!(target2.leaf_count, target3.leaf_count);
 
             let serve3_cfg = client_config(&format!("{suffix}-serve3"), &context);
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
@@ -2382,6 +2399,20 @@ mod compact_variable_mmb {
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
 
+            // A tip-sized target with a divergent root is refused: the source knows its own
+            // tip root.
+            let divergent_target = sync::compact::Target {
+                root: window_target.root,
+                leaf_count: current_target.leaf_count,
+            };
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, divergent_target.clone()).await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == divergent_target && current == current_target
+            ));
+
             // A target past the tip is refused so the client refetches once the source
             // catches up.
             let ahead_target = sync::compact::Target {
@@ -2495,6 +2526,9 @@ mod compact_variable_mmb {
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
+            // The regrown tip shares target2's leaf count: the divergent stanza below
+            // exercises the tip root check, not the retained-window paths.
+            assert_eq!(target2.leaf_count, target3.leaf_count);
 
             let serve3_cfg = client_config(&format!("{suffix}-serve3"), &context);
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {

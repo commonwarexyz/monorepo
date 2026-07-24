@@ -552,9 +552,9 @@ where
     ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
     /// advance past the point where the grafting overlay has been pruned. The bitmap and
-    /// grafted tree advance to `prune_loc`'s chunk boundary, never past the caller's target:
-    /// callers prune to a retention window, and a recorded boundary past the window's oldest
-    /// block would forbid rewinding to it.
+    /// grafted tree never advance past the caller's target: callers prune to a retention
+    /// window, and a recorded boundary past the window's oldest block would forbid rewinding
+    /// to it.
     ///
     /// # Errors
     ///
@@ -1976,11 +1976,12 @@ mod tests {
 
     /// Random-walk crash-interleaving simulation over one database family.
     ///
-    /// Interleaves applies, every durability path (commit, pipelined start_sync), windowed
-    /// prunes, and prunes dropped between the metadata sync and the log prune, across
-    /// checkpoint-recovered phases whose boundaries are unclean shutdowns. Two invariants
-    /// hold at every step: reopen always succeeds, and every commit in the retention window
-    /// stays rewindable with its recorded root.
+    /// Interleaves applies, both glue-driven durability paths (commit, pipelined
+    /// start_sync), windowed prunes, and prunes dropped between the metadata sync and the
+    /// log prune, across checkpoint-recovered phases whose boundaries are unclean
+    /// shutdowns. Two invariants hold at every step: reopen always succeeds, and every
+    /// commit in the retention window stays above both retention boundaries, with the
+    /// window floor rewound and root-checked on repair.
     ///
     /// The workload runs in one of two regimes, since their failure states are mutually
     /// exclusive. Floor-chasing keeps a tiny active set so the floor crosses chunk

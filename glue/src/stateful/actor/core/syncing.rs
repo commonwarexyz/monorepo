@@ -206,7 +206,9 @@ where
             // resume from a floor at least as new as any target the engine acted on. An
             // ancestor finalized transitively by a descendant's certificate has no
             // finalization of its own; the floor then advances when the certificate-carrying
-            // descendant is delivered.
+            // descendant is delivered. A crash inside that window resumes from the lagging
+            // floor, which the sync journal may have durably outrun (recovery then requires
+            // a newer floor).
             if let Some(finalization) = self.marshal.get_finalization(block.height()).await {
                 self.sync_metadata = self.sync_metadata.begin_sync(finalization).await;
             }

@@ -1637,6 +1637,81 @@ fn test_variable_start_sync_overlaps_work() {
     });
 }
 
+/// A prune whose boundary is justified by the in-memory barrier persists nothing, so a
+/// crash can reopen with the recovery watermark behind the pruning boundary.
+/// [Mutable::durable] must stay well-formed in that state.
+#[test]
+fn test_fixed_durable_range_well_formed_after_prune_crash() {
+    let executor = deterministic::Runner::default();
+    let ((), checkpoint) = executor.start_and_recover(|context| async move {
+        let cfg = fixed_overlap_cfg(&context, "fixed-durable-clamp");
+        let mut journal = fixed::Journal::<_, u64>::init(context, cfg).await.unwrap();
+        for i in 0..20u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        // Commit proves the appends durable and advances the in-memory barrier without
+        // persisting the recovery watermark.
+        journal = journal.commit().await.unwrap();
+        // The barrier covers the boundary, so the prune persists nothing either.
+        (journal, _) = journal.prune(10).await.unwrap();
+        drop(journal);
+    });
+    let executor = deterministic::Runner::from(checkpoint);
+    executor.start(|context| async move {
+        let cfg = fixed_overlap_cfg(&context, "fixed-durable-clamp");
+        let mut journal = fixed::Journal::<_, u64>::init(context, cfg).await.unwrap();
+        let durable = Mutable::durable(&mut journal);
+        assert_eq!(
+            durable,
+            10..10,
+            "recovered watermark behind the pruning boundary must clamp, not invert"
+        );
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// The variable-journal twin of
+/// [test_fixed_durable_range_well_formed_after_prune_crash]. Unlike the fixed journal,
+/// the variable barrier advances only at the data+offsets join, so the persisted
+/// watermark always covers it and the recovered range needs no clamp.
+#[test]
+fn test_variable_durable_range_well_formed_after_prune_crash() {
+    let executor = deterministic::Runner::default();
+    let ((), checkpoint) = executor.start_and_recover(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-clamp");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        for i in 0..10u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        for i in 10..30u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        let handle;
+        (journal, handle) = journal.start_sync().await.unwrap();
+        handle.await.unwrap();
+        // The barrier covers the boundary, so the prune persists nothing.
+        (journal, _) = journal.prune(20).await.unwrap();
+        drop(journal);
+    });
+    let executor = deterministic::Runner::from(checkpoint);
+    executor.start(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-clamp");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        let durable = Mutable::durable(&mut journal);
+        assert_eq!(
+            durable,
+            20..30,
+            "the variable watermark must keep covering the barrier across a prune crash"
+        );
+        journal.destroy().await.unwrap();
+    });
+}
+
 #[test]
 fn test_fixed_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();

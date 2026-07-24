@@ -399,13 +399,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         items_per_blob: NonZeroU64,
         metrics: Metrics<E>,
     ) -> Self {
+        // A prune justified by the in-memory barrier persists no watermark, so a crash can
+        // leave the recovered watermark behind the pruning boundary. Pruned positions were
+        // durably justified before removal, so the boundary is a durable floor.
+        let watermark = checkpoint
+            .watermark()
+            .expect("recovery watermark must exist after init");
         Self {
             blobs,
-            barrier: Barrier::new(
-                checkpoint
-                    .watermark()
-                    .expect("recovery watermark must exist after init"),
-            ),
+            barrier: Barrier::new(watermark.max(bounds.start)),
             checkpoint,
             bounds,
             items_per_blob,
