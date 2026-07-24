@@ -464,7 +464,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
                 equivocator
             }
-            ProposalChange::Skipped => None,
+            // Only votes are skipped once equivocation is recorded (see
+            // [Slot::update]), and recovered proposals come from certificates.
+            ProposalChange::Skipped => unreachable!("recovered proposal skipped"),
         }
     }
 
@@ -844,11 +846,11 @@ mod tests {
         // the conflicting proposal.
         assert!(!round.set_proposal(proposal_y.clone()));
 
-        // The rest of the network finalized the conflicting proposal.
-        let finalize_votes: Vec<_> = schemes
+        // The rest of the network (the leader and the other two honest
+        // participants) finalized the conflicting proposal.
+        let finalize_votes: Vec<_> = [0, 2, 3]
             .iter()
-            .skip(1)
-            .map(|scheme| Finalize::sign(scheme, proposal_y.clone()).unwrap())
+            .map(|&i: &usize| Finalize::sign(&schemes[i], proposal_y.clone()).unwrap())
             .collect();
         let finalization =
             Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential).unwrap();
@@ -888,11 +890,11 @@ mod tests {
         // the conflicting proposal.
         assert!(!round.set_proposal(proposal_y.clone()));
 
-        // The rest of the network notarized the conflicting proposal.
-        let notarize_votes: Vec<_> = schemes
+        // The rest of the network (the leader and the other two honest
+        // participants) notarized the conflicting proposal.
+        let notarize_votes: Vec<_> = [0, 2, 3]
             .iter()
-            .skip(1)
-            .map(|scheme| Notarize::sign(scheme, proposal_y.clone()).unwrap())
+            .map(|&i: &usize| Notarize::sign(&schemes[i], proposal_y.clone()).unwrap())
             .collect();
         let notarization =
             Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential).unwrap();

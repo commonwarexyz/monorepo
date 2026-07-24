@@ -2989,8 +2989,10 @@ mod tests {
             );
             assert!(!state.set_proposal(view, proposal_y.clone()));
 
-            // The rest of the network finalized the conflicting proposal.
-            let finalization = build_finalization(&verifier, &schemes, &proposal_y);
+            // The rest of the network (the leader and the other two honest
+            // participants) finalized the conflicting proposal.
+            let others = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let finalization = build_finalization(&verifier, &others, &proposal_y);
             let (added, equivocator) = state.add_finalization(finalization);
             assert!(added);
             assert_eq!(equivocator.unwrap(), participants[2]);

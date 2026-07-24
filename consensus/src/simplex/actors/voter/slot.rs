@@ -134,11 +134,11 @@ where
     /// proposal, even after equivocation was recorded. Votes never replace
     /// the slot and are skipped entirely once equivocation is recorded.
     /// Either conflict marks the slot [Status::Equivocated], which suppresses
-    /// our own votes for the round.
+    /// our notarize and finalize votes for the round.
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {
         // Once we detect equivocation we refuse to record any additional
         // proposals from votes, even if they target the original payload.
-        // Certificates remain authoritative and take the override branch
+        // Certificates remain authoritative and fall through to the match
         // below, keeping the slot consistent with any stored certificate.
         if self.status == Status::Equivocated && !recovered {
             return Change::Skipped;
