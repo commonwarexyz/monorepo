@@ -551,12 +551,17 @@ where
         }
 
         // The sync boundary may be advanced by applied-but-uncommitted operations, and the
-        // pruning metadata persisted below durably records it. A durable commit must declare
-        // a floor covering that boundary before it is recorded: otherwise a crash recovers
-        // the older durable floor alongside newer pruning metadata and fails to initialize
-        // the bitmap. Commit first only when no durable commit covers the boundary yet.
+        // pruning metadata persisted below durably records it. A durable commit must justify
+        // that boundary before it is recorded: otherwise a crash recovers older durable state
+        // alongside newer pruning metadata and fails to initialize the bitmap. The boundary
+        // depends on the ops count as well as the floor (delayed-merge absorption), so it is
+        // recomputed from durable state. Commit first only when the durable boundary lags.
         self.any.advance_durable_floor();
-        if self.any.durable_floor < sync_boundary {
+        let durable_boundary = self::sync_boundary::<F, N>(
+            *self.any.durable_floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
+            *self.any.durable_size,
+        );
+        if durable_boundary < sync_boundary {
             self.any.log = self.any.log.commit().await?;
             self.any.mark_commits_durable();
         }
@@ -1629,6 +1634,87 @@ mod tests {
             )
             .await
             .expect("prune must commit the floor before recording pruning metadata");
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.root(), root);
+            assert!(db.any.bitmap.pruned_bits() >= *boundary);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune whose bitmap boundary is covered by the durable floor but whose delayed-merge
+    /// absorption is satisfied only by applied-but-uncommitted operations must still commit
+    /// before durably recording pruning metadata: recovery otherwise rebuilds an ops tree
+    /// whose graftable chunks cannot cover the recorded boundary and the database can never
+    /// reopen. A floor-only gate takes the fast path here, so this pins the durable-boundary
+    /// gate.
+    #[test_traced]
+    fn test_current_mmb_prune_commits_when_absorption_exceeds_durable_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let mut db = MmbDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("prune-absorption-gate", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Reach a committed state whose floor covers chunk 0 while delayed-merge
+            // settlement still holds the boundary at 0: the durable state alone cannot
+            // justify pruning any chunk.
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let mut round = 0u64;
+            while *db.inactivity_floor_loc() < 256 || *db.sync_boundary() != 0 {
+                let value = Sha256::hash(&[&(10_000 + round).to_be_bytes()]);
+                let merkleized = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                let (next, _) = db.apply_batch(merkleized).await.unwrap();
+                db = next.commit().await.unwrap();
+                round += 1;
+            }
+
+            // One large uncommitted batch satisfies chunk 0's absorption threshold with live
+            // operations alone: the boundary jumps to the chunk boundary while the durable
+            // floor already covers it, so a floor-only gate skips the commit.
+            let mut batch = db.new_batch();
+            for idx in 0..506u64 {
+                let key = Sha256::hash(&[&(1_000 + idx).to_be_bytes()]);
+                let value = Sha256::hash(&[&(20_000 + idx).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
+            let boundary = db.sync_boundary();
+            assert_eq!(*boundary, 256);
+            assert!(db.any.durable_floor >= boundary);
+            let bounds = db.bounds();
+            let floor = db.inactivity_floor_loc();
+            let root = db.root();
+
+            // Drop the production prune future while it is parked after the metadata sync,
+            // before the log prune: a genuine cancellation at that await.
+            db.halt_before_prune_log = true;
+            {
+                let fut = db.prune(boundary);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+            }
+
+            // Reopening must succeed and recover the post-batch state: prune committed the
+            // operations whose count justifies the durably recorded absorption boundary.
+            let db = MmbDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>("prune-absorption-gate", &ctx),
+            )
+            .await
+            .expect("prune must commit absorption-justifying operations before recording pruning metadata");
             assert_eq!(db.bounds(), bounds);
             assert_eq!(db.inactivity_floor_loc(), floor);
             assert_eq!(db.root(), root);

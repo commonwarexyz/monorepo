@@ -93,6 +93,10 @@ pub struct Db<
     /// The highest inactivity floor declared by a commit proven durable in the log.
     pub(crate) durable_floor: Location<F>,
 
+    /// The operation count covered by the newest commit proven durable in the log (its
+    /// location plus one).
+    pub(crate) durable_size: Location<F>,
+
     /// Commits appended but not yet proven durable, oldest first, as
     /// `(commit location, declared inactivity floor)` pairs.
     pub(crate) pending_commits: VecDeque<(Location<F>, Location<F>)>,
@@ -463,7 +467,8 @@ where
         Ok((self, boundary))
     }
 
-    /// Advance [Self::durable_floor] past every commit the log has proven durable.
+    /// Advance [Self::durable_floor] and [Self::durable_size] past every commit the log has
+    /// proven durable.
     pub(crate) fn advance_durable_floor(&mut self) {
         let barrier = Location::new(self.log.barrier());
         while let Some((commit_loc, floor)) = self.pending_commits.front().copied() {
@@ -471,6 +476,7 @@ where
                 break;
             }
             self.durable_floor = floor;
+            self.durable_size = Location::new(*commit_loc + 1);
             self.pending_commits.pop_front();
         }
     }
@@ -479,6 +485,7 @@ where
     pub(crate) fn mark_commits_durable(&mut self) {
         self.pending_commits.clear();
         self.durable_floor = self.inactivity_floor_loc;
+        self.durable_size = Location::new(*self.last_commit_loc + 1);
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -734,6 +741,7 @@ where
         self.inactivity_floor_loc = rewind_floor;
         self.pending_commits.clear();
         self.durable_floor = Location::new(0);
+        self.durable_size = Location::new(0);
         self.root = self
             .log
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
@@ -864,6 +872,7 @@ where
             snapshot: index,
             last_commit_loc,
             durable_floor: inactivity_floor_loc,
+            durable_size: Location::new(*last_commit_loc + 1),
             pending_commits: VecDeque::new(),
             active_keys,
             bitmap,

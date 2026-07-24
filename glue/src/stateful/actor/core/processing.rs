@@ -98,14 +98,14 @@ where
                         // driving flush completions while idle.
                         None => {
                             let mailbox = &mut self.mailbox;
-                            let pool = &mut syncs;
+                            let syncs = &mut syncs;
                             Either::Right(async move {
                                 loop {
                                     select! {
                                         message = mailbox.recv() => {
                                             break message.map(Step::Message);
                                         },
-                                        _ = pool.next_completed() => {},
+                                        _ = syncs.next_completed() => {},
                                     }
                                 }
                             })
