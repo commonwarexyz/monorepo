@@ -24,8 +24,6 @@
 //! the equivocation never prevents the attack, and because the scheme is non-attributable (see below)
 //! it yields no third-party evidence against the leader.
 //!
-//! As a result, it is **not safe** to use a round's randomness to affect execution in that same round.
-//!
 //! Applications that want to incorporate this embedded VRF into execution should employ a "commit-then-reveal" pattern
 //! and require users to bind to the output of randomness in advance (i.e. `draw(view+k)` means execution uses VRF output
 //! `k` views later). The larger `k`, the more likely that the transaction is finalized before the randomness is revealed (recall, Simplex
