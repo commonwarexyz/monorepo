@@ -8,7 +8,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         Error as JournalError, authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshot},
     },
     merkle::{Family, Location, Proof},
     qmdb::{
@@ -905,5 +905,155 @@ where
         // retaining the entire `self` in the future.
         let Self { log, .. } = self;
         log.destroy().await.map_err(Into::into)
+    }
+}
+
+/// Owned immutable proof snapshot of an Any database with bounds frozen at capture.
+///
+/// Produced by [Db::proof_snapshot]. It serves proofs against the captured state while the
+/// source database continues to append, sync, and prune, and it exposes no mutation. It carries
+/// neither the keyed index nor the activity bitmap.
+///
+/// Rewinding the source database in place while a snapshot is alive is forbidden: reads from the
+/// rewound range may observe unspecified contents.
+#[commonware_macros::stability(ALPHA)]
+pub struct ProofSnapshot<F, E, U, R, H>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = Operation<F, U>>,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Owned view of the operations log.
+    log: authenticated::View<F, E, R, H>,
+
+    /// Root of the database at capture.
+    root: H::Digest,
+
+    /// Location of the last commit at capture.
+    last_commit_loc: Location<F>,
+
+    /// Inactivity floor at capture.
+    inactivity_floor_loc: Location<F>,
+}
+
+impl<F, E, U, R, H> ProofSnapshot<F, E, U, R, H>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = Operation<F, U>>,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Return the root of the database at capture.
+    pub const fn root(&self) -> H::Digest {
+        self.root
+    }
+
+    /// Return the number of operations visible to this snapshot.
+    pub fn op_count(&self) -> Location<F> {
+        self.log.size()
+    }
+
+    /// Return the location of the last commit at capture.
+    pub const fn last_commit_loc(&self) -> Location<F> {
+        self.last_commit_loc
+    }
+
+    /// Return the inactivity floor at capture.
+    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+        self.inactivity_floor_loc
+    }
+
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and
+    /// newest operations visible to this snapshot.
+    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
+        let bounds = Contiguous::bounds(&self.log);
+        Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Generate a proof of operations starting at `start_loc`, against this snapshot's frozen
+    /// state. Semantics match [Db::proof].
+    #[allow(clippy::type_complexity)]
+    pub async fn proof(
+        &self,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
+    }
+
+    /// Analogous to [Self::proof], but with respect to the state of the database when it had
+    /// `historical_size` operations. Semantics match [Db::historical_proof], bounded by this
+    /// snapshot's frozen size.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.any.proof_snapshot.historical_proof",
+        level = "info",
+        skip_all,
+        fields(
+            historical_size = *historical_size,
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
+        if historical_size > self.log.size() {
+            return Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(historical_size),
+            ));
+        }
+
+        let inactivity_floor =
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size, |op| {
+                op.has_floor()
+            })
+            .await?;
+        let inactive_peaks =
+            F::inactive_peaks(F::location_to_position(historical_size), inactivity_floor);
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Snapshot<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable [ProofSnapshot] of the database.
+    ///
+    /// The snapshot's bounds are frozen at capture: it does not observe later mutations and stays
+    /// readable across concurrent appends, syncs, and prunes of this database.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn proof_snapshot(
+        mut self,
+    ) -> Result<(Self, ProofSnapshot<F, E, U, C::Reader, H>), crate::qmdb::Error<F>> {
+        let log;
+        (self.log, log) = self.log.view().await?;
+        let snapshot = ProofSnapshot {
+            log,
+            root: self.root,
+            last_commit_loc: self.last_commit_loc,
+            inactivity_floor_loc: self.inactivity_floor_loc,
+        };
+        Ok((self, snapshot))
     }
 }

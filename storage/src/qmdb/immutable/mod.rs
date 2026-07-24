@@ -76,7 +76,7 @@ use crate::{
     index::{Unordered as _, unordered::Index},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshot},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
@@ -783,6 +783,154 @@ where
     }
 }
 
+/// Owned immutable proof snapshot of an [Immutable] database with bounds frozen at capture.
+///
+/// Produced by [Immutable::proof_snapshot]. It serves proofs against the captured state while
+/// the source database continues to append, sync, and prune, and it exposes no mutation. It
+/// carries no keyed index.
+///
+/// Rewinding the source database in place while a snapshot is alive is forbidden: reads from
+/// the rewound range may observe unspecified contents.
+#[commonware_macros::stability(ALPHA)]
+pub struct ProofSnapshot<F, E, K, V, R, H>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    R: Contiguous<Item = Operation<F, K, V>>,
+    H: Hasher,
+    Operation<F, K, V>: EncodeShared,
+{
+    /// Owned view of the operations log.
+    log: authenticated::View<F, E, R, H>,
+
+    /// Root of the database at capture.
+    root: H::Digest,
+
+    /// Location of the last commit at capture.
+    last_commit_loc: Location<F>,
+
+    /// Inactivity floor declared by the last committed batch at capture.
+    inactivity_floor_loc: Location<F>,
+}
+
+impl<F, E, K, V, R, H> ProofSnapshot<F, E, K, V, R, H>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    R: Contiguous<Item = Operation<F, K, V>>,
+    H: Hasher,
+    Operation<F, K, V>: EncodeShared,
+{
+    /// Return the root of the database at capture.
+    pub const fn root(&self) -> H::Digest {
+        self.root
+    }
+
+    /// Return the number of operations visible to this snapshot.
+    pub fn op_count(&self) -> Location<F> {
+        self.log.size()
+    }
+
+    /// Return the location of the last commit at capture.
+    pub const fn last_commit_loc(&self) -> Location<F> {
+        self.last_commit_loc
+    }
+
+    /// Return the inactivity floor declared by the last committed batch at capture.
+    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+        self.inactivity_floor_loc
+    }
+
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and
+    /// newest operations visible to this snapshot.
+    pub fn bounds(&self) -> Range<Location<F>> {
+        let bounds = Contiguous::bounds(&self.log);
+        Location::new(bounds.start)..Location::new(bounds.end)
+    }
+
+    /// Generate a proof of operations starting at `start_loc`, against this snapshot's frozen
+    /// state. Semantics match [Immutable::proof].
+    #[allow(clippy::type_complexity)]
+    pub async fn proof(
+        &self,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
+    }
+
+    /// Analogous to [Self::proof], but with respect to the state of the database when it had
+    /// `op_count` operations. Semantics match [Immutable::historical_proof], bounded by this
+    /// snapshot's frozen size.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.immutable.proof_snapshot.historical_proof",
+        level = "info",
+        skip_all,
+        fields(
+            op_count = *op_count,
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
+    pub async fn historical_proof(
+        &self,
+        op_count: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
+        if op_count > self.log.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        }
+
+        let inactive_peaks =
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.log, op_count, |op| op.has_floor())
+                .await?;
+
+        Ok(self
+            .log
+            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+            .await?)
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>> + Snapshot<Item = Operation<F, K, V>>,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+{
+    /// Capture an owned immutable [ProofSnapshot] of the database.
+    ///
+    /// The snapshot's bounds are frozen at capture: it does not observe later mutations and
+    /// stays readable across concurrent appends, syncs, and prunes of this database.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn proof_snapshot(
+        mut self,
+    ) -> Result<(Self, ProofSnapshot<F, E, K, V, C::Reader, H>), Error<F>> {
+        let log;
+        (self.journal, log) = self.journal.view().await?;
+        let snapshot = ProofSnapshot {
+            log,
+            root: self.root,
+            last_commit_loc: self.last_commit_loc,
+            inactivity_floor_loc: self.inactivity_floor_loc,
+        };
+        Ok((self, snapshot))
+    }
+}
+
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
@@ -997,6 +1145,89 @@ pub(super) mod test {
             &ops,
             &root
         ));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database applies batches, commits, and prunes past it.
+    #[boxed]
+    pub(crate) async fn test_immutable_proof_snapshot<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Snapshot<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        use commonware_codec::Encode as _;
+
+        let mut db = open_db(context.child("first")).await;
+
+        {
+            let mut batch = db.new_batch();
+            for i in 0..20u8 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(100)));
+            }
+            let merkleized = batch.merkleize(&db, None, Location::new(0)).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let root = db.root();
+        let op_count = db.bounds().end;
+
+        let snapshot;
+        (db, snapshot) = db.proof_snapshot().await.unwrap();
+        assert_eq!(snapshot.root(), root);
+        assert_eq!(snapshot.op_count(), op_count);
+        assert_eq!(snapshot.inactivity_floor_loc(), db.inactivity_floor_loc());
+        assert_eq!(snapshot.last_commit_loc(), db.last_commit_loc);
+
+        let (proof, ops) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
+
+        // Advance the live database past the capture: set more keys with a raised inactivity
+        // floor, commit, and prune.
+        {
+            let mut batch = db.new_batch();
+            for i in 20..40u8 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(100)));
+            }
+            let merkleized = batch.merkleize(&db, None, Location::new(15)).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        db = db.prune(boundary).await.unwrap();
+        assert_ne!(db.root(), root);
+        assert!(db.bounds().start > Location::new(0));
+
+        // The snapshot still serves the identical proof, verifiable against the captured
+        // root, including for operations the live database has since pruned.
+        let (proof2, ops2) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+        assert_eq!(proof.encode(), proof2.encode());
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof2,
+            Location::new(0),
+            &ops2,
+            &root,
+        ));
+
+        // Anything above the frozen size is rejected.
+        assert!(
+            snapshot
+                .historical_proof(op_count + 1, Location::new(0), NZU64!(1))
+                .await
+                .is_err()
+        );
+        assert!(snapshot.proof(op_count, NZU64!(1)).await.is_err());
 
         db.destroy().await.unwrap();
     }

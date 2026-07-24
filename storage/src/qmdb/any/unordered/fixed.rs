@@ -1634,6 +1634,80 @@ pub(crate) mod test {
         });
     }
 
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database updates its keys (index rewrites and bitmap flips), commits, and prunes
+    /// past it — behavioral evidence that the snapshot carries neither the keyed index nor the
+    /// activity bitmap.
+    #[test]
+    fn test_any_fixed_db_proof_snapshot() {
+        use commonware_codec::Encode as _;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let ops = create_test_ops(20);
+            let mut db = apply_ops(db, ops.clone()).await;
+            let root = db.root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.proof_snapshot().await.unwrap();
+            assert_eq!(snapshot.root(), root);
+            assert_eq!(snapshot.op_count(), op_count);
+            assert_eq!(snapshot.inactivity_floor_loc(), db.inactivity_floor_loc());
+            assert_eq!(snapshot.last_commit_loc(), db.last_commit_loc);
+
+            let (proof, proof_ops) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &proof_ops,
+                &root,
+            ));
+
+            // Update every captured key (rewriting index entries and retroactively flipping
+            // activity bits), commit, and prune the live database past the capture.
+            let mut rng = TestRng::new(7);
+            let updates: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    Operation::Update(Update(key, _)) => {
+                        Some(Operation::Update(Update(*key, Digest::random(&mut rng))))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!updates.is_empty());
+            db = apply_ops(db, updates).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert_ne!(db.root(), root);
+            assert!(db.bounds().start > Location::new(0));
+
+            // The snapshot still serves the identical proof, verifiable against the captured
+            // root, including for operations the live database has since pruned.
+            let (proof2, proof_ops2) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof2,
+                Location::new(0),
+                &proof_ops2,
+                &root,
+            ));
+
+            // Anything above the frozen size is rejected.
+            assert!(
+                snapshot
+                    .historical_proof(op_count + 1, Location::new(0), NZU64!(1))
+                    .await
+                    .is_err()
+            );
+            assert!(snapshot.proof(op_count, NZU64!(1)).await.is_err());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
