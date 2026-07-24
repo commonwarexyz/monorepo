@@ -614,7 +614,7 @@ where
         // recovered leaf count covers the boundary (delayed-merge parents above the barrier
         // are recomputed during replay), so the sync is skipped. The backing journal defends
         // its own barrier inside `prune`.
-        if self.merkle.barrier() < F::location_to_position(prune_loc) {
+        if self.merkle.durable().end < F::location_to_position(prune_loc) {
             self.merkle = self.merkle.sync().await?;
         }
         let journal_pruned;

@@ -1704,7 +1704,7 @@ mod tests {
             let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
             let boundary = db.sync_boundary();
             assert_eq!(*boundary, 256);
-            assert!(db.any.durable_floor >= boundary);
+            assert!(db.any.durable.start >= boundary);
             let bounds = db.bounds();
             let floor = db.inactivity_floor_loc();
             let root = db.root();

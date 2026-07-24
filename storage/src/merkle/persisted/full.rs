@@ -201,9 +201,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// The node position below which every node is proven durable.
-    pub(crate) fn barrier(&mut self) -> Position<F> {
-        Position::new(self.journal.durable().end)
+    /// The positions of durably persisted nodes.
+    pub(crate) fn durable(&mut self) -> std::ops::Range<Position<F>> {
+        let durable = self.journal.durable();
+        Position::new(durable.start)..Position::new(durable.end)
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -713,10 +714,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        // Once the barrier covers the prune position, the durable journal prefix always
-        // covers the metadata boundary written below, so the flush is skipped. Nodes above
-        // the barrier stay cached and are not guaranteed to survive a crash.
-        if self.barrier() < pos {
+        // Once the durable end covers the prune position, the durable journal prefix always
+        // covers the metadata boundary written below, so the flush is skipped. Nodes past
+        // the durable end stay cached and are not guaranteed to survive a crash.
+        if self.durable().end < pos {
             self = self.sync().await?;
         }
 
