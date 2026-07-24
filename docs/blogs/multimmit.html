@@ -143,23 +143,22 @@ O’Grady</a></div>
         blocks without waiting on the others, consensus references
         blocks the moment they arrive, and the votes already being cast
         establish availability, so no block waits on a certificate and
-        no voter waits on a fetch. Votes also extend past whatever the
-        leader omits, so every producer can add to each view’s finalized
-        log.</p>
-        <p>A transaction block disseminated at time <span
-        class="math inline">t</span> is finalized by <span
+        no voter waits on a fetch. As a bonus, votes extend past
+        whatever the leader omits, so every producer can add to each
+        view’s finalized log.</p>
+        <p>A transaction block sent at time <span
+        class="math inline">t</span> finalizes by <span
         class="math inline">t+2\delta</span> at best and <span
-        class="math inline">t+3\delta</span> in expectation (for <span
-        class="math inline">n \geq 5f+1</span>). The clock starts when
-        the producer broadcasts, not when a leader proposes, and those
-        figures hold for an honest producer’s blocks even while up to
-        <span class="math inline">f</span> producers misbehave. Two
-        message delays is <a
-        href="https://arxiv.org/abs/2102.07240">optimal</a> (no
-        fault-tolerant consensus can finalize faster, even in the best
-        case), and protocols that reach that floor do so only for the
-        leader’s own block. Multimmit puts every producer’s blocks there
-        at once, without handing back the throughput: the best of both
+        class="math inline">t+3\delta</span> in expectation, on a clock
+        that starts at the producer’s broadcast rather than a leader’s
+        proposal. The figures assume <span class="math inline">n \geq
+        5f+1</span> and hold for an honest producer’s blocks even while
+        up to <span class="math inline">f</span> producers misbehave. No
+        fault-tolerant consensus can finalize in fewer than <a
+        href="https://arxiv.org/abs/2102.07240">two message delays</a>,
+        even in its best case, and that floor has belonged to leader
+        blocks alone. Multimmit extends it to every producer’s blocks at
+        once, without handing back the throughput: the best of both
         worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
         <p>Start with the shape of most deployed protocols: one proposer
