@@ -20,7 +20,7 @@ use core::marker::PhantomData;
 /// serves only the captured commit's compact state — not operation ranges.
 #[commonware_macros::stability(ALPHA)]
 pub struct StateSnapshot<F: Family, D: Digest, Op, Cfg> {
-    /// The captured verified witness: the last durably persisted commit at capture.
+    /// The captured verified witness, the last durably persisted commit at capture.
     witness: VerifiedWitness<F, D>,
 
     /// Codec configuration for decoding the witness's commit operation.
@@ -74,9 +74,8 @@ where
             proof: last_commit_proof,
             pinned_nodes,
         } = self.witness.witness.clone();
-        let op = Op::decode_cfg(op_bytes.as_ref(), &self.codec_config).map_err(|_| {
-            ServeError::Database(Error::DataCorrupted("invalid commit operation"))
-        })?;
+        let op = Op::decode_cfg(op_bytes.as_ref(), &self.codec_config)
+            .map_err(|_| ServeError::Database(Error::DataCorrupted("invalid commit operation")))?;
         Ok(State {
             leaf_count: self.witness.leaf_count(),
             pinned_nodes,

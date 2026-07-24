@@ -914,7 +914,7 @@ where
 /// source database continues to append, sync, and prune, and it exposes no mutation. It carries
 /// neither the keyed index nor the activity bitmap.
 ///
-/// Rewinding the source database in place while a snapshot is alive is forbidden: reads from the
+/// Rewinding the source database in place while a snapshot is alive is forbidden because reads from the
 /// rewound range may observe unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct ProofSnapshot<F, E, U, R, H>
@@ -1040,7 +1040,7 @@ where
 {
     /// Capture an owned immutable [ProofSnapshot] of the database.
     ///
-    /// The snapshot's bounds are frozen at capture: it does not observe later mutations and stays
+    /// The snapshot's bounds are frozen at capture, so it does not observe later mutations and stays
     /// readable across concurrent appends, syncs, and prunes of this database.
     #[commonware_macros::stability(ALPHA)]
     pub async fn proof_snapshot(

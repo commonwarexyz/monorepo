@@ -696,7 +696,7 @@ where
 /// Merkle structure, so it stays readable — and its proofs stay valid — across concurrent
 /// appends, syncs, and prunes of the source journal. It exposes no mutation.
 ///
-/// Rewinding the source journal in place while a view is alive is forbidden: reads from the
+/// Rewinding the source journal in place while a view is alive is forbidden because reads from the
 /// rewound range may observe unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct View<F, E, R, H>
@@ -776,7 +776,10 @@ where
         self.items.bounds()
     }
 
-    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
+    fn read(
+        &self,
+        position: u64,
+    ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
         self.items.read(position)
     }
 
@@ -800,7 +803,10 @@ where
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> impl Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send, JournalError>,
+        Output = Result<
+            impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+            JournalError,
+        >,
     > + Send {
         self.items.replay(start_pos, buffer)
     }
@@ -816,7 +822,7 @@ where
 {
     /// Capture an owned immutable [View] of the journal.
     ///
-    /// The view's bounds are frozen at capture: it does not observe later mutations and stays
+    /// The view's bounds are frozen at capture, so it does not observe later mutations and stays
     /// readable across concurrent appends, syncs, and prunes of this journal.
     #[commonware_macros::stability(ALPHA)]
     pub async fn view(mut self) -> Result<(Self, View<F, E, C::Reader, H>), Error<F>> {
@@ -825,11 +831,18 @@ where
         let (merkle, nodes) = self.merkle.view().await?;
         self.merkle = merkle;
         let hasher = self.hasher.clone();
-        Ok((self, View { items, nodes, hasher }))
+        Ok((
+            self,
+            View {
+                items,
+                nodes,
+                hasher,
+            },
+        ))
     }
 }
 
-/// Shared implementation of [Journal::historical_proof] and [View::historical_proof]: bounds
+/// Shared implementation of [Journal::historical_proof] and [View::historical_proof], covering bounds
 /// checks, Merkle range proof, and the item reads for the proven range.
 async fn historical_proof_over<F, H, I, N>(
     items: &I,
@@ -3614,7 +3627,10 @@ mod tests {
         let size = journal.size();
         let live_proof;
         let live_ops;
-        (live_proof, live_ops) = journal.proof(Location::new(0), NZU64!(10), 0).await.unwrap();
+        (live_proof, live_ops) = journal
+            .proof(Location::new(0), NZU64!(10), 0)
+            .await
+            .unwrap();
 
         let view;
         (journal, view) = journal.view().await.unwrap();
@@ -3628,7 +3644,7 @@ mod tests {
             view_ops.iter().map(Encode::encode).collect::<Vec<_>>()
         );
 
-        // Advance the live journal well past the capture: append, sync, and prune.
+        // Advance the live journal well past the capture by appending, syncing, and pruning.
         for i in 0..30u8 {
             (journal, _) = journal
                 .append(&create_operation::<F>(i.wrapping_add(50)))
@@ -3650,7 +3666,7 @@ mod tests {
         let pruned_reads = view.read_many(&[0, 1, 2]).await.unwrap();
         assert_eq!(pruned_reads.len(), 3);
 
-        // Historical proofs at or below the frozen size work; anything above is rejected.
+        // Historical proofs at or below the frozen size work while anything above is rejected.
         let (historical, _) = view
             .historical_proof(size, Location::new(5), NZU64!(5), 0)
             .await
@@ -3682,7 +3698,7 @@ mod tests {
     }
 
     /// Rewinding the source journal into a live view's range is forbidden by the [View]
-    /// contract: reads from the rewound range may observe unspecified contents. This test
+    /// contract that reads from the rewound range may observe unspecified contents. This test
     /// documents the boundary — it asserts only that such reads do not panic and that the
     /// view's own bounds still hold, never the contents of the rewound range.
     #[test_traced("INFO")]
@@ -3704,7 +3720,7 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
-            // Reads below the rewind point remain intact; reads in the rewound range are
+            // Reads below the rewind point remain intact. Reads in the rewound range are
             // unspecified (intentionally unchecked beyond "no panic").
             let below = view.read_many(&[0, 1, 2]).await.unwrap();
             assert_eq!(below.len(), 3);

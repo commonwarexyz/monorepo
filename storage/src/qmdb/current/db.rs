@@ -1280,11 +1280,11 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 /// and it exposes no mutation. It carries neither the keyed index, the activity bitmap, nor
 /// the grafted tree.
 ///
-/// There is no snapshot [Db::range_proof]: grafted activity proofs read the live bitmap, which
+/// There is no snapshot [Db::range_proof] because grafted activity proofs read the live bitmap, which
 /// keeps no history, so they are served only by the live database at its latest root — the
 /// same contract as the live API.
 ///
-/// Rewinding the source database in place while a snapshot is alive is forbidden: reads from
+/// Rewinding the source database in place while a snapshot is alive is forbidden because reads from
 /// the rewound range may observe unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct ProofSnapshot<F, E, U, R, H>
@@ -1317,7 +1317,7 @@ where
         self.root
     }
 
-    /// Return the ops tree root at capture. Semantics match [Db::ops_root]: sync targets and
+    /// Return the ops tree root at capture. Semantics match [Db::ops_root], which sync targets and
     /// ops-level proofs verify against this root, not the canonical root.
     pub const fn ops_root(&self) -> H::Digest {
         self.ops.root()
@@ -1372,7 +1372,7 @@ where
 {
     /// Capture an owned immutable [ProofSnapshot] of the database.
     ///
-    /// The snapshot's bounds are frozen at capture: it does not observe later mutations and
+    /// The snapshot's bounds are frozen at capture, so it does not observe later mutations and
     /// stays readable across concurrent appends, syncs, and prunes of this database.
     #[commonware_macros::stability(ALPHA)]
     pub async fn proof_snapshot(
@@ -1627,7 +1627,7 @@ mod tests {
                 &ops_root,
             ));
 
-            // Update the same keys: the live bitmap retroactively flips the captured
+            // Update the same keys so the live bitmap retroactively flips the captured
             // operations' activity bits, the floor rises, and pruning discards captured
             // operations. The snapshot must not observe any of it.
             db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;

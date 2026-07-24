@@ -959,7 +959,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
 /// Node reads combine the captured in-memory nodes with an owned snapshot of the node
 /// journal, so the view stays readable across concurrent appends, flushes, and prunes of
 /// the source structure. Rewinding the source structure in place while a view is alive is
-/// forbidden: reads from the rewound range may observe unspecified contents.
+/// forbidden because reads from the rewound range may observe unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct View<F: Family, E: Context, D: Digest> {
     /// Nodes resident in memory at capture.
@@ -992,7 +992,7 @@ impl<F: Family, E: Context, D: Digest> crate::merkle::storage::Storage<F> for Vi
 impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Capture an owned immutable [View] of the structure.
     ///
-    /// The view's bounds are frozen at capture: it does not observe later mutations and
+    /// The view's bounds are frozen at capture, so it does not observe later mutations and
     /// stays readable across concurrent appends, flushes, and prunes.
     #[commonware_macros::stability(ALPHA)]
     pub async fn view(mut self) -> Result<(Self, View<F, E, D>), Error<F>> {

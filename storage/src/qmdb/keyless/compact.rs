@@ -426,21 +426,24 @@ where
     where
         Operation<F, V>: Read<Cfg = C>,
     {
-        // Hold the witness lock only long enough to snapshot the entry; decode outside it so
+        // Hold the witness lock only long enough to snapshot the entry. Decode outside it so
         // concurrent readers do not contend.
         self.compact_snapshot().compact_state(target)
     }
 
     /// Capture an owned immutable [StateSnapshot] of the database's durable compact state.
     ///
-    /// The snapshot is frozen at capture: it does not observe later mutations and serves the
+    /// The snapshot is frozen at capture, so it does not observe later mutations and serves the
     /// captured commit's compact state while this database continues to mutate and persist.
     #[commonware_macros::stability(ALPHA)]
     pub fn compact_snapshot(&self) -> StateSnapshot<F, H::Digest, Operation<F, V>, C>
     where
         Operation<F, V>: Read<Cfg = C>,
     {
-        StateSnapshot::new(self.witness.with(Clone::clone), self.commit_codec_config.clone())
+        StateSnapshot::new(
+            self.witness.with(Clone::clone),
+            self.commit_codec_config.clone(),
+        )
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

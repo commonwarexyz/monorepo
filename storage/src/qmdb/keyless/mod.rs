@@ -583,7 +583,7 @@ where
 /// Produced by [Keyless::proof_snapshot]. It serves proofs against the captured state while
 /// the source database continues to append, sync, and prune, and it exposes no mutation.
 ///
-/// Rewinding the source database in place while a snapshot is alive is forbidden: reads from
+/// Rewinding the source database in place while a snapshot is alive is forbidden because reads from
 /// the rewound range may observe unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct ProofSnapshot<F, E, V, R, H>
@@ -703,7 +703,7 @@ where
 {
     /// Capture an owned immutable [ProofSnapshot] of the database.
     ///
-    /// The snapshot's bounds are frozen at capture: it does not observe later mutations and
+    /// The snapshot's bounds are frozen at capture, so it does not observe later mutations and
     /// stays readable across concurrent appends, syncs, and prunes of this database.
     #[commonware_macros::stability(ALPHA)]
     pub async fn proof_snapshot(
@@ -1066,7 +1066,7 @@ pub(crate) mod tests {
             &root,
         ));
 
-        // Advance the live database past the capture: apply another batch with a raised
+        // Advance the live database past the capture by applying another batch with a raised
         // inactivity floor, commit, and prune.
         {
             let mut batch = db.new_batch();
