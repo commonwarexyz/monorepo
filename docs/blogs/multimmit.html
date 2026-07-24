@@ -130,8 +130,8 @@ O’Grady</a></div>
         Reference blocks immediately and voters must fetch whatever they
         are missing, on the critical path, from the one node the whole
         design exists to unburden. Today we’re sharing <a
-        href="https://github.com/commonwarexyz/monorepo/tree/main/pipeline/multimmit">Multimmit</a>,
-        a construction developed with Andrew Lewis-Pye that combines <a
+        href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
+        construction developed with Andrew Lewis-Pye that combines <a
         href="/blogs/minimmit.html">Minimmit</a>’s one-round-voting
         consensus (for <span class="math inline">n \geq 5f+1</span>)
         with a chain of blocks per producer. Multimmit leaders reference
@@ -228,7 +228,7 @@ O’Grady</a></div>
         once. Blocks still exist, but they shrink: the leader’s block
         carries references to lane tips instead of transactions, and
         finalizing it finalizes everything below the referenced tips.
-        This architecture also collapses the left side of Figure 1,
+        This architecture also collapses the left side of figure 1,
         because the node that accepts your transaction <em>is</em> a
         producer. Submission is dissemination.</p>
         <p>Autobahn then gives the latency right back. A leader may only
@@ -255,8 +255,8 @@ O’Grady</a></div>
         delays from proposal to finality, the same total as Autobahn’s
         fast path). The batch (green) carries the transaction data and
         crosses the network once. Its PoA follows two message delays
-        later, the earliest the leader’s block, red as in figure 1 but
-        now carrying only references, may include it.</p>
+        later, the earliest the leader’s block may include it. The block
+        stays red as in figure 1, but now carries only references.</p>
         </div>
         <p>The obvious escape is to reference blocks before they
         certify, and the known ways to do it each break something.
@@ -282,17 +282,16 @@ O’Grady</a></div>
         certified-only inclusion), but the mitigation is reactive: each
         producer spoils before it is blamed, and a reputation forgiving
         enough to readmit slow-but-honest producers re-arms the attack
-        on every reset. This fragility is exactly why reputation shows
-        up wherever uncertified references do, and DAG deployments have
-        scored anchors the same way since <a
-        href="https://arxiv.org/abs/2306.03058">Shoal</a>. The DAG world
-        hits the same fork: <a
+        on every reset. The DAG world hits the same fork: <a
         href="https://arxiv.org/abs/2310.14821">Mysticeti</a> references
         uncertified vertices, and dropping just 1% of egress traffic at
         5 of 100 validators has been <a
         href="https://arxiv.org/abs/2405.20488">observed</a> to increase
-        its median latency by an order of magnitude at moderate
-        load.</p>
+        its median latency by an order of magnitude at moderate load.
+        This fragility is exactly why reputation shows up wherever
+        uncertified references do, and DAG deployments have scored
+        anchors the same way since <a
+        href="https://arxiv.org/abs/2306.03058">Shoal</a>.</p>
         <h2 id="checkpoint-now-certify-in-the-background">Checkpoint
         Now, Certify in the Background</h2>
         <p>Multimmit keeps the producer lanes but makes each a real
@@ -334,7 +333,12 @@ O’Grady</a></div>
         proposed tips, anchored at the voter’s own reported position. A
         block no longer needs to reach the leader before the proposal to
         finalize in a view. It needs to reach the voters before they
-        vote.</p>
+        vote. The same anchoring makes the frontier leader-proof: junk
+        or stale entries for a chain cannot stop correct voters from
+        attaching its true recent blocks. A leader that wants to exclude
+        a well-circulated honest block therefore cannot propose around
+        it, and its only remaining move is to suppress the entire view,
+        forfeiting finalization.</p>
         <div id="multimmit-fig-extend" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's extension path. The transaction block and the leader block cross on the wire, so the leader block cannot reference it. Voters attest the block in their votes anyway, finalizing it two message delays after the block broadcast, three after submission. Dashed markers show where the earlier figures finalized on the same axis.">
           <noscript>This figure animates Multimmit's extension path: the transaction block misses the leader block but reaches the voters, whose extension votes attest it directly, finalizing at block + 2δ while DA-votes and the PoA form in the background.</noscript>
         </div>
@@ -382,15 +386,13 @@ O’Grady</a></div>
         <p>Figure 5: Easy spoiling. A Raptr leader block carries one
         flat sequence of batches from many producers, and each voter
         supports the longest prefix whose data it holds. One withheld
-        batch early in the sequence caps almost every vote at the hole,
-        so the proposal finalizes prefix 1 and strands every available
-        batch behind position 2. The batches belong to six different
-        producers, so P2’s hole strands the data of P3 through P6.
-        Stranded batches eventually land through the certified slow
-        path, which is exactly the path prefix voting exists to avoid.
-        Multimmit’s votes (next figure) report per chain instead of per
-        prefix, so there is no position to poison: a withheld block
-        costs its own chain and nothing else.</p>
+        batch caps almost every vote at the hole: the proposal finalizes
+        prefix 1, stranding P3 through P6’s available data behind P2’s
+        hole. Stranded batches eventually land through the certified
+        slow path, which is exactly the path prefix voting exists to
+        avoid. Multimmit’s votes (next figure) report per chain instead
+        of per prefix, so there is no position to poison: a withheld
+        block costs its own chain and nothing else.</p>
         </div>
         <p>What does one round of votes actually pin down? The
         difference from figure 5 is the shape of the vote. Raptr’s vote
@@ -447,11 +449,12 @@ O’Grady</a></div>
         disclose blocks selectively, and the only chain it delays is its
         own (other chains wait at most one view for their slot in the
         total ordering).</li>
-        <li>A leader cannot finalize its own block while censoring
-        someone else’s. If a fresh honest block reaches the honest
-        validators before they vote, then either the view finalizes
-        nothing at all or that block’s membership in the ledger is
-        settled in that view, whatever the leader proposed.</li>
+        <li>Extension votes make censorship unprofitable: a leader
+        cannot finalize its own block while censoring someone else’s. If
+        a fresh honest block reaches the honest validators before they
+        vote, then either the view finalizes nothing at all or that
+        block’s membership in the ledger is settled in that view,
+        whatever the leader proposed.</li>
         <li>Consensus messages stay tens of kilobytes per view,
         independent of transaction volume. With views lasting 100-200ms,
         a single view at line rate can order tens of megabytes of
@@ -571,18 +574,16 @@ O’Grady</a></div>
         ever blocking on the other. Blocks enter the ordering process
         the moment they hit the wire, availability is voted rather than
         fetched, and the failure of any producer is confined to its own
-        chain. The draft specification includes proofs of consistency
-        and liveness, an availability accounting for every block that
-        enters the ordering, and the exact extension threshold for every
-        <span class="math inline">n</span>, with the protocol’s rules
-        optimal at <span class="math inline">n=5f+1</span>.</p>
-        <p>Like Minimmit before it, Multimmit is not yet peer-reviewed
-        or fully implemented, and we are releasing it under both MIT and
-        Apache-2 licenses for others to build with and build upon. Have
-        an idea to simplify, improve, or extend Multimmit? <a
-        href="https://github.com/commonwarexyz/monorepo/tree/main/pipeline/multimmit">Open
-        a PR</a> or reach out at <a
-        href="mailto:multimmit@commonware.xyz">multimmit@commonware.xyz</a>.</p>
+        chain. The <a
+        href="https://arxiv.org/abs/2607.21021">specification</a>
+        includes proofs of consistency and liveness, an availability
+        accounting for every block that enters the ordering, and the
+        exact extension threshold for every <span
+        class="math inline">n</span>, with the protocol’s rules optimal
+        at <span class="math inline">n=5f+1</span>.</p>
+        <p>Multimmit is not yet peer-reviewed or fully implemented, and
+        we are releasing it under both MIT and Apache-2 licenses for
+        others to build with and build upon.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
