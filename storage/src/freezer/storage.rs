@@ -645,6 +645,24 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // A missing or empty checkpoint starts fresh: delete all existing freezer data
         let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
         let metadata_partition = format!("{}-metadata", config.key_partition);
+
+        // Reject a partition-name collision before the destructive reset below, so an invalid
+        // configuration fails without deleting data. All four partitions must be distinct; the
+        // companion `{key_partition}-metadata` partition is reserved for recovery watermarks.
+        let partitions = [
+            config.key_partition.as_str(),
+            config.value_partition.as_str(),
+            config.table_partition.as_str(),
+            metadata_partition.as_str(),
+        ];
+        for (i, partition) in partitions.iter().enumerate() {
+            if partitions[i + 1..].contains(partition) {
+                return Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                    format!("freezer partitions must be distinct: {partition} used more than once"),
+                )));
+            }
+        }
+
         if reset {
             for partition in [
                 &config.key_partition,
@@ -1520,6 +1538,89 @@ mod tests {
             .unwrap();
             assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
+        });
+    }
+
+    /// A fresh-start init with a partition-name collision must reject the configuration without
+    /// deleting data: the config is validated before the destructive reset, so a rejected init
+    /// leaves the caller's partitions untouched. Covers both fresh-start entry points (`None` and
+    /// an empty checkpoint).
+    #[test_traced]
+    fn init_rejects_partition_collision_before_reset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for label in ["none", "empty"] {
+                let checkpoint = (label == "empty").then_some(Checkpoint {
+                    epoch: 0,
+                    section: 0,
+                    oversized_size: 0,
+                    table_size: 0,
+                });
+                let key_partition = format!("collide-key-{label}");
+                // value_partition collides with the reserved `{key_partition}-metadata`.
+                let metadata_partition = format!("{key_partition}-metadata");
+                let cfg = super::super::Config {
+                    key_partition: key_partition.clone(),
+                    key_write_buffer: NZUsize!(1024),
+                    key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                    value_partition: metadata_partition.clone(),
+                    value_compression: None,
+                    value_write_buffer: NZUsize!(1024),
+                    value_target_size: 10 * 1024 * 1024,
+                    table_partition: format!("collide-table-{label}"),
+                    table_initial_size: 2,
+                    table_resize_frequency: 1,
+                    table_resize_chunk_size: 1,
+                    table_replay_buffer: NZUsize!(64 * 1024),
+                    codec_config: (),
+                };
+
+                // Seed data in the colliding partition.
+                let (blob, _) = context
+                    .open(&metadata_partition, b"left")
+                    .await
+                    .expect("Failed to seed colliding partition");
+                blob.write_at_sync(0, vec![0xAB; 3]).await.unwrap();
+                drop(blob);
+
+                let result =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child(label), cfg, checkpoint)
+                        .await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                            _
+                        )))
+                    ),
+                    "{label}: expected InvalidConfiguration, got {result:?}"
+                );
+
+                // The rejected init must not have deleted the seeded partition.
+                let names = context
+                    .scan(&metadata_partition)
+                    .await
+                    .expect("colliding partition must survive a rejected init");
+                assert!(
+                    names.contains(&b"left".to_vec()),
+                    "{label}: seeded blob was deleted by a rejected init"
+                );
+
+                // ...nor modified its contents: a truncate-or-overwrite-before-error regression
+                // must not pass, so verify the seeded bytes are byte-identical.
+                let (blob, len) = context
+                    .open(&metadata_partition, b"left")
+                    .await
+                    .expect("seeded blob must survive a rejected init");
+                assert_eq!(len, 3, "{label}: seeded blob size changed");
+                let data = blob.read_at(0, 3).await.unwrap().coalesce();
+                assert_eq!(
+                    data.as_ref(),
+                    &[0xAB; 3][..],
+                    "{label}: seeded blob contents changed"
+                );
+                drop(blob);
+            }
         });
     }
 

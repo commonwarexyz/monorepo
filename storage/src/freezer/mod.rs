@@ -242,8 +242,9 @@ pub enum Error {
 pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition for the key index journal.
     ///
-    /// The companion `{key_partition}-metadata` partition is reserved for recovery watermarks and
-    /// must be distinct from the value and table partitions.
+    /// The key, value, and table partitions and the companion `{key_partition}-metadata` partition
+    /// (reserved for recovery watermarks) must all be mutually distinct; initialization rejects any
+    /// collision.
     pub key_partition: String,
 
     /// The size of the write buffer for the key index journal.
