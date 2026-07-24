@@ -70,7 +70,7 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalization: bool,
     certify: CertifyState,
     // Whether we already broadcast a certificate justifying a refusal to
-    // verify this round's proposal (see [super::state::State::take_objection]).
+    // verify this round's proposal (see [super::state::State::try_verify]).
     objected: bool,
 }
 
