@@ -47,6 +47,11 @@ const ROWS_CONSENSUS = [
   { id: 'v3', label: 'Validator 3' },
   { id: 'v4', label: 'Validator 4' },
 ];
+// In the decoupled figures the API node doubles as a producer, so those
+// figures label the row accordingly.
+const ROWS_PRODUCER = ROWS_CONSENSUS.map(row =>
+  row.id === 'api' ? { id: 'api', label: 'API / Producer' } : row
+);
 const VALIDATORS = ['leader', 'v2', 'v3', 'v4'];
 
 const FIGURES = {
@@ -80,7 +85,7 @@ const FIGURES = {
 
   'multimmit-fig-lanes': {
     height: 464,
-    rows: ROWS_CONSENSUS,
+    rows: ROWS_PRODUCER,
     rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
@@ -114,7 +119,7 @@ const FIGURES = {
 
   'multimmit-fig-checkpoint': {
     height: 464,
-    rows: ROWS_CONSENSUS,
+    rows: ROWS_PRODUCER,
     rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
@@ -138,7 +143,7 @@ const FIGURES = {
         { k: 'mesh', among: VALIDATORS, t: 3, d: 1 },
         { k: 'mark', t: 4, label: 'finalized', sub: 'block + 3δ' },
         { k: 'mark', t: 5, sub: 'fig. 1', ghost: true },
-        { k: 'mark', t: 7, sub: 'fig. 2', ghost: true },
+        { k: 'mark', t: 7, sub: 'fig. 3', ghost: true },
       ],
       token: [],
     }],
@@ -146,7 +151,7 @@ const FIGURES = {
 
   'multimmit-fig-extend': {
     height: 464,
-    rows: ROWS_CONSENSUS,
+    rows: ROWS_PRODUCER,
     rowTop: 96,
     rowGap: 57,
     axis: { min: -0.4, max: 7.6, origin: null },
@@ -167,9 +172,9 @@ const FIGURES = {
         { k: 'fan', from: VALIDATORS, to: 'api', t: 2, d: 1, style: 'bg' },
         { k: 'fan', from: 'api', to: VALIDATORS, t: 3, d: 1, style: 'bg' },
         { k: 'mark', t: 3, label: 'finalized', sub: 'block + 2δ' },
-        { k: 'mark', t: 4, sub: 'fig. 3', ghost: true },
+        { k: 'mark', t: 4, sub: 'fig. 5', ghost: true },
         { k: 'mark', t: 5, sub: 'fig. 1', ghost: true },
-        { k: 'mark', t: 7, sub: 'fig. 2', ghost: true },
+        { k: 'mark', t: 7, sub: 'fig. 3', ghost: true },
       ],
       token: [],
     }],
@@ -508,6 +513,35 @@ const FIGURES = {
           { k: 'arc', row: 'mm', t: (i + 1) * 2 / 3, d: 2, faint: true }
         )),
         { k: 'counter', row: 'mm', unit: 'blocks' },
+      ],
+      token: [],
+    }],
+  },
+
+  'multimmit-fig-cadence': {
+    height: 320,
+    plotX0: 214,
+    rows: [
+      { id: 'ua', label: 'API node A' },
+      { id: 'ub', label: 'API node B' },
+      { id: 'lead', label: 'Leader' },
+    ],
+    rowTop: 90,
+    rowGap: 60,
+    axis: { min: -0.4, max: 8, origin: null },
+    variants: [{
+      tag: 'proposals every 2δ, arrival timing decides the wait',
+      end: 8,
+      phases: [],
+      events: [
+        ...[0, 2, 4, 6, 8].map(t => ({ k: 'emit', row: 'lead', t, color: RED })),
+        { k: 'msg', from: 'ub', to: 'lead', t: 0.85, d: 1, style: 'tx' },
+        { k: 'note', t: 0.85, tx: 0.95, y: 197, lines: ['tx B'], size: 15, fill: 'black' },
+        { k: 'msg', from: 'lead', to: 'lead', t: 1.85, d: 0.15, style: 'bad' },
+        { k: 'note', t: 1.85, tx: 1.3, y: 254, lines: ['tx B waits almost nothing'], size: 15 },
+        { k: 'msg', from: 'ua', to: 'lead', t: 1.15, d: 1, style: 'tx', label: 'tx A' },
+        { k: 'msg', from: 'lead', to: 'lead', t: 2.15, d: 1.85, style: 'bad' },
+        { k: 'note', t: 2.15, tx: 5.0, y: 254, lines: ['tx A waits almost 2δ for the next proposal'], size: 15 },
       ],
       token: [],
     }],

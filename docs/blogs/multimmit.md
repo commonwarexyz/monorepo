@@ -15,15 +15,15 @@ For users, a blockchain's speed is the time from submitting a transaction to see
 
 Decoupling transaction dissemination from consensus removes this bottleneck. Every validator becomes a *producer* and streams its own transaction data in parallel, while consensus orders small references to that data. The network can then finalize transactions at roughly the rate validators can *ingress* them instead of the rate one leader can *egress* them. This split is [now standard among high-throughput designs](https://hackmd.io/@patrickogrady/rys8mdl5p).
 
-However, decoupling has typically increased finality latency. Consensus cannot finalize a reference to data that the network cannot recover. Existing protocols either certify each block before it can be referenced or allow immediate references and require voters to fetch missing data. The first approach adds certificate round trips to every transaction. The second is faster until a producer misbehaves, at which point voters must fetch before they can vote.
+However, decoupling has typically increased finality latency. Consensus cannot finalize a reference to data that the network cannot recover. Existing protocols either certify each block before it can be referenced or reference blocks immediately and pay when data is missing. The first approach adds certificate round trips to every transaction. The second is faster until data is missing, at which point voters must fetch it or the protocol finalizes only the prefix before the gap.
 
-Today, we're sharing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that avoids both delays. Each producer extends its own chain of transaction blocks without waiting on other producers. Consensus references blocks as soon as they arrive, and the votes already being cast establish availability. No block waits for a certificate and no voter waits to fetch missing data. Votes can also include blocks the leader missed, allowing every producer to add to the finalized log in each view.
+Today, we're sharing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that avoids both delays. Each producer extends its own chain of transaction blocks without waiting on other producers. Consensus references blocks as soon as they arrive, and the votes already being cast establish availability. No block waits for a certificate, no voter waits to fetch missing data, and a withheld block delays finality only on its own chain. Votes can also include blocks the leader missed, allowing every producer to add to the finalized log in each view.
 
-With Multimmit, an honest producer's block finalizes $2\delta$ after broadcast in the best case and $3\delta$ in expectation, even when up to $f$ producers are faulty (assuming $n \geq 5f+1$). Unlike the latency figures usually reported for consensus, this timer starts at broadcast, not at a later leader proposal. Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing two-round protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), reach it only for designated leader blocks. Multimmit reaches that bound for blocks from every honest producer without giving up concurrent dissemination: the best of both worlds.
+With Multimmit, an honest producer's block finalizes $2\delta$ after broadcast in the best case and $3\delta$ in expectation, even when up to $f$ producers are faulty (assuming $n \geq 5f+1$). Unlike the latency figures usually reported for consensus, this timer starts at broadcast, not at a later leader proposal. Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), provide two-delay finality only for designated leader blocks. Multimmit extends it to every honest producer's blocks at once without giving up concurrent dissemination: the best of both worlds.
 
 ## The Ride to the Leader
 
-Consider a typical deployed protocol with one proposer at a time and [Simplex](https://eprint.iacr.org/2023/463)-style notarize and finalize rounds. Figures 1, 2, 4, and 5 measure from transaction submission and track the transaction through finality.
+Consider a typical deployed protocol with one proposer at a time and [Simplex](https://eprint.iacr.org/2023/463)-style notarize and finalize rounds. Figures 1, 3, 5, and 6 measure from transaction submission and track the transaction through finality.
 
 ```{=html}
 <style>
@@ -34,6 +34,10 @@ Consider a typical deployed protocol with one proposer at a time and [Simplex](h
 
   .cw-loop-dag {
     aspect-ratio: 1024 / 424;
+  }
+
+  .cw-loop-cadence {
+    aspect-ratio: 1024 / 320;
   }
 
   .cw-loop-dagstructure {
@@ -63,17 +67,31 @@ Consider a typical deployed protocol with one proposer at a time and [Simplex](h
     }
   </style>
 </noscript>
-<div id="multimmit-fig-simplex" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of a single-proposer protocol. A transaction travels from the user to an API node, is forwarded to the leader, and is broadcast in the leader's block. Two rounds of voting follow. Finality lands three message delays after the block broadcast, five after submission.">
-  <noscript>This figure animates a transaction's path through a single-proposer protocol: user to API node, API node to leader, then the leader's block broadcast followed by notarize and finalize vote rounds. The transaction spends 2δ reaching the block that carries it, then 3δ more to finality.</noscript>
+<div id="multimmit-fig-simplex" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of a single-proposer protocol. A transaction travels from the user to an API node, is forwarded to a leader that is ready to propose, and is broadcast in the leader's block. Two rounds of voting follow. Under this favorable alignment, finality lands three message delays after the block broadcast and five after submission. An arbitrary arrival may wait up to two additional message delays for the leader's next proposal.">
+  <noscript>This figure animates a transaction's path through a single-proposer protocol: user to API node, API node to a leader that is ready to propose, then the leader's block broadcast followed by notarize and finalize vote rounds. Under this favorable alignment, the transaction spends 2δ reaching the block that carries it, then 3δ more reaching finality. An arbitrary arrival may wait up to another 2δ for the leader's next proposal.</noscript>
 </div>
 <script type="module" src="multimmit.loops.js"></script>
 ```
 
 ::: {.image-caption}
-Figure 1: A transaction's path through a single-proposer protocol, measured in message delays ($\delta$) since submission. Figures 1, 2, 4, and 5 use the same axis and assume there is no wait for the next proposal or production event. Consensus papers typically start their timers at "block", after the user has already waited $2\delta$.
+Figure 1: A transaction's path through a single-proposer protocol, measured in message delays ($\delta$) since submission. Figures 1, 3, 5, and 6 use the same axis and omit the wait for the next proposal or producer block. Figure 1 therefore shows favorable alignment: the transaction reaches the leader just as it is ready to propose. Figure 2 isolates the omitted proposal wait, while a producer controls its own block cadence. Consensus papers typically start their timers at "block", after the user has already waited $2\delta$.
 :::
 
-After the leader broadcasts a block, finality takes two rounds of voting. A recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) reduces this to one round when $n \geq 5f+1$ (Multimmit uses the same consensus skeleton in Figures 4 and 5). Before the broadcast, however, the transaction must reach an API node, travel again to the leader, and wait for the leader's next proposal. This time is usually excluded from reported consensus latency. The leader must then send every transaction back out inside its block, making its egress the throughput limit for the entire network. One-round voting only improves the part after the broadcast.
+After the leader broadcasts a block, finality takes two rounds of voting. A recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) reduces this to one round when $n \geq 5f+1$ (Multimmit uses the same consensus skeleton in Figures 5 and 6).
+
+Before the broadcast, however, the transaction must reach an API node, travel again to the leader, and wait for the leader's next proposal. Because proposals are $2\delta$ apart, that wait alone adds $0$ to $2\delta$, or $\delta$ in expectation. Figure 2 isolates this scheduling penalty by placing two identical final hops on opposite sides of the same proposal.
+
+```{=html}
+<div id="multimmit-fig-cadence" class="cw-loop cw-loop-cadence" role="img" aria-label="Animated diagram of proposal arrival timing. Three rows: API node A, API node B, and the leader, whose proposals are spaced two message delays apart and drawn as red squares. Each API node forwards a transaction to the leader. Transaction B lands just before a proposal and waits almost nothing. Transaction A lands just after the same proposal, and a red arrow shows it waiting almost two message delays for the next one.">
+  <noscript>This figure compares two final-hop arrivals against the same proposal schedule, one proposal every 2δ. A transaction reaching the leader just before a proposal waits almost nothing, while one arriving just after waits almost 2δ. Averaged over arrival times, the wait is δ.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 2: One proposal schedule, two arrival times. Both transactions have already reached an API node and take $\delta$ to travel from there to the leader. Transaction B arrives just before a proposal and enters it almost immediately. Transaction A arrives just after the same proposal and waits almost $2\delta$ before the leader can broadcast a block carrying it. Averaged over arrival times, the wait is $\delta$.
+:::
+
+That wait is usually excluded from reported consensus latency. The leader must then send every transaction back out inside its block, making its egress the throughput limit for the entire network. One-round voting only improves the part after the broadcast.
 
 ## Removing the Leader Bottleneck
 
@@ -90,7 +108,7 @@ The catch is that a leader may only reference a *certified* tip. Validators retu
 ```
 
 ::: {.image-caption}
-Figure 2: Producer lanes with certified tips, using the same Simplex-style two-round consensus as Figure 1. Like Autobahn's fast path, finality takes three message delays after the proposal. The transaction batch (green) crosses the network once. Its PoA arrives two message delays later, after which the leader's block may reference it. The leader block remains red but now contains only references.
+Figure 3: Producer lanes with certified tips, using the same Simplex-style two-round consensus as Figure 1. Like Autobahn's fast path, finality takes three message delays after the proposal. The transaction batch (green) crosses the network once. Its PoA arrives two message delays after the batch does, after which the leader's block may reference it. The leader block remains red but now contains only references.
 :::
 
 Why not reference blocks before they are certified? Autobahn sketches this as an optimization: a voter missing a referenced batch delays its vote and fetches the batch from the leader. A faulty producer can disclose its latest batch only to the leader, forcing the leader to relay it to every voter before the view can progress. Across faulty producers, this creates $\Omega(n^2)$ batch transmissions through the leader's egress (the same bottleneck producer lanes were introduced to remove).
@@ -106,7 +124,7 @@ Raptr uses reputation to limit this attack. Voters blame the authors of missing 
 ```
 
 ::: {.image-caption}
-Figure 3: Easy spoiling. A Raptr leader block carries one sequence of batches from many producers, and each voter supports the longest prefix whose data it holds. When P2 withholds its batch, almost every vote stops at the gap. The proposal finalizes prefix 1 even though the batches from P3 through P6 are available. These batches eventually land through the certified slow path. Multimmit votes (Figure 6) report a position for each chain, so a withheld block only lowers the position reported for its own chain.
+Figure 4: Easy spoiling. A Raptr leader block carries one sequence of batches from many producers, and each voter supports the longest prefix whose data it holds. When P2 withholds its batch, almost every vote stops at the gap. The proposal finalizes prefix 1 even though the batches from P3 through P6 are available. These batches eventually land through the certified slow path. Multimmit votes (Figure 7) report a position for each chain, so a withheld block only lowers the position reported for its own chain.
 :::
 
 [Mysticeti](https://arxiv.org/abs/2310.14821) makes the same tradeoff for a DAG by referencing uncertified vertices. Dropping just 1% of egress traffic at 5 of 100 validators has been [observed](https://arxiv.org/abs/2405.20488) to increase its median latency by an order of magnitude at moderate load. DAG deployments use reputation for the same reason and have scored anchors (their leader equivalents) since [Shoal](https://arxiv.org/abs/2306.03058). We return to DAGs below.
@@ -115,23 +133,23 @@ Figure 3: Easy spoiling. A Raptr leader block carries one sequence of batches fr
 
 ## Multimmit: Checkpoint First, Certify in the Background
 
-Multimmit keeps producer lanes but makes each one a chain. Every producer signs its own sequence of transaction blocks, with each block referencing its parent by hash. DA-votes and PoAs still form for every block, as in Figure 2, but consensus does not wait for them. A producer may run up to $d$ blocks ahead of its last certified block, leaving a short uncertified tail while everything below it remains recoverable.
+Multimmit keeps producer lanes but makes each one a chain. Every producer signs its own sequence of transaction blocks, with each block referencing its parent by hash. DA-votes and PoAs still form for every block, as in Figure 3, but consensus does not wait for them. A producer may run up to $d$ blocks ahead of its last certified block, leaving a short uncertified tail while everything below it remains recoverable.
 
-Multimmit is designed around one rule: **a faulty participant other than the leader should only be able to significantly delay the finalization of blocks in its own chain**. Its votes have two parts: proposal-relative positions and extensions.
+Multimmit is designed around one rule: **a faulty participant other than the leader should only be able to significantly delay the finalization of blocks in its own chain**. Its votes have two parts, proposal-relative positions and extensions.
 
-*Proposal-relative voting.* The leader *checkpoints* one tip for every chain, whether it is certified or not. Each reference costs one hash. A validator does not fetch missing blocks. Its vote reports how far it can support each chain in the proposal (the blocks it holds and has DA-voted). A chain finalizes through the highest position supported by $3f+1$ votes, and the next leader must extend the highest position supported by $f+1$ votes. If a producer withholds a block, only its own reported position falls. Other chains do not wait or fetch, and the proposal is not spoiled. A vote supporting every proposed tip remains constant size.
+*Proposal-relative voting.* The leader *checkpoints* one tip for every chain, whether it is certified or not. Each reference costs one hash. A validator does not fetch missing blocks. Its vote reports how far it can support each chain in the proposal (the blocks it holds and has DA-voted). A chain finalizes through the highest position supported by $3f+1$ votes, and the next leader must extend the highest position supported by $f+1$ votes. If a producer withholds a block, only its own reported position falls. Other chains do not wait or fetch, and the proposal is not spoiled. Supporting every proposed tip takes constant space. Lower positions are encoded only as deviations from full support.
 
 ```{=html}
-<div id="multimmit-fig-checkpoint" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's checkpoint path. The API node broadcasts a transaction block, the leader references it in the next leader block before any certificate forms, and one round of votes finalizes it three message delays after the block broadcast, four after submission. Dashed markers show where Figures 1 and 2 finalized on the same axis.">
+<div id="multimmit-fig-checkpoint" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's checkpoint path. The API node broadcasts a transaction block, the leader references it in the next leader block before any certificate forms, and one round of votes finalizes it three message delays after the block broadcast, four after submission. Dashed markers show where Figures 1 and 3 finalized on the same axis.">
   <noscript>This figure animates Multimmit's checkpoint path: the leader block references the uncertified transaction block and one vote round finalizes it at block + 3δ, while DA-votes and the PoA form in the background.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 4: Transaction block $b$ (green, like the batch in Figure 2) reaches the leader before its proposal and is checkpointed before a PoA forms. Minimmit's single voting round finalizes $b$ $3\delta$ after its broadcast. DA-votes and the PoA (faint arrows) form in the background. The dashed markers show the finality times from Figures 1 and 2. No transaction data passes through the leader.
+Figure 5: Transaction block $b$ (green, like the batch in Figure 3) reaches the leader before its proposal and is checkpointed before a PoA forms. Minimmit's single voting round finalizes $b$ $3\delta$ after its broadcast. DA-votes and the PoA (faint arrows) form in the background. The dashed markers show the finality times from Figures 1 and 3. No transaction data passes through the leader.
 :::
 
-*Extension votes.* A vote may also attest to as many as $e$ fresh blocks *beyond* the proposed tips, anchored at the voter's reported position. A block that misses the leader's proposal can still finalize in the same view if it reaches voters before they vote. Because each extension is anchored to the position reported by that voter, junk or stale entries cannot prevent correct voters from attaching recent blocks. A leader cannot finalize its own block while excluding a well-disseminated honest block. It must allow that block to finalize or prevent the entire view from finalizing.
+*Extension votes.* A vote may also attest to as many as $e$ fresh blocks *beyond* the proposed tips, anchored at the voter's reported position. A block that misses the leader's proposal can still finalize in the same view if it reaches voters before they vote. A faulty participant can fill a proposal or vote with junk or stale entries, but each extension is anchored at its own voter's reported position, so correct voters can always attach recent blocks. A leader cannot finalize its own block while excluding a well-disseminated honest block. It must allow that block to finalize or prevent the entire view from finalizing.
 
 ```{=html}
 <div id="multimmit-fig-extend" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's extension path. The transaction block and the leader block cross on the wire, so the leader block cannot reference it. Voters attest the block in their votes anyway, finalizing it two message delays after the block broadcast, three after submission. Dashed markers show where the earlier figures finalized on the same axis.">
@@ -140,7 +158,7 @@ Figure 4: Transaction block $b$ (green, like the batch in Figure 2) reaches the 
 ```
 
 ::: {.image-caption}
-Figure 5: Transaction block $b$ crosses the leader block on the wire and misses the proposal, but reaches validators before they vote. Extension votes attest $b$ directly, finalizing it $2\delta$ after its broadcast. Certification continues in the background (faint arrows) and finishes after $b$ has already finalized.
+Figure 6: Transaction block $b$ crosses the leader block on the wire and misses the proposal, but reaches validators before they vote. Extension votes attest $b$ directly, finalizing it $2\delta$ after its broadcast. Certification continues in the background (faint arrows) and finishes after $b$ has already finalized.
 :::
 
 From the user's perspective, both paths are simple: submit to an API node, let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before it could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation (and by $t+2\delta$ with favorable timing). The two-delay case is optimal.
@@ -149,7 +167,7 @@ If we started the timer at the leader's proposal, as consensus papers often do, 
 
 How does one round of votes produce a single ordering? Each Multimmit vote carries an independent position for every chain. Voters do not vote on how blocks from different chains are interleaved. That ordering is computed afterwards from the finalized tips, which prevents a gap in one chain from limiting any other chain.
 
-An L-QC (a quorum certificate on the leader block) aggregates any $n-f$ votes for it. For each chain, sort the positions reported by those votes. Discarding the top $3f$ positions gives the finalized tip. Discarding only the top $f$ gives the tip that the next leader must extend. Quorum intersection keeps the second tip at or above the first. After applying these rules independently to every chain, the finalized blocks enter the log in a fixed sweep.
+An L-QC (a quorum certificate on the leader block) aggregates any $n-f$ votes for it. For each chain, sort the positions reported by those votes. Discarding the top $3f$ positions gives the finalized tip. Discarding only the top $f$ gives the tip that the next leader must extend. Quorum intersection ensures that the extend tip derived from any L-QC is at least as high as the tip finalized by any other L-QC for the same view. After applying these rules independently to every chain, the finalized blocks enter the log in a fixed sweep.
 
 ```{=html}
 <div id="multimmit-fig-certificate" class="cw-loop cw-loop-certificate" role="img" aria-label="Animated diagram of Multimmit's certificate rules, drawn at n equals 11 and f equals 2. Left: the leader block is drawn as a red container holding one compact coordinate row per chain, chains 1 through 4, each a gray previous tip followed by as many green proposed entries as the leader has seen for that chain, and chain 1's coordinate is zoomed below it: blocks 1B through 1E proposed above its previous tip 1A. Nine votes stack as dots above the entries. Discarding the top six votes finalizes 1D in gold, and discarding only the top two marks 1E safe to extend in blue. Right: a four-chain grid where the finalized tips of every chain are stamped into a single order, each chain's first new block before any chain's second, with chain 1's column carrying the same gold 1D and blue 1E as the zoomed coordinate.">
@@ -158,7 +176,7 @@ An L-QC (a quorum certificate on the leader block) aggregates any $n-f$ votes fo
 ```
 
 ::: {.image-caption}
-Figure 6: Converting votes into an ordering at $n=11$, $f=2$. The leader block (left) contains one coordinate for each producer chain. Chain 1 is expanded below it, from the previous tip 1A through proposed blocks 1B-1E. An L-QC contains $n-f=9$ votes, each reporting its highest supported block on every chain. Dropping the top $3f=6$ positions finalizes 1D (gold) with $3f+1=7$ votes. Voters missing newer chain 1 blocks lower only this result. Dropping the top $f=2$ positions gives the safe-to-extend tip 1E (blue), which prevents the next leader from orphaning 1D. These rules run independently for every chain. The resulting tips enter the log (right) in a fixed sweep, with each chain's first new block ordered before any chain's second. Gray cells were ordered previously.
+Figure 7: Converting votes into an ordering at $n=11$, $f=2$. The leader block (left) contains one coordinate for each producer chain. Chain 1 is expanded below it, from the previous tip 1A through proposed blocks 1B-1E. An L-QC contains $n-f=9$ votes, each reporting its highest supported block on every chain. Dropping the top $3f=6$ positions finalizes 1D (gold) with $3f+1=7$ votes. Voters missing newer chain 1 blocks lower only this result. Dropping the top $f=2$ positions gives the safe-to-extend tip 1E (blue), which prevents the next leader from orphaning 1D. These rules run independently for every chain. The resulting tips enter the log (right) in a fixed sweep, with each chain's first new block ordered before any chain's second. Gray cells were ordered previously.
 :::
 
 At $n=5f+1$, these thresholds provide three other useful properties:
@@ -178,7 +196,7 @@ DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](ht
 ```
 
 ::: {.image-caption}
-Figure 7: How a DAG mempool is built. Each round, every validator emits a vertex referencing $n-f$ vertices of the previous round. The references are the protocol: they carry availability and voting information, so the ordering logic can read finality out of the lattice.
+Figure 8: How a DAG mempool is built. Each round, every validator emits a vertex referencing $n-f$ vertices of the previous round. The references are the protocol: they carry availability and voting information, so the ordering logic can read finality out of the lattice.
 :::
 
 A reference does not provide finality on its own. The ordering logic designates periodic anchor vertices, and an anchor commits only after later rounds show that enough validators built on top of it. Committing the anchor orders every vertex in its causal history. The remaining vertices wait for a later anchor.
@@ -190,7 +208,7 @@ A reference does not provide finality on its own. The ordering logic designates 
 ```
 
 ::: {.image-caption}
-Figure 8: Finality in a Mysticeti-style three-round pattern. Anchor $A$ enters in round $r$, gathers support (gold references) in $r+1$, and commits when round $r+2$ arrives. Its causal history (gold) is ordered with it, while every other vertex waits for a later anchor. In a certified DAG, each round also requires a certificate round trip.
+Figure 9: Finality in a Mysticeti-style three-round pattern. Anchor $A$ enters in round $r$, gathers support (gold references) in $r+1$, and commits when round $r+2$ arrives. Its causal history (gold) is ordered with it, while every other vertex waits for a later anchor. In a certified DAG, each round also requires a certificate round trip.
 :::
 
 This coupling also controls production. A validator may only create a round-$r+1$ vertex after receiving $n-f$ round-$r$ vertices, so the network produces in lockstep (deployments add round timeouts to keep the DAG well connected). In certified DAGs like Narwhal, a certificate round trip separates each pair of consecutive vertices. Uncertified DAGs like Mysticeti remove that round trip but reintroduce fetching. Because every referenced vertex is a dependency, a validator must fetch a missing vertex before it can process anything built on top of it.
@@ -202,10 +220,10 @@ This coupling also controls production. A validator may only create a round-$r+1
 ```
 
 ::: {.image-caption}
-Figure 9: The fetch problem. Validator 3 sends its round-$(r+1)$ vertex only to validator 2, whose next vertex references it (red edge). Validators 1 and 4 cannot use validator 2's vertex without its full ancestry, leaving them with only two of the $n-f=3$ round-$(r+2)$ vertices needed to enter round $r+3$. They must fetch the withheld vertex first, delaying the next round for everyone. Larger DAGs can route around an isolated gap, but each gap still puts a fetch on someone's critical path. At real block rates, sustained loss creates gaps in nearly every round (producing the order-of-magnitude slowdown measured above). A Multimmit reference never requires a download. Voters report how far they can support each chain and vote on schedule.
+Figure 10: The fetch problem. Validator 3 sends its round-$(r+1)$ vertex only to validator 2, whose next vertex references it (red edge). Validators 1 and 4 cannot use validator 2's vertex without its full ancestry, leaving them with only two of the $n-f=3$ round-$(r+2)$ vertices needed to enter round $r+3$. They must fetch the withheld vertex first, delaying the next round for everyone. Larger DAGs can route around an isolated gap, but each gap still puts a fetch on someone's critical path. At real block rates, sustained loss creates gaps in nearly every round (producing the order-of-magnitude slowdown measured above). A Multimmit reference never requires a download. Voters report how far they can support each chain and vote on schedule.
 :::
 
-Whether the protocol waits for fetches or certificates, a collective step limits every producer's output. Figure 10 compares that pace with a Multimmit producer paying the same certificate round trips.
+Whether the protocol waits for fetches or certificates, a collective step limits every producer's output. Figure 11 compares that pace with a Multimmit producer paying the same certificate round trips.
 
 ```{=html}
 <div id="multimmit-fig-dag" class="cw-loop cw-loop-dag" role="img" aria-label="Animated comparison of block production over eight message delays. A DAG producer emits a vertex, waits for a two-delay certificate round trip, and only then emits the next, producing four vertices. A Multimmit producer emits a block every two-thirds of a message delay with certificate round trips overlapping in the background, producing thirteen blocks in the same time.">
@@ -214,10 +232,10 @@ Whether the protocol waits for fetches or certificates, a collective step limits
 ```
 
 ::: {.image-caption}
-Figure 10: One producer with identical $2\delta$ certificate round trips. The DAG producer waits for the previous round's certificates before creating its next vertex (assuming every other producer's certificate arrives with its votes, since spreading them costs a certified DAG a third delay per round). The Multimmit producer runs as many as $d$ blocks ahead of certification, shown here filling a $d=3$ window under load.
+Figure 11: One producer with identical $2\delta$ certificate round trips. The DAG producer waits for the previous round's certificates before creating its next vertex (assuming every other producer's certificate arrives with its votes, since spreading them costs a certified DAG a third delay per round). The Multimmit producer runs as many as $d$ blocks ahead of certification, shown here filling a $d=3$ window under load.
 :::
 
-Multimmit chains contain no cross-producer references. Each producer extends its own chain as transactions arrive and can run as many as $d$ blocks ahead of its last certified block. Certificates form in the background. Under sustained load, a chain can grow by $d$ blocks per certificate round trip instead of one.
+In Figure 2, consensus fixes the leader's proposal cadence. In Multimmit, each producer controls its own block cadence. Its chain contains no cross-producer references, so it can extend as transactions arrive and run as many as $d$ blocks ahead of its last certified block. Certificates form in the background. Under sustained load, a chain can grow by $d$ blocks per certificate round trip instead of one.
 
 Consensus also proceeds without waiting for certification. The leader checkpoints the blocks it has received, and voters extend beyond anything the leader missed. Producers continue building through leader failures and view changes. The first successful view checkpoints the backlog.
 
@@ -228,11 +246,11 @@ Consensus also proceeds without waiting for certification. The leader checkpoint
 ```
 
 ::: {.image-caption}
-Figure 11: Two consensus views time out between the dashed markers. The producer keeps emitting blocks and forming certificates without the leader. The first successful view checkpoints the backlog, and one round of votes finalizes it. Blocks emitted after that proposal wait for the next view.
+Figure 12: Two consensus views time out between the dashed markers. The producer keeps emitting blocks and forming certificates without the leader. The first successful view checkpoints the backlog, and one round of votes finalizes it. Blocks emitted after that proposal wait for the next view.
 :::
 
 ## Every Producer, Every View
 
-Multimmit runs transaction dissemination and consensus concurrently. Blocks enter the ordering process as soon as they reach validators, consensus votes establish their availability, and a faulty producer only delays its own chain. The [specification](https://arxiv.org/abs/2607.21021) includes proofs of consistency and liveness, accounts for the availability of every ordered block, and gives the exact extension threshold for every $n$ (with optimal rules at $n=5f+1$).
+Multimmit runs transaction dissemination and consensus concurrently. Blocks enter the ordering process as soon as they reach validators, consensus votes establish their availability, and a faulty producer only delays its own chain. The [specification](https://arxiv.org/abs/2607.21021) includes proofs of consistency and liveness, accounts for the availability of every ordered block, and gives the exact vote threshold for finalizing extension blocks at every $n$ (with optimal rules at $n=5f+1$).
 
 Submit a transaction to any producer. One round of votes later, it is final.
