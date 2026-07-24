@@ -104,21 +104,18 @@ where
 
 /// Index journal positions for each retained index.
 ///
-/// Positions are split across two maps to keep the common case cheap: `first` holds the sole
-/// position for every index, and `extra` holds the additional positions of indices written via
-/// [crate::archive::MultiArchive::put_multi]. An index appears in `extra` only if it also appears
-/// in `first`, which this type is solely responsible for upholding.
+/// An index appears in `extra` only if it also appears in `first`.
 #[derive(Default)]
 struct Positions {
-    /// The first position stored at each index.
+    /// The first position at each index.
     first: BTreeMap<u64, u64>,
 
-    /// Any subsequent positions stored at an index, in write order.
+    /// Any later positions at an index, in write order.
     extra: BTreeMap<u64, Vec<u64>>,
 }
 
 impl Positions {
-    /// Records `position` as the newest position stored at `index`.
+    /// Adds `position` to `index`.
     fn insert(&mut self, index: u64, position: u64) {
         match self.first.entry(index) {
             btree_map::Entry::Vacant(e) => {
@@ -130,17 +127,17 @@ impl Positions {
         }
     }
 
-    /// Returns the first position stored at `index`, if any.
+    /// Returns the first position at `index`.
     fn first(&self, index: u64) -> Option<u64> {
         self.first.get(&index).copied()
     }
 
-    /// Returns whether anything is stored at `index`.
+    /// Returns whether `index` has any position.
     fn contains(&self, index: u64) -> bool {
         self.first.contains_key(&index)
     }
 
-    /// Returns the number of positions stored at `index`.
+    /// Returns the number of positions at `index`.
     fn count(&self, index: u64) -> usize {
         if !self.contains(index) {
             return 0;
@@ -148,7 +145,7 @@ impl Positions {
         1 + self.extra.get(&index).map_or(0, Vec::len)
     }
 
-    /// Iterates over every position stored at `index`, in write order.
+    /// Iterates over the positions at `index`, in write order.
     fn iter(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
         self.first(index).into_iter().chain(
             self.extra
@@ -158,7 +155,7 @@ impl Positions {
         )
     }
 
-    /// Removes every index below `min`, returning how many were removed.
+    /// Removes all indices below `min`, returning the number removed.
     fn prune(&mut self, min: u64) -> u64 {
         let retained = self.first.split_off(&min);
         let pruned = mem::replace(&mut self.first, retained).len();
@@ -166,7 +163,7 @@ impl Positions {
         pruned as u64
     }
 
-    /// Returns the number of indices stored.
+    /// Returns the number of indices.
     fn len(&self) -> usize {
         self.first.len()
     }
