@@ -10,6 +10,7 @@ const PLOT_X1 = 1014;
 
 const RED = '#d9251c';
 const BLUE = '#1f1fd1';
+const BLUE_LIGHT = '#9a9aea';
 const GRAY = '#8a8a8a';
 const FAINT = '#b5b5b5';
 const GOLD = '#b89b37';
@@ -690,8 +691,8 @@ function buildFigure(mount, cfg) {
       const depth = cfg.arcDepth;
       const path = svgEl('path', {
         d: `M ${x0} ${y + 9} C ${x0} ${y + depth}, ${x1} ${y + depth}, ${x1} ${y + 9}`,
-        fill: 'none', stroke: ev.faint ? FAINT : BLUE,
-        'stroke-width': ev.faint ? 1.4 : 2, opacity: ev.faint ? 0.55 : 0.85,
+        fill: 'none', stroke: ev.faint ? BLUE_LIGHT : BLUE,
+        'stroke-width': ev.faint ? 1.6 : 2, opacity: ev.faint ? 0.7 : 0.85,
       });
       dyn.appendChild(path);
       const length = path.getTotalLength();
