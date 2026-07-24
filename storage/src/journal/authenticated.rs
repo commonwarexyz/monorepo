@@ -16,7 +16,7 @@ use crate::{
     Context,
     journal::{
         Error as JournalError,
-        contiguous::{Contiguous, Many, Mutable},
+        contiguous::{Contiguous, Many, Mutable, Snapshot},
     },
     merkle::{
         self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
@@ -33,6 +33,7 @@ use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use core::{
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
@@ -676,33 +677,199 @@ where
         max_ops: NonZeroU64,
         inactive_peaks: usize,
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        let bounds = self.journal.bounds();
-
-        if *historical_leaves > bounds.end {
-            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
-        }
-        if start_loc >= historical_leaves {
-            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
-        }
-
-        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
-
-        let hasher = self.hasher.clone();
-        let proof = self
-            .merkle
-            .historical_range_proof(
-                &hasher,
-                historical_leaves,
-                start_loc..end_loc,
-                inactive_peaks,
-            )
-            .await?;
-
-        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
-        let ops = self.journal.read_many(&positions).await?;
-
-        Ok((proof, ops))
+        historical_proof_over(
+            &self.journal,
+            &self.merkle,
+            &self.hasher,
+            historical_leaves,
+            start_loc,
+            max_ops,
+            inactive_peaks,
+        )
+        .await
     }
+}
+
+/// Owned immutable view of an authenticated journal with bounds frozen at capture.
+///
+/// A view is produced by [Journal::view]. It owns snapshots of the item journal and the
+/// Merkle structure, so it stays readable — and its proofs stay valid — across concurrent
+/// appends, syncs, and prunes of the source journal. It exposes no mutation.
+///
+/// Rewinding the source journal in place while a view is alive is forbidden: reads from the
+/// rewound range may observe unspecified contents.
+#[commonware_macros::stability(ALPHA)]
+pub struct View<F, E, R, H>
+where
+    F: Family,
+    E: Context,
+    R: Contiguous,
+    H: Hasher,
+{
+    /// Owned item-journal snapshot.
+    items: R,
+
+    /// Owned Merkle view (captured in-memory nodes + node-journal snapshot).
+    nodes: merkle::full::View<F, E, H::Digest>,
+
+    /// Hasher (with bagging) used for proof construction.
+    hasher: StandardHasher<H>,
+}
+
+impl<F, E, R, H> View<F, E, R, H>
+where
+    F: Family,
+    E: Context,
+    R: Contiguous,
+    H: Hasher,
+{
+    /// Returns the Location one past the last item visible to this view.
+    pub fn size(&self) -> Location<F> {
+        Location::new(self.items.bounds().end)
+    }
+
+    /// Generate a proof of inclusion for items starting at `start_loc`, against this view's
+    /// frozen size. Semantics match [Journal::proof].
+    pub async fn proof(
+        &self,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<R::Item>), Error<F>> {
+        self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
+            .await
+    }
+
+    /// Generate a historical proof with respect to the state of the Merkle structure when it
+    /// had `historical_leaves` leaves. Semantics match [Journal::historical_proof], bounded by
+    /// this view's frozen size.
+    pub async fn historical_proof(
+        &self,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<R::Item>), Error<F>> {
+        historical_proof_over(
+            &self.items,
+            &self.nodes,
+            &self.hasher,
+            historical_leaves,
+            start_loc,
+            max_ops,
+            inactive_peaks,
+        )
+        .await
+    }
+}
+
+impl<F, E, R, H> Contiguous for View<F, E, R, H>
+where
+    F: Family,
+    E: Context,
+    R: Contiguous<Item: Send>,
+    H: Hasher,
+{
+    type Item = R::Item;
+
+    fn bounds(&self) -> Range<u64> {
+        self.items.bounds()
+    }
+
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
+        self.items.read(position)
+    }
+
+    fn read_many(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
+        self.items.read_many(positions)
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<Self::Item> {
+        self.items.try_read_sync(position)
+    }
+
+    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+        self.items.try_read_many_sync(positions)
+    }
+
+    fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> impl Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send, JournalError>,
+    > + Send {
+        self.items.replay(start_pos, buffer)
+    }
+}
+
+impl<F, E, C, H, S> Journal<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Snapshot<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Capture an owned immutable [View] of the journal.
+    ///
+    /// The view's bounds are frozen at capture: it does not observe later mutations and stays
+    /// readable across concurrent appends, syncs, and prunes of this journal.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn view(mut self) -> Result<(Self, View<F, E, C::Reader, H>), Error<F>> {
+        let (journal, items) = self.journal.snapshot().await.map_err(Error::Journal)?;
+        self.journal = journal;
+        let (merkle, nodes) = self.merkle.view().await?;
+        self.merkle = merkle;
+        let hasher = self.hasher.clone();
+        Ok((self, View { items, nodes, hasher }))
+    }
+}
+
+/// Shared implementation of [Journal::historical_proof] and [View::historical_proof]: bounds
+/// checks, Merkle range proof, and the item reads for the proven range.
+async fn historical_proof_over<F, H, I, N>(
+    items: &I,
+    nodes: &N,
+    hasher: &StandardHasher<H>,
+    historical_leaves: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+    inactive_peaks: usize,
+) -> Result<(Proof<F, H::Digest>, Vec<I::Item>), Error<F>>
+where
+    F: Family,
+    H: Hasher,
+    I: Contiguous,
+    N: merkle::storage::Storage<F, Digest = H::Digest>,
+{
+    let bounds = items.bounds();
+
+    if *historical_leaves > bounds.end {
+        return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
+    }
+    if start_loc >= historical_leaves {
+        return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
+    }
+
+    let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
+
+    let proof = merkle::verification::historical_range_proof(
+        hasher,
+        nodes,
+        historical_leaves,
+        start_loc..end_loc,
+        inactive_peaks,
+    )
+    .await?;
+
+    let positions: Vec<u64> = (*start_loc..*end_loc).collect();
+    let ops = items.read_many(&positions).await?;
+
+    Ok((proof, ops))
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
@@ -3435,5 +3602,115 @@ mod tests {
     fn test_apply_batch_skips_only_committed_ancestor_items_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_skips_only_committed_ancestor_items_inner::<mmb::Family>);
+    }
+
+    /// A captured view serves byte-identical bytes and proofs while the live journal
+    /// appends, syncs, and prunes past it.
+    async fn test_view_frozen_across_append_and_prune_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal = create_journal_with_ops::<F>(context, "view-frozen", 50).await;
+
+        let size = journal.size();
+        let live_proof;
+        let live_ops;
+        (live_proof, live_ops) = journal.proof(Location::new(0), NZU64!(10), 0).await.unwrap();
+
+        let view;
+        (journal, view) = journal.view().await.unwrap();
+        assert_eq!(view.size(), size);
+
+        // At capture, view output matches the live journal byte-for-byte.
+        let (view_proof, view_ops) = view.proof(Location::new(0), NZU64!(10), 0).await.unwrap();
+        assert_eq!(live_proof.encode(), view_proof.encode());
+        assert_eq!(
+            live_ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            view_ops.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+
+        // Advance the live journal well past the capture: append, sync, and prune.
+        for i in 0..30u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(50)))
+                .await
+                .unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+        assert!(journal.size() > size);
+
+        // The view still serves the same proof and the same bytes, including for locations
+        // the live journal has since pruned.
+        let (view_proof2, view_ops2) = view.proof(Location::new(0), NZU64!(10), 0).await.unwrap();
+        assert_eq!(view_proof.encode(), view_proof2.encode());
+        assert_eq!(
+            view_ops.iter().map(Encode::encode).collect::<Vec<_>>(),
+            view_ops2.iter().map(Encode::encode).collect::<Vec<_>>()
+        );
+        let pruned_reads = view.read_many(&[0, 1, 2]).await.unwrap();
+        assert_eq!(pruned_reads.len(), 3);
+
+        // Historical proofs at or below the frozen size work; anything above is rejected.
+        let (historical, _) = view
+            .historical_proof(size, Location::new(5), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert!(!historical.encode().is_empty());
+        assert!(matches!(
+            view.proof(size, NZU64!(1), 0).await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+        assert!(matches!(
+            view.historical_proof(size + 1, Location::new(0), NZU64!(1), 0)
+                .await,
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_view_frozen_across_append_and_prune_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_view_frozen_across_append_and_prune_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_view_frozen_across_append_and_prune_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_view_frozen_across_append_and_prune_inner::<mmb::Family>);
+    }
+
+    /// Rewinding the source journal into a live view's range is forbidden by the [View]
+    /// contract: reads from the rewound range may observe unspecified contents. This test
+    /// documents the boundary — it asserts only that such reads do not panic and that the
+    /// view's own bounds still hold, never the contents of the rewound range.
+    #[test_traced("INFO")]
+    fn test_view_rewind_unspecified() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal =
+                create_journal_with_ops::<mmr::Family>(context, "view-rewind", 50).await;
+
+            let view;
+            (journal, view) = journal.view().await.unwrap();
+
+            journal = journal.rewind(30).await.unwrap();
+            for i in 0..20u8 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i.wrapping_add(100)))
+                    .await
+                    .unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Reads below the rewind point remain intact; reads in the rewound range are
+            // unspecified (intentionally unchecked beyond "no panic").
+            let below = view.read_many(&[0, 1, 2]).await.unwrap();
+            assert_eq!(below.len(), 3);
+            let _ = view.read(40).await;
+
+            journal.destroy().await.unwrap();
+        });
     }
 }

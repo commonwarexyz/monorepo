@@ -954,6 +954,55 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 }
 
+/// Owned immutable view of a [Merkle] structure with bounds frozen at capture.
+///
+/// Node reads combine the captured in-memory nodes with an owned snapshot of the node
+/// journal, so the view stays readable across concurrent appends, flushes, and prunes of
+/// the source structure. Rewinding the source structure in place while a view is alive is
+/// forbidden: reads from the rewound range may observe unspecified contents.
+#[commonware_macros::stability(ALPHA)]
+pub struct View<F: Family, E: Context, D: Digest> {
+    /// Nodes resident in memory at capture.
+    mem: Arc<Mem<F, D>>,
+
+    /// Owned node-journal snapshot covering nodes flushed before capture.
+    nodes: crate::journal::contiguous::fixed::Reader<'static, E, D>,
+}
+
+impl<F: Family, E: Context, D: Digest> crate::merkle::storage::Storage<F> for View<F, E, D> {
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.mem.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        if let Some(node) = self.mem.get_node(position) {
+            return Ok(Some(node));
+        }
+
+        match self.nodes.read(*position).await {
+            Ok(item) => Ok(Some(item)),
+            Err(JError::ItemPruned(_) | JError::ItemOutOfRange(_)) => Ok(None),
+            Err(e) => Err(Error::Journal(e)),
+        }
+    }
+}
+
+impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
+    /// Capture an owned immutable [View] of the structure.
+    ///
+    /// The view's bounds are frozen at capture: it does not observe later mutations and
+    /// stays readable across concurrent appends, flushes, and prunes.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn view(mut self) -> Result<(Self, View<F, E, D>), Error<F>> {
+        let (journal, nodes) = self.journal.snapshot().await?;
+        self.journal = journal;
+        let mem = Arc::clone(&self.mem);
+        Ok((self, View { mem, nodes }))
+    }
+}
+
 impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.

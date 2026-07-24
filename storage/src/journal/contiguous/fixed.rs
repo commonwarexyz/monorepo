@@ -1729,6 +1729,15 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 }
 
 #[commonware_macros::stability(ALPHA)]
+impl<E: Context, A: CodecFixedShared> super::Snapshot for Journal<E, A> {
+    type Reader = Reader<'static, E, A>;
+
+    async fn snapshot(self) -> Result<(Self, Self::Reader), Error> {
+        Self::snapshot(self).await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A> {
     type Config = Config;
 
