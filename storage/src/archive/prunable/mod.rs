@@ -146,10 +146,10 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
+//!         metadata_partition: "demo-metadata".into(),
 //!         key_partition: "demo-index".into(),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
-//!         metadata_partition: "demo-metadata".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
@@ -175,9 +175,6 @@ mod storage;
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
-///
-/// The `key_partition`, `value_partition`, and `metadata_partition` must be mutually distinct;
-/// initialization rejects any collision.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// Logic to transform keys into their index representation.
@@ -185,6 +182,12 @@ pub struct Config<T: Translator, C> {
     /// [Archive] assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
+
+    /// The partition to use for the archive's durable-size checkpoint.
+    ///
+    /// The checkpoint records how much of each section a completed sync made durable, so recovery
+    /// can tell unacknowledged crash debris apart from damage to data the archive acknowledged.
+    pub metadata_partition: String,
 
     /// The partition to use for the key journal (stores index+key metadata).
     pub key_partition: String,
@@ -194,9 +197,6 @@ pub struct Config<T: Translator, C> {
 
     /// The partition to use for the value blob (stores values).
     pub value_partition: String,
-
-    /// The partition to use for the recovery-watermark metadata.
-    pub metadata_partition: String,
 
     /// The compression level to use for the value blob.
     pub compression: Option<u8>,
@@ -269,8 +269,8 @@ mod tests {
     ) -> Config<FourCap, ()> {
         Config {
             translator: FourCap,
-            key_partition: "test-index".into(),
             metadata_partition: "test-index-metadata".into(),
+            key_partition: "test-index".into(),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             codec_config: (),
@@ -841,8 +841,8 @@ mod tests {
             // derived name.
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "orders".into(),
                 metadata_partition: "orders-watermarks".into(),
+                key_partition: "orders".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "orders-value".into(),
                 codec_config: (),
@@ -878,6 +878,153 @@ mod tests {
         });
     }
 
+    /// Damage to a value the archive acknowledged is loud, because the checkpoint records that
+    /// the value was made durable. The identical damage without a checkpoint (an archive written
+    /// before the archive published one) is indistinguishable from crash debris, so it is
+    /// repaired instead.
+    #[test_traced]
+    fn test_recovery_rejects_damage_below_checkpoint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..2u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            // Damage the checksum of the last acknowledged value.
+            let (blob, size) = context
+                .open(&cfg.value_partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open values");
+            blob.write_at_sync(size - 4, vec![0xFF; 4])
+                .await
+                .expect("Failed to damage value");
+            drop(blob);
+
+            let result =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await;
+            assert!(
+                matches!(result, Err(Error::Journal(JournalError::Corruption(_)))),
+                "expected Corruption, got {result:?}"
+            );
+
+            // Drop the checkpoint to present the same storage as a pre-checkpoint archive.
+            context
+                .remove(&cfg.metadata_partition, None)
+                .await
+                .expect("Failed to remove checkpoint");
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third"), cfg.clone())
+                    .await
+                    .expect("Failed to recover without a checkpoint");
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(0));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// An archive whose storage predates the checkpoint recovers all of its data by scan.
+    #[test_traced]
+    fn test_init_without_checkpoint_recovers_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(4));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..10u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            context
+                .remove(&cfg.metadata_partition, None)
+                .await
+                .expect("Failed to remove checkpoint");
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .expect("Failed to recover without a checkpoint");
+            for index in 0..10u64 {
+                assert_eq!(
+                    archive.get(Identifier::Index(index)).await.unwrap(),
+                    Some(index as i32),
+                    "index {index} must survive a missing checkpoint"
+                );
+            }
+
+            // The recovered archive republishes a checkpoint of its own.
+            archive = archive.put(10, test_key("k10"), 10).await.unwrap();
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third"), cfg)
+                .await
+                .expect("Failed to reopen");
+            assert_eq!(archive.get(Identifier::Index(10)).await.unwrap(), Some(10));
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// A checkpoint write in flight must not stall the next data sync: the checkpoint is
+    /// published one interval behind, so `start_sync` skips publication rather than waiting.
+    #[test_traced]
+    fn test_start_sync_does_not_wait_for_checkpoint_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("archive"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            // Nothing is durable yet, so this interval publishes no checkpoint.
+            archive = archive.put(1, test_key("a"), 1).await.unwrap();
+            let (mut archive, first) = archive.start_sync().await.expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            first.await.expect("Failed to complete first sync");
+
+            // This interval publishes section 1's completed sync, leaving the checkpoint write
+            // and section 2's data writes in flight.
+            archive = archive.put(2, test_key("b"), 2).await.unwrap();
+            let (mut archive, second) = archive.start_sync().await.expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 3);
+
+            // A third interval must start without waiting for that checkpoint write.
+            archive = archive.put(3, test_key("c"), 3).await.unwrap();
+            let (archive, third) = archive
+                .start_sync()
+                .await
+                .expect("checkpoint sync must not block a later data sync");
+            assert_eq!(pending.lock().len(), 5);
+
+            release_pending_syncs(&pending);
+            second.await.expect("Failed to complete second sync");
+            third.await.expect("Failed to complete third sync");
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
     #[test_traced]
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
@@ -886,8 +1033,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -918,8 +1065,8 @@ mod tests {
             // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -955,8 +1102,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1021,8 +1168,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1081,8 +1228,8 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1193,8 +1340,8 @@ mod tests {
             let items_per_section = 256u64;
             let cfg = Config {
                 translator: TwoCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1257,8 +1404,8 @@ mod tests {
             // Reinitialize the archive
             let cfg = Config {
                 translator: TwoCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1366,8 +1513,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1418,8 +1565,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
@@ -1554,8 +1701,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test-index".into(),
                 metadata_partition: "test-index-metadata".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),

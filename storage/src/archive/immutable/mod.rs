@@ -57,7 +57,6 @@
 //!         freezer_value_partition: "freezer-value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
-//!         freezer_metadata_partition: "freezer-metadata".into(),
 //!         ordinal_partition: "ordinal".into(),
 //!         items_per_section: NZU64!(1024),
 //!         freezer_key_write_buffer: NZUsize!(1024),
@@ -81,10 +80,6 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
-///
-/// All partition fields (`metadata_partition`, `freezer_table_partition`,
-/// `freezer_key_partition`, `freezer_value_partition`, `freezer_metadata_partition`,
-/// `ordinal_partition`) must be mutually distinct; initialization rejects any collision.
 #[derive(Clone)]
 pub struct Config<C> {
     /// The partition to use for the archive's metadata.
@@ -116,9 +111,6 @@ pub struct Config<C> {
 
     /// The compression level to use for the archive's freezer values.
     pub freezer_value_compression: Option<u8>,
-
-    /// The partition to use for the archive's freezer recovery-watermark metadata.
-    pub freezer_metadata_partition: String,
 
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
@@ -168,7 +160,6 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "test-freezer-key2".into(),
-                freezer_metadata_partition: "test-freezer-metadata2".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "test-freezer-value2".into(),
                 freezer_value_target_size: 1024 * 1024,
@@ -226,44 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn test_init_rejects_partition_collision() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // freezer_metadata_partition collides with the archive's own metadata partition.
-            let cfg = Config {
-                metadata_partition: "collide".into(),
-                freezer_table_partition: "collide-freezer-table".into(),
-                freezer_table_initial_size: 8192,
-                freezer_table_resize_frequency: 4,
-                freezer_table_resize_chunk_size: 8192,
-                freezer_key_partition: "collide-freezer-key".into(),
-                freezer_metadata_partition: "collide".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: "collide-freezer-value".into(),
-                freezer_value_target_size: 1024 * 1024,
-                freezer_value_compression: None,
-                ordinal_partition: "collide-ordinal".into(),
-                items_per_section: NZU64!(512),
-                freezer_key_write_buffer: NZUsize!(1024),
-                freezer_value_write_buffer: NZUsize!(1024),
-                ordinal_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-                codec_config: (),
-            };
-            let result = Archive::<_, Digest, i32>::init(context.child("archive"), cfg).await;
-            assert!(
-                matches!(
-                    result,
-                    Err(crate::archive::Error::Journal(
-                        crate::journal::Error::InvalidConfiguration(_)
-                    ))
-                ),
-                "expected InvalidConfiguration, got {result:?}"
-            );
-        });
-    }
-
-    #[test]
     fn test_sync_empty_archive_then_restart() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -274,7 +227,6 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "empty-freezer-key".into(),
-                freezer_metadata_partition: "empty-freezer-metadata".into(),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "empty-freezer-value".into(),
                 freezer_value_target_size: 1024 * 1024,

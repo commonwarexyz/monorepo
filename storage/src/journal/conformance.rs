@@ -18,6 +18,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
 use rand::RngExt as _;
+use std::collections::BTreeMap;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
@@ -326,7 +327,6 @@ impl StorageWorkload for SegmentedOversizedWorkload {
         let config = oversized::Config {
             index_partition: format!("segmented-oversized-index-conformance-{seed}"),
             value_partition: format!("segmented-oversized-value-conformance-{seed}"),
-            metadata_partition: format!("segmented-oversized-metadata-conformance-{seed}"),
             index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
@@ -336,6 +336,7 @@ impl StorageWorkload for SegmentedOversizedWorkload {
         let mut replay = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
             context.child("journal"),
             config,
+            BTreeMap::new(),
             WRITE_BUFFER,
         )
         .await?;

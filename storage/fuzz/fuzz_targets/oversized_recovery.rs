@@ -17,7 +17,10 @@ use commonware_storage::journal::{
 };
 use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU16, NonZeroUsize},
+};
 
 /// Test index entry that stores a u64 id and references a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +166,6 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
-const METADATA_PARTITION: &str = "fuzz-metadata";
 
 fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool {
     let end = offset.saturating_add(write_len as u64);
@@ -174,7 +176,6 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
-        metadata_partition: METADATA_PARTITION.into(),
         index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
@@ -193,6 +194,7 @@ fn fuzz(input: FuzzInput) {
         let mut replay = Oversized::<_, TestEntry, TestValue>::init(
             context.child("initial"),
             cfg.clone(),
+            BTreeMap::new(),
             NZUsize!(512),
         )
         .await
@@ -218,19 +220,26 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        if input.sync_before_corrupt {
-            drop(oversized.sync_all().await.expect("setup sync_all failed"));
+        let checkpoint = if input.sync_before_corrupt {
+            // A completed blocking sync makes every retained byte durable, so the caller
+            // publishes the current sizes as its checkpoint.
+            let oversized = oversized.sync_all().await.expect("setup sync_all failed");
+            let checkpoint = (1u64..=3)
+                .filter_map(|section| oversized.size(section).ok().map(|size| (section, size)))
+                .collect::<BTreeMap<_, _>>();
+            drop(oversized);
+            checkpoint
         } else {
-            // Persist the data without publishing recovery watermarks. The first background sync
-            // has no earlier completion to publish, so recovery must treat all retained bytes as
-            // repairable crash debris.
+            // A background sync publishes nothing: its completion is only observable by a later
+            // sync, so recovery must treat all retained bytes as repairable crash debris.
             let (journal, handle) = oversized
                 .start_sync([1, 2, 3])
                 .await
                 .expect("setup start_sync failed");
             handle.await.expect("setup background sync failed");
             drop(journal);
-        }
+            BTreeMap::new()
+        };
 
         // Phase 2: Apply corruptions
         let mut index_page_integrity_may_be_invalidated = false;
@@ -334,6 +343,7 @@ fn fuzz(input: FuzzInput) {
             let mut replay = Oversized::<_, TestEntry, TestValue>::init(
                 context.child("recovered"),
                 cfg.clone(),
+                checkpoint.clone(),
                 NZUsize!(512),
             )
             .await?;

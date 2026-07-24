@@ -823,7 +823,6 @@ mod test {
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,
             freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
-            freezer_metadata_partition: format!("{prefix}-{name}-freezer-metadata"),
             freezer_key_page_cache: page_cache,
             freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
             freezer_value_target_size: 1024,
