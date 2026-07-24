@@ -317,14 +317,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_nullify {
             return false;
         }
-        match self.proposal.update(&proposal, false) {
-            ProposalChange::New => {
+        match self.proposal.update_vote(&proposal) {
+            Some(ProposalChange::New) => {
                 self.leader_deadline = None;
                 true
             }
-            ProposalChange::Unchanged
-            | ProposalChange::Equivocated { .. }
-            | ProposalChange::Skipped => false,
+            Some(ProposalChange::Unchanged | ProposalChange::Equivocated { .. }) | None => false,
         }
     }
 
@@ -444,7 +442,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        match self.proposal.update(&proposal, true) {
+        match self.proposal.update_certificate(&proposal) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
                 self.leader_deadline = None;
@@ -464,9 +462,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
                 equivocator
             }
-            // Only votes are skipped once equivocation is recorded (see
-            // [Slot::update]), and recovered proposals come from certificates.
-            ProposalChange::Skipped => unreachable!("recovered proposal skipped"),
         }
     }
 
