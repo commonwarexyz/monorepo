@@ -9,16 +9,16 @@
 //! so the `256/WIDTH` windows share the cost of the additions across all `n` terms. This is
 //! variable-time, which is fine since verification only ever operates on public data.
 //!
-//! Terms arrive already decompressed and digit-recoded (see [`Term::new`]), as a list of chunks
-//! (`&[Vec<Term>]`): the chunks are whatever units the caller's parallel decompression produced,
-//! and every function here iterates them in order as one logical term sequence -- so the caller
-//! never pays to flatten its per-chunk output into one contiguous allocation. Two
-//! implementations of the same bucket algorithm run over them:
+//! Terms arrive already decompressed and digit-recoded (see [`Term::new`]), as a short list of
+//! contiguous slices (`&[&[Term]]`: the caller's bulk decompression output plus a couple of small
+//! appendices -- see [`super::verify_batch`]), treated everywhere as one logical term sequence
+//! indexed globally across the slices in order ([`pieces`]). Two implementations of the same
+//! bucket algorithm run over them:
 //!
 //! - [`scalar`]: the classic, non-vectorized version, operating on [`EdwardsPoint`] directly.
 //! - [`transposed`]: the same algorithm reorganized so bucket fills and bucket reductions run as
 //!   vectorized [`super::point::PointVec`] operations across [`LANES`] independent lanes -- each
-//!   lane owns the terms whose index is congruent to its own mod `LANES` within its chunk, plus
+//!   lane owns the terms whose index is congruent to its own mod `LANES` within its piece, plus
 //!   a private bucket array, so no two lanes ever collide on a bucket (the design notes'
 //!   "transposed Pippenger").
 //!
@@ -35,15 +35,15 @@
 //! CPU libraries (blst, gnark-crypto, arkworks, halo2curves, constantine) do, rather than by
 //! replicating bucket state per thread:
 //!
-//! 1. The bucket work is split into `(window, contiguous chunk range)` tiles: each tile fills
-//!    only its own window's buckets over its own chunks and immediately folds them down to a
-//!    single partial point (each module's `window_partial`). Distinct windows are independent by
-//!    construction, and -- because bucket-filling is linear in its terms -- two tiles of the
-//!    *same* window combine with one point addition. No bucket-array state is ever shared or
-//!    merged across threads. (An earlier design gave each thread a private copy of *every*
-//!    window's buckets and merged the copies elementwise; the merge cost
-//!    `threads * NUM_WINDOWS * NUM_BUCKETS` serial additions, and dominated the profile past ~8
-//!    cores.)
+//! 1. The bucket work is split into `(window, global term range)` tiles: each tile fills only its
+//!    own window's buckets over its own range and immediately folds them down to a single partial
+//!    point (each module's `window_partial`). Distinct windows are independent by construction,
+//!    and -- because bucket-filling is linear in its terms -- two tiles of the *same* window
+//!    combine with one point addition. No bucket-array state is ever shared or merged across
+//!    threads. (An earlier design gave each thread a private copy of *every* window's buckets and
+//!    merged the copies elementwise; the merge cost `threads * NUM_WINDOWS * NUM_BUCKETS` serial
+//!    additions, and dominated the profile past ~8 cores.) Ranges are plain cuts of the global
+//!    index space -- subslicing is free, so tile granularity is a pure tuning knob.
 //! 2. The per-window partials are combined by one short Horner ladder
 //!    ([`fold_window_partials`]): `WIDTH` doublings plus one addition per window. This is the
 //!    only sequential stage, and it is `O(NUM_WINDOWS * WIDTH)` regardless of batch size.
@@ -99,20 +99,38 @@ impl Term {
 }
 
 /// Total number of terms across `chunks`.
-fn total_terms(chunks: &[Vec<Term>]) -> usize {
-    chunks.iter().map(Vec::len).sum()
+fn total_terms(chunks: &[&[Term]]) -> usize {
+    chunks.iter().map(|chunk| chunk.len()).sum()
 }
 
-/// One past the highest bucket any of `chunks`' digits in `window` lands in (`0` if none does,
-/// i.e. the largest digit *magnitude*; see [`Scalar::signed_digits`]). Every bucket at or above
-/// this is still the identity after a fill and would contribute nothing to the bucket fold, and
-/// when the terms are a small or sparse range -- a tiny batch, or the recoding's spare top
-/// window -- that is *most* of the buckets. Computed as a standalone prescan over the recoded
-/// digits (cheap: two byte-sized loads and a compare per term, no point arithmetic) rather than
-/// tracked inside the bucket-fill loop, which measurably slows the fill's hot wave prologue.
-fn used_buckets(chunks: &[Vec<Term>], window: usize) -> usize {
-    chunks
-        .iter()
+/// The subslices of `chunks` covering global term indices `[start, end)`, where the global index
+/// runs across the chunks in order: how every consumer here reads an arbitrary cut of the logical
+/// term sequence without the caller ever flattening its slices into one allocation.
+fn pieces<'a>(
+    chunks: &'a [&'a [Term]],
+    start: usize,
+    end: usize,
+) -> impl Iterator<Item = &'a [Term]> + 'a {
+    let mut offset = 0;
+    chunks.iter().filter_map(move |chunk| {
+        let chunk_start = offset;
+        offset += chunk.len();
+        let lo = start.max(chunk_start);
+        let hi = end.min(chunk_start + chunk.len());
+        (lo < hi).then(|| &chunk[lo - chunk_start..hi - chunk_start])
+    })
+}
+
+/// One past the highest bucket any digit of `window` lands in over global range `[start, end)`
+/// (`0` if none does, i.e. the largest digit *magnitude*; see [`Scalar::signed_digits`]). Every
+/// bucket at or above this is still the identity after a fill and would contribute nothing to
+/// the bucket fold, and when the terms are a small or sparse range -- a tiny batch, or the
+/// recoding's spare top window -- that is *most* of the buckets. Computed as a standalone
+/// prescan over the recoded digits (cheap: two byte-sized loads and a compare per term, no point
+/// arithmetic) rather than tracked inside the bucket-fill loop, which measurably slows the
+/// fill's hot wave prologue.
+fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> usize {
+    pieces(chunks, start, end)
         .flatten()
         .map(|term| term.digits[window].unsigned_abs() as usize)
         .max()
@@ -122,16 +140,17 @@ fn used_buckets(chunks: &[Vec<Term>], window: usize) -> usize {
 mod scalar {
     use super::{EdwardsPoint, NUM_BUCKETS, Term};
 
-    /// Fills one window's buckets (`buckets[m - 1]` sums every, possibly negated, point whose
-    /// digit in this window has magnitude `m`) via a single pass over `chunks`' terms, negating
-    /// the point for a negative digit (cheap; see [`super::MixedPoint::negate`]). Bucket-fill
-    /// additions use [`EdwardsPoint::add_mixed`] (7 field multiplies) rather than the general
+    /// Adds one contiguous run of terms into one window's buckets (`buckets[m - 1]` sums every,
+    /// possibly negated, point whose digit in this window has magnitude `m`), negating the point
+    /// for a negative digit (cheap; see [`super::MixedPoint::negate`]). Accumulating (rather
+    /// than returning fresh buckets) lets a caller fill the same buckets from several pieces of
+    /// the logical term sequence and fold only once. Bucket-fill additions use
+    /// [`EdwardsPoint::add_mixed`] (7 field multiplies) rather than the general
     /// [`EdwardsPoint::add`] (9): every term is mixed-addition-eligible, since its point is
     /// always freshly decompressed (or the hardcoded basepoint), never the output of a prior
     /// addition or doubling.
-    fn window_buckets(chunks: &[Vec<Term>], window: usize) -> [EdwardsPoint; NUM_BUCKETS] {
-        let mut buckets = [EdwardsPoint::IDENTITY; NUM_BUCKETS];
-        for term in chunks.iter().flatten() {
+    fn fill_buckets(buckets: &mut [EdwardsPoint; NUM_BUCKETS], terms: &[Term], window: usize) {
+        for term in terms {
             let digit = term.digits[window];
             if digit > 0 {
                 let i = digit as usize - 1;
@@ -141,7 +160,6 @@ mod scalar {
                 buckets[i] = buckets[i].add_mixed(&term.point.negate());
             }
         }
-        buckets
     }
 
     /// Folds one window's filled buckets into `sum(m * buckets[m - 1])` via a running sum, from
@@ -160,23 +178,33 @@ mod scalar {
         window_sum
     }
 
-    /// One window's contribution to the MSM over `chunks`, *before* the doubling shift that
-    /// positions it (see [`super::fold_window_partials`]).
-    pub(super) fn window_partial(chunks: &[Vec<Term>], window: usize) -> EdwardsPoint {
-        let used = super::used_buckets(chunks, window);
-        fold_buckets(&window_buckets(chunks, window), used)
+    /// One window's contribution to the MSM over global term range `[start, end)`, *before* the
+    /// doubling shift that positions it (see [`super::fold_window_partials`]).
+    pub(super) fn window_partial(
+        chunks: &[&[Term]],
+        start: usize,
+        end: usize,
+        window: usize,
+    ) -> EdwardsPoint {
+        let used = super::used_buckets(chunks, start, end, window);
+        let mut buckets = [EdwardsPoint::IDENTITY; NUM_BUCKETS];
+        for piece in super::pieces(chunks, start, end) {
+            fill_buckets(&mut buckets, piece, window);
+        }
+        fold_buckets(&buckets, used)
     }
 
     /// Computes the full MSM over `chunks` via Pippenger's bucket method, one window at a time
     /// from the top down, interleaving each window's fill/fold with the `WIDTH` doublings that
     /// shift every window accumulated so far up one position.
-    pub(super) fn multiscalar_mul(chunks: &[Vec<Term>]) -> EdwardsPoint {
+    pub(super) fn multiscalar_mul(chunks: &[&[Term]]) -> EdwardsPoint {
+        let total = super::total_terms(chunks);
         let mut result = EdwardsPoint::IDENTITY;
         for window in (0..super::NUM_WINDOWS).rev() {
             for _ in 0..super::WIDTH {
                 result = result.double();
             }
-            result = result.add(&window_partial(chunks, window));
+            result = result.add(&window_partial(chunks, 0, total, window));
         }
         result
     }
@@ -186,52 +214,50 @@ mod transposed {
     use super::{EdwardsPoint, LANES, MixedPoint, NUM_BUCKETS, Term};
     use crate::signing::point::{MixedPointVec, PointVec};
 
-    /// Every lane's buckets for one window: within each chunk, lane `l` owns the terms whose
+    /// Every lane's buckets for one window: within each piece, lane `l` owns the terms whose
     /// index is `l mod LANES`, plus this private bucket array, so the wave loop below can update
     /// `LANES` buckets with one vectorized addition and no two lanes ever collide on a bucket.
     type WindowBuckets = [[EdwardsPoint; NUM_BUCKETS]; LANES];
 
-    /// Fills one window's [`WindowBuckets`] via one vectorized "wave" pass, one wave of `LANES`
-    /// consecutive terms (one per lane) at a time: gather each lane's current bucket value (a
-    /// scalar array read, cheap and branch-free since a digit of 0 just gathers-and-discards the
-    /// identity), add the wave's incoming (possibly negated, for a negative digit) points via one
-    /// vectorized [`PointVec::add_mixed`], then scatter the results back (again cheap scalar
-    /// writes, skipped only for zero-digit lanes since there is no bucket to write into). Waves
-    /// never straddle a chunk boundary; each chunk's `len % LANES` tail rides as a short wave,
-    /// its missing lanes no-op identity additions.
+    /// Adds one contiguous run of terms into one window's [`WindowBuckets`] via vectorized
+    /// "wave" passes, one wave of `LANES` consecutive terms (one per lane) at a time: gather
+    /// each lane's current bucket value (a scalar array read, cheap and branch-free since a
+    /// digit of 0 just gathers-and-discards the identity), add the wave's incoming (possibly
+    /// negated, for a negative digit) points via one vectorized [`PointVec::add_mixed`], then
+    /// scatter the results back (again cheap scalar writes, skipped only for zero-digit lanes
+    /// since there is no bucket to write into). The `terms.len() % LANES` tail rides as a short
+    /// wave, its missing lanes no-op identity additions -- so a caller filling from several
+    /// pieces pays at most one short wave per piece. Accumulating (rather than returning fresh
+    /// buckets) is what lets those pieces share one bucket set and one fold.
     #[allow(clippy::needless_range_loop)]
-    fn window_buckets(chunks: &[Vec<Term>], window: usize) -> WindowBuckets {
+    fn fill_buckets(buckets: &mut WindowBuckets, terms: &[Term], window: usize) {
         let identity_point = MixedPoint::new(&EdwardsPoint::IDENTITY);
-        let mut buckets = [[EdwardsPoint::IDENTITY; NUM_BUCKETS]; LANES];
-        for terms in chunks {
-            for wave in terms.chunks(LANES) {
-                let mut incoming = [identity_point; LANES];
-                let mut current = [EdwardsPoint::IDENTITY; LANES];
-                let mut bucket_index = [None::<usize>; LANES];
-                for (lane, term) in wave.iter().enumerate() {
-                    let digit = term.digits[window];
-                    if digit > 0 {
-                        bucket_index[lane] = Some(digit as usize - 1);
-                        incoming[lane] = term.point;
-                    } else if digit < 0 {
-                        bucket_index[lane] = Some(digit.unsigned_abs() as usize - 1);
-                        incoming[lane] = term.point.negate();
-                    }
-                    if let Some(i) = bucket_index[lane] {
-                        current[lane] = buckets[lane][i];
-                    }
+        for wave in terms.chunks(LANES) {
+            let mut incoming = [identity_point; LANES];
+            let mut current = [EdwardsPoint::IDENTITY; LANES];
+            let mut bucket_index = [None::<usize>; LANES];
+            for (lane, term) in wave.iter().enumerate() {
+                let digit = term.digits[window];
+                if digit > 0 {
+                    bucket_index[lane] = Some(digit as usize - 1);
+                    incoming[lane] = term.point;
+                } else if digit < 0 {
+                    bucket_index[lane] = Some(digit.unsigned_abs() as usize - 1);
+                    incoming[lane] = term.point.negate();
                 }
-                let updated = PointVec::from_lanes(&current)
-                    .add_mixed(&MixedPointVec::from_lanes(&incoming))
-                    .to_lanes();
-                for lane in 0..LANES {
-                    if let Some(i) = bucket_index[lane] {
-                        buckets[lane][i] = updated[lane];
-                    }
+                if let Some(i) = bucket_index[lane] {
+                    current[lane] = buckets[lane][i];
+                }
+            }
+            let updated = PointVec::from_lanes(&current)
+                .add_mixed(&MixedPointVec::from_lanes(&incoming))
+                .to_lanes();
+            for lane in 0..LANES {
+                if let Some(i) = bucket_index[lane] {
+                    buckets[lane][i] = updated[lane];
                 }
             }
         }
-        buckets
     }
 
     /// Folds `LANES` lanes' worth of one window's [`WindowBuckets`] into `result`, vectorized
@@ -242,20 +268,29 @@ mod transposed {
         let mut sum = PointVec::identity();
         let mut window_sum = PointVec::identity();
         for d in (0..used).rev() {
-            let bucket_group: [EdwardsPoint; LANES] = core::array::from_fn(|lane| buckets[lane][d]);
+            let bucket_group: [EdwardsPoint; LANES] =
+                core::array::from_fn(|lane| buckets[lane][d]);
             sum = sum.add(&PointVec::from_lanes(&bucket_group));
             window_sum = window_sum.add(&sum);
         }
         result.add(&window_sum)
     }
 
-    /// One window's contribution to the MSM over `chunks`, *before* the doubling shift that
-    /// positions it -- the vectorized counterpart of [`super::scalar::window_partial`], with the
-    /// `LANES` per-lane partials summed down to a single point at the end (valid because MSM is
-    /// linear in its terms).
-    pub(super) fn window_partial(chunks: &[Vec<Term>], window: usize) -> EdwardsPoint {
-        let used = super::used_buckets(chunks, window);
-        let buckets = window_buckets(chunks, window);
+    /// One window's contribution to the MSM over global term range `[start, end)`, *before* the
+    /// doubling shift that positions it -- the vectorized counterpart of
+    /// [`super::scalar::window_partial`], with the `LANES` per-lane partials summed down to a
+    /// single point at the end (valid because MSM is linear in its terms).
+    pub(super) fn window_partial(
+        chunks: &[&[Term]],
+        start: usize,
+        end: usize,
+        window: usize,
+    ) -> EdwardsPoint {
+        let used = super::used_buckets(chunks, start, end, window);
+        let mut buckets = [[EdwardsPoint::IDENTITY; NUM_BUCKETS]; LANES];
+        for piece in super::pieces(chunks, start, end) {
+            fill_buckets(&mut buckets, piece, window);
+        }
         fold_buckets(PointVec::identity(), &buckets, used)
             .to_lanes()
             .into_iter()
@@ -266,14 +301,18 @@ mod transposed {
     /// window by window from the top down. Unlike [`window_partial`], the running `result` stays
     /// a [`PointVec`] across all windows -- the inter-window doublings run `LANES` wide, and the
     /// lanes are only summed down to a single point once, at the very end.
-    pub(super) fn multiscalar_mul(chunks: &[Vec<Term>]) -> EdwardsPoint {
+    pub(super) fn multiscalar_mul(chunks: &[&[Term]]) -> EdwardsPoint {
+        let total = super::total_terms(chunks);
         let mut result = PointVec::identity();
         for window in (0..super::NUM_WINDOWS).rev() {
             for _ in 0..super::WIDTH {
                 result = result.double();
             }
-            let used = super::used_buckets(chunks, window);
-            let buckets = window_buckets(chunks, window);
+            let used = super::used_buckets(chunks, 0, total, window);
+            let mut buckets = [[EdwardsPoint::IDENTITY; NUM_BUCKETS]; LANES];
+            for piece in super::pieces(chunks, 0, total) {
+                fill_buckets(&mut buckets, piece, window);
+            }
             result = fold_buckets(result, &buckets, used);
         }
 
@@ -286,7 +325,7 @@ mod transposed {
 
 /// Computes the full MSM over `chunks` serially, dispatching to whichever of [`scalar`]'s or
 /// [`transposed`]'s implementation is actually faster on the running CPU (see the module docs).
-fn multiscalar_mul_terms(chunks: &[Vec<Term>]) -> EdwardsPoint {
+fn multiscalar_mul_terms(chunks: &[&[Term]]) -> EdwardsPoint {
     if total_terms(chunks) > 0 && field_vec::simd_available() {
         transposed::multiscalar_mul(chunks)
     } else {
@@ -306,7 +345,7 @@ fn multiscalar_mul(points: &[MixedPoint], scalars: &[Scalar]) -> EdwardsPoint {
         .zip(scalars)
         .map(|(point, scalar)| Term::new(*point, scalar))
         .collect();
-    multiscalar_mul_terms(core::slice::from_ref(&terms))
+    multiscalar_mul_terms(&[&terms])
 }
 
 /// Horner-folds per-window partial sums into the final MSM result: from the top window down,
@@ -342,36 +381,24 @@ fn range_count(len: usize, strategy: &impl Strategy) -> usize {
         .clamp(1, len.div_ceil(MIN_RANGE_LEN))
 }
 
-/// Splits the chunk list into up to `ranges` contiguous runs of whole chunks with near-equal
-/// term counts, returned as `(start, end)` chunk-index pairs. Ranges never split a chunk: the
-/// chunks are the caller's parallel-decompression output, and keeping them whole is what lets
-/// tiles read them with no flattening or copying.
-fn partition_chunks(chunks: &[Vec<Term>], ranges: usize, total: usize) -> Vec<(usize, usize)> {
-    let target = total.div_ceil(ranges);
-    let mut out = Vec::with_capacity(ranges);
-    let mut start = 0;
-    let mut in_range = 0;
-    for (i, chunk) in chunks.iter().enumerate() {
-        in_range += chunk.len();
-        if in_range >= target && out.len() + 1 < ranges {
-            out.push((start, i + 1));
-            start = i + 1;
-            in_range = 0;
-        }
-    }
-    if start < chunks.len() {
-        out.push((start, chunks.len()));
-    }
-    out
+/// Cuts the global term-index space `[0, total)` into up to `ranges` near-equal contiguous
+/// ranges. Ranges are pure index arithmetic -- [`pieces`] resolves them onto the underlying
+/// slices at read time -- so a cut may land anywhere, including mid-slice.
+fn partition_ranges(total: usize, ranges: usize) -> Vec<(usize, usize)> {
+    let target = total.div_ceil(ranges).max(1);
+    (0..total)
+        .step_by(target)
+        .map(|start| (start, (start + target).min(total)))
+        .collect()
 }
 
 /// Computes the full MSM over `chunks` with the bucket phase spread across `strategy`'s threads
-/// as `(window, chunk range)` tiles (see the module docs' "Parallelization" section): each tile
-/// fills and folds one window's buckets over one contiguous run of chunks into a single partial
+/// as `(window, global term range)` tiles (see the module docs' "Parallelization" section): each
+/// tile fills and folds one window's buckets over one contiguous range into a single partial
 /// point, the tiles of each window are summed, and one short serial Horner ladder
 /// ([`fold_window_partials`]) positions the windows.
 pub(super) fn multiscalar_mul_terms_parallel(
-    chunks: &[Vec<Term>],
+    chunks: &[&[Term]],
     strategy: &impl Strategy,
 ) -> EdwardsPoint {
     let total = total_terms(chunks);
@@ -379,16 +406,15 @@ pub(super) fn multiscalar_mul_terms_parallel(
         return multiscalar_mul_terms(chunks);
     }
 
-    let ranges = partition_chunks(chunks, range_count(total, strategy), total);
+    let ranges = partition_ranges(total, range_count(total, strategy));
     let simd = field_vec::simd_available();
-    let tiles = (0..NUM_WINDOWS)
-        .flat_map(|window| ranges.iter().map(move |&(a, b)| (window, a, b)));
+    let tiles =
+        (0..NUM_WINDOWS).flat_map(|window| ranges.iter().map(move |&(a, b)| (window, a, b)));
     let partials = strategy.map_collect_vec(tiles, |(window, a, b)| {
-        let range = &chunks[a..b];
         let partial = if simd {
-            transposed::window_partial(range, window)
+            transposed::window_partial(chunks, a, b, window)
         } else {
-            scalar::window_partial(range, window)
+            scalar::window_partial(chunks, a, b, window)
         };
         (window, partial)
     });
@@ -443,8 +469,8 @@ mod tests {
             .collect()
     }
 
-    /// Splits `terms` into chunks of the given (deliberately uneven, `LANES`-unaligned) sizes,
-    /// with any remainder in one final chunk.
+    /// Splits `terms` into owned chunks of the given (deliberately uneven, `LANES`-unaligned)
+    /// sizes, with any remainder in one final chunk.
     fn split_terms(mut terms: Vec<Term>, sizes: &[usize]) -> Vec<Vec<Term>> {
         let mut chunks = Vec::new();
         for &size in sizes {
@@ -457,6 +483,11 @@ mod tests {
         }
         chunks.push(terms);
         chunks
+    }
+
+    /// Borrows a set of owned chunks as the slice-of-slices shape the MSM API takes.
+    fn refs(chunks: &[Vec<Term>]) -> Vec<&[Term]> {
+        chunks.iter().map(Vec::as_slice).collect()
     }
 
     #[test]
@@ -482,15 +513,16 @@ mod tests {
     fn transposed_matches_scalar() {
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
             let chunks = split_terms(rand_terms(n), &[7, 9, 24]);
+            let chunks = refs(&chunks);
             let expected = scalar::multiscalar_mul(&chunks);
             let actual = transposed::multiscalar_mul(&chunks);
             assert!(actual.add(&expected.negate()).is_identity());
         }
     }
 
-    /// Chunk boundaries are pure layout: any split of the same terms (including `LANES`-unaligned
-    /// and empty chunks, whose tail waves pad with identity lanes) must produce the same point as
-    /// one contiguous chunk.
+    /// Slice boundaries are pure layout: any split of the same terms (including `LANES`-unaligned
+    /// and empty slices, whose tail waves pad with identity lanes) must produce the same point as
+    /// one contiguous slice.
     #[test]
     fn chunked_matches_single_chunk() {
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
@@ -499,8 +531,8 @@ mod tests {
             let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
             chunks.push(Vec::new());
 
-            let expected = multiscalar_mul_terms(&single);
-            let actual = multiscalar_mul_terms(&chunks);
+            let expected = multiscalar_mul_terms(&refs(&single));
+            let actual = multiscalar_mul_terms(&refs(&chunks));
             assert!(actual.add(&expected.negate()).is_identity());
         }
     }
@@ -509,6 +541,7 @@ mod tests {
     fn parallel_matches_serial() {
         for n in [0, 1, 2, 5, 32, 600] {
             let chunks = split_terms(rand_terms(n), &[64, 64, 64, 64]);
+            let chunks = refs(&chunks);
             let expected = multiscalar_mul_terms(&chunks);
             let actual = multiscalar_mul_terms_parallel(&chunks, &Sequential);
             assert!(actual.add(&expected.negate()).is_identity());
@@ -525,33 +558,35 @@ mod tests {
 
         for n in [0, 1, 300, 600, 1000] {
             let chunks = split_terms(rand_terms(n), &[128, 128, 128, 128, 128, 128]);
+            let chunks = refs(&chunks);
             let expected = multiscalar_mul_terms(&chunks);
             let actual = multiscalar_mul_terms_parallel(&chunks, &strategy);
             assert!(actual.add(&expected.negate()).is_identity());
         }
     }
 
-    /// Splitting a window's bucket fill across two disjoint chunk ranges and summing the partials
-    /// must Horner-fold to the exact same point as running the whole MSM over the full range at
-    /// once, for both backends -- this is the correctness argument the tile-parallel
-    /// [`multiscalar_mul_terms_parallel`] relies on to combine same-window tiles with a single
-    /// addition.
+    /// Splitting a window's bucket fill at an arbitrary global index (deliberately not a slice
+    /// boundary) and summing the two partials must Horner-fold to the exact same point as
+    /// running the whole MSM over the full range at once, for both backends -- this is the
+    /// correctness argument the tile-parallel [`multiscalar_mul_terms_parallel`] relies on to
+    /// combine same-window tiles with a single addition.
     #[test]
     fn split_window_partials_match_whole_range() {
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
             let chunks = split_terms(rand_terms(n), &[n / 3, n / 3]);
-            let mid = chunks.len() / 2;
-            let (c1, c2) = chunks.split_at(mid);
+            let chunks = refs(&chunks);
+            let total = total_terms(&chunks);
+            let mid = total / 2;
 
             let expected = multiscalar_mul_terms(&chunks);
 
             let mut scalar_windows = [EdwardsPoint::IDENTITY; NUM_WINDOWS];
             let mut transposed_windows = [EdwardsPoint::IDENTITY; NUM_WINDOWS];
             for window in 0..NUM_WINDOWS {
-                scalar_windows[window] =
-                    scalar::window_partial(c1, window).add(&scalar::window_partial(c2, window));
-                transposed_windows[window] = transposed::window_partial(c1, window)
-                    .add(&transposed::window_partial(c2, window));
+                scalar_windows[window] = scalar::window_partial(&chunks, 0, mid, window)
+                    .add(&scalar::window_partial(&chunks, mid, total, window));
+                transposed_windows[window] = transposed::window_partial(&chunks, 0, mid, window)
+                    .add(&transposed::window_partial(&chunks, mid, total, window));
             }
 
             assert!(
@@ -567,17 +602,36 @@ mod tests {
         }
     }
 
+    /// [`pieces`] must hand back exactly the requested global range, in order, for any cut --
+    /// including cuts inside slices, across slice boundaries, and touching empty slices.
     #[test]
-    fn partition_chunks_covers_all_chunks_contiguously() {
-        for sizes in [vec![10usize], vec![64, 64, 64], vec![512; 9], vec![1, 700, 1]] {
-            let chunks: Vec<Vec<Term>> = sizes.iter().map(|&s| rand_terms(s)).collect();
-            let total = total_terms(&chunks);
+    fn pieces_covers_exact_global_ranges() {
+        let chunks = split_terms(rand_terms(50), &[1, 7, 0, 24]);
+        let mut chunks = refs(&chunks);
+        chunks.insert(2, &[]);
+        let total = total_terms(&chunks);
+        assert_eq!(total, 50);
+
+        let flat: Vec<*const Term> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().map(|t| t as *const Term))
+            .collect();
+        for (start, end) in [(0, 50), (0, 0), (3, 3), (0, 1), (7, 9), (1, 40), (49, 50)] {
+            let got: Vec<*const Term> = pieces(&chunks, start, end)
+                .flat_map(|piece| piece.iter().map(|t| t as *const Term))
+                .collect();
+            assert_eq!(got, flat[start..end], "range ({start}, {end})");
+        }
+    }
+
+    #[test]
+    fn partition_ranges_covers_index_space_contiguously() {
+        for total in [1usize, 10, 63, 64, 65, 700] {
             for ranges in [1, 2, 3, 5] {
-                let parts = partition_chunks(&chunks, ranges, total);
+                let parts = partition_ranges(total, ranges);
                 assert!(!parts.is_empty());
-                assert!(parts.len() <= ranges);
                 assert_eq!(parts[0].0, 0);
-                assert_eq!(parts.last().unwrap().1, chunks.len());
+                assert_eq!(parts.last().unwrap().1, total);
                 for pair in parts.windows(2) {
                     assert_eq!(pair[0].1, pair[1].0);
                 }

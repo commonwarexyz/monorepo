@@ -8,7 +8,8 @@ mod scalar;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use crate::field_vec::LANES;
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
+use core::sync::atomic::{AtomicBool, Ordering};
 pub use error::Error;
 use msm::Term;
 use point::{EdwardsPoint, MixedPoint};
@@ -137,135 +138,192 @@ fn group_ranges(sorted: &[([u8; 32], u32)]) -> Vec<(u32, u32)> {
     out
 }
 
-/// The per-signature scalar phase, parallel over contiguous runs of the sorted batch: for sorted
-/// position `i`, derives `z_i` (see [`batch_coefficients`]), rejects a non-canonical `s`,
-/// computes the challenge `h = H(R || A || M)`, and writes `z*h` into `zh[i]` (this signature's
-/// contribution to its signer's coalesced term) and `z` into `zr[i]` (its `R` point's own MSM
-/// scalar). Returns `sum(z*s) mod L` -- the coalesced basepoint scalar -- or `None` if any `s`
-/// was non-canonical (a structurally invalid signature, rejected the same way
-/// [`VerifyingKey::verify`] rejects it).
+/// One [`scalar_phase`] output block: the `z*h` scalars (each signature's contribution to its
+/// signer's coalesced `A` term) and `z` scalars (each `R` point's own MSM scalar) for the four
+/// consecutive sorted positions covered by one [`batch_coefficients`] block, plus the block's
+/// `sum(z*s)` contribution to the coalesced basepoint scalar. Sorted position `i`'s scalars live
+/// at `blocks[i / 4].{0,1}[i % 4]`.
+type ScalarBlock = ([Scalar; 4], [Scalar; 4], Scalar);
+
+/// The per-signature scalar phase, parallel over the sorted batch's coefficient blocks: for each
+/// sorted position, derives `z` (see [`batch_coefficients`]), rejects a non-canonical `s`,
+/// computes the challenge `h = H(R || A || M)`, and packs `z*h`/`z` into that position's
+/// [`ScalarBlock`] slot. Returns the blocks together with `sum(z*s) mod L` -- the coalesced
+/// basepoint scalar -- or `None` if any `s` was non-canonical (a structurally invalid signature,
+/// rejected the same way [`VerifyingKey::verify`] rejects it).
 ///
-/// This phase touches no curve points: it is uniform per signature regardless of how the batch's
-/// signers are distributed, so a batch dominated by one key parallelizes exactly as well as a
-/// batch of all-distinct keys.
+/// The parallel unit is one 4-signature block -- the finest split that never derives a
+/// coefficient block twice -- produced as a value and collected, so there is no output array to
+/// pre-zero or scatter into, and the pool's demand-driven splitting balances the pass at block
+/// granularity: a late-waking worker simply takes fewer blocks (see [`decompress_phase`] for the
+/// same principle). This phase touches no curve points: it is uniform per signature regardless
+/// of how the batch's signers are distributed.
 fn scalar_phase(
     items: &[(&[u8; 32], &Signature, &[u8])],
     order: &[([u8; 32], u32)],
     seed: &[u8; 32],
-    zh: &mut [Scalar],
-    zr: &mut [Scalar],
     strategy: &impl Strategy,
-) -> Option<Scalar> {
-    // A multiple of 4 keeps every chunk aligned to whole `batch_coefficients` blocks, so no
-    // block is ever derived twice; the floor keeps per-chunk dispatch overhead amortized.
-    let chunk = items
-        .len()
-        .div_ceil(4 * strategy.manual().parallelism())
-        .next_multiple_of(4)
-        .max(32);
+) -> Option<(Vec<ScalarBlock>, Scalar)> {
+    // Measured serial cost per signature (one 1-2 block SHA-512, two mod-L multiplies; EPYC
+    // 9354P): the input to this phase's dispatch gate.
+    const NS_PER_ITEM: usize = 450;
+    let n = items.len();
 
-    let partials: Result<Vec<Scalar>, ()> = strategy.try_map_collect_vec(
-        zh.chunks_mut(chunk).zip(zr.chunks_mut(chunk)).enumerate(),
-        |(index, (zh_chunk, zr_chunk))| {
-            let start = index * chunk;
-            let mut coefficients = [Scalar::ZERO; 4];
-            let mut zs_sum = Scalar::ZERO;
-            for (j, (zh_slot, zr_slot)) in zh_chunk.iter_mut().zip(zr_chunk).enumerate() {
-                let i = start + j;
-                if i.is_multiple_of(4) {
-                    coefficients = batch_coefficients(seed, (i / 4) as u64);
-                }
-                let z = coefficients[i % 4];
-                let (a_bytes, sig, msg) = items[order[i].1 as usize];
-                let s = Scalar::from_canonical_bytes(&sig.s).ok_or(())?;
-                let digest = sha512(&[&sig.r, a_bytes, msg]);
-                let h = Scalar::from_bytes_mod_order_wide(&digest);
-                *zh_slot = z.mul_mod_l(&h);
-                *zr_slot = z;
-                zs_sum = zs_sum.add_mod_l(&z.mul_mod_l(&s));
+    // Rejection is flagged out-of-band rather than by returning `Result` per block: a
+    // short-circuiting `Result` collect cannot use rayon's in-place indexed writer, degrading to
+    // per-thread buffers merged by copying -- for value-heavy outputs like these, that merge tree
+    // measurably regressed the whole pipeline (see `decompress_phase` for the same pattern). A
+    // flagged batch is simply rejected after the pass; which signature was invalid is not
+    // reported either way.
+    let invalid = AtomicBool::new(false);
+    let body = |block: usize| {
+        let coefficients = batch_coefficients(seed, block as u64);
+        let mut zh = [Scalar::ZERO; 4];
+        let mut zr = [Scalar::ZERO; 4];
+        let mut zs_sum = Scalar::ZERO;
+        for (j, z) in coefficients.into_iter().enumerate() {
+            let i = 4 * block + j;
+            if i >= n {
+                break;
             }
-            Ok(zs_sum)
-        },
-    );
+            let (a_bytes, sig, msg) = items[order[i].1 as usize];
+            let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
+                invalid.store(true, Ordering::Relaxed);
+                continue;
+            };
+            let digest = sha512(&[&sig.r, a_bytes, msg]);
+            let h = Scalar::from_bytes_mod_order_wide(&digest);
+            zh[j] = z.mul_mod_l(&h);
+            zr[j] = z;
+            zs_sum = zs_sum.add_mod_l(&z.mul_mod_l(&s));
+        }
+        (zh, zr, zs_sum)
+    };
 
-    let partials = partials.ok()?;
-    Some(
-        partials
-            .iter()
-            .fold(Scalar::ZERO, |acc, partial| acc.add_mod_l(partial)),
-    )
+    let blocks: Vec<ScalarBlock> =
+        if n < parallel_min_items(strategy.manual().parallelism(), NS_PER_ITEM) {
+            // Below the pool's fork/join break-even (see `parallel_min_items`): run inline on
+            // the calling thread, leaving the pool parked.
+            Sequential.map_collect_vec(0..n.div_ceil(4), body)
+        } else {
+            strategy.map_collect_vec(0..n.div_ceil(4), body)
+        };
+
+    if invalid.load(Ordering::Relaxed) {
+        return None;
+    }
+    let s_sum = blocks
+        .iter()
+        .fold(Scalar::ZERO, |acc, (_, _, zs)| acc.add_mod_l(zs));
+    Some((blocks, s_sum))
 }
 
-/// Floor on worklist entries per decompression chunk (a multiple of [`LANES`], so whole chunks
-/// feed [`EdwardsPoint::decompress_batch`]): below this, per-chunk dispatch overhead stops being
-/// amortized against the chunk's modular exponentiations.
-const MIN_DECOMPRESS_CHUNK: usize = 64;
+/// Estimated cost of one pool fork/join round, in nanoseconds per `parallelism^2`: waking a
+/// parked rayon pool and joining it back was measured (on pure spin tasks with no memory
+/// traffic, EPYC 9354P) at ~30us for 8 threads and ~0.4ms for 32 -- growing roughly with the
+/// square of the pool width, as each additional worker both costs a wake and widens the join.
+/// [`parallel_min_items`] turns this into per-phase serial-vs-parallel gates. The constant here
+/// is deliberately a quarter of the cold-pool measurement: mid-pipeline the pool is still warm
+/// from the previous phase and the round costs far less, and end-to-end benchmarks bore out the
+/// lower setting (the full cold cost gated 100-signature batches serial at 32 threads, losing
+/// ~10% versus dispatching them).
+const DISPATCH_NS_PER_THREAD_SQ: usize = 100;
+
+/// Smallest input size for which dispatching a phase to the pool beats running it inline:
+/// parallelism saves at most `(1 - 1/parallelism)` of the phase's serial cost
+/// (`per_item_ns * items`), and the fork/join round costs
+/// `DISPATCH_NS_PER_THREAD_SQ * parallelism^2` regardless, so below this size the pool
+/// dispatch is a strict loss. Deterministic by construction -- the explicit replacement for the
+/// adaptive serial-vs-parallel policy `manual()` disables (see [`verify_batch_inner`]).
+const fn parallel_min_items(parallelism: usize, per_item_ns: usize) -> usize {
+    DISPATCH_NS_PER_THREAD_SQ * parallelism * parallelism / per_item_ns
+}
 
 /// The decompression phase: turns a flat worklist of `count` point encodings (resolved by index
-/// via `resolve`, which returns an encoding and its already-final MSM scalar) into [`Term`]
-/// chunks, in one parallel pass. Every worklist entry costs the same (one decompression), so the
-/// pass stays uniform however the batch's signers are distributed, and the arithmetic-heavy part
-/// batches [`LANES`]-wide (see [`EdwardsPoint::decompress_batch`]). The per-chunk output vectors
-/// are handed to the MSM as-is, never flattened into one allocation (see [`msm`]'s module docs).
+/// via `resolve`, which returns an encoding and its already-final MSM scalar) into MSM terms, in
+/// one parallel pass over [`LANES`]-sized units -- the finest split that keeps the sqrt kernel
+/// running 8-wide (see [`EdwardsPoint::decompress_batch`]), so the pool's demand-driven
+/// splitting balances the pass at ~7us granularity and a late-waking worker simply takes fewer
+/// units. Units collect into `Vec<[Term; LANES]>`, which is contiguous in memory: the caller
+/// views it as the flat term slice the MSM reads via `as_flattened`, with no per-chunk
+/// allocations and nothing to merge. The `count % LANES` remainder decompresses inline into the
+/// (at most `LANES - 1` element) second vector.
 ///
 /// Returns `None` if any encoding fails to decompress.
-fn decompress_phase<F>(count: usize, resolve: F, strategy: &impl Strategy) -> Option<Vec<Vec<Term>>>
+fn decompress_phase<F>(
+    count: usize,
+    resolve: F,
+    strategy: &impl Strategy,
+) -> Option<(Vec<[Term; LANES]>, Vec<Term>)>
 where
     F: Fn(usize) -> ([u8; 32], Scalar) + Send + Sync,
 {
-    if count == 0 {
-        return Some(Vec::new());
-    }
-    let chunk = count
-        .div_ceil(2 * strategy.manual().parallelism())
-        .next_multiple_of(LANES)
-        .max(MIN_DECOMPRESS_CHUNK);
-    let starts: Vec<usize> = (0..count).step_by(chunk).collect();
+    // Measured serial cost per decompression (its share of an 8-wide sqrt kernel plus digit
+    // recoding; EPYC 9354P): the input to this phase's dispatch gate.
+    const NS_PER_ITEM: usize = 840;
+    let units = count / LANES;
 
-    let chunks: Result<Vec<Vec<Term>>, ()> = strategy
-        .try_map_collect_vec(starts, |start| {
-            let end = (start + chunk).min(count);
-            let mut terms = Vec::with_capacity(end - start);
-            let mut i = start;
-            while i < end {
-                if end - i >= LANES {
-                    let resolved: [([u8; 32], Scalar); LANES] =
-                        core::array::from_fn(|k| resolve(i + k));
-                    let bytes = resolved.map(|(bytes, _)| bytes);
-                    let points = EdwardsPoint::decompress_batch(&bytes);
-                    for (point, (_, scalar)) in points.into_iter().zip(&resolved) {
-                        terms.push(Term::new(MixedPoint::new(&point.ok_or(())?), scalar));
-                    }
-                    i += LANES;
-                } else {
-                    let (bytes, scalar) = resolve(i);
-                    let point = EdwardsPoint::decompress(&bytes).ok_or(())?;
-                    terms.push(Term::new(MixedPoint::new(&point), &scalar));
-                    i += 1;
-                }
-            }
-            Ok(terms)
-        });
-    chunks.ok()
+    // Failure is flagged out-of-band rather than by returning `Result` per unit: a
+    // short-circuiting `Result` collect cannot use rayon's in-place indexed writer (which writes
+    // each unit's terms straight into their final slot, no intermediate buffers), degrading to
+    // per-thread buffers merged by copying -- ~7MB of term data through a copy tree for a 16k
+    // batch, measured at -20% whole-pipeline throughput on 32 threads. On failure the unit emits
+    // harmless placeholder terms and the batch is rejected after the pass (which encoding was
+    // invalid is not reported either way).
+    let failed = AtomicBool::new(false);
+    let body = |unit: usize| -> [Term; LANES] {
+        let base = unit * LANES;
+        let resolved: [([u8; 32], Scalar); LANES] = core::array::from_fn(|k| resolve(base + k));
+        let bytes = resolved.map(|(bytes, _)| bytes);
+        let points = EdwardsPoint::decompress_batch(&bytes);
+        core::array::from_fn(|k| {
+            points[k].as_ref().map_or_else(
+                || {
+                    failed.store(true, Ordering::Relaxed);
+                    Term::new(MixedPoint::new(&EdwardsPoint::IDENTITY), &Scalar::ZERO)
+                },
+                |point| Term::new(MixedPoint::new(point), &resolved[k].1),
+            )
+        })
+    };
+
+    let full: Vec<[Term; LANES]> =
+        if count < parallel_min_items(strategy.manual().parallelism(), NS_PER_ITEM) {
+            // Below the pool's fork/join break-even (see `parallel_min_items`): run inline on
+            // the calling thread, leaving the pool parked.
+            Sequential.map_collect_vec(0..units, body)
+        } else {
+            strategy.map_collect_vec(0..units, body)
+        };
+    if failed.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let mut tail = Vec::with_capacity(count - units * LANES);
+    for i in units * LANES..count {
+        let (bytes, scalar) = resolve(i);
+        let point = EdwardsPoint::decompress(&bytes)?;
+        tail.push(Term::new(MixedPoint::new(&point), &scalar));
+    }
+    Some((full, tail))
 }
 
 /// The shared batch-verification pipeline (see [`verify_batch`] for the equation and its
 /// security argument): a short sequence of data-parallel phases over flat arrays, with `A`
 /// coalescing falling out of a sort.
 ///
-/// 1. Parallel sort of `(A encoding, original index)` pairs, so every signer's signatures sit
-///    adjacent and grouping becomes local information ([`group_ranges`]).
+/// 1. Sort of `(A encoding, original index)` pairs, so every signer's signatures sit adjacent
+///    and grouping becomes local information ([`group_ranges`]).
 /// 2. [`scalar_phase`]: coefficient derivation, hashing, and scalar arithmetic -- uniform per
 ///    signature, no curve points.
-/// 3. Group sums: each distinct signer's coalesced scalar is a sum over a contiguous `zh` run.
-///    Serial: even one signer covering a 16k batch is ~16k additions mod L, far below the cost
-///    of the point work either side of it.
-/// 4. [`decompress_phase`] over a flat worklist -- every `R`, plus every distinct `A` when
-///    `a_points` is `None` -- into [`Term`] chunks, written where they're produced. When the
+/// 3. [`decompress_phase`] over a flat worklist -- every `R`, plus every distinct `A` when
+///    `a_points` is `None` -- into one flat term slice. A signer's coalesced scalar (the sum of
+///    its signatures' `z*h` over a contiguous [`ScalarBlock`] run) is computed lazily by
+///    whichever unit resolves its `A` entry, so there is no separate group-sum pass. When the
 ///    caller already holds decompressed `A` points ([`verify_batch`]), `a_points` supplies them
 ///    (indexed by *original* item position) and the coalesced `A` terms are built directly
-///    instead.
-/// 5. One tile-parallel MSM over the term chunks (with the coalesced basepoint term
+///    instead, in a parallel map of their own.
+/// 4. One tile-parallel MSM over the term slices (with the coalesced basepoint term
 ///    `sum(z*s)·(-B)` riding along as one final term), then the cofactored identity check.
 fn verify_batch_inner(
     rng: &mut impl CryptoRng,
@@ -278,6 +336,15 @@ fn verify_batch_inner(
         return true;
     }
 
+    // Every phase below partitions its own work explicitly (chunk sizes and tile counts derived
+    // from `parallelism()`), so the adaptive serial-vs-parallel policy a bare strategy applies
+    // per callsite has nothing left to decide -- and its calibration probes (an occasional
+    // deliberately-serial run of a phase) would show up here as multi-millisecond latency
+    // spikes. `manual()` disables it for the whole pipeline; deterministic per-phase gates
+    // ([`parallel_min_items`], plus the MSM's own `MIN_PARALLEL_TERMS`) run phases inline where
+    // the pool's fork/join overhead would exceed the parallel savings.
+    let strategy = &strategy.manual();
+
     let mut seed = [0u8; 32];
     rng.fill_bytes(&mut seed);
 
@@ -289,67 +356,79 @@ fn verify_batch_inner(
         .enumerate()
         .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
         .collect();
-    strategy.sort_by(&mut order, |x, y| x.cmp(y));
+    // Measured serial sort cost per item ~80ns (EPYC 9354P): below the pool's fork/join
+    // break-even (see `parallel_min_items`), sort inline.
+    if n < parallel_min_items(strategy.parallelism(), 80) {
+        order.sort_unstable();
+    } else {
+        strategy.sort_by(&mut order, |x, y| x.cmp(y));
+    }
 
-    let mut zh = vec![Scalar::ZERO; n];
-    let mut zr = vec![Scalar::ZERO; n];
-    let Some(s_sum) = scalar_phase(items, &order, &seed, &mut zh, &mut zr, strategy) else {
+    let Some((blocks, s_sum)) = scalar_phase(items, &order, &seed, strategy) else {
         return false;
+    };
+    let zr = |i: usize| blocks[i / 4].1[i % 4];
+    // A signer's coalesced scalar: the sum of its contiguous sorted run's `z*h` scalars. Cheap
+    // mod-L additions, computed lazily (each group is resolved exactly once, by the worklist
+    // entry for its `A` term), so the summing itself rides inside a parallel phase. A batch
+    // dominated by one signer folds its whole run in that signer's single resolve call --
+    // acceptable, since even a 16k-signature run is far cheaper than one decompression unit's
+    // point arithmetic.
+    let group_scalar = |(start, end): (u32, u32)| {
+        (start as usize..end as usize).fold(Scalar::ZERO, |acc, i| {
+            acc.add_mod_l(&blocks[i / 4].0[i % 4])
+        })
     };
 
     let groups = group_ranges(&order);
-    let a_scalars: Vec<Scalar> = groups
-        .iter()
-        .map(|&(start, end)| {
-            zh[start as usize..end as usize]
-                .iter()
-                .fold(Scalar::ZERO, |acc, zh_i| acc.add_mod_l(zh_i))
-        })
-        .collect();
-
     let resolve_r = |i: usize| {
         let (_, sig, _) = items[order[i].1 as usize];
-        (sig.r, zr[i])
+        (sig.r, zr(i))
     };
-    let term_chunks = if let Some(points) = a_points {
-        let mut chunks = match decompress_phase(n, resolve_r, strategy) {
-            Some(chunks) => chunks,
-            None => return false,
+
+    // The coalesced basepoint term: `sum(z*s)·B` moved to the equation's other side as
+    // `sum(z*s)·(-B)`, one more ordinary MSM term.
+    let basepoint = [Term::new(
+        MixedPoint::new(&EdwardsPoint::basepoint().negate()),
+        &s_sum,
+    )];
+
+    let result = if let Some(points) = a_points {
+        let Some((full, tail)) = decompress_phase(n, resolve_r, strategy) else {
+            return false;
         };
-        chunks.push(strategy.map_collect_vec(
-            groups.iter().zip(&a_scalars),
-            |(&(start, _), scalar)| {
-                let point = points[order[start as usize].1 as usize];
-                Term::new(MixedPoint::new(point), scalar)
-            },
-        ));
-        chunks
+        // `A` needs no decompression here, so its coalesced terms are built directly -- a term
+        // is one `2d*T` multiply plus digit recoding, ~300ns (EPYC 9354P), gated like the other
+        // phases.
+        let a_body = |&(start, end): &(u32, u32)| {
+            let point = points[order[start as usize].1 as usize];
+            Term::new(MixedPoint::new(point), &group_scalar((start, end)))
+        };
+        let a_terms: Vec<Term> =
+            if groups.len() < parallel_min_items(strategy.parallelism(), 300) {
+                Sequential.map_collect_vec(groups.iter(), a_body)
+            } else {
+                strategy.map_collect_vec(groups.iter(), a_body)
+            };
+        msm::multiscalar_mul_terms_parallel(
+            &[full.as_flattened(), &tail, &a_terms, &basepoint],
+            strategy,
+        )
     } else {
         let resolve = |i: usize| {
             if i < n {
                 resolve_r(i)
             } else {
-                let (start, _) = groups[i - n];
-                (order[start as usize].0, a_scalars[i - n])
+                let group = groups[i - n];
+                (order[group.0 as usize].0, group_scalar(group))
             }
         };
-        match decompress_phase(n + groups.len(), resolve, strategy) {
-            Some(chunks) => chunks,
-            None => return false,
-        }
+        let Some((full, tail)) = decompress_phase(n + groups.len(), resolve, strategy) else {
+            return false;
+        };
+        msm::multiscalar_mul_terms_parallel(&[full.as_flattened(), &tail, &basepoint], strategy)
     };
-
-    // The coalesced basepoint term: `sum(z*s)·B` moved to the equation's other side as
-    // `sum(z*s)·(-B)`, one more ordinary MSM term.
-    let mut term_chunks = term_chunks;
-    term_chunks.push(vec![Term::new(
-        MixedPoint::new(&EdwardsPoint::basepoint().negate()),
-        &s_sum,
-    )]);
-
-    msm::multiscalar_mul_terms_parallel(&term_chunks, strategy)
-        .mul_by_cofactor()
-        .is_identity()
+    result.mul_by_cofactor().is_identity()
 }
 
 /// Verifies a batch of `(verifying_key, signature, message)` triples, returning `true` only if
@@ -409,7 +488,6 @@ pub fn verify_batch_bytes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use ed25519_consensus::SigningKey as RefSigningKey;
     use rand_core::Rng;
@@ -452,6 +530,7 @@ mod tests {
             batch_coefficients(&[8u8; 32], 0)[0].0
         );
     }
+
 
     /// Generates `n` valid `(VerifyingKey, Signature, message)` triples, signed by independent
     /// keys over independent messages using the `ed25519-consensus` reference implementation.
