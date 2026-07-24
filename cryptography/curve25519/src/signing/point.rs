@@ -213,6 +213,30 @@ impl EdwardsPoint {
         }
     }
 
+    /// Adds a mixed-addition-prepared point (implicit `Z = 1`) to this (general) point: 7 field
+    /// multiplies instead of [`EdwardsPoint::add`]'s 9. `rhs`'s implicit `Z = 1` makes `D = 2*Z1*Z2`
+    /// free (just `Z1 + Z1`, no multiply), and `rhs.t2d` already folds in the `2d` factor
+    /// [`EdwardsPoint::add`] would otherwise apply fresh on every call -- both savings only apply
+    /// because every point this crate's MSM ever adds is either freshly decompressed or the
+    /// hardcoded basepoint, never the output of a prior addition/doubling (see
+    /// [`MixedPoint::new`]).
+    pub(crate) fn add_mixed(&self, rhs: &MixedPoint) -> Self {
+        let a = self.y.sub(&self.x).mul(&rhs.y.sub(&rhs.x));
+        let b = self.y.add(&self.x).mul(&rhs.y.add(&rhs.x));
+        let c = self.t.mul(&rhs.t2d);
+        let d = self.z.add(&self.z);
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
+        Self {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
+    }
+
     /// Multiplies the point by a scalar via plain binary double-and-add (variable-time).
     pub(crate) fn scalar_mul(&self, scalar: &Scalar) -> Self {
         let mut result = Self::IDENTITY;
@@ -233,6 +257,47 @@ impl EdwardsPoint {
     /// Returns `true` if this point is the identity element `(0, 1)`.
     pub(crate) fn is_identity(&self) -> bool {
         self.x.is_zero() && self.y.eq(&self.z)
+    }
+}
+
+/// A point prepared for [`EdwardsPoint::add_mixed`]/[`PointVec::add_mixed`]: an affine-origin
+/// point (`Z` implicit `1`) together with its precomputed `2d*T` (`T = X*Y`, exactly, since
+/// `Z = 1` needs no division to recover it). This is the one sub-computation worth caching once
+/// and reusing across every addition a point participates in: a point can be added into a bucket
+/// in up to [`super::msm::NUM_WINDOWS`] separate windows, and without caching, each of those
+/// additions would redo the same `T*2d` multiply on the exact same (unchanging) `T`. `(Y+X)`/
+/// `(Y-X)` are *not* cached: recomputing them costs only a field addition/subtraction (not a
+/// multiply), so caching them would spend extra storage for no real savings.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct MixedPoint {
+    x: FieldElement,
+    y: FieldElement,
+    t2d: FieldElement,
+}
+
+impl MixedPoint {
+    /// Prepares `point` for mixed addition. `point.z` must be `1` -- true of every point this
+    /// crate ever feeds into the MSM: freshly decompressed signatures/keys, or the hardcoded
+    /// basepoint (see [`EdwardsPoint::basepoint`]), never the output of a prior addition or
+    /// doubling.
+    pub(crate) fn new(point: &EdwardsPoint) -> Self {
+        debug_assert!(point.z.eq(&FieldElement::ONE));
+        Self {
+            x: point.x,
+            y: point.y,
+            t2d: point.t.mul(&FieldElement::EDWARDS_D2),
+        }
+    }
+
+    /// Negates this point: flips the sign of `x` (and therefore of `t2d`, since
+    /// `t2d = 2d*x*y`), leaving `y` untouched -- the same transformation as
+    /// [`EdwardsPoint::negate`].
+    pub(crate) const fn negate(&self) -> Self {
+        Self {
+            x: self.x.neg(),
+            y: self.y,
+            t2d: self.t2d.neg(),
+        }
     }
 }
 
@@ -325,6 +390,49 @@ impl PointVec {
         }
     }
 
+    /// Adds `LANES` mixed-addition-prepared points (see [`MixedPointVec`]) at once, the vectorized
+    /// analogue of [`EdwardsPoint::add_mixed`]: the same 7-vs-9-multiply saving, applied 8-wide.
+    ///
+    /// Dispatches to a single fused AVX-512 function when available
+    /// ([`field_vec::fused_point_add_mixed`]), same reason and same pattern as [`PointVec::add`]:
+    /// an earlier version of this function had no fused kernel and, measured on real AVX-512
+    /// hardware, regressed batch-verify throughput by 13-16% relative to the general, fused
+    /// [`PointVec::add`] -- the extra `Reduced`/`Unreduced` round trips between each of the 7
+    /// unfused steps cost more than the 2-fewer-multiplies saved, since memory traffic (not
+    /// multiply count) dominates this backend (see [`field_vec::fused_point_add`]'s doc comment).
+    /// Falls back to the same formula written out against the ordinary methods on any CPU without
+    /// that backend, where there is no such fused path to miss out on.
+    pub(crate) fn add_mixed(&self, rhs: &MixedPointVec) -> Self {
+        if let Some((x, y, z, t)) = field_vec::fused_point_add_mixed(
+            &self.x, &self.y, &self.z, &self.t, &rhs.x, &rhs.y, &rhs.t2d,
+        ) {
+            return Self { x, y, z, t };
+        }
+
+        let a = self
+            .y
+            .sub(&self.x)
+            .reduce()
+            .mul(&rhs.y.sub(&rhs.x).reduce());
+        let b = self
+            .y
+            .add(&self.x)
+            .reduce()
+            .mul(&rhs.y.add(&rhs.x).reduce());
+        let c = self.t.mul(&rhs.t2d);
+        let d = self.z.add(&self.z).reduce();
+        let e = b.sub(&a).reduce();
+        let f = d.sub(&c).reduce();
+        let g = d.add(&c).reduce();
+        let h = b.add(&a).reduce();
+        Self {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
+    }
+
     /// Doubles `LANES` points at once via the dedicated `dbl-2008-hwcd` formula (see
     /// [`EdwardsPoint::double`]): 4M+4S instead of [`PointVec::add`]'s 9M, and a square costs
     /// less than a full multiply on this backend (15 multiply-accumulates versus 25; see
@@ -374,6 +482,28 @@ impl PointVec {
     }
 }
 
+/// `LANES` [`MixedPoint`]s, packed the same "structure of arrays" way [`PointVec`] packs
+/// [`EdwardsPoint`]s: `Z` stays implicit `1` (no lane row for it), so [`PointVec::add_mixed`] can
+/// consume this directly wherever the transposed MSM's bucket-fill wave has `LANES` freshly
+/// decompressed (or hardcoded-basepoint) terms ready to add.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MixedPointVec {
+    x: Reduced,
+    y: Reduced,
+    t2d: Reduced,
+}
+
+impl MixedPointVec {
+    /// Packs `LANES` mixed points into one `MixedPointVec`.
+    pub(crate) fn from_lanes(lanes: &[MixedPoint; LANES]) -> Self {
+        Self {
+            x: Unreduced::from_lanes(&core::array::from_fn(|i| lanes[i].x)).reduce(),
+            y: Unreduced::from_lanes(&core::array::from_fn(|i| lanes[i].y)).reduce(),
+            t2d: Unreduced::from_lanes(&core::array::from_fn(|i| lanes[i].t2d)).reduce(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +512,19 @@ mod tests {
 
     fn rand_point(rng: &mut impl rand_core::Rng) -> EdwardsPoint {
         EdwardsPoint::basepoint().scalar_mul(&rand_scalar(rng))
+    }
+
+    /// Returns a random `Z = 1` point via rejection-sampled decompression: [`MixedPoint::new`]'s
+    /// precondition, unlike [`rand_point`]'s `scalar_mul`-derived points (which generally have
+    /// `Z != 1`).
+    fn rand_affine_point(rng: &mut impl rand_core::Rng) -> EdwardsPoint {
+        loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Some(p) = EdwardsPoint::decompress(&bytes) {
+                return p;
+            }
+        }
     }
 
     /// The compressed encoding of the standard Ed25519 base point `B` (`y = 4/5`, `x` even),
@@ -432,6 +575,50 @@ mod tests {
 
         let actual = PointVec::from_lanes(&a)
             .add(&PointVec::from_lanes(&b))
+            .to_lanes();
+        for i in 0..LANES {
+            let expected = a[i].add(&b[i]);
+            assert!(actual[i].add(&expected.negate()).is_identity());
+        }
+    }
+
+    #[test]
+    fn add_mixed_matches_general_add() {
+        let mut rng = test_rng();
+        for _ in 0..64 {
+            let p = rand_point(&mut rng);
+            let q = rand_affine_point(&mut rng);
+            let mixed = MixedPoint::new(&q);
+
+            let expected = p.add(&q);
+            let actual = p.add_mixed(&mixed);
+            assert!(actual.add(&expected.negate()).is_identity());
+        }
+    }
+
+    #[test]
+    fn mixed_point_negate_matches_edwards_negate() {
+        let mut rng = test_rng();
+        for _ in 0..64 {
+            let p = rand_point(&mut rng);
+            let q = rand_affine_point(&mut rng);
+            let mixed = MixedPoint::new(&q);
+
+            let expected = p.add(&q.negate());
+            let actual = p.add_mixed(&mixed.negate());
+            assert!(actual.add(&expected.negate()).is_identity());
+        }
+    }
+
+    #[test]
+    fn point_vec_add_mixed_matches_scalar_per_lane() {
+        let mut rng = test_rng();
+        let a: [EdwardsPoint; LANES] = core::array::from_fn(|_| rand_point(&mut rng));
+        let b: [EdwardsPoint; LANES] = core::array::from_fn(|_| rand_affine_point(&mut rng));
+        let mixed_b: [MixedPoint; LANES] = core::array::from_fn(|i| MixedPoint::new(&b[i]));
+
+        let actual = PointVec::from_lanes(&a)
+            .add_mixed(&MixedPointVec::from_lanes(&mixed_b))
             .to_lanes();
         for i in 0..LANES {
             let expected = a[i].add(&b[i]);

@@ -24,6 +24,12 @@ impl FieldElement {
         0x0052036cee2b6ff,
     ]);
 
+    /// `2 * EDWARDS_D`, precomputed for the mixed-addition formula's `2d*T` term (see
+    /// [`crate::signing::point::MixedPoint::new`]): folding the doubling into a compile-time
+    /// constant means each point's one-time `2d*T` precomputation costs a single multiply rather
+    /// than a multiply followed by a separate doubling.
+    pub(crate) const EDWARDS_D2: Self = Self::EDWARDS_D.add(&Self::EDWARDS_D);
+
     /// A fixed square root of `-1` in the field, used to recover `x` from `y` when decompressing
     /// a point whose candidate `x` has the wrong sign of square.
     pub(crate) const SQRT_M1: Self = Self([

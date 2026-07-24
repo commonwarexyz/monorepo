@@ -544,6 +544,77 @@ pub(crate) unsafe fn point_add(
     }
 }
 
+/// Fused mixed-addition point add: the entire mixed-addition formula (see
+/// [`crate::signing::point::PointVec::add_mixed`]) computed with every intermediate held in
+/// registers, same [`point_add`] pattern and for the same reason. One fewer operand than
+/// [`point_add`]'s 9 (`bz` is never loaded -- `rhs`'s `Z` is implicitly `1` -- and `bt2d` is a
+/// single already-precomputed input rather than `point_add`'s separate `bt`/`two_d`). Callers must
+/// check [`available`] first.
+///
+/// # Safety
+///
+/// The CPU executing this must support AVX-512F, AVX-512IFMA, AVX-512VL, and AVX-512DQ (checked
+/// by [`available`]).
+#[target_feature(enable = "avx512f,avx512ifma,avx512vl,avx512dq")]
+pub(crate) unsafe fn point_add_mixed(
+    ax: &Reduced,
+    ay: &Reduced,
+    az: &Reduced,
+    at: &Reduced,
+    bx: &Reduced,
+    by: &Reduced,
+    bt2d: &Reduced,
+) -> (Reduced, Reduced, Reduced, Reduced) {
+    // SAFETY: function-level requirement covers every intrinsic used here.
+    unsafe {
+        let (x1, y1, z1, t1) = (
+            load(&ax.limbs),
+            load(&ay.limbs),
+            load(&az.limbs),
+            load(&at.limbs),
+        );
+        let (x2, y2) = (load(&bx.limbs), load(&by.limbs));
+        let bt2d = load(&bt2d.limbs);
+
+        // Same bound reasoning as `point_add`'s `a`/`b`: `a` is `sub_raw(b, a)`'s right-hand
+        // operand (in `e` below), so it must be fully reduced; `b` is only ever an `add_raw`
+        // operand or a left-hand `sub_raw` operand (`e`, `h`), never a subtraction's right-hand
+        // side, so it is safe to leave loose (see `mul_regs_loose`'s doc comment).
+        let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+        let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+        // `c = t1 * bt2d`: `bt2d` already folds in the `2d` factor (precomputed once per point;
+        // see [`crate::signing::point::MixedPoint::new`]), so this is a single multiply where
+        // `point_add` needs two (`t1t2 = mul_regs(t1, t2)` then `mul_regs(t1t2, two_d)`). Fully
+        // reduced: feeds `sub_raw(dd, c)`'s right-hand operand (`f` below).
+        let c = mul_regs(t1, bt2d);
+        // `dd = z1 + z1`: `rhs`'s `Z` is implicitly `1`, so this needs no multiply at all, unlike
+        // `point_add`'s `zz = mul_regs_loose(z1, z2)` step. `z1` is already `Reduced`
+        // (`< 2^52`), so `dd`'s `< 2^53` bound is comfortably inside every downstream raw op's
+        // margin -- tighter than `point_add`'s own `dd`, which starts from a loose (`~2^61.3`)
+        // product.
+        let dd = add_raw(z1, z1);
+        let e = reduce_regs(sub_raw(b, a));
+        let f = reduce_regs(sub_raw(dd, c));
+        let g = reduce_regs(add_raw(dd, c));
+        let h = reduce_regs(add_raw(b, a));
+
+        (
+            Reduced {
+                limbs: store(mul_regs(e, f)),
+            },
+            Reduced {
+                limbs: store(mul_regs(g, h)),
+            },
+            Reduced {
+                limbs: store(mul_regs(f, g)),
+            },
+            Reduced {
+                limbs: store(mul_regs(e, h)),
+            },
+        )
+    }
+}
+
 /// Fused point doubling: the dedicated `dbl-2008-hwcd` formula (see
 /// [`crate::signing::point::PointVec::double`]), with every intermediate held in registers, same
 /// [`point_add`] pattern and for the same reason (see that function's doc comment). Only the 3
@@ -800,6 +871,85 @@ mod tests {
             let c = t1t2.mul_portable(&two_d);
             let zz = az.mul_portable(&bz);
             let dd = Unreduced::from(zz).add_portable(&Unreduced::from(zz));
+            let e = Unreduced::from(b_val)
+                .sub_portable(&Unreduced::from(a_val))
+                .reduce_portable();
+            let f = dd.sub_portable(&Unreduced::from(c)).reduce_portable();
+            let g = dd.add_portable(&Unreduced::from(c)).reduce_portable();
+            let h = Unreduced::from(b_val)
+                .add_portable(&Unreduced::from(a_val))
+                .reduce_portable();
+            let expected = (
+                e.mul_portable(&f),
+                g.mul_portable(&h),
+                f.mul_portable(&g),
+                e.mul_portable(&h),
+            );
+
+            let actual_lanes = (
+                actual.0.to_lanes(),
+                actual.1.to_lanes(),
+                actual.2.to_lanes(),
+                actual.3.to_lanes(),
+            );
+            let expected_lanes = (
+                expected.0.to_lanes(),
+                expected.1.to_lanes(),
+                expected.2.to_lanes(),
+                expected.3.to_lanes(),
+            );
+            for i in 0..super::super::LANES {
+                assert!(actual_lanes.0[i].eq(&expected_lanes.0[i]), "x lane {i}");
+                assert!(actual_lanes.1[i].eq(&expected_lanes.1[i]), "y lane {i}");
+                assert!(actual_lanes.2[i].eq(&expected_lanes.2[i]), "z lane {i}");
+                assert!(actual_lanes.3[i].eq(&expected_lanes.3[i]), "t lane {i}");
+            }
+        }
+    }
+
+    /// Same structure as [`point_add_matches_portable_formula_on_real_hardware`], but for
+    /// [`point_add_mixed`] against the mixed-addition formula (`bz` implicit `1`, `bt2d` already
+    /// folding in `2d`) written out with the portable kernels directly.
+    #[test]
+    fn point_add_mixed_matches_portable_formula_on_real_hardware() {
+        skip_unless_available!();
+        let mut rng = test_rng();
+        let rand_reduced = |rng: &mut _| {
+            let lanes: [_; super::super::LANES] = core::array::from_fn(|_| rand_field_element(rng));
+            Unreduced::from_lanes(&lanes).reduce()
+        };
+        for _ in 0..64 {
+            let (ax, ay, az, at) = (
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+            );
+            let (bx, by, bt2d) = (
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+                rand_reduced(&mut rng),
+            );
+
+            // SAFETY: `available()` returned true above.
+            let actual = unsafe { point_add_mixed(&ax, &ay, &az, &at, &bx, &by, &bt2d) };
+
+            let y1mx1 = Unreduced::from(ay)
+                .sub_portable(&Unreduced::from(ax))
+                .reduce_portable();
+            let y2mx2 = Unreduced::from(by)
+                .sub_portable(&Unreduced::from(bx))
+                .reduce_portable();
+            let a_val = y1mx1.mul_portable(&y2mx2);
+            let y1px1 = Unreduced::from(ay)
+                .add_portable(&Unreduced::from(ax))
+                .reduce_portable();
+            let y2px2 = Unreduced::from(by)
+                .add_portable(&Unreduced::from(bx))
+                .reduce_portable();
+            let b_val = y1px1.mul_portable(&y2px2);
+            let c = at.mul_portable(&bt2d);
+            let dd = Unreduced::from(az).add_portable(&Unreduced::from(az));
             let e = Unreduced::from(b_val)
                 .sub_portable(&Unreduced::from(a_val))
                 .reduce_portable();
