@@ -51,7 +51,7 @@
 //! * Attempt to certify `c` (see [Certification](#certification)), leaving `t_a` armed so a
 //!   stalled certification still times out the view
 //!     * On success: enter `v+1` and broadcast `finalize(c,v)` (skipped if we have broadcast
-//!       `nullify(v)`)
+//!       `nullify(v)` or observed `l` equivocate in `v`)
 //!     * On failure: treat as immediate timeout expiry and broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
@@ -95,7 +95,7 @@
 //! voting to finalize.
 //!
 //! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload (unless it has
-//! broadcast `nullify`) and enters the next view. If `certify` returns `false`, the participant broadcasts
+//! broadcast `nullify` or observed the leader equivocate) and enters the next view. If `certify` returns `false`, the participant broadcasts
 //! `nullify` for the view instead (treating it as an immediate timeout), and will refuse to build upon the
 //! proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
