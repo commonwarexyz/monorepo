@@ -82,6 +82,18 @@ impl ParentPayloadError {
     }
 }
 
+/// Outcome of [State::try_verify].
+pub enum Verify<S: Scheme<D>, D: Digest> {
+    /// The proposal is ready for verification by the automaton.
+    Ready(Context<D, S::PublicKey>, Proposal<D>),
+    /// The proposal was refused because its ancestry conflicts with a
+    /// certificate we hold, returned for broadcast so the proposer's side
+    /// of a certificate split converges on ours (see [State::object]).
+    Objection(Certificate<S, D>),
+    /// No proposal is ready to verify and no conflict was found.
+    Wait,
+}
+
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub scheme: S,
@@ -129,10 +141,6 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
-    /// Certificate justifying our latest refusal to verify a proposal,
-    /// staged for broadcast (see [Self::take_objection]).
-    objection: Option<Certificate<S, D>>,
-
     current_view: Gauge,
     tracked_views: Gauge,
     timeouts: CounterFamily<Timeout>,
@@ -164,7 +172,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             nullification_views: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
-            objection: None,
             current_view,
             tracked_views,
             timeouts,
@@ -731,10 +738,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Unlike during proposal, we don't use a verification opportunity
     /// to backfill missing certificates (a malicious proposer could
     /// ask us to fetch junk).
-    #[allow(clippy::type_complexity)]
-    pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
+    pub fn try_verify(&mut self) -> Verify<S, D> {
         let view = self.view;
-        let (leader, proposal) = self.views.get(&view)?.should_verify()?;
+        let Some((leader, proposal)) = self
+            .views
+            .get(&view)
+            .and_then(|round| round.should_verify())
+        else {
+            return Verify::Wait;
+        };
         let parent_payload = match self.parent_payload(&proposal) {
             Ok(parent_payload) => parent_payload,
             Err(err) => {
@@ -749,19 +761,26 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                self.object(view, err);
-                return None;
+                return match self.object(view, err) {
+                    Some(certificate) => Verify::Objection(certificate),
+                    None => Verify::Wait,
+                };
             }
         };
-        if !self.views.get_mut(&view)?.try_verify() {
-            return None;
+        if !self
+            .views
+            .get_mut(&view)
+            .expect("current round must exist")
+            .try_verify()
+        {
+            return Verify::Wait;
         }
         let context = Context {
             round: proposal.round,
             leader: leader.key,
             parent: (proposal.parent, parent_payload),
         };
-        Some((context, proposal))
+        Verify::Ready(context, proposal)
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
@@ -995,7 +1014,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             })
     }
 
-    /// Stages the certificate that justifies refusing the current view's
+    /// Returns the certificate that justifies refusing the current view's
     /// proposal, if the refusal stems from a conflict with evidence we hold
     /// rather than evidence we merely lack.
     ///
@@ -1003,11 +1022,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// participants and a nullification held by the rest for the same view),
     /// each side refuses the other's proposals and no proposal can reach
     /// quorum. Only the evidence holder can detect the split, so it
-    /// broadcasts the conflicting certificate (via [Self::take_objection])
-    /// to converge the proposer's side. Refusals caused by evidence we
-    /// merely lack stay silent: there is no certificate to share, and the
-    /// resolver already fetches nullification gaps above the floor.
-    fn object(&mut self, view: View, err: ParentPayloadError) {
+    /// broadcasts the conflicting certificate to converge the proposer's
+    /// side. Refusals caused by evidence we merely lack stay silent: there
+    /// is no certificate to share, and the resolver already fetches
+    /// nullification gaps above the floor. Each round objects at most once.
+    fn object(&mut self, view: View, err: ParentPayloadError) -> Option<Certificate<S, D>> {
         // The current round must exist (try_verify just consulted it). Skip
         // the certificate lookup once it has already objected.
         if self
@@ -1016,7 +1035,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .expect("current round must exist")
             .objected()
         {
-            return;
+            return None;
         }
         let certificate = match err {
             // The proposal skips views among which we certified a
@@ -1029,44 +1048,35 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 parent_view,
                 ..
             } => {
-                let Some(notarization) = self.certified_conflict(parent_view, proposal_view) else {
-                    return;
-                };
+                let notarization = self.certified_conflict(parent_view, proposal_view)?;
                 Certificate::Notarization(notarization.clone())
             }
             // The proposal builds on a view we hold a covering nullification
             // for: the proposer certified that view and may not know the
             // nullification exists.
             ParentPayloadError::ParentNotCertified { parent_view, .. } => {
-                let Some(covering) = self.highest_nullification_in_term(parent_view) else {
-                    return;
-                };
-                let Some(nullification) = self.nullification(covering) else {
-                    return;
-                };
+                let covering = self.highest_nullification_in_term(parent_view)?;
+                let nullification = self.nullification(covering)?;
                 Certificate::Nullification(nullification.clone())
             }
             // The proposal builds below our finalization floor: the proposer
             // lacks our finalization.
             ParentPayloadError::ParentBeforeFinalized { .. } => {
-                let Some(finalization) = self.finalization(self.last_finalized) else {
-                    return;
-                };
+                let finalization = self.finalization(self.last_finalized)?;
                 Certificate::Finalization(finalization.clone())
             }
             // Structurally invalid proposals need no evidence.
             ParentPayloadError::ParentNotBeforeProposal { .. }
-            | ParentPayloadError::IntraTermProposalSkipsViews { .. } => return,
+            | ParentPayloadError::IntraTermProposalSkipsViews { .. } => return None,
         };
-        if !self
+        // Consume the round's one-shot objection.
+        let objected = self
             .views
             .get_mut(&view)
             .expect("current round must exist")
-            .try_object()
-        {
-            return;
-        }
-        self.objection = Some(certificate);
+            .try_object();
+        assert!(objected, "round already objected");
+        Some(certificate)
     }
 
     /// Returns the notarization of the highest certified view strictly
@@ -1086,12 +1096,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .and_then(|(_, round)| round.notarization())
     }
 
-    /// Takes the certificate staged to justify our latest refusal to verify
-    /// a proposal (see [Self::object]). At most one objection is staged per
-    /// round.
-    pub const fn take_objection(&mut self) -> Option<Certificate<S, D>> {
-        self.objection.take()
-    }
 }
 
 #[cfg(test)]
@@ -1595,7 +1599,7 @@ mod tests {
                     Sha256Digest::from(payload),
                 );
                 assert!(state.set_proposal(view, proposal.clone()));
-                assert!(state.try_verify().is_some());
+                assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(view));
                 let notarization = build_notarization(verifier, schemes, &proposal);
                 assert!(state.add_notarization(notarization).0);
@@ -1632,7 +1636,7 @@ mod tests {
                 Sha256Digest::from([3u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), proposal_v3));
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(3)));
 
             assert_eq!(
@@ -2701,7 +2705,7 @@ mod tests {
             assert!(initial_deadline.0 > context.current());
 
             // Permanent ancestry error should immediately expire the timeout.
-            assert!(state.try_verify().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
             assert!(state.next_timeout().0 <= context.current());
         });
     }
@@ -2752,8 +2756,12 @@ mod tests {
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
 
-            // Permanent ancestry errors should immediately expire the timeout.
-            assert!(state.try_verify().is_none());
+            // Permanent ancestry errors should immediately expire the timeout
+            // (and object with the finalization the proposer lacks).
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Objection(Certificate::Finalization(_))
+            ));
             assert!(state.next_timeout().0 <= context.current());
         });
     }
@@ -2794,7 +2802,7 @@ mod tests {
             assert!(initial_deadline.0 > context.current());
 
             // Missing parent certification should wait instead of forcing an immediate timeout.
-            assert!(state.try_verify().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
             assert_eq!(state.next_timeout(), initial_deadline);
         });
     }
@@ -2852,7 +2860,7 @@ mod tests {
             );
 
             // No verification request should be emitted (leader-owned).
-            assert!(state.try_verify().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal);
             let (added, _) = state.add_notarization(notarization);
@@ -3298,9 +3306,9 @@ mod tests {
             assert!(Notarize::sign(&schemes[0], bad_proposal.clone()).is_some());
 
             assert!(state.set_proposal(view, bad_proposal.clone()));
-            let (verify_context, verify_proposal) = state
-                .try_verify()
-                .expect("bad header should reach verification");
+            let Verify::Ready(verify_context, verify_proposal) = state.try_verify() else {
+                panic!("bad header should reach verification");
+            };
             assert_eq!(verify_proposal, bad_proposal);
             assert_eq!(verify_context.parent, (certified_view, certified_payload));
 
@@ -3437,14 +3445,18 @@ mod tests {
             );
             assert!(state.set_proposal(child_view, child_proposal.clone()));
 
-            // Before late certification of parent, follower cannot verify this child proposal.
-            assert!(state.try_verify().is_none());
+            // Before late certification of parent, the follower cannot verify
+            // this child proposal (and objects with the covering nullification).
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Objection(Certificate::Nullification(_))
+            ));
 
             // Late certification after nullification should unblock parent check for verification.
             assert!(state.certified(parent_view, true).is_some());
-            let verified = state.try_verify();
-            assert!(verified.is_some());
-            let (ctx, proposal) = verified.expect("verify context should exist");
+            let Verify::Ready(ctx, proposal) = state.try_verify() else {
+                panic!("verify context should exist");
+            };
             assert_eq!(ctx.round.view(), child_view);
             assert_eq!(ctx.parent, (parent_view, parent_payload));
             assert_eq!(proposal, child_proposal);
@@ -3610,7 +3622,7 @@ mod tests {
             // Missing nullification should stall verification without expiring the timeout.
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
-            assert!(state.try_verify().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
             assert_eq!(state.next_timeout(), initial_deadline);
 
             // Once the intermediate nullification arrives, the same proposal should become verifiable.
@@ -3618,8 +3630,9 @@ mod tests {
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), blocked_view));
             assert!(state.add_nullification(nullification));
 
-            let verified = state.try_verify().expect("verify context should exist");
-            let (ctx, proposal) = verified;
+            let Verify::Ready(ctx, proposal) = state.try_verify() else {
+                panic!("verify context should exist");
+            };
             assert_eq!(ctx.round.view(), child_view);
             assert_eq!(ctx.parent, (parent_view, parent_payload));
             assert_eq!(proposal, child_proposal);
@@ -3679,13 +3692,13 @@ mod tests {
                 Sha256Digest::from([89u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            let objection = state.take_objection().expect("objection must be staged");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged");
+            };
             assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
 
             // The refusal objects at most once per round.
-            assert!(state.try_verify().is_none());
-            assert!(state.take_objection().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
@@ -3716,8 +3729,9 @@ mod tests {
                 Sha256Digest::from([90u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            let objection = state.take_objection().expect("objection must be staged");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged");
+            };
             assert!(matches!(objection, Certificate::Nullification(n) if n == nullification_1));
         });
     }
@@ -3750,8 +3764,9 @@ mod tests {
                 Sha256Digest::from([92u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            let objection = state.take_objection().expect("objection must be staged");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged");
+            };
             assert!(matches!(objection, Certificate::Finalization(f) if f == finalization));
         });
     }
@@ -3792,8 +3807,9 @@ mod tests {
                 Sha256Digest::from([96u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            let objection = state.take_objection().expect("objection must be staged");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged");
+            };
             assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
         });
     }
@@ -3823,8 +3839,7 @@ mod tests {
                 Sha256Digest::from([98u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), child_proposal));
-            assert!(state.try_verify().is_none());
-            assert!(state.take_objection().is_some());
+            assert!(matches!(state.try_verify(), Verify::Objection(_)));
 
             // Advance two views (we lead view 4, so a proposal there would
             // not be verified) and refuse the same conflict again: the new
@@ -3846,10 +3861,9 @@ mod tests {
                 Sha256Digest::from([99u8; 32]),
             );
             assert!(state.set_proposal(retry_view, retry_proposal));
-            assert!(state.try_verify().is_none());
-            let objection = state
-                .take_objection()
-                .expect("objection must be staged again");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged again");
+            };
             assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
         });
     }
@@ -3883,14 +3897,14 @@ mod tests {
                 Sha256Digest::from([101u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            assert!(state.take_objection().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
 
             // Once certification completes, the same round objects (the
             // silent refusal must not have consumed its objection).
             assert!(state.certified(skipped_view, true).is_some());
-            assert!(state.try_verify().is_none());
-            let objection = state.take_objection().expect("objection must be staged");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged");
+            };
             assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
         });
     }
@@ -3922,8 +3936,9 @@ mod tests {
                 Sha256Digest::from([102u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            let objection = state.take_objection().expect("objection must be staged");
+            let Verify::Objection(objection) = state.try_verify() else {
+                panic!("objection must be staged");
+            };
             assert!(matches!(objection, Certificate::Nullification(n) if n == nullification_1));
         });
     }
@@ -3959,8 +3974,7 @@ mod tests {
                 Sha256Digest::from([94u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(state.try_verify().is_none());
-            assert!(state.take_objection().is_none());
+            assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
@@ -3992,7 +4006,7 @@ mod tests {
             state.set_proposal(view, proposal);
 
             // We should not want to verify (already timeout)
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view));
 
             // Timeout path emits a first-attempt nullify.
@@ -4190,7 +4204,7 @@ mod tests {
                 Sha256Digest::from([43u8; 32]),
             );
             assert!(state.set_proposal(view, proposal_v2.clone()));
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal_v2);
@@ -4262,7 +4276,7 @@ mod tests {
                 Sha256Digest::from([43u8; 32]),
             );
             assert!(state.set_proposal(View::new(2), proposal_v2));
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(2)));
 
             assert!(
@@ -4401,7 +4415,7 @@ mod tests {
                     Sha256Digest::from([11u8; 32]),
                 );
                 assert!(state.set_proposal(view, proposal.clone()));
-                assert!(state.try_verify().is_some());
+                assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(view));
 
                 let notarization = build_notarization(&verifier, &schemes, &proposal);
@@ -4497,7 +4511,7 @@ mod tests {
                 Sha256Digest::from([55u8; 32]),
             );
             state.set_proposal(view4, proposal_v4.clone());
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view4));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal_v4);

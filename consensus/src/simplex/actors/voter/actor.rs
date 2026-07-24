@@ -1,7 +1,7 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{Config as StateConfig, State},
+    state::{Config as StateConfig, State, Verify},
 };
 use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
@@ -364,10 +364,23 @@ impl<
     }
 
     /// Attempt to verify a proposed block.
+    ///
+    /// Returns the pending verification request when the proposal is ready,
+    /// or the certificate justifying a refusal (see [State::try_verify]).
     #[allow(clippy::async_yields_async)]
-    async fn try_verify(&mut self) -> Option<Request<Context<D, S::PublicKey>, bool>> {
+    #[allow(clippy::type_complexity)]
+    async fn try_verify(
+        &mut self,
+    ) -> (
+        Option<Request<Context<D, S::PublicKey>, bool>>,
+        Option<Certificate<S, D>>,
+    ) {
         // Check if we are ready to verify
-        let (context, proposal) = self.state.try_verify()?;
+        let (context, proposal) = match self.state.try_verify() {
+            Verify::Ready(context, proposal) => (context, proposal),
+            Verify::Objection(certificate) => return (None, Some(certificate)),
+            Verify::Wait => return (None, None),
+        };
 
         // Request verification
         let span = info_span!(
@@ -384,7 +397,7 @@ impl<
         }
         .instrument(span.clone())
         .await;
-        Some(Request(context, span, receiver))
+        (Some(Request(context, span, receiver)), None)
     }
 
     /// Persists our nullify vote to the journal for crash recovery.
@@ -1090,20 +1103,20 @@ impl<
                     pending_propose = self.try_propose().await;
                 }
 
-                // If needed, verify current view
-                if pending_verify.is_none() {
-                    pending_verify = self.try_verify().await;
-                }
-
-                // Broadcast any certificate staged to justify a refusal to
-                // verify the current proposal, so the proposer's side of a
+                // If needed, verify current view. A refusal caused by a
+                // conflict with a certificate we hold returns that
+                // certificate, broadcast so the proposer's side of a
                 // certificate split converges on ours. We don't worry about
-                // recording this certificate because it must've already
-                // existed (in our journal or the configured floor).
-                if let Some(objection) = self.state.take_objection() {
-                    assert!(!self.dirty, "journal must be synced before broadcast");
-                    debug!(view = %objection.view(), "broadcasting objection");
-                    self.broadcast_certificate(&mut certificate_sender, objection);
+                // recording it because it must've already existed (in our
+                // journal or the configured floor).
+                if pending_verify.is_none() {
+                    let objection;
+                    (pending_verify, objection) = self.try_verify().await;
+                    if let Some(objection) = objection {
+                        assert!(!self.dirty, "journal must be synced before broadcast");
+                        debug!(view = %objection.view(), "broadcasting objection");
+                        self.broadcast_certificate(&mut certificate_sender, objection);
+                    }
                 }
 
                 // Attempt to certify any views that we have notarizations for.
