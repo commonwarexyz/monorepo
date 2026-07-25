@@ -247,6 +247,6 @@ Figure 12: Two consensus views time out in the shaded interval. The producer kee
 
 ## Every Producer, Every View
 
-Multimmit runs transaction dissemination and consensus concurrently. Blocks enter the ordering process as soon as they reach validators, consensus votes establish their availability, and a faulty producer only delays its own chain. The [specification](https://arxiv.org/abs/2607.21021) includes proofs of consistency and liveness, accounts for the availability of every ordered block, and gives the exact vote threshold for finalizing extension blocks at every $n$ (with optimal rules at $n=5f+1$).
+Multimmit runs transaction dissemination and consensus concurrently. Blocks enter the ordering process as soon as they reach validators, consensus votes establish their availability, and a faulty producer only delays its own chain. Submit a transaction to any producer. One round of votes later, it is final.
 
-Submit a transaction to any producer. One round of votes later, it is final.
+Checkout the (draft) [specification](https://arxiv.org/abs/2607.21021) for proofs of consistency and liveness. Follow GitHub for an MIT/Apache-2 implementation over the coming weeks.

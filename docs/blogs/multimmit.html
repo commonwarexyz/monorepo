@@ -596,15 +596,13 @@ O’Grady</a></div>
         <p>Multimmit runs transaction dissemination and consensus
         concurrently. Blocks enter the ordering process as soon as they
         reach validators, consensus votes establish their availability,
-        and a faulty producer only delays its own chain. The <a
-        href="https://arxiv.org/abs/2607.21021">specification</a>
-        includes proofs of consistency and liveness, accounts for the
-        availability of every ordered block, and gives the exact vote
-        threshold for finalizing extension blocks at every <span
-        class="math inline">n</span> (with optimal rules at <span
-        class="math inline">n=5f+1</span>).</p>
-        <p>Submit a transaction to any producer. One round of votes
-        later, it is final.</p>
+        and a faulty producer only delays its own chain. Submit a
+        transaction to any producer. One round of votes later, it is
+        final.</p>
+        <p>Checkout the (draft) <a
+        href="https://arxiv.org/abs/2607.21021">specification</a> for
+        proofs of consistency and liveness. Follow GitHub for an
+        MIT/Apache-2 implementation over the coming weeks.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
