@@ -1,9 +1,9 @@
 ---
 title: "Multimmit: The Best of Both Worlds"
-description: "The fastest path to finality no longer belongs exclusively to the leader. In Multimmit, blocks from every honest sequencer can reach the two-message-delay lower bound, even when they miss the leader's proposal, while all sequencers disseminate independent transaction chains in parallel."
-date: "July 23rd, 2026"
-published-time: "2026-07-23T00:00:00Z"
-modified-time: "2026-07-23T00:00:00Z"
+description: "The fastest path to finality no longer belongs exclusively to the leader. In Multimmit, blocks from every honest producer (disseminating transactions in parallel) can reach the two-message-delay lower bound, even when they miss the leader's proposal."
+date: "July 25th, 2026"
+published-time: "2026-07-25T00:00:00Z"
+modified-time: "2026-07-25T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/multimmit"
@@ -19,9 +19,9 @@ In a "traditional" leader-based protocol, this means sending a transaction to an
 
 However, decoupling often increases the latency of finality (the number we just said is the only thing users care about). Consensus cannot finalize a reference to data that the network cannot recover. Existing protocols either certify each block before it can be referenced or reference blocks immediately. The first approach adds certificate round trips to every transaction. The second is faster until data is missing, at which point voters must fetch it or the protocol finalizes only the prefix before the gap.
 
-Today, we're revealing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that avoids both delays. Producers, validators and optionally API nodes, each emit their own stream of transaction blocks. Consensus references these blocks as soon as they arrive, and votes already being cast establish availability. No block waits for a certificate, no voter waits to fetch missing data, and a withheld block delays finality only on a producer's own chain. Votes can also include blocks the leader missed (or censored), allowing blocks from every producer chain to enter the finalized log in each view.
+Today, we're revealing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that avoids both delays. Producers (validators and optionally API nodes) each build their own chain of transaction blocks. Consensus references these blocks as soon as they arrive, and votes already being cast establish availability. No block waits for a certificate, no voter waits to fetch missing data, and a withheld block delays finality only on a producer's own chain. Votes can also include blocks the leader missed (or censored), allowing blocks from every producer chain to enter the finalized log in each view.
 
-With Multimmit, a block from any honest producer chain can finalize $2\delta$ after broadcast, even when up to $f$ non-leader producers are faulty (assuming $n \geq 5f+1$). Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), reach it only for designated leaders (or anchors). Multimmit extends it to every honest producer chain at once without giving up concurrent dissemination: the best of both worlds.
+With Multimmit, a block from any honest producer chain can finalize $2\delta$ after broadcast, even when up to $f$ non-leader producers are faulty (assuming $n \geq 5f+1$). Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), reach it only for designated leaders (or anchors), and everything else waits for a later one. Multimmit extends it to every honest producer chain at once without giving up concurrent dissemination: the best of both worlds.
 
 ## The Ride to the Leader
 
@@ -159,7 +159,7 @@ Figure 5: Transaction block $b$ (green, like the batch in Figure 3) reaches the 
 Figure 6: Transaction block $b$ crosses the leader block on the wire and misses the proposal, but reaches validators before they vote. Extension votes attest $b$ directly, finalizing it $2\delta$ after its broadcast. Certification continues in the background (faint arrows) and finishes after $b$ has already finalized.
 :::
 
-From the user's perspective, both paths are simple: submit to an API node (a producer with no weight in consensus), let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before it could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ can finalize at $t+2\delta$. 
+From the user's perspective, both paths are simple: submit to an API node (a producer with no weight in consensus), let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before it could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation, and at $t+2\delta$ with favorable timing (broadcast concurrently with leader's block). Raptr, measured the same way, takes $5\delta$. 
 
 How does one round of votes produce a single ordering? Each Multimmit vote carries an independent position for every chain. Voters do not vote on how blocks from different chains are interleaved. That ordering is computed afterwards from the finalized tips, which prevents a gap in one chain from limiting any other chain's finalization.
 

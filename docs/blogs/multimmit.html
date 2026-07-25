@@ -11,9 +11,9 @@
     <title>commonware > Multimmit: The Best of Both Worlds</title>
     <meta name="description" content="The fastest path to finality no
 longer belongs exclusively to the leader. In Multimmit, blocks from
-every honest sequencer can reach the two-message-delay lower bound, even
-when they miss the leader’s proposal, while all sequencers disseminate
-independent transaction chains in parallel.">
+every honest producer (disseminating transactions in parallel) can reach
+the two-message-delay lower bound, even when they miss the leader’s
+proposal.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -25,12 +25,12 @@ independent transaction chains in parallel.">
 Worlds" />
     <meta property="og:description" content="The fastest path to
 finality no longer belongs exclusively to the leader. In Multimmit,
-blocks from every honest sequencer can reach the two-message-delay lower
-bound, even when they miss the leader’s proposal, while all sequencers
-disseminate independent transaction chains in parallel." />
+blocks from every honest producer (disseminating transactions in
+parallel) can reach the two-message-delay lower bound, even when they
+miss the leader’s proposal." />
     <meta property="article:author" content="Patrick O’Grady" />
-    <meta property="article:published_time" content="2026-07-23T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-07-23T00:00:00Z" />
+    <meta property="article:published_time" content="2026-07-25T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-07-25T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/multimmit" />
 
@@ -41,9 +41,9 @@ disseminate independent transaction chains in parallel." />
 Worlds" />
     <meta property="twitter:description" content="The fastest path to
 finality no longer belongs exclusively to the leader. In Multimmit,
-blocks from every honest sequencer can reach the two-message-delay lower
-bound, even when they miss the leader’s proposal, while all sequencers
-disseminate independent transaction chains in parallel." />
+blocks from every honest producer (disseminating transactions in
+parallel) can reach the two-message-delay lower bound, even when they
+miss the leader’s proposal." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
@@ -106,7 +106,7 @@ disseminate independent transaction chains in parallel." />
 
                         <div class="author">By <a href="https://x.com/_patrickogrady">Patrick
 O’Grady</a></div>
-                        <div class="date">July 23rd, 2026</div>
+                        <div class="date">July 25th, 2026</div>
         </div>
         <p>For users, the only blockchain speed that matters is the time
         from submitting a transaction to seeing it finalize.</p>
@@ -137,8 +137,8 @@ O’Grady</a></div>
         the prefix before the gap.</p>
         <p>Today, we’re revealing <a
         href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
-        construction that avoids both delays. Producers, validators and
-        optionally API nodes, each emit their own stream of transaction
+        construction that avoids both delays. Producers (validators and
+        optionally API nodes) each build their own chain of transaction
         blocks. Consensus references these blocks as soon as they
         arrive, and votes already being cast establish availability. No
         block waits for a certificate, no voter waits to fetch missing
@@ -155,9 +155,10 @@ O’Grady</a></div>
         minimum</a> for fault-tolerant consensus. Existing protocols,
         including DAG protocols such as <a
         href="https://arxiv.org/abs/2511.15361">BlueBottle</a>, reach it
-        only for designated leaders (or anchors). Multimmit extends it
-        to every honest producer chain at once without giving up
-        concurrent dissemination: the best of both worlds.</p>
+        only for designated leaders (or anchors), and everything else
+        waits for a later one. Multimmit extends it to every honest
+        producer chain at once without giving up concurrent
+        dissemination: the best of both worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
         <p>Consider a typical consensus protocol with one proposer at a
         time and <a
@@ -415,8 +416,12 @@ O’Grady</a></div>
         could reach a leader an ocean away. Nothing must reach the
         leader before dissemination begins. Including the wait for the
         next vote event, a block sent at time <span
-        class="math inline">t</span> can finalize at <span
-        class="math inline">t+2\delta</span>.</p>
+        class="math inline">t</span> finalizes at <span
+        class="math inline">t+3\delta</span> in expectation, and at
+        <span class="math inline">t+2\delta</span> with favorable timing
+        (broadcast concurrently with leader’s block). Raptr, measured
+        the same way, takes <span
+        class="math inline">5\delta</span>.</p>
         <p>How does one round of votes produce a single ordering? Each
         Multimmit vote carries an independent position for every chain.
         Voters do not vote on how blocks from different chains are
