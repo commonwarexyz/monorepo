@@ -108,24 +108,26 @@ disseminate independent transaction chains in parallel." />
 O’Grady</a></div>
                         <div class="date">July 23rd, 2026</div>
         </div>
-        <p>For users, a blockchain’s speed is the time from submitting a
-        transaction to seeing it final. Most consensus benchmarks start
-        their timer later, when a leader proposes a block. In a
-        traditional leader-based protocol, a transaction must first
-        reach the current leader before it can appear in a block. That
-        leader then broadcasts the same transaction back out to every
-        validator, limiting network throughput to one node’s egress.</p>
-        <p>Decoupling transaction dissemination from consensus removes
-        this bottleneck. Instead of one leader sequencing all
+        <p>For users, the only blockchain speed that matters is the time
+        from submitting a transaction to seeing it finalize.</p>
+        <p>In a “traditional” leader-based protocol, this means sending
+        a transaction to an API, the API sending that transaction to the
+        leader (wherever it may be in the world), and then landing in a
+        finalized block (unless you just missed the leader’s proposal
+        and land in the next one). The throughput of all of this bound
+        by the leader’s egress (which bounds the rate they can push
+        their block, erasure coded or not, to other validators).</p>
+        <p><a
+        href="https://hackmd.io/@patrickogrady/rys8mdl5p">Decoupling
+        transaction dissemination from consensus removes the scale
+        bottleneck (at least)</a>. Instead of one leader sequencing all
         transaction data, many independent <em>producers</em> each
         sequence and stream their own chain of transaction blocks in
-        parallel. Consensus orders small references from those chains
-        into one log. The network can then finalize transactions at
-        roughly the rate validators can <em>ingress</em> them instead of
-        the rate one leader can <em>egress</em> them. This split is <a
-        href="https://hackmd.io/@patrickogrady/rys8mdl5p">now standard
-        among high-throughput designs</a>.</p>
-        <p>However, decoupling has typically increased finality latency.
+        parallel. Consensus then orders small references from those
+        chains into one log (or uses the broadcast directly as consensus
+        in a DAG).</p>
+        <p>However, decoupling often increases the latency of finality
+        (the number we just said is the only thing users care about).
         Consensus cannot finalize a reference to data that the network
         cannot recover. Existing protocols either certify each block
         before it can be referenced or reference blocks immediately. The
@@ -133,43 +135,36 @@ O’Grady</a></div>
         transaction. The second is faster until data is missing, at
         which point voters must fetch it or the protocol finalizes only
         the prefix before the gap.</p>
-        <p>Today, we’re sharing <a
+        <p>Today, we’re revealing <a
         href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
-        construction that avoids both delays. Producers and the
-        consensus leader have distinct roles: each producer
-        independently extends and broadcasts its own chain of
-        transaction blocks, while the leader proposes a checkpoint over
-        those chains. Consensus references blocks as soon as they
-        arrive, and the votes already being cast establish availability.
-        No block waits for a certificate, no voter waits to fetch
-        missing data, and a withheld block delays finality only on its
-        own chain. Votes can also include blocks the leader missed,
-        allowing blocks from every producer chain to enter the finalized
-        log in each view.</p>
-        <p>With Multimmit, a block from any honest producer chain
-        finalizes <span class="math inline">2\delta</span> after
-        broadcast in the best case and <span
-        class="math inline">3\delta</span> in expectation, even when up
-        to <span class="math inline">f</span> non-leader producers are
-        faulty (assuming <span class="math inline">n \geq 5f+1</span>).
-        Unlike the latency figures usually reported for consensus, this
-        timer starts at broadcast, not at a later leader proposal. Two
-        message delays is the <a
-        href="https://arxiv.org/abs/2102.07240">theoretical minimum</a>
-        for fault-tolerant consensus. Existing protocols, including DAG
-        protocols such as <a
+        construction that avoids both delays. Producers, validators and
+        optionally API nodes, each emit their own stream of transaction
+        blocks. Consensus references these blocks as soon as they
+        arrive, and votes already being cast establish availability. No
+        block waits for a certificate, no voter waits to fetch missing
+        data, and a withheld block delays finality only on a producer’s
+        own chain. Votes can also include blocks the leader missed (or
+        censored), allowing blocks from every producer chain to enter
+        the finalized log in each view.</p>
+        <p>With Multimmit, a block from any honest producer chain can
+        finalize <span class="math inline">2\delta</span> after
+        broadcast, even when up to <span class="math inline">f</span>
+        non-leader producers are faulty (assuming <span
+        class="math inline">n \geq 5f+1</span>). Two message delays is
+        the <a href="https://arxiv.org/abs/2102.07240">theoretical
+        minimum</a> for fault-tolerant consensus. Existing protocols,
+        including DAG protocols such as <a
         href="https://arxiv.org/abs/2511.15361">BlueBottle</a>, reach it
-        through designated leader slots, and adding slots makes each
-        round wait on every one of them. Multimmit extends it to every
-        honest producer chain at once without giving up concurrent
-        dissemination: the best of both worlds.</p>
+        only for designated leaders (or anchors). Multimmit extends it
+        to every honest producer chain at once without giving up
+        concurrent dissemination: the best of both worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
-        <p>Consider a typical deployed protocol with one proposer at a
+        <p>Consider a typical consensus protocol with one proposer at a
         time and <a
         href="https://eprint.iacr.org/2023/463">Simplex</a>-style
-        notarize and finalize rounds. Figures 1, 3, 5, and 6 measure
-        from transaction submission and track the transaction through
-        finality.</p>
+        notarize and finalize rounds. A transaction travels from the
+        user to an API node, is forwarded to a leader that is ready to
+        propose, and is broadcast in the leader’s block.</p>
         <style>
           .cw-loop {
             aspect-ratio: 1024 / 464;
@@ -221,30 +216,25 @@ O’Grady</a></div>
         class="math inline">\delta</span>) since submission. Figures 1,
         3, 5, and 6 use the same axis and omit the wait for the next
         proposal or producer block, which Figure 2 draws. Here, the
-        transaction reaches the leader just as it is ready to propose.
-        Conventional consensus timers start at “block”.</p>
+        transaction reaches the leader just as it is ready to
+        propose.</p>
         </div>
-        <p>From that “block” marker, finality takes two rounds of
-        voting. A recent cohort (<a
-        href="/blogs/minimmit.html">Minimmit</a>, <a
-        href="https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana">Alpenglow</a>,
-        <a href="https://arxiv.org/abs/2505.08771">Kudzu</a>) reduces
-        this to one round when <span class="math inline">n \geq
-        5f+1</span> (Multimmit uses the same consensus skeleton in
-        Figures 5 and 6).</p>
-        <p>The user’s timer, however, started at submission. The
-        transaction spends <span class="math inline">\delta</span>
-        reaching an API node and another <span
-        class="math inline">\delta</span> reaching the leader, where
-        Figure 1 had it arrive exactly as the next block went out.
-        Blocks leave on a schedule of their own, so the same two hops
-        can just as easily land the moment after one, leaving the
-        transaction to wait out the rest of the interval: as long as
-        <span class="math inline">2\delta</span>, and <span
-        class="math inline">\delta</span> on average. A shorter interval
+        <p>From the “block” marker (when the leader’s block is
+        broadcast), finality takes two rounds of voting (or one round
+        when <span class="math inline">n \geq 5f+1</span>). The user’s
+        clock, however, started at submission. The transaction spends
+        <span class="math inline">\delta</span> reaching an API node and
+        another <span class="math inline">\delta</span> reaching the
+        leader, where Figure 1 had it arrive exactly as the next block
+        went out.</p>
+        <p>Blocks are emitted when the leader is ready to propose, so
+        the same two hops can just as easily land the moment after one,
+        leaving the transaction to wait out the rest of the interval: as
+        long as <span class="math inline">2\delta</span>, and <span
+        class="math inline">\delta</span> on average (a shorter interval
         between blocks shrinks both numbers, which is why <a
         href="https://arxiv.org/abs/2508.10862">Minimmit</a> optimizes
-        for view latency.</p>
+        for view latency).</p>
         <div id="multimmit-fig-cadence" class="cw-loop cw-loop-cadence" role="img" aria-label="Animated diagram of arrival timing against a block schedule. Three rows, user, API node and leader, on the same axis as Figure 1. The leader produces a block every two message delays, drawn as red squares. Transaction A travels user to API node to leader and reaches the leader exactly as a block is produced, so it waits nothing. Transaction B, submitted later in the cycle, takes the same two hops but lands just after a block, and a red arrow shows it waiting almost two message delays for the next one.">
           <noscript>This figure replays Figure 1's two inbound hops for two submissions against a leader producing a block every 2δ. Transaction A reaches the leader exactly as a block is produced and waits nothing. Transaction B takes the same 2δ on the wire, lands just after a block, and waits almost 2δ for the next. Averaged over arrival times, the wait is δ.</noscript>
         </div>
@@ -257,11 +247,6 @@ O’Grady</a></div>
         interval for the next one. Nothing about the network changed.
         Only where the submission fell in the leader’s schedule.</p>
         </div>
-        <p>Consensus latency usually excludes the two inbound hops and
-        this scheduling wait. Its timer starts at the leader’s block
-        broadcast, which caps network throughput at one node’s egress.
-        One-round voting shortens what follows. It changes neither the
-        hidden wait nor the leader bottleneck.</p>
         <h2 id="removing-the-leader-bottleneck">Removing the Leader
         Bottleneck</h2>
         <p><a href="https://arxiv.org/abs/2401.10369">Autobahn</a>

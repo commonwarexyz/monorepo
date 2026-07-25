@@ -25,7 +25,7 @@ With Multimmit, a block from any honest producer chain can finalize $2\delta$ af
 
 ## The Ride to the Leader
 
-Consider a typical deployed protocol with one proposer at a time and [Simplex](https://eprint.iacr.org/2023/463)-style notarize and finalize rounds. Figures 1, 3, 5, and 6 measure from transaction submission and track the transaction through finality.
+Consider a typical consensus protocol with one proposer at a time and [Simplex](https://eprint.iacr.org/2023/463)-style notarize and finalize rounds. A transaction travels from the user to an API node, is forwarded to a leader that is ready to propose, and is broadcast in the leader's block. 
 
 ```{=html}
 <style>
@@ -76,12 +76,12 @@ Consider a typical deployed protocol with one proposer at a time and [Simplex](h
 ```
 
 ::: {.image-caption}
-Figure 1: A transaction's path through a single-proposer protocol, measured in message delays ($\delta$) since submission. Figures 1, 3, 5, and 6 use the same axis and omit the wait for the next proposal or producer block, which Figure 2 draws. Here, the transaction reaches the leader just as it is ready to propose. Conventional consensus timers start at "block".
+Figure 1: A transaction's path through a single-proposer protocol, measured in message delays ($\delta$) since submission. Figures 1, 3, 5, and 6 use the same axis and omit the wait for the next proposal or producer block, which Figure 2 draws. Here, the transaction reaches the leader just as it is ready to propose.
 :::
 
-From that "block" marker, finality takes two rounds of voting. A recent cohort ([Minimmit](/blogs/minimmit.html), [Alpenglow](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana), [Kudzu](https://arxiv.org/abs/2505.08771)) reduces this to one round when $n \geq 5f+1$ (Multimmit uses the same consensus skeleton in Figures 5 and 6).
+From the "block" marker (when the leader's block is broadcast), finality takes two rounds of voting (or one round when $n \geq 5f+1$). The user's clock, however, started at submission. The transaction spends $\delta$ reaching an API node and another $\delta$ reaching the leader, where Figure 1 had it arrive exactly as the next block went out.
 
-The user's timer, however, started at submission. The transaction spends $\delta$ reaching an API node and another $\delta$ reaching the leader, where Figure 1 had it arrive exactly as the next block went out. Blocks leave on a schedule of their own, so the same two hops can just as easily land the moment after one, leaving the transaction to wait out the rest of the interval: as long as $2\delta$, and $\delta$ on average. A shorter interval between blocks shrinks both numbers, which is why [Minimmit](https://arxiv.org/abs/2508.10862) optimizes for view latency.
+Blocks are emitted when the leader is ready to propose, so the same two hops can just as easily land the moment after one, leaving the transaction to wait out the rest of the interval: as long as $2\delta$, and $\delta$ on average (a shorter interval between blocks shrinks both numbers, which is why [Minimmit](https://arxiv.org/abs/2508.10862) optimizes for view latency).
 
 ```{=html}
 <div id="multimmit-fig-cadence" class="cw-loop cw-loop-cadence" role="img" aria-label="Animated diagram of arrival timing against a block schedule. Three rows, user, API node and leader, on the same axis as Figure 1. The leader produces a block every two message delays, drawn as red squares. Transaction A travels user to API node to leader and reaches the leader exactly as a block is produced, so it waits nothing. Transaction B, submitted later in the cycle, takes the same two hops but lands just after a block, and a red arrow shows it waiting almost two message delays for the next one.">
@@ -92,8 +92,6 @@ The user's timer, however, started at submission. The transaction spends $\delta
 ::: {.image-caption}
 Figure 2: The same inbound hops as Figure 1, drawn on the same axis, for two submissions. Transaction A is Figure 1's: it reaches the leader exactly as a block goes out. Transaction B spends the same $2\delta$ on the wire but lands just after a block and waits almost the full interval for the next one. Nothing about the network changed. Only where the submission fell in the leader's schedule.
 :::
-
-Consensus latency usually excludes the two inbound hops and this scheduling wait. Its timer starts at the leader's block broadcast, which caps network throughput at one node's egress. One-round voting shortens what follows. It changes neither the hidden wait nor the leader bottleneck.
 
 ## Removing the Leader Bottleneck
 
