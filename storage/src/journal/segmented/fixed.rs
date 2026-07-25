@@ -298,7 +298,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 ///
 /// Replay repairs page checksum failures and incomplete trailing fixed-size items. Other runtime
 /// and codec errors are returned and make [Replay::finish] fail. Without a durable watermark,
-/// replay cannot distinguish a crash-torn unacknowledged tail from later external corruption; it
+/// replay cannot distinguish a crash-torn unacknowledged tail from later external corruption. It
 /// applies the documented first-invalid-item-is-the-end policy in either case.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
@@ -402,7 +402,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// replay or observing an error prevents the journal from being recovered.
     ///
     /// When recovering without a separately validated durable checkpoint, both
-    /// `start_section` and `start_position` must be `0`; data before the requested start is not
+    /// `start_section` and `start_position` must be `0`. Data before the requested start is not
     /// read, validated, or repaired.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
@@ -562,7 +562,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 ///
 /// Recovery completes only after [Replay::next] returns `None` and [Replay::finish] succeeds.
 /// Dropping the reader before exhaustion drops the journal and may leave later sections
-/// unrepaired; recovery then requires re-initialization.
+/// unrepaired. Recovery then requires re-initialization.
 pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     journal: Journal<E, A>,
     sections: VecDeque<SectionReplay<E::Blob>>,
@@ -622,7 +622,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                 }
                 Err(commonware_runtime::Error::InvalidChecksum) => {
                     // A torn page in the unsynced tail. A synced page cannot tear, so this is
-                    // unacknowledged data past the last durable sync; truncate to the last
+                    // unacknowledged data past the last durable sync. Truncate to the last
                     // well-formed item (fixed-size, so `position` items = `position * CHUNK_SIZE`
                     // bytes) rather than failing, so a torn flush never wedges recovery.
                     let section = current.section;
@@ -1698,6 +1698,64 @@ mod tests {
                 err
             );
 
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    /// A repair interrupted by a dropped `next` future leaves the section's writer holding
+    /// in-memory state the blob no longer matches, so the replay must fail rather than decode
+    /// over it. Re-initialization then repairs from durable state.
+    #[test_traced]
+    fn test_replay_dropped_during_repair_fails_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            // Write three `u64` items, then reopen the same partition as a `Digest` journal.
+            // The retained bytes are not a whole number of `Digest` chunks, so replay must
+            // truncate the incomplete trailing item.
+            let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to init");
+            for i in 0..3u64 {
+                (journal, _) = journal.append(1, &i).await.expect("failed to append");
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            // Gate syncs so the repair suspends, then drop the in-flight next()
+            let pending = PendingSyncs::default();
+            let gated = DelayedSyncContext {
+                inner: context.child("second"),
+                pending: pending.clone(),
+            };
+            let mut replay = Journal::<_, Digest>::init(gated, cfg.clone(), NZUsize!(1024))
+                .await
+                .expect("failed to re-init");
+            pending.arm();
+            {
+                let fut = replay.next();
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "repair must suspend on the gated sync"
+                );
+            }
+            release_pending_syncs(&pending);
+
+            // The interrupted repair fails the replay rather than resuming over it
+            assert!(matches!(
+                replay.next().await,
+                Some(Err(Error::ReplayInterrupted))
+            ));
+            assert!(replay.next().await.is_none());
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            // Re-initialization repairs from durable state
+            let journal = init_journal::<_, Digest>(context.child("third"), cfg)
+                .await
+                .expect("failed to re-init after interrupted repair");
+            assert_eq!(journal.size(1).expect("missing section"), 0);
             journal.destroy().await.expect("failed to destroy");
         });
     }

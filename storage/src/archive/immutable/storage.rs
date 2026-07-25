@@ -344,14 +344,15 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
+        // Destroy metadata first: it holds the freezer's committed checkpoint, and a checkpoint
+        // that outlives the data it describes fails the next init rather than being recovered.
+        self.metadata.destroy().await?;
+
         // Destroy ordinal
         self.ordinal.destroy().await?;
 
         // Destroy freezer
         self.freezer.destroy().await?;
-
-        // Destroy metadata
-        self.metadata.destroy().await?;
 
         Ok(())
     }

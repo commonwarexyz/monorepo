@@ -244,7 +244,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Load the durable-size checkpoint. An archive written before checkpoints existed has
-        // none, and recovers every section by scan.
+        // none, and recovers every section by scan. Recovery does not publish what it validated,
+        // so a section that never receives another write keeps rescanning until it is pruned.
+        // Publishing here instead would need every adopted section synced first, since replayed
+        // bytes are readable after a process crash without being durable.
         let metadata = Metadata::<E, U64, VecU64>::init(
             context.child("metadata"),
             MetadataConfig {
@@ -605,23 +608,15 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.requested.append(&mut self.pending);
         let sizes = self.sizes(&self.requested)?;
 
-        // Decide what to publish before starting any sync. Publication covers every completion
-        // observable now, one interval behind the sync being returned. Metadata permits only one
-        // write at a time, so skip publication rather than waiting when its previous write is
-        // still in flight, and let a later sync carry the accumulated updates. Reading that state
-        // first also keeps a failure it surfaces from stranding a data sync the caller can no
-        // longer observe.
+        // Publish before starting any sync. Publication covers every completion observable now,
+        // one interval behind the sync being returned, and the checkpoint only names sizes an
+        // already-completed sync proved durable, so it has no ordering dependency on the sync
+        // being started. Metadata permits only one write at a time, so skip publication rather
+        // than waiting when its previous write is still in flight, and let a later sync carry the
+        // accumulated updates. Publishing first keeps a failure here from stranding a data sync
+        // the caller can no longer observe.
         self.observe_unproven();
-        let publish = self.checkpoint_dirty && self.metadata.poll_sync()?;
-
-        let handle;
-        (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
-        let completion: SyncCompletion = handle.boxed().shared();
-        for (section, size) in sizes {
-            self.unproven.insert(section, (size, completion.clone()));
-        }
-
-        let checkpoint_handle = if publish {
+        let checkpoint_handle = if self.checkpoint_dirty && self.metadata.poll_sync()? {
             let (metadata, handle) = self.metadata.start_sync().await?;
             self.metadata = metadata;
             self.checkpoint_dirty = false;
@@ -629,6 +624,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         } else {
             Handle::ready(Ok(()))
         };
+
+        let handle;
+        (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
+        let completion: SyncCompletion = handle.boxed().shared();
+        for (section, size) in sizes {
+            self.unproven.insert(section, (size, completion.clone()));
+        }
 
         Ok((
             self,
@@ -672,8 +674,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        self.oversized.destroy().await?;
+        // Remove the checkpoint before the journals it describes, matching the ordering `prune`
+        // uses. The reverse order can leave a checkpoint entry for an already-removed section,
+        // which `Oversized::repair` reports as unrecoverable loss, and `init` is the only way to
+        // obtain the handle `destroy` needs.
         self.metadata.destroy().await?;
+        self.oversized.destroy().await?;
         Ok(())
     }
 

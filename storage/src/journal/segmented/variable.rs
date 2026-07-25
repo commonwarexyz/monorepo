@@ -126,7 +126,6 @@ pub struct Config<C> {
 struct SectionReplay<B: Blob> {
     section: u64,
     reader: BlobReplay<B>,
-    skip_bytes: u64,
     offset: u64,
     valid_offset: u64,
     pending: Option<(usize, usize)>,
@@ -379,7 +378,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 ///
 /// Replay repairs page checksum failures and incomplete trailing frame data. Other runtime and
 /// codec errors are returned and make [Replay::finish] fail. Without a durable watermark, replay
-/// cannot distinguish a crash-torn unacknowledged tail from later external corruption; it applies
+/// cannot distinguish a crash-torn unacknowledged tail from later external corruption. It applies
 /// the documented first-invalid-item-is-the-end policy in either case.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
@@ -421,7 +420,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// replay or observing an error prevents the journal from being recovered.
     ///
     /// When recovering without a separately validated durable checkpoint, both
-    /// `start_section` and `start_offset` must be `0`; data before the requested start is not
+    /// `start_section` and `start_offset` must be `0`. Data before the requested start is not
     /// read, validated, or repaired.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
@@ -438,8 +437,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             if section == start_section && start_offset > blob.size() {
                 return Err(Error::ItemOutOfRange(start_offset));
             }
-            let reader = blob.replay(buffer).await?;
-            let skip_bytes = if section == start_section {
+            let mut reader = blob.replay(buffer).await?;
+            // Seek past the requested start rather than reading through it, so data below the
+            // start is neither validated nor eligible for repair.
+            let offset = if section == start_section {
+                reader.seek_to(start_offset)?;
                 start_offset
             } else {
                 0
@@ -447,9 +449,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             sections.push_back(SectionReplay {
                 section,
                 reader,
-                skip_bytes,
-                offset: 0,
-                valid_offset: skip_bytes,
+                offset,
+                valid_offset: offset,
                 pending: None,
             });
         }
@@ -613,7 +614,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 ///
 /// Recovery completes only after [Replay::next] returns `None` and [Replay::finish] succeeds.
 /// Dropping the reader before exhaustion drops the journal and may leave later sections
-/// unrepaired; recovery then requires re-initialization.
+/// unrepaired. Recovery then requires re-initialization.
 pub struct Replay<E: Storage + Metrics, V: Codec> {
     journal: Journal<E, V>,
     sections: VecDeque<SectionReplay<E::Blob>>,
@@ -667,7 +668,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                         }
                         Err(commonware_runtime::Error::InvalidChecksum) => {
                             // A torn page in the unsynced tail. A synced page cannot tear, so
-                            // this is unacknowledged data past the last durable sync; repair it
+                            // this is unacknowledged data past the last durable sync. Repair it
                             // by truncating to the last well-formed item (like trailing bytes)
                             // rather than failing, so a torn flush never wedges recovery.
                             warn!(
@@ -686,16 +687,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                             self.sections.pop_front();
                             return self.fail(err.into());
                         }
-                    }
-
-                    // Skip bytes if needed (for start_offset)
-                    if current.skip_bytes > 0 {
-                        let to_skip =
-                            current.skip_bytes.min(current.reader.remaining() as u64) as usize;
-                        current.reader.advance(to_skip);
-                        current.skip_bytes -= to_skip as u64;
-                        current.offset += to_skip as u64;
-                        continue;
                     }
 
                     // Try to decode length prefix
@@ -2118,6 +2109,101 @@ mod tests {
                 .expect("failed to reopen after repair");
             assert_eq!(journal.get(2, 0).await.expect("failed to get"), 777);
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    /// Repairing a torn page must end only the section that carries it. Later sections are
+    /// separate blobs, so their items must still be yielded and the replay must still finish.
+    #[test_traced]
+    fn test_journal_replay_repairs_torn_page_in_earlier_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Section 1 spans several pages so an interior page can be torn while a later page
+            // survives. Section 2 stays intact.
+            let mut journal = init_journal(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            let count: i32 = 1000;
+            for i in 0..count {
+                (journal, _, _) = journal.append(1, &i).await.expect("failed to append");
+            }
+            let tail: Vec<i32> = (count..count + 5).collect();
+            for i in &tail {
+                (journal, _, _) = journal.append(2, i).await.expect("failed to append");
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            let (_, section_size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            assert!(
+                section_size > 4 * PAGE_SIZE.get() as u64,
+                "test needs several pages, got {section_size}"
+            );
+
+            // Tear an interior page of section 1, leaving later pages of that section intact.
+            let (blob, _) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            blob.write_at_sync(3 * PAGE_SIZE.get() as u64 + 100, vec![0xFFu8; 16])
+                .await
+                .expect("failed to corrupt interior page");
+            drop(blob);
+
+            let mut replay = Journal::<_, i32>::init(
+                context.child("second"),
+                cfg.clone(),
+                NZUsize!(1024 * 1024),
+            )
+            .await
+            .expect("failed to re-initialize journal");
+            let mut first_section = Vec::<i32>::new();
+            let mut second_section = Vec::<i32>::new();
+            while let Some(result) = replay.next().await {
+                let (section, _, _, item) = result.expect("replay must repair, not fail");
+                match section {
+                    1 => first_section.push(item),
+                    2 => second_section.push(item),
+                    other => panic!("unexpected section {other}"),
+                }
+            }
+            let journal = replay.finish().expect("failed to finish replay");
+
+            // Section 1 is truncated at the tear, section 2 is untouched.
+            assert!(
+                !first_section.is_empty() && (first_section.len() as i32) < count,
+                "section 1 must keep a shorter valid prefix, got {}",
+                first_section.len()
+            );
+            for (i, item) in first_section.iter().enumerate() {
+                assert_eq!(
+                    *item, i as i32,
+                    "section 1 prefix must match appended order"
+                );
+            }
+            assert_eq!(
+                second_section, tail,
+                "a later section must survive an earlier section's repair"
+            );
+            assert_eq!(journal.size(2).expect("missing section"), {
+                let mut bytes = 0u64;
+                for i in &tail {
+                    bytes += (UInt(i.encode_size() as u32).encode_size() + i.encode_size()) as u64;
+                }
+                bytes
+            });
+            journal.destroy().await.expect("failed to destroy journal");
         });
     }
 

@@ -186,7 +186,11 @@ pub struct Config<T: Translator, C> {
     /// The partition to use for the archive's durable-size checkpoint.
     ///
     /// The checkpoint records how much of each section a completed sync made durable, so recovery
-    /// can tell unacknowledged crash debris apart from damage to data the archive acknowledged.
+    /// can tell unacknowledged crash debris apart from damage to data the checkpoint covers.
+    /// [crate::archive::Archive::sync] publishes before it returns.
+    /// [crate::archive::Archive::start_sync] publishes one interval behind, so data it made
+    /// durable is covered only once a later sync publishes it. Damage below an unpublished size
+    /// is repaired rather than reported, the same as for a section the checkpoint omits entirely.
     pub metadata_partition: String,
 
     /// The partition to use for the key journal (stores index+key metadata).
@@ -225,6 +229,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::Error as JournalError,
+        metadata::{Config as MetadataConfig, Metadata},
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
@@ -234,11 +239,14 @@ mod tests {
         Supervisor as _, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
-            release_pending_syncs,
+            release_pending_syncs, release_pending_syncs_after,
         },
         telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        sequence::{FixedBytes, VecU64, prefixed_u64::U64},
+    };
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -821,6 +829,95 @@ mod tests {
         });
     }
 
+    /// `destroy` removes the checkpoint before the journals it describes. If the journal removal
+    /// is interrupted, the leftover storage must still be openable: a checkpoint that outlived
+    /// its sections would fail init permanently, and `destroy` needs a handle only init produces.
+    #[test_traced]
+    fn test_destroy_removes_checkpoint_before_journals() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..3u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            // The checkpoint is live: it names every synced section.
+            let metadata = Metadata::<_, U64, VecU64>::init(
+                context.child("checkpoint"),
+                MetadataConfig {
+                    partition: cfg.metadata_partition.clone(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .expect("Failed to open checkpoint");
+            assert!(metadata.keys().next().is_some(), "expected a checkpoint");
+            drop(metadata);
+
+            // Stop `destroy` after the checkpoint is gone but before the journals are, the state
+            // a crash between the two removals leaves behind.
+            context
+                .remove(&cfg.metadata_partition, None)
+                .await
+                .expect("Failed to remove checkpoint");
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .expect("interrupted destroy must leave openable storage");
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(0));
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// Pruning drops a section from the checkpoint before its blobs are removed, so a reopen
+    /// after pruning neither reports the pruned sections as lost nor loses the retained ones.
+    #[test_traced]
+    fn test_prune_then_reopen_with_live_checkpoint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..6u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            let archive = archive.prune(3).await.expect("Failed to prune");
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .expect("pruned sections must not be reported as lost");
+            for index in 0..3u64 {
+                assert_eq!(archive.get(Identifier::Index(index)).await.unwrap(), None);
+            }
+            for index in 3..6u64 {
+                assert_eq!(
+                    archive.get(Identifier::Index(index)).await.unwrap(),
+                    Some(index as i32),
+                    "retained section {index} was lost"
+                );
+            }
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
     /// Regression (#539): the archive uses only its explicitly configured `metadata_partition`
     /// and never claims the previously-derived `{key_partition}-metadata` name. Foreign data
     /// stored at that derived name by an unrelated component must be left untouched.
@@ -1004,19 +1101,37 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.expect("Failed to complete first sync");
 
-            // This interval publishes section 1's completed sync, leaving the checkpoint write
-            // and section 2's data writes in flight.
+            // This interval publishes section 1's completed sync. The checkpoint write is started
+            // before the data sync, so it is the oldest parked sync.
             archive = archive.put(2, test_key("b"), 2).await.unwrap();
             let (mut archive, second) = archive.start_sync().await.expect("Failed to start sync");
             assert_eq!(pending.lock().len(), 3);
 
-            // A third interval must start without waiting for that checkpoint write.
+            // Complete section 2's data sync while the checkpoint write stays in flight, so the
+            // next interval has something new to publish and a busy metadata store to publish it
+            // through.
+            release_pending_syncs_after(&pending, 1);
+            for _ in 0..8 {
+                commonware_runtime::reschedule().await;
+            }
+            assert_eq!(
+                pending.lock().len(),
+                1,
+                "only the checkpoint write should remain parked"
+            );
+
+            // A third interval must start without waiting for that checkpoint write, and must
+            // skip publication rather than blocking on it.
             archive = archive.put(3, test_key("c"), 3).await.unwrap();
             let (archive, third) = archive
                 .start_sync()
                 .await
                 .expect("checkpoint sync must not block a later data sync");
-            assert_eq!(pending.lock().len(), 5);
+            assert_eq!(
+                pending.lock().len(),
+                3,
+                "publication must be skipped, adding only section 3's two data syncs"
+            );
 
             release_pending_syncs(&pending);
             second.await.expect("Failed to complete second sync");
