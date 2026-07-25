@@ -561,6 +561,7 @@ const FIGURES = {
     rowGap: 164,
     arcDepth: 66,
     axis: { min: -0.4, max: 8, origin: null },
+    bands: [{ t: 2, d: 3 }],
     variants: [{
       tag: 'a consensus blip leaves no hangover',
       end: 8,
@@ -686,10 +687,23 @@ function buildFigure(mount, cfg) {
   const rowY = {};
   cfg.rows.forEach((row, i) => { rowY[row.id] = cfg.rowTop + i * cfg.rowGap; });
 
+  // Shaded intervals sit in their own layer beneath the grid, so the axis
+  // lines and row lines stay on top of them.
+  const bgLayer = svgEl('g');
+  svg.appendChild(bgLayer);
+
   const staticLayer = svgEl('g');
   svg.appendChild(staticLayer);
 
   const axisY = H - 34;
+
+  for (const band of cfg.bands ?? []) {
+    bgLayer.appendChild(svgEl('rect', {
+      x: xOf(band.t), y: 54,
+      width: xOf(band.t + band.d) - xOf(band.t), height: axisY - 66,
+      fill: band.fill ?? '#f4f4f4',
+    }));
+  }
   for (let t = Math.ceil(cfg.axis.min); !cfg.noAxis && t <= Math.floor(cfg.axis.max); t++) {
     const x = xOf(t);
     staticLayer.appendChild(svgEl('line', {
