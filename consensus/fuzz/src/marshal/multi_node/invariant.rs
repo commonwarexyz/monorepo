@@ -1,22 +1,118 @@
-//! End-of-run invariants for the multi-node marshal liveness model.
+//! Safety and end-of-run invariants for the multi-node marshal model.
 //!
-//! Asserted over the honest nodes' downstream [`Application`] sinks after the
-//! liveness window. Panics on violation with the offending state, matching the
-//! rest of the consensus fuzz crate. Generic over the marshal variant `H`.
+//! These checks cover both the marshal/application boundary and observations
+//! made while Simplex drives marshal. They panic on violation with the
+//! offending state, matching the rest of the consensus fuzz crate.
 //!
-//! Checks operate on the sink's append-only delivery log
+//! Delivery checks operate on the sink's append-only delivery log
 //! ([`Application::delivered`]) -- the actual `(height, digest)` arrival
 //! sequence -- rather than a by-height snapshot, so out-of-order delivery,
 //! gaps, duplicates, and same-height forks are all observable (a by-height map
 //! would silently overwrite them).
 
+use crate::simplex::Simplex;
 use commonware_consensus::{
-    Block,
-    marshal::mocks::{application::Application, harness::TestHarness},
-    types::Height,
+    Block, CertifiableBlock,
+    marshal::{
+        core::Mailbox,
+        mocks::{application::Application, block::Block as MockBlock, harness::TestHarness},
+        standard::Standard,
+    },
+    simplex::types::Context as SimplexContext,
+    types::{Height, Round},
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use std::collections::BTreeMap;
+use commonware_utils::sync::Mutex;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
+
+type SchemeOf<P> = <P as Simplex>::Scheme;
+type PublicKeyOf<P> =
+    <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
+type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
+type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
+type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
+
+/// Ensures a rejection scoped to one proposal header cannot poison
+/// certification of the same payload under its embedded header.
+pub(super) struct HeaderMismatchInvariant<P: Simplex, C: Copy> {
+    verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
+    app_config: C,
+    rejects: fn(C, &Ctx<P>) -> bool,
+}
+
+impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
+    fn clone(&self) -> Self {
+        Self {
+            verified_contexts: self.verified_contexts.clone(),
+            app_config: self.app_config,
+            rejects: self.rejects,
+        }
+    }
+}
+
+impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
+    pub(super) fn new(app_config: C, rejects: fn(C, &Ctx<P>) -> bool) -> Self {
+        Self {
+            verified_contexts: Arc::new(Mutex::new(HashMap::new())),
+            app_config,
+            rejects,
+        }
+    }
+
+    pub(super) fn record_verify(&self, context: Ctx<P>, digest: Sha256Digest) {
+        self.verified_contexts
+            .lock()
+            .entry((context.round, digest))
+            .or_default()
+            .push(context);
+    }
+
+    async fn observed_mismatch(
+        &self,
+        mailbox: &Mailbox<SchemeOf<P>, Standard<B<P>>>,
+        round: Round,
+        digest: Sha256Digest,
+    ) -> bool {
+        let Some(block) = mailbox.get_block(&digest).await else {
+            return false;
+        };
+        let block_context = block.context();
+        let mismatch = self
+            .verified_contexts
+            .lock()
+            .get(&(round, digest))
+            .is_some_and(|contexts| contexts.iter().any(|context| context != &block_context));
+        mismatch && !(self.rejects)(self.app_config, &block_context)
+    }
+
+    /// Check the certification outcome after a header-mismatching verification.
+    ///
+    /// `None` represents a closed certification channel.
+    pub(super) async fn check_certification(
+        &self,
+        mailbox: &Mailbox<SchemeOf<P>, Standard<B<P>>>,
+        round: Round,
+        digest: Sha256Digest,
+        verdict: Option<bool>,
+    ) {
+        let mismatch = self.observed_mismatch(mailbox, round, digest).await;
+        match verdict {
+            Some(value) => assert!(
+                value || !mismatch,
+                "marshal invariant violated: certification reused a \
+                 header-scoped verification rejection"
+            ),
+            None => assert!(
+                !mismatch,
+                "marshal invariant violated: certification closed after a \
+                 header-scoped verification rejection"
+            ),
+        }
+    }
+}
 
 /// Run every liveness-model invariant.
 pub fn check_all<H: TestHarness>(
@@ -35,7 +131,7 @@ pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
     for (idx, app) in honest_apps {
         check_in_order(*idx, required, &app.delivered());
     }
-    check_cross_node_agreement(honest_apps);
+    agreement(honest_apps);
 }
 
 /// Invariant: per-node in-order, gap-free delivery.
@@ -72,11 +168,21 @@ fn check_in_order<D>(idx: usize, required: u64, delivered: &[(Height, D)]) {
 
 /// Invariant: cross-node agreement (safety).
 ///
-/// No honest fork: any height delivered by more than one honest node must carry
-/// the same block digest everywhere it appears.
-fn check_cross_node_agreement<B: Block<Digest = Sha256Digest>>(
-    honest_apps: &[(usize, Application<B>)],
-) {
+/// For every pair of honest nodes, the shorter finalized chain must be a prefix
+/// of the longer chain. Marshal can check this stronger block-level property
+/// because its application sink retains finalized `(height, digest)` entries;
+/// comparing finalized heights alone would not detect conflicting blocks.
+///
+/// [`check_in_order`] establishes that each node's delivery log is contiguous
+/// and contains no duplicate heights. Given that, requiring one digest per
+/// height across all honest nodes is equivalent to pairwise prefix
+/// compatibility. Heights are used instead of raw sequence indexes because a
+/// fresh application may surface genesis at height 0 or begin with the first
+/// finalized block at height 1.
+///
+/// This detects conflicting finalization, fork divergence, and recovery that
+/// delivers a different block at an already observed height.
+fn agreement<B: Block<Digest = Sha256Digest>>(honest_apps: &[(usize, Application<B>)]) {
     let mut seen: BTreeMap<Height, (usize, Sha256Digest)> = BTreeMap::new();
     for (idx, app) in honest_apps {
         for (height, digest) in app.delivered() {

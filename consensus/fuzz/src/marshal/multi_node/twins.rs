@@ -13,7 +13,7 @@ use super::{
     ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
     app::{BlockBuilderApp, RandomizedBlockBuilderApp, RandomizedConfig},
     input::MarshalTwinsInput,
-    invariant,
+    invariant::{self, HeaderMismatchInvariant},
 };
 use crate::{
     BYZANTINE_IDX, NAMESPACE, NetworkChannels, POST_GST_WINDOW, SimplexCertificateMock, SimplexId,
@@ -87,7 +87,6 @@ type PublicKeyOf<P> =
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type Builder<P, A> = Deferred<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>;
-type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
 
 trait TwinsBlockBuilder<P: Simplex>:
     commonware_consensus::Application<
@@ -415,57 +414,6 @@ async fn setup_validator<P: Simplex>(
     }
 }
 
-struct HeaderMismatchInvariant<P: Simplex> {
-    verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
-    app_config: RandomizedConfig,
-    rejects: fn(RandomizedConfig, &Ctx<P>) -> bool,
-}
-
-impl<P: Simplex> Clone for HeaderMismatchInvariant<P> {
-    fn clone(&self) -> Self {
-        Self {
-            verified_contexts: self.verified_contexts.clone(),
-            app_config: self.app_config,
-            rejects: self.rejects,
-        }
-    }
-}
-
-impl<P: Simplex> HeaderMismatchInvariant<P> {
-    fn new(app_config: RandomizedConfig, rejects: fn(RandomizedConfig, &Ctx<P>) -> bool) -> Self {
-        Self {
-            verified_contexts: Arc::new(Mutex::new(HashMap::new())),
-            app_config,
-            rejects,
-        }
-    }
-
-    fn record_verify(&self, context: Ctx<P>, digest: Sha256Digest) {
-        self.verified_contexts
-            .lock()
-            .entry((context.round, digest))
-            .or_default()
-            .push(context);
-    }
-
-    async fn observed_mismatch(
-        &self,
-        mailbox: &Mailbox<SchemeOf<P>, Standard<B<P>>>,
-        round: Round,
-        digest: Sha256Digest,
-    ) -> bool {
-        let Some(block) = mailbox.get_block(&digest).await else {
-            return false;
-        };
-        let mismatch = self
-            .verified_contexts
-            .lock()
-            .get(&(round, digest))
-            .is_some_and(|contexts| contexts.iter().any(|context| context != &block.context()));
-        mismatch && !(self.rejects)(self.app_config, &block.context())
-    }
-}
-
 /// Passively observes the real [`Deferred`] automaton calls made by Simplex.
 ///
 /// A failed certification after the same `(round, digest)` was verified under
@@ -478,7 +426,7 @@ struct ObservedDeferred<P: Simplex, A: TwinsBlockBuilder<P>> {
     context: Arc<Mutex<deterministic::Context>>,
     inner: Builder<P, A>,
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
-    invariant: HeaderMismatchInvariant<P>,
+    invariant: HeaderMismatchInvariant<P, RandomizedConfig>,
 }
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> Clone for ObservedDeferred<P, A> {
@@ -554,20 +502,15 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> CertifiableAutomaton for ObservedDefer
         context.spawn(move |_| async move {
             match result.await {
                 Ok(value) => {
-                    let mismatch = invariant.observed_mismatch(&mailbox, round, digest).await;
-                    assert!(
-                        value || !mismatch,
-                        "marshal Twins invariant violated: certification reused a \
-                         header-scoped verification rejection"
-                    );
+                    invariant
+                        .check_certification(&mailbox, round, digest, Some(value))
+                        .await;
                     tx.send_lossy(value);
                 }
                 Err(_) => {
-                    assert!(
-                        !invariant.observed_mismatch(&mailbox, round, digest).await,
-                        "marshal Twins invariant violated: certification closed after a \
-                         header-scoped verification rejection"
-                    );
+                    invariant
+                        .check_certification(&mailbox, round, digest, None)
+                        .await;
                 }
             }
         });
