@@ -336,8 +336,8 @@ O’Grady</a></div>
         tradeoff is that every transaction must still reach that leader
         before dissemination begins, and the leader can censor
         transactions throughout its tenure. We explain the coding in <a
-        href="/blogs/coding.html">Deliver Us in Pieces</a> and establish
-        its limits in <a href="/blogs/carnot-bound.html">The Carnot
+        href="/blogs/coding">Deliver Us in Pieces</a> and establish its
+        limits in <a href="/blogs/carnot-bound">The Carnot
         Bound</a>.</em></p>
         <h2
         id="multimmit-checkpoint-first-certify-in-the-background">Multimmit:
@@ -385,15 +385,15 @@ O’Grady</a></div>
         <p><em>Extension votes.</em> A vote may also attest to as many
         as <span class="math inline">e</span> fresh blocks
         <em>beyond</em> the proposed tips, anchored at the voter’s
-        reported position. A block that misses the leader’s proposal can
-        still finalize in the same view if it reaches voters before they
-        vote. A faulty participant can fill a proposal or vote with junk
-        or stale entries, but each extension is anchored at its own
-        voter’s reported position, so correct voters can always attach
-        recent blocks. A leader cannot finalize its own block while
-        excluding a well-disseminated honest block. It must settle that
-        block’s membership in the ledger or prevent the entire view from
-        finalizing.</p>
+        reported position. A block that misses the leader’s proposal (or
+        is censored) can still finalize in the same view if it reaches
+        voters before they vote. A faulty participant can fill a
+        proposal or vote with junk or stale entries, but each extension
+        is anchored at its own voter’s reported position, so correct
+        voters can always attach recent blocks. A leader cannot finalize
+        its own block while excluding a well-disseminated honest block.
+        It must settle that block’s membership in the ledger or prevent
+        the entire view from finalizing.</p>
         <div id="multimmit-fig-extend" class="cw-loop cw-loop-consensus" role="img" aria-label="Animated sequence diagram of Multimmit's extension path. The transaction block and the leader block cross on the wire, so the leader block cannot reference it. Voters attest the block in their votes anyway, finalizing it two message delays after the block broadcast, three after submission. Dashed markers show where the earlier figures finalized on the same axis.">
           <noscript>This figure animates Multimmit's extension path: the transaction block misses the leader block but reaches the voters, whose extension votes attest it directly, finalizing at block + 2δ while DA-votes and the PoA form in the background.</noscript>
         </div>
@@ -408,34 +408,15 @@ O’Grady</a></div>
         class="math inline">b</span> has already finalized.</p>
         </div>
         <p>From the user’s perspective, both paths are simple: submit to
-        an API node, let its next block carry the transaction to every
-        validator, and wait one round of votes for finality. The
-        producer can pre-confirm the transaction as soon as it arrives,
-        potentially before it could reach a leader an ocean away.
-        Nothing must reach the leader before dissemination begins.
-        Including the wait for the next vote event, a block sent at time
-        <span class="math inline">t</span> finalizes at <span
-        class="math inline">t+3\delta</span> in expectation (and by
-        <span class="math inline">t+2\delta</span> with favorable
-        timing). The two-delay case is optimal.</p>
-        <p>If we started the timer at the leader’s proposal, as
-        consensus papers often do, Multimmit finality would be reported
-        as <span class="math inline">2\delta</span>. That convention
-        misses where checkpoints and extension votes save time. Raptr,
-        measured on the same basis, takes <span
-        class="math inline">5\delta</span> to order a batch: two message
-        delays of dissemination, including the average wait for block
-        inclusion, and three of consensus. That figure and its fast path
-        both rest on a quorum of voters each holding every referenced
-        batch, so a single withholding producer per round is enough to
-        slow its rounds and to spoil what the fast path orders. Roughly
-        one <span class="math inline">\delta</span> of Multimmit’s
-        improvement comes from assuming <span class="math inline">n \geq
-        5f+1</span> and using one voting round instead of two.
-        Checkpoints and extension votes provide the rest. An honest
-        chain’s expected <span class="math inline">t+3\delta</span>
-        finality does not change when <span class="math inline">f</span>
-        non-leader producers misbehave.</p>
+        an API node (a producer with no weight in consensus), let its
+        next block carry the transaction to every validator, and wait
+        one round of votes for finality. The producer can pre-confirm
+        the transaction as soon as it arrives, potentially before it
+        could reach a leader an ocean away. Nothing must reach the
+        leader before dissemination begins. Including the wait for the
+        next vote event, a block sent at time <span
+        class="math inline">t</span> can finalize at <span
+        class="math inline">t+2\delta</span>.</p>
         <p>How does one round of votes produce a single ordering? Each
         Multimmit vote carries an independent position for every chain.
         Voters do not vote on how blocks from different chains are
@@ -487,9 +468,7 @@ O’Grady</a></div>
         validators before they vote, its membership in the ledger is
         settled in that view unless the view finalizes nothing.</li>
         <li>Consensus messages stay tens of kilobytes per view when
-        votes agree, independent of transaction volume. With views
-        lasting 100-200ms, a single view at line rate can order tens of
-        megabytes of transactions on a commodity gigabit link.</li>
+        votes agree, independent of transaction volume.</li>
         </ul>
         <h2 id="why-not-a-dag">Why Not a DAG?</h2>
         <p>DAG-based protocols (<a
@@ -599,17 +578,7 @@ O’Grady</a></div>
         certification. Under sustained load, a chain grows by <span
         class="math inline">d</span> blocks per certificate round trip
         instead of one, cutting that wait to <span
-        class="math inline">\delta/d</span>. Producing faster gains
-        little, since a chain contributes at most <span
-        class="math inline">d</span> new blocks to any one leader
-        block.</p>
-        <p>Ordering remains view-driven. The next leader can checkpoint
-        a transaction block, or voters can attest it as an extension if
-        it reaches them before they vote, even when it misses the
-        proposal. This is still faster than leader-only production: the
-        block is already spreading while it waits and can catch the
-        current view after the proposal has passed. A block that misses
-        that vote event waits for the next view. Producers keep building
+        class="math inline">\delta/d</span>. Producers keep building
         through leader failures and view changes, and the first
         successful view checkpoints the backlog.</p>
         <div id="multimmit-fig-blip" class="cw-loop cw-loop-dag" role="img" aria-label="Animated diagram of a Multimmit producer through a consensus blip. Two rows: consensus views above, one producer below. The producer emits a block every two-thirds of a message delay for the whole window, with certificate arcs forming behind each block. An early leader block finalizes the first two blocks with gold edges. Then a consensus blip begins, drawn as a shaded band: two views time out, drawn as dashed hollow leader blocks, while the producer keeps emitting and certificates keep forming. When the blip ends, the first successful leader block draws gold edges back to the entire backlog, and two message delays later seven blocks finalize at once.">
