@@ -1,6 +1,6 @@
 //! Actor for compact QMDB sync over P2P.
 
-use super::{Mailbox, handler, mailbox};
+use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
@@ -8,7 +8,10 @@ use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
-use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::status,
+};
 use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
@@ -17,7 +20,7 @@ use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
 use rand_core::Rng;
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
-use tracing::info;
+use tracing::{debug, info};
 
 type DbOp<DB> = <Shared<DB> as compact::Resolver>::Op;
 type Pending<F, Op, D> =
@@ -89,6 +92,7 @@ where
     config: Config<P, D, B, DB>,
     mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, DbOp<DB>, H::Digest>>,
     state: State<DB>,
+    metrics: ResolverMetrics,
     pending: PendingSubs<F, DbOp<DB>, H::Digest>,
 }
 
@@ -105,6 +109,7 @@ where
 {
     /// Create a new compact resolver actor and mailbox.
     pub fn new(context: E, mut config: Config<P, D, B, DB>) -> (Self, Mailbox<DB, F, DbOp<DB>, H>) {
+        let metrics = ResolverMetrics::new(&context);
         let state = config.database.take().map_or(State::NoDb, State::HasDb);
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -114,6 +119,7 @@ where
             config,
             mailbox_rx,
             state,
+            metrics,
             pending: BTreeMap::new(),
         };
         (actor, mailbox)
@@ -330,13 +336,21 @@ where
         response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
-        let Ok(fetch) = compact::Resolver::get_compact_state(database, key.to_target()).await
-        else {
-            return;
+        let fetch = match compact::Resolver::get_compact_state(database, key.to_target()).await {
+            Ok(fetch) => fetch,
+            Err(err) => {
+                // Declines and storage failures are indistinguishable to the requester, which
+                // simply retries against another peer, so record them here.
+                debug!(?err, "failed to serve compact state");
+                self.metrics.serve_requests.inc(status::Status::Failure);
+                return;
+            }
         };
         response.send_lossy(fetch.state.encode());
+        self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
 
@@ -586,6 +600,33 @@ mod tests {
                 compact::State::<mmr::Family, TestOp, sha256::Digest>::decode_cfg(encoded, &cfg)
                     .expect("served state should decode");
             assert_eq!(state.leaf_count, target.leaf_count);
+        });
+    }
+
+    /// A target the database cannot serve is indistinguishable from a storage failure to the
+    /// requester, so the actor must at least record it locally.
+    #[test]
+    fn produce_records_unservable_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("db")).await;
+            let target = db.target();
+            let db = Shared::new("test", db);
+            let (mut actor, _mailbox) =
+                TestActor::new(context.child("actor"), test_config(Some(db)));
+
+            // A target past the tip is declined by the source.
+            let ahead = compact::Target::new(target.root, Location::new(*target.leaf_count + 1));
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_produce(handler::Request::from_target(ahead), response_tx)
+                .await;
+
+            assert!(response_rx.await.is_err(), "decline must not be answered");
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("actor_serve_requests_total{status=\"Failure\"} 1"),
+                "serve failure should be counted: {metrics}"
+            );
         });
     }
 

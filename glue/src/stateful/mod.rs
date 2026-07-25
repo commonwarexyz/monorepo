@@ -6,7 +6,7 @@
 //! bookkeeping:
 //!
 //! 1. Before each `propose` or `verify`, the actor forks unmerkleized batches
-//!    from the parent block's pending state (or from committed database state
+//!    from the parent block's pending state (or from applied database state
 //!    if the parent has been finalized).
 //! 2. The application executes against those batches and returns merkleized
 //!    results, which the actor stores as a new pending tip keyed by the

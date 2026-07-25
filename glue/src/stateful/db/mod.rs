@@ -271,7 +271,7 @@ pub trait Merkleized: Sized + Send + Sync {
     fn root(&self) -> Self::Digest;
 
     /// Create a child unmerkleized batch that reads through this batch's
-    /// pending changes before falling back to the committed database state.
+    /// pending changes before falling back to the database's applied state.
     ///
     /// In QMDB, this maps to `merkleized_batch.new_batch()`.
     fn new_batch(&self) -> Self::Unmerkleized;
@@ -279,11 +279,11 @@ pub trait Merkleized: Sized + Send + Sync {
 
 /// One database managed by the [`Stateful`](super::Stateful) wrapper.
 ///
-/// Implementations create new batches from committed state and apply finalized
+/// Implementations create new batches from applied state and apply finalized
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
 /// [`new_batch`](Self::new_batch) receives `Shared<Self>` so batch
-/// types can keep read-through access to committed state.
+/// types can keep read-through access to applied state.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
@@ -332,7 +332,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// The `db` parameter is the [`Shared`] handle that wraps this
     /// database, allowing batch types to capture a shared reference for
-    /// read-through to committed state.
+    /// read-through to applied state.
     fn new_batch(db: &Shared<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Return true if a merkleized batch matches a committed sync target.
@@ -370,10 +370,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
-    /// Return the sync target for this database's current committed state.
+    /// Return the sync target for this database's current applied state.
     fn sync_target(&self) -> Self::SyncTarget;
 
-    /// Rewind committed state to `target`.
+    /// Rewind applied state to `target`.
     ///
     /// Implementations must ensure rewind effects are durable before returning
     /// the database (for example by committing after rewind).
@@ -452,7 +452,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Return the sync targets produced by a newly initialized database set.
     fn initial_sync_targets() -> Self::SyncTargets;
 
-    /// Create unmerkleized batches from each database's committed state.
+    /// Create unmerkleized batches from each database's applied state.
     ///
     /// Acquires a read lock on each database.
     fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send;
@@ -485,7 +485,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// databases whose mutations were in progress (see [Shared]); every later access panics.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return sync targets for the set's current committed state.
+    /// Return sync targets for the set's current applied state.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Rewind the set to the provided per-database targets.

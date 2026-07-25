@@ -5,7 +5,7 @@
 //! handling three operations:
 //!
 //! - Propose/Verify: fork unmerkleized batches from a parent's pending
-//!   state (or from committed state), delegate to the [`Application`], and
+//!   state (or from applied state), delegate to the [`Application`], and
 //!   cache the resulting merkleized batches keyed by block digest.
 //!
 //! - Lazy recovery: when a parent's pending state is missing (e.g. after
@@ -15,7 +15,7 @@
 //!   into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   committed databases and start flushing them (durability is reported via
+//!   databases and start flushing them (durability is reported via
 //!   [`Barrier`]), then prune all pending entries at or below the
 //!   finalized round.
 //!
@@ -852,7 +852,7 @@ where
     }
 }
 
-/// Returns true when `block` is already covered by committed state.
+/// Returns true when `block` is already covered by applied state.
 #[tracing::instrument(
     name = "stateful.processor.is_already_processed",
     level = "info",
