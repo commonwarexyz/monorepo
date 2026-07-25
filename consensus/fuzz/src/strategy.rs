@@ -915,6 +915,7 @@ macro_rules! impl_header_scope {
                 }
             }
 
+            // Proposal with view = 0 is guaranteed rejected; acts as a no-op
             fn random_view_for_proposal(
                 &self,
                 _rng: &mut impl Rng,
