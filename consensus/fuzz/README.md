@@ -134,19 +134,20 @@ cargo fuzz run marshal_deferred_standard
 cargo fuzz run marshal_multi_node_twins_standard
 cargo fuzz run marshal_multi_node_twins_randomized_app
 cargo fuzz run marshal_multi_node_twins_id_split_header
+cargo fuzz run marshal_multi_node_twins_id_split_header_inline
 ```
 
 The inline and deferred targets include split-header equivocation in their
 action space. The multi-node targets are Byzantine Twins mutators over the
 end-to-end standard stack. Three honest validators each run
-`Simplex -> Deferred -> Marshal -> Application`; the compromised identity runs
-one full Simplex engine over the same real marshal/application data plane and
-the existing `Disrupter` on its secondary half. The `Disrupter` can preserve an
-observed payload digest while mutating its proposal header.
+`Simplex -> Inline|Deferred -> Marshal -> Application`; the compromised
+identity runs one full Simplex engine over the same real marshal/application
+data plane and the existing `Disrupter` on its secondary half. The `Disrupter`
+can preserve an observed payload digest while mutating its proposal header.
 
 The shared fuzz-layer Twins helpers sample leaders and recipient partitions for
 an adversarial prefix, then restore full synchrony. The target checks that every
 honest marshal makes post-prefix progress, preserves in-order delivery, and
 agrees on every delivered height. It also passively observes each honest
-`Deferred` instance and asserts that certification never reuses a rejection
-caused by verifying the same `(round, digest)` under a different header context.
+marshal wrapper and asserts that certification never reuses a rejection caused
+by verifying the same `(round, digest)` under a different header context.

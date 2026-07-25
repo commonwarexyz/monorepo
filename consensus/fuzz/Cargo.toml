@@ -554,8 +554,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_twins_id_split_header"
-path = "fuzz_targets/marshal_multi_node_twins_id_split_header.rs"
+name = "marshal_multi_node_twins_id_split_header_deferred"
+path = "fuzz_targets/marshal_multi_node_twins_id_split_header_deferred.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_multi_node_twins_id_split_header_inline"
+path = "fuzz_targets/marshal_multi_node_twins_id_split_header_inline.rs"
 test = false
 doc = false
 bench = false
