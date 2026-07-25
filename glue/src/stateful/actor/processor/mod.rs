@@ -1,6 +1,6 @@
 //! Speculative execution engine for the [`Stateful`](super::Stateful) actor.
 //!
-//! The [`Processor`] owns the in-memory pending-tip DAG and the committed
+//! The [`Processor`] owns the in-memory pending-tip DAG and the applied
 //! database set. It is the workhorse behind the actor's `Processing` mode,
 //! handling three operations:
 //!

@@ -327,7 +327,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
     fn initial_sync_target() -> Self::SyncTarget;
 
-    /// Create a new unmerkleized batch rooted at the database's committed
+    /// Create a new unmerkleized batch rooted at the database's applied
     /// state.
     ///
     /// The `db` parameter is the [`Shared`] handle that wraps this
@@ -335,7 +335,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// read-through to applied state.
     fn new_batch(db: &Shared<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
-    /// Return true if a merkleized batch matches a committed sync target.
+    /// Return true if a merkleized batch matches the sync target committed in the block.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
 
     /// Apply a merkleized batch's changeset to the underlying database and
@@ -462,7 +462,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// No lock is needed; reads come from the in-memory merkleized state.
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized;
 
-    /// Return true if merkleized batches match the committed sync targets.
+    /// Return true if merkleized batches match the sync targets committed in the block.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
     /// Apply each merkleized batch's changeset to its underlying database and
@@ -486,7 +486,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Return sync targets for the set's current applied state.
-    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
+    fn applied_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Rewind the set to the provided per-database targets.
     ///
@@ -673,7 +673,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
         slot.put(prune_or_panic(database, target, None).await);
     }
 
-    async fn committed_targets(&self) -> Self::SyncTargets {
+    async fn applied_targets(&self) -> Self::SyncTargets {
         let database = self.read().await;
         T::sync_target(&database)
     }
@@ -918,7 +918,7 @@ macro_rules! impl_database_set {
                 )+);
             }
 
-            async fn committed_targets(&self) -> Self::SyncTargets {
+            async fn applied_targets(&self) -> Self::SyncTargets {
                 join!($(
                     async {
                         let database = self.$idx.read().await;
@@ -1283,7 +1283,7 @@ macro_rules! impl_state_sync_set {
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
-                if <Self as DatabaseSet<E>>::committed_targets(&synced).await != converged_targets {
+                if <Self as DatabaseSet<E>>::applied_targets(&synced).await != converged_targets {
                     return Err(
                         "state sync database targets do not match the coordinator target set"
                             .into(),
