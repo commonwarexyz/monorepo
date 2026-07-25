@@ -223,6 +223,8 @@ This coupling also controls production. A validator may only create a round-$r+1
 Figure 10: The fetch problem. Validator 3 sends its round-$(r+1)$ vertex only to validator 2, whose next vertex references it (red edge). Validators 1 and 4 cannot use validator 2's vertex without its full ancestry, leaving them with only two of the $n-f=3$ round-$(r+2)$ vertices needed to enter round $r+3$. They must fetch the withheld vertex first, delaying the next round for everyone. Larger DAGs can route around an isolated gap, but each gap still puts a fetch on someone's critical path. At real block rates, sustained loss creates gaps in nearly every round (producing the order-of-magnitude slowdown measured above). A Multimmit reference never puts a fetch on a critical path. Voters report how far they can support each chain and vote on schedule.
 :::
 
+The coupling also fixes who may produce. A vertex is a vote, so contributing transaction data means being a validator. Multimmit keeps the two structures apart, and a transaction block is never itself the subject of a consensus vote, so a producer does not have to be a validator and a deployment can run a different number of chains than it has voters.
+
 Whether the protocol waits for fetches or certificates, a collective step limits every producer's output. Figure 11 compares that pace with a Multimmit producer paying the same certificate round trips.
 
 ```{=html}
