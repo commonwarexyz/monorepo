@@ -287,21 +287,12 @@ O’Grady</a></div>
         after which the leader’s block may reference it. The leader
         block remains red but now contains only references.</p>
         </div>
-        <p>Why not reference blocks before they are certified? Autobahn
-        implements this as an optimization for historically reliable
-        lanes: a voter missing a referenced batch delays its vote and
-        fetches the batch from the leader. A producer that has been
-        reliable can still disclose its latest batch only to the leader,
-        forcing the leader to relay it to every voter before the view
-        can progress. Across faulty producers, this creates <span
-        class="math inline">\Omega(n^2)</span> batch transmissions
-        through the leader’s egress (the same bottleneck producer lanes
-        were introduced to remove).</p>
-        <p><a href="https://arxiv.org/abs/2504.18649">Raptr</a> avoids
-        the fetch by having voters support the longest prefix of a
-        proposal for which they hold data. The protocol then finalizes
-        the prefix supported by a quorum. One missing batch
-        <em>spoils</em> everything after it. Even if all later batches
+        <p>Why not reference blocks before they are certified? <a
+        href="https://arxiv.org/abs/2504.18649">Raptr</a> avoids this
+        certificate round trip by having voters signal the longest
+        prefix of a proposal for which they hold data. The protocol then
+        finalizes the prefix supported by a quorum. One missing batch,
+        however, spoils everything after it. Even if all later batches
         are available, they cannot finalize. By taking turns, <span
         class="math inline">k</span> faulty producers can deny the fast
         path for <span class="math inline">k</span> consecutive
