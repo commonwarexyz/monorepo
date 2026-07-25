@@ -1117,8 +1117,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
-        self.blobs.destroy().await?;
+        // Remove the checkpoint before the blobs it describes. If a crash interrupts destroy
+        // between the two removals, a surviving checkpoint whose watermark exceeds the missing
+        // blobs fails the next init as corruption, while surviving blobs with no checkpoint
+        // recover cleanly by walking blob lengths.
         self.checkpoint.destroy().await?;
+        self.blobs.destroy().await?;
         Ok(())
     }
 
@@ -2700,6 +2704,40 @@ mod tests {
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// `destroy` removes the checkpoint before the blobs it describes, so a crash between the two
+    /// removals leaves a recoverable state. A surviving checkpoint over missing blobs would fail
+    /// the next init as corruption (its watermark exceeds the recovered size); surviving blobs with
+    /// no checkpoint recover by walking blob lengths.
+    #[test_traced]
+    fn test_fixed_journal_destroy_removes_checkpoint_before_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0u64..5 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Model a crash after destroy removed the checkpoint but before the blobs (the
+            // ordering this test pins): the blobs outlive their checkpoint.
+            context
+                .remove(&format!("{}-metadata", cfg.partition), None)
+                .await
+                .unwrap();
+
+            // With no checkpoint, recovery walks the surviving blobs instead of failing.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("interrupted destroy must leave openable storage");
+            assert_eq!(journal.size(), 5);
+            journal.destroy().await.unwrap();
         });
     }
 
