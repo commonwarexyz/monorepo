@@ -402,7 +402,7 @@ const FIGURES = {
           });
           return edges;
         }).flat(),
-        { k: 'mark', t: 3.5, label: 'A finalized', sub: 'A + 2 rounds' },
+        { k: 'mark', t: 3.5, label: 'A finalized', sub: 'once r+2 lands' },
       ],
       token: [],
     }],
@@ -572,11 +572,11 @@ const FIGURES = {
         ...Array.from({ length: 7 }, (_, i) => (
           { k: 'emit', row: 'mm', t: (i + 2) * 2 / 3, color: GREEN, certAt: (i + 2) * 2 / 3 + 2, finalAt: 7.5 }
         )),
-        ...Array.from({ length: 4 }, (_, i) => (
+        ...Array.from({ length: 3 }, (_, i) => (
           { k: 'emit', row: 'mm', t: (i + 9) * 2 / 3, color: GREEN, certAt: (i + 9) * 2 / 3 + 2 }
         )),
         { k: 'arc', row: 'mm', t: 0, d: 2, label: 'PoA' },
-        ...Array.from({ length: 12 }, (_, i) => (
+        ...Array.from({ length: 11 }, (_, i) => (
           { k: 'arc', row: 'mm', t: (i + 1) * 2 / 3, d: 2, faint: true }
         )),
         { k: 'counter', row: 'mm', unit: 'blocks' },

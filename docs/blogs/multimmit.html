@@ -153,10 +153,11 @@ O’Grady</a></div>
         the <a href="https://arxiv.org/abs/2102.07240">theoretical
         minimum</a> for fault-tolerant consensus. Existing protocols,
         including DAG protocols such as <a
-        href="https://arxiv.org/abs/2511.15361">BlueBottle</a>, provide
-        two-delay finality only for designated leader blocks. Multimmit
-        extends it to every honest producer’s blocks at once without
-        giving up concurrent dissemination: the best of both worlds.</p>
+        href="https://arxiv.org/abs/2511.15361">BlueBottle</a>, reach it
+        through designated leader slots, and adding slots makes each
+        round wait on every one of them. Multimmit extends it to every
+        honest producer’s blocks at once without giving up concurrent
+        dissemination: the best of both worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
         <p>Consider a typical deployed protocol with one proposer at a
         time and <a
@@ -440,11 +441,13 @@ O’Grady</a></div>
         consensus papers often do, Multimmit finality would be reported
         as <span class="math inline">2\delta</span>. That convention
         misses where checkpoints and extension votes save time. Raptr,
-        measured from dissemination, finalizes a batch at <span
-        class="math inline">t+5\delta</span> in expectation with
-        <em>no</em> faults and at <span
-        class="math inline">t+5.5\delta</span> once faulty producers are
-        present (with the fast path still subject to spoiling). Roughly
+        measured on the same basis, takes <span
+        class="math inline">5\delta</span> to order a batch: two message
+        delays of dissemination, including the average wait for block
+        inclusion, and three of consensus. That figure and its fast path
+        both rest on a quorum of voters each holding every referenced
+        batch, so a single withholding producer per round is enough to
+        slow its rounds and to spoil what the fast path orders. Roughly
         one <span class="math inline">\delta</span> of Multimmit’s
         improvement comes from assuming <span class="math inline">n \geq
         5f+1</span> and using one voting round instead of two.
@@ -561,7 +564,7 @@ O’Grady</a></div>
         validator must fetch a missing vertex before it can process
         anything built on top of it.</p>
         <div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagfetch" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG with four validators. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. A vertex is unusable until its full ancestry is held, so validators 1 and 4 must fetch the withheld vertex from validator 2 before they can build on validator 2's vertex, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
-          <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. A vertex is unusable without its full ancestry, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and round r+3 starts a fetch round trip late.</noscript>
+          <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. A vertex is unusable without its full ancestry, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and round r+3 starts 1.7 message delays late.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 10: The fetch problem. Validator 3 sends its
@@ -635,8 +638,8 @@ O’Grady</a></div>
         <p>Figure 12: Two consensus views time out in the shaded
         interval. The producer keeps emitting blocks and forming
         certificates without the leader. The first successful view
-        checkpoints the backlog, and one round of votes finalizes it.
-        Blocks emitted after that proposal wait for the next view.</p>
+        carries the backlog, and one round of votes finalizes it. Blocks
+        emitted after that proposal wait for the next view.</p>
         </div>
         <h2 id="every-producer-every-view">Every Producer, Every
         View</h2>

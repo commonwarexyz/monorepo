@@ -19,7 +19,7 @@ However, decoupling has typically increased finality latency. Consensus cannot f
 
 Today, we're sharing [Multimmit](https://arxiv.org/abs/2607.21021), a construction that avoids both delays. Each producer extends its own chain of transaction blocks without waiting on other producers. Consensus references blocks as soon as they arrive, and the votes already being cast establish availability. No block waits for a certificate, no voter waits to fetch missing data, and a withheld block delays finality only on its own chain. Votes can also include blocks the leader missed, allowing every producer to add to the finalized log in each view.
 
-With Multimmit, an honest producer's block finalizes $2\delta$ after broadcast in the best case and $3\delta$ in expectation, even when up to $f$ non-leader producers are faulty (assuming $n \geq 5f+1$). Unlike the latency figures usually reported for consensus, this timer starts at broadcast, not at a later leader proposal. Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), provide two-delay finality only for designated leader blocks. Multimmit extends it to every honest producer's blocks at once without giving up concurrent dissemination: the best of both worlds.
+With Multimmit, an honest producer's block finalizes $2\delta$ after broadcast in the best case and $3\delta$ in expectation, even when up to $f$ non-leader producers are faulty (assuming $n \geq 5f+1$). Unlike the latency figures usually reported for consensus, this timer starts at broadcast, not at a later leader proposal. Two message delays is the [theoretical minimum](https://arxiv.org/abs/2102.07240) for fault-tolerant consensus. Existing protocols, including DAG protocols such as [BlueBottle](https://arxiv.org/abs/2511.15361), reach it through designated leader slots, and adding slots makes each round wait on every one of them. Multimmit extends it to every honest producer's blocks at once without giving up concurrent dissemination: the best of both worlds.
 
 ## The Ride to the Leader
 
@@ -163,7 +163,7 @@ Figure 6: Transaction block $b$ crosses the leader block on the wire and misses 
 
 From the user's perspective, both paths are simple: submit to an API node, let its next block carry the transaction to every validator, and wait one round of votes for finality. The producer can pre-confirm the transaction as soon as it arrives, potentially before it could reach a leader an ocean away. Nothing must reach the leader before dissemination begins. Including the wait for the next vote event, a block sent at time $t$ finalizes at $t+3\delta$ in expectation (and by $t+2\delta$ with favorable timing). The two-delay case is optimal.
 
-If we started the timer at the leader's proposal, as consensus papers often do, Multimmit finality would be reported as $2\delta$. That convention misses where checkpoints and extension votes save time. Raptr, measured from dissemination, finalizes a batch at $t+5\delta$ in expectation with *no* faults and at $t+5.5\delta$ once faulty producers are present (with the fast path still subject to spoiling). Roughly one $\delta$ of Multimmit's improvement comes from assuming $n \geq 5f+1$ and using one voting round instead of two. Checkpoints and extension votes provide the rest. An honest chain's expected $t+3\delta$ finality does not change when $f$ non-leader producers misbehave.
+If we started the timer at the leader's proposal, as consensus papers often do, Multimmit finality would be reported as $2\delta$. That convention misses where checkpoints and extension votes save time. Raptr, measured on the same basis, takes $5\delta$ to order a batch: two message delays of dissemination, including the average wait for block inclusion, and three of consensus. That figure and its fast path both rest on a quorum of voters each holding every referenced batch, so a single withholding producer per round is enough to slow its rounds and to spoil what the fast path orders. Roughly one $\delta$ of Multimmit's improvement comes from assuming $n \geq 5f+1$ and using one voting round instead of two. Checkpoints and extension votes provide the rest. An honest chain's expected $t+3\delta$ finality does not change when $f$ non-leader producers misbehave.
 
 How does one round of votes produce a single ordering? Each Multimmit vote carries an independent position for every chain. Voters do not vote on how blocks from different chains are interleaved. That ordering is computed afterwards from the finalized tips, which prevents a gap in one chain from limiting any other chain's finalization.
 
@@ -215,7 +215,7 @@ This coupling also controls production. A validator may only create a round-$r+1
 
 ```{=html}
 <div id="multimmit-fig-dagfetch" class="cw-loop cw-loop-dagfetch" role="img" aria-label="Animated diagram of a fetch stall in an uncertified DAG with four validators. Validator 3 withholds its round r+1 vertex, shown as a dashed hole, disclosing it only to validator 2, whose round r+2 vertex references it with a red edge. A vertex is unusable until its full ancestry is held, so validators 1 and 4 must fetch the withheld vertex from validator 2 before they can build on validator 2's vertex, and round r+3 starts 1.7 message delays later than the dashed on-time marker.">
-  <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. A vertex is unusable without its full ancestry, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and round r+3 starts a fetch round trip late.</noscript>
+  <noscript>This figure animates a fetch stall in an uncertified DAG with four validators: validator 3 withholds its round r+1 vertex from all but validator 2, whose next vertex references it. A vertex is unusable without its full ancestry, so validators 1 and 4 must fetch the withheld vertex before they can build on validator 2's, and round r+3 starts 1.7 message delays late.</noscript>
 </div>
 ```
 
@@ -248,7 +248,7 @@ Ordering remains view-driven. The next leader can checkpoint a transaction block
 ```
 
 ::: {.image-caption}
-Figure 12: Two consensus views time out in the shaded interval. The producer keeps emitting blocks and forming certificates without the leader. The first successful view checkpoints the backlog, and one round of votes finalizes it. Blocks emitted after that proposal wait for the next view.
+Figure 12: Two consensus views time out in the shaded interval. The producer keeps emitting blocks and forming certificates without the leader. The first successful view carries the backlog, and one round of votes finalizes it. Blocks emitted after that proposal wait for the next view.
 :::
 
 ## Every Producer, Every View
