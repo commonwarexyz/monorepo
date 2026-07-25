@@ -9,11 +9,11 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Multimmit: The Best of Both Worlds</title>
-    <meta name="description" content="Two message delays is the
-theoretical minimum for fault-tolerant consensus, and existing
-protocols, including DAGs, reach it only for designated leader blocks.
-Multimmit retains concurrent block production while extending that
-minimum to all honest blocks.">
+    <meta name="description" content="The fastest path to finality no
+longer belongs exclusively to the leader. In Multimmit, blocks from
+every honest sequencer can reach the two-message-delay lower bound, even
+when they miss the leader’s proposal, while all sequencers disseminate
+independent transaction chains in parallel.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -23,11 +23,11 @@ minimum to all honest blocks.">
     <meta property="og:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="og:title" content="Multimmit: The Best of Both
 Worlds" />
-    <meta property="og:description" content="Two message delays is the
-theoretical minimum for fault-tolerant consensus, and existing
-protocols, including DAGs, reach it only for designated leader blocks.
-Multimmit retains concurrent block production while extending that
-minimum to all honest blocks." />
+    <meta property="og:description" content="The fastest path to
+finality no longer belongs exclusively to the leader. In Multimmit,
+blocks from every honest sequencer can reach the two-message-delay lower
+bound, even when they miss the leader’s proposal, while all sequencers
+disseminate independent transaction chains in parallel." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-07-23T00:00:00Z" />
     <meta property="article:modified_time" content="2026-07-23T00:00:00Z" />
@@ -39,11 +39,11 @@ minimum to all honest blocks." />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/multimmit" />
     <meta property="twitter:title" content="Multimmit: The Best of Both
 Worlds" />
-    <meta property="twitter:description" content="Two message delays is
-the theoretical minimum for fault-tolerant consensus, and existing
-protocols, including DAGs, reach it only for designated leader blocks.
-Multimmit retains concurrent block production while extending that
-minimum to all honest blocks." />
+    <meta property="twitter:description" content="The fastest path to
+finality no longer belongs exclusively to the leader. In Multimmit,
+blocks from every honest sequencer can reach the two-message-delay lower
+bound, even when they miss the leader’s proposal, while all sequencers
+disseminate independent transaction chains in parallel." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/multimmit.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
@@ -116,12 +116,13 @@ O’Grady</a></div>
         leader then broadcasts the same transaction back out to every
         validator, limiting network throughput to one node’s egress.</p>
         <p>Decoupling transaction dissemination from consensus removes
-        this bottleneck. Every validator becomes a <em>producer</em> and
-        streams its own transaction data in parallel, while consensus
-        orders small references to that data. The network can then
-        finalize transactions at roughly the rate validators can
-        <em>ingress</em> them instead of the rate one leader can
-        <em>egress</em> them. This split is <a
+        this bottleneck. Instead of one leader sequencing all
+        transaction data, many independent <em>producers</em> each
+        sequence and stream their own chain of transaction blocks in
+        parallel. Consensus orders small references from those chains
+        into one log. The network can then finalize transactions at
+        roughly the rate validators can <em>ingress</em> them instead of
+        the rate one leader can <em>egress</em> them. This split is <a
         href="https://hackmd.io/@patrickogrady/rys8mdl5p">now standard
         among high-throughput designs</a>.</p>
         <p>However, decoupling has typically increased finality latency.
@@ -134,29 +135,33 @@ O’Grady</a></div>
         the prefix before the gap.</p>
         <p>Today, we’re sharing <a
         href="https://arxiv.org/abs/2607.21021">Multimmit</a>, a
-        construction that avoids both delays. Each producer extends its
-        own chain of transaction blocks without waiting on other
-        producers. Consensus references blocks as soon as they arrive,
-        and the votes already being cast establish availability. No
-        block waits for a certificate, no voter waits to fetch missing
-        data, and a withheld block delays finality only on its own
-        chain. Votes can also include blocks the leader missed, allowing
-        every producer to add to the finalized log in each view.</p>
-        <p>With Multimmit, an honest producer’s block finalizes <span
-        class="math inline">2\delta</span> after broadcast in the best
-        case and <span class="math inline">3\delta</span> in
-        expectation, even when up to <span class="math inline">f</span>
-        non-leader producers are faulty (assuming <span
-        class="math inline">n \geq 5f+1</span>). Unlike the latency
-        figures usually reported for consensus, this timer starts at
-        broadcast, not at a later leader proposal. Two message delays is
-        the <a href="https://arxiv.org/abs/2102.07240">theoretical
-        minimum</a> for fault-tolerant consensus. Existing protocols,
-        including DAG protocols such as <a
+        construction that avoids both delays. Producers and the
+        consensus leader have distinct roles: each producer
+        independently extends and broadcasts its own chain of
+        transaction blocks, while the leader proposes a checkpoint over
+        those chains. Consensus references blocks as soon as they
+        arrive, and the votes already being cast establish availability.
+        No block waits for a certificate, no voter waits to fetch
+        missing data, and a withheld block delays finality only on its
+        own chain. Votes can also include blocks the leader missed,
+        allowing blocks from every producer chain to enter the finalized
+        log in each view.</p>
+        <p>With Multimmit, a block from any honest producer chain
+        finalizes <span class="math inline">2\delta</span> after
+        broadcast in the best case and <span
+        class="math inline">3\delta</span> in expectation, even when up
+        to <span class="math inline">f</span> non-leader producers are
+        faulty (assuming <span class="math inline">n \geq 5f+1</span>).
+        Unlike the latency figures usually reported for consensus, this
+        timer starts at broadcast, not at a later leader proposal. Two
+        message delays is the <a
+        href="https://arxiv.org/abs/2102.07240">theoretical minimum</a>
+        for fault-tolerant consensus. Existing protocols, including DAG
+        protocols such as <a
         href="https://arxiv.org/abs/2511.15361">BlueBottle</a>, reach it
         through designated leader slots, and adding slots makes each
         round wait on every one of them. Multimmit extends it to every
-        honest producer’s blocks at once without giving up concurrent
+        honest producer chain at once without giving up concurrent
         dissemination: the best of both worlds.</p>
         <h2 id="the-ride-to-the-leader">The Ride to the Leader</h2>
         <p>Consider a typical deployed protocol with one proposer at a
