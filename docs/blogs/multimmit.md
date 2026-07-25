@@ -195,7 +195,7 @@ DAG-based protocols ([Narwhal](https://arxiv.org/abs/2105.11827), [Bullshark](ht
 Figure 8: How a DAG mempool is built. Each round, every validator emits a vertex referencing $n-f$ vertices of the previous round. The references are the protocol: they carry availability and voting information, so the ordering logic can read finality out of the lattice.
 :::
 
-A reference does not provide finality on its own. The ordering logic designates periodic anchor vertices, and an anchor commits only after later rounds show that enough validators built on top of it. Committing the anchor orders every vertex in its causal history. The remaining vertices wait for a later anchor.
+A reference does not provide finality on its own. The ordering logic designates periodic anchor vertices, and an anchor commits only after later rounds show that enough validators built on top of it. Committing the anchor orders every vertex in its causal history. The remaining vertices wait for a later anchor. Some DAGs add a fast path around this: Mysticeti finalizes transactions that touch only single-owner state by reliable broadcast, without waiting for an anchor, though their position in the total ordering still waits for one.
 
 ```{=html}
 <div id="multimmit-fig-dagfinality" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG finality. Four validators emit one vertex per round. Validator 2's round-r vertex, labeled A, is the anchor. Gold reference edges from round r+1 mark its support, and once round r+2 lands, A and its causal history turn gold, two rounds after A entered the DAG. Every other vertex stays pending until a later anchor commits.">

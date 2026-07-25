@@ -512,7 +512,11 @@ O’Grady</a></div>
         anchor commits only after later rounds show that enough
         validators built on top of it. Committing the anchor orders
         every vertex in its causal history. The remaining vertices wait
-        for a later anchor.</p>
+        for a later anchor. Some DAGs add a fast path around this:
+        Mysticeti finalizes transactions that touch only single-owner
+        state by reliable broadcast, without waiting for an anchor,
+        though their position in the total ordering still waits for
+        one.</p>
         <div id="multimmit-fig-dagfinality" class="cw-loop cw-loop-dagstructure" role="img" aria-label="Animated diagram of DAG finality. Four validators emit one vertex per round. Validator 2's round-r vertex, labeled A, is the anchor. Gold reference edges from round r+1 mark its support, and once round r+2 lands, A and its causal history turn gold, two rounds after A entered the DAG. Every other vertex stays pending until a later anchor commits.">
           <noscript>This figure animates DAG finality: anchor A enters in round r, is referenced by n−f round r+1 vertices, and commits only once round r+2 lands, ordering its causal history with it. Finality arrives two rounds of DAG growth after the vertex itself.</noscript>
         </div>
