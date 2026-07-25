@@ -1,6 +1,6 @@
 ---
 title: "Multimmit: The Best of Both Worlds"
-description: "Two-delay finality is the theoretical minimum, but existing protocols, including DAGs, provide it only for designated leader blocks. Multimmit extends two-delay finality to every honest producer's blocks at once: the best of both worlds."
+description: "Two message delays is the theoretical minimum for fault-tolerant consensus, and existing protocols, including DAGs, reach it only for designated leader blocks. Multimmit retains concurrent block production while extending that minimum to all honest blocks."
 date: "July 23rd, 2026"
 published-time: "2026-07-23T00:00:00Z"
 modified-time: "2026-07-23T00:00:00Z"
