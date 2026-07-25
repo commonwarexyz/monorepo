@@ -293,7 +293,7 @@ const FIGURES = {
         { k: 'cell', static: true, t: 0, x: 692, y: 294, w: 58, h: 58, label: '1C', corner: true, changes: [{ t: 9.2, fill: GOLD_FILL }] },
         { k: 'cell', static: true, t: 0, x: 692, y: 232, w: 58, h: 58, label: '1D', corner: true, changes: [{ t: 7.6, stroke: GOLD, strokeWidth: 2.5 }, { t: 10.4, fill: GOLD_FILL }] },
         { k: 'cell', static: true, t: 0, x: 692, y: 170, w: 58, h: 58, label: '1E', corner: true, changes: [{ t: 7.0, stroke: BLUE, strokeWidth: 2.5 }] },
-        { k: 'cell', static: true, t: 0, x: 754, y: 418, w: 58, h: 58, label: '2A', corner: true },
+        { k: 'cell', static: true, t: 0, x: 754, y: 418, w: 58, h: 58, label: '2A', corner: true, fill: '#e2e2e2' },
         { k: 'cell', static: true, t: 0, x: 754, y: 356, w: 58, h: 58, label: '2B', corner: true, fill: '#e2e2e2' },
         { k: 'cell', static: true, t: 0, x: 754, y: 294, w: 58, h: 58, label: '2C', corner: true, changes: [{ t: 8.3, fill: GOLD_FILL }] },
         { k: 'cell', static: true, t: 0, x: 754, y: 232, w: 58, h: 58, label: '2D', corner: true, changes: [{ t: 7.6, stroke: GOLD, strokeWidth: 2.5 }, { t: 9.5, fill: GOLD_FILL }] },
@@ -505,11 +505,11 @@ const FIGURES = {
         { k: 'arc', row: 'dag', t: 6, d: 2 },
         { k: 'counter', row: 'dag', unit: 'blocks' },
         { k: 'emit', row: 'mm', t: 0, color: GREEN, label: 'b1', certAt: 2 },
-        ...Array.from({ length: 12 }, (_, i) => (
+        ...Array.from({ length: 11 }, (_, i) => (
           { k: 'emit', row: 'mm', t: (i + 1) * 2 / 3, color: GREEN, certAt: (i + 1) * 2 / 3 + 2 }
         )),
         { k: 'arc', row: 'mm', t: 0, d: 2, label: 'PoA' },
-        ...Array.from({ length: 12 }, (_, i) => (
+        ...Array.from({ length: 11 }, (_, i) => (
           { k: 'arc', row: 'mm', t: (i + 1) * 2 / 3, d: 2, faint: true }
         )),
         { k: 'counter', row: 'mm', unit: 'blocks' },
@@ -567,10 +567,10 @@ const FIGURES = {
       end: 8,
       phases: [],
       events: [
-        { k: 'emit', row: 'mm', t: 0, color: GREEN, label: 'b1', certAt: 2, finalAt: 2 },
-        { k: 'emit', row: 'mm', t: 2 / 3, color: GREEN, certAt: 2 / 3 + 2, finalAt: 2 },
+        { k: 'emit', row: 'mm', t: 0, color: GREEN, label: 'b1', certAt: 2, finalAt: 3 },
+        { k: 'emit', row: 'mm', t: 2 / 3, color: GREEN, certAt: 2 / 3 + 2, finalAt: 3 },
         ...Array.from({ length: 7 }, (_, i) => (
-          { k: 'emit', row: 'mm', t: (i + 2) * 2 / 3, color: GREEN, certAt: (i + 2) * 2 / 3 + 2, finalAt: 6.5 }
+          { k: 'emit', row: 'mm', t: (i + 2) * 2 / 3, color: GREEN, certAt: (i + 2) * 2 / 3 + 2, finalAt: 7.5 }
         )),
         ...Array.from({ length: 4 }, (_, i) => (
           { k: 'emit', row: 'mm', t: (i + 9) * 2 / 3, color: GREEN, certAt: (i + 9) * 2 / 3 + 2 }
@@ -593,7 +593,7 @@ const FIGURES = {
         ...Array.from({ length: 7 }, (_, i) => (
           { k: 'edge', fromRow: 'cons', fromT: 5.5, toRow: 'mm', toT: (i + 2) * 2 / 3, t: 5.5, d: 0.45, style: 'sup' }
         )),
-        { k: 'mark', t: 6.5, label: 'finalized', sub: 'whole backlog' },
+        { k: 'mark', t: 7.5, label: 'finalized', sub: 'whole backlog' },
       ],
       token: [],
     }],
