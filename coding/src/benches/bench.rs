@@ -35,9 +35,9 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                             |data| {
                                 // Encode data
                                 if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                    S::encode(&config, data, &strategy).unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                    S::encode(&config, data, &Sequential).unwrap()
                                 }
                             },
                             BatchSize::SmallInput,
@@ -76,9 +76,9 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
 
                                     // Encode data
                                     let (commitment, shards) = if conc > 1 {
-                                        S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                        S::encode(&config, data, &strategy).unwrap()
                                     } else {
-                                        S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                        S::encode(&config, data, &Sequential).unwrap()
                                     };
 
                                     let indices = selection.indices(min);
