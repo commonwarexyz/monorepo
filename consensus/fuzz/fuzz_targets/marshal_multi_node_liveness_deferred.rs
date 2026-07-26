@@ -1,4 +1,5 @@
 #![no_main]
+//! Multi-node liveness over Deferred and standard Marshal.
 
 #[cfg(feature = "mocks")]
 mod fuzz {

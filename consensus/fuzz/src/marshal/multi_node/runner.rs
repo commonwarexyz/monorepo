@@ -51,7 +51,7 @@
 
 use super::{
     ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED, engine::LiveMarshal,
-    input::MarshalLivenessInput, invariant,
+    input::MarshalLivenessInput, invariants,
 };
 use crate::{
     BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW, SimplexBls12381MinPk,
@@ -308,6 +308,6 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
             }
         }
 
-        invariant::check_all::<H>(required, &honest_apps);
+        invariants::check_all::<H>(required, &honest_apps);
     });
 }

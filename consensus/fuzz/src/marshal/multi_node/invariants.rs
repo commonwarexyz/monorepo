@@ -1,4 +1,4 @@
-//! Safety and end-of-run invariants for the multi-node marshal model.
+//! Live and end-of-run invariants for the multi-node marshal model.
 //!
 //! These checks cover both the marshal/application boundary and observations
 //! made while Simplex drives marshal. They panic on violation with the
@@ -34,6 +34,42 @@ type PublicKeyOf<P> =
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
+type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
+
+/// Ensures correct automata return the same completed certification verdict
+/// for the same `(round, digest)`.
+#[derive(Clone)]
+pub(super) struct CertificationAgreementInvariant {
+    verdicts: Arc<Mutex<CertifyVerdicts>>,
+}
+
+impl CertificationAgreementInvariant {
+    pub(super) fn new() -> Self {
+        Self {
+            verdicts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(super) fn check_certify_agreement(
+        &self,
+        validator: usize,
+        round: Round,
+        digest: Sha256Digest,
+        verdict: bool,
+    ) {
+        let mut verdicts = self.verdicts.lock();
+        if let Some((first_validator, first_verdict)) = verdicts.get(&(round, digest)) {
+            assert_eq!(
+                *first_verdict, verdict,
+                "marshal automaton certify agreement violated: honest node{first_validator} \
+                 returned {first_verdict} but honest node{validator} returned {verdict} for \
+                 round={round} digest={digest}",
+            );
+            return;
+        }
+        verdicts.insert((round, digest), (validator, verdict));
+    }
+}
 
 /// Ensures a rejection scoped to one proposal header cannot poison
 /// certification of the same payload under its embedded header.

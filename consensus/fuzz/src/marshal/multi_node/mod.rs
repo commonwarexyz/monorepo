@@ -19,14 +19,14 @@
 //!   invariants.
 //! - `twins` runs the standard marshal stack under sampled Simplex Twins
 //!   scenarios and checks post-prefix recovery.
-//! - `invariant` holds the end-of-run assertions.
+//! - `invariants` holds the end-of-run and live automaton assertions.
 
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
 mod app;
 mod engine;
 mod input;
-mod invariant;
+mod invariants;
 mod runner;
 mod twins;
 
@@ -34,8 +34,8 @@ pub use engine::LiveMarshal;
 pub use input::{MarshalLivenessInput, MarshalTwinsInput};
 pub use runner::fuzz_marshal_liveness;
 pub use twins::{
-    fuzz_marshal_twins, fuzz_marshal_twins_id_split_header,
-    fuzz_marshal_twins_id_split_header_inline, fuzz_marshal_twins_randomized_app,
+    fuzz_marshal_twins_deferred, fuzz_marshal_twins_id_split_header,
+    fuzz_marshal_twins_id_split_header_inline, fuzz_marshal_twins_randomized_app_deferred,
 };
 
 /// Engine p2p channel ids, shared by the honest engines and Byzantine twins.

@@ -2470,6 +2470,7 @@ pub(crate) trait TwinsBackend<P: simplex::Simplex> {
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>>;
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_primary(
         &mut self,
         context: deterministic::Context,
@@ -2530,6 +2531,7 @@ pub(crate) trait TwinsBackend<P: simplex::Simplex> {
     fn finish_twins(&mut self, _state: &mut Self::State, _topology: &TwinsTopology<P, Self::Case>) {
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_honest(
         &mut self,
         context: deterministic::Context,

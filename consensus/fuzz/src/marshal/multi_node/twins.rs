@@ -6,14 +6,15 @@
 //! engine and the compromised primary use a real
 //! `Inline|Deferred -> Marshal -> Application` data path. The secondary mutator
 //! can preserve an observed payload while changing its proposal header. In
-//! addition to delivery and liveness checks, the target asserts that a
+//! addition to delivery and liveness checks, the target compares completed
+//! certification verdicts across correct replicas and asserts that a
 //! header-scoped verification rejection is never reused during certification.
 
 use super::{
     ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
     app::{BlockBuilderApp, RandomizedBlockBuilderApp, RandomizedConfig},
     input::MarshalTwinsInput,
-    invariant::{self, HeaderMismatchInvariant},
+    invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
 };
 use crate::{
     BYZANTINE_IDX, NAMESPACE, NetworkChannels, POST_GST_WINDOW, SimplexCertificateMock, SimplexId,
@@ -69,9 +70,8 @@ use std::{
 
 /// Opt-in ground-truth probe. Set `MARSHAL_TWINS_PROBE=1` to log whenever
 /// verifying a header whose context differs from the stored block rejects the
-/// block. Off by default so normal fuzzing keeps the unperturbed timing -- the
-/// probe only observes `inner.verify`'s verdict after it is forwarded, but the
-/// extra task hop still shifts the schedule slightly.
+/// block. Off by default so normal fuzzing keeps the direct verification path;
+/// the probe forwards the real verdict before performing its diagnostic lookup.
 static VERIFY_PROBE: LazyLock<bool> =
     LazyLock::new(|| std::env::var("MARSHAL_TWINS_PROBE").is_ok());
 
@@ -87,6 +87,7 @@ type PublicKeyOf<P> =
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type PrimaryApp<P> = BlockBuilderApp<Ctx<P>, SchemeOf<P>>;
+type BackendMarker<P, A, M> = std::marker::PhantomData<fn() -> (P, A, M)>;
 
 trait TwinsBlockBuilder<P: Simplex>:
     commonware_consensus::Application<
@@ -466,17 +467,17 @@ async fn setup_validator<P: Simplex>(
 
 /// Passively observes the real marshal automaton calls made by Simplex.
 ///
-/// A failed certification after the same `(round, digest)` was verified under
-/// a context that differs from the block's embedded context means a
-/// header-scoped rejection leaked into matching-header certification, unless
-/// the selected application deliberately rejects the embedded context.
+/// Completed certification verdicts are compared with other correct replicas
+/// and checked against any verification context that differs from the block's
+/// embedded context.
 struct ObservedMarshal<P: Simplex, M> {
     validator: usize,
     probe_input: Arc<str>,
     context: Arc<Mutex<deterministic::Context>>,
     inner: M,
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
-    invariant: HeaderMismatchInvariant<P, RandomizedConfig>,
+    certification_agreement: CertificationAgreementInvariant,
+    header_mismatch: HeaderMismatchInvariant<P, RandomizedConfig>,
 }
 
 impl<P: Simplex, M: Clone> Clone for ObservedMarshal<P, M> {
@@ -487,7 +488,8 @@ impl<P: Simplex, M: Clone> Clone for ObservedMarshal<P, M> {
             context: self.context.clone(),
             inner: self.inner.clone(),
             mailbox: self.mailbox.clone(),
-            invariant: self.invariant.clone(),
+            certification_agreement: self.certification_agreement.clone(),
+            header_mismatch: self.header_mismatch.clone(),
         }
     }
 }
@@ -509,15 +511,10 @@ where
         context: Self::Context,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        self.invariant.record_verify(context.clone(), digest);
+        self.header_mismatch.record_verify(context.clone(), digest);
         if !*VERIFY_PROBE {
             return self.inner.verify(context, digest).await;
         }
-        // Ground-truth probe: forward the real verdict unchanged, then off the
-        // critical path check whether this call rejected a header whose
-        // consensus context disagrees with the stored block's embedded context.
-        // The forward happens before the diagnostic `get_block`, so
-        // certification timing is not delayed by the lookup.
         let inner_rx = self.inner.verify(context.clone(), digest).await;
         let (tx, rx) = oneshot::channel();
         let mailbox = self.mailbox.clone();
@@ -552,19 +549,23 @@ where
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         let result = self.inner.certify(round, digest).await;
         let (tx, rx) = oneshot::channel();
-        let invariant = self.invariant.clone();
+        let header_mismatch = self.header_mismatch.clone();
+        let certification_agreement = self.certification_agreement.clone();
         let mailbox = self.mailbox.clone();
         let context = self.context.lock().child("certify");
+        let validator = self.validator;
         context.spawn(move |_| async move {
             match result.await {
                 Ok(value) => {
-                    invariant
+                    certification_agreement
+                        .check_certify_agreement(validator, round, digest, value);
+                    header_mismatch
                         .check_certification(&mailbox, round, digest, Some(value))
                         .await;
                     tx.send_lossy(value);
                 }
                 Err(_) => {
-                    invariant
+                    header_mismatch
                         .check_certification(&mailbox, round, digest, None)
                         .await;
                 }
@@ -694,12 +695,13 @@ struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
     input: MarshalTwinsInput,
     probe_input: Arc<str>,
     app_config: RandomizedConfig,
-    _marker: std::marker::PhantomData<fn() -> (P, A, M)>,
+    _marker: BackendMarker<P, A, M>,
 }
 
 struct MarshalTwinsState<P: Simplex> {
     validators: Vec<Validator<P>>,
     honest: Vec<(usize, Application<B<P>>)>,
+    certification_agreement: CertificationAgreementInvariant,
     genesis: Sha256Digest,
 }
 
@@ -773,6 +775,7 @@ where
             state: MarshalTwinsState {
                 validators,
                 honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
+                certification_agreement: CertificationAgreementInvariant::new(),
                 genesis,
             },
         }
@@ -937,10 +940,11 @@ where
         let observed: ObservedMarshal<P, <M as TwinsMarshal<P, A>>::Wrapper> = ObservedMarshal {
             validator: idx,
             probe_input: self.probe_input.clone(),
-            context: Arc::new(Mutex::new(context.child("header_mismatch_invariant"))),
+            context: Arc::new(Mutex::new(context.child("automaton_invariants"))),
             inner: builder.clone(),
             mailbox: state.validators[idx].mailbox.clone(),
-            invariant: HeaderMismatchInvariant::new(self.app_config, A::rejects),
+            certification_agreement: state.certification_agreement.clone(),
+            header_mismatch: HeaderMismatchInvariant::new(self.app_config, A::rejects),
         };
         start_engine::<P, _, _>(
             context.child("honest"),
@@ -981,12 +985,12 @@ where
         state: &mut Self::State,
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
-        invariant::check_all_blocks(self.input.trailing_blocks.into(), &state.honest);
+        invariants::check_all_blocks(self.input.trailing_blocks.into(), &state.honest);
     }
 }
 
 /// Run one sampled end-to-end standard-marshal Twins mutator.
-pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
+pub fn fuzz_marshal_twins_deferred(input: MarshalTwinsInput) {
     fuzz_marshal_twins_with::<
         SimplexCertificateMock,
         BlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
@@ -995,7 +999,7 @@ pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
 }
 
 /// Run standard-marshal Twins with input-derived application behavior.
-pub fn fuzz_marshal_twins_randomized_app(input: MarshalTwinsInput) {
+pub fn fuzz_marshal_twins_randomized_app_deferred(input: MarshalTwinsInput) {
     fuzz_marshal_twins_with::<
         SimplexCertificateMock,
         RandomizedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,

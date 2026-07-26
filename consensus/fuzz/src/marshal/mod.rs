@@ -14,14 +14,14 @@
 //!   consensus. The liveness targets use a Byzantine `Disrupter`; the standard
 //!   Twins mutator splits one compromised identity between a full engine and a
 //!   `Disrupter`.
-//!   Targets: `marshal_multi_node_liveness_standard`,
-//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins_standard`,
-//!   `marshal_multi_node_twins_randomized_app`,
+//!   Targets: `marshal_multi_node_liveness_deferred`,
+//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins_deferred`,
+//!   `marshal_multi_node_twins_randomized_app_deferred`,
 //!   `marshal_multi_node_twins_id_split_header`,
 //!   `marshal_multi_node_twins_id_split_header_inline`.
 //! - [`inline`]: drives the standard inline and deferred block paths, including
-//!   split-header equivocation. Targets: `marshal_inline_standard`,
-//!   `marshal_deferred_standard`.
+//!   split-header equivocation. Targets: `marshal_standard_inline`,
+//!   `marshal_standard_deferred`.
 //! - [`store`]: drives the marshal block/certificate store directly. Target:
 //!   `marshal_store_standard`.
 //!
@@ -45,9 +45,9 @@ pub mod store;
 
 pub use inline::{MarshalInlineInput, fuzz_marshal_deferred, fuzz_marshal_inline};
 pub use multi_node::{
-    MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins,
+    MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins_deferred,
     fuzz_marshal_twins_id_split_header, fuzz_marshal_twins_id_split_header_inline,
-    fuzz_marshal_twins_randomized_app,
+    fuzz_marshal_twins_randomized_app_deferred,
 };
 pub use single_node::{MarshalEvent, MarshalFuzzInput, VariantPublish, fuzz_marshal_single_node};
 pub use store::{MarshalStoreInput, fuzz_marshal_store};

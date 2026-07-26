@@ -129,10 +129,10 @@ The standard-wrapper targets exercise proposal, verification, certification,
 broadcast, and application-result transitions using structured libFuzzer input:
 
 ```bash
-cargo fuzz run marshal_inline_standard
-cargo fuzz run marshal_deferred_standard
-cargo fuzz run marshal_multi_node_twins_standard
-cargo fuzz run marshal_multi_node_twins_randomized_app
+cargo fuzz run marshal_standard_inline
+cargo fuzz run marshal_standard_deferred
+cargo fuzz run marshal_multi_node_twins_deferred
+cargo fuzz run marshal_multi_node_twins_randomized_app_deferred
 cargo fuzz run marshal_multi_node_twins_id_split_header
 cargo fuzz run marshal_multi_node_twins_id_split_header_inline
 ```
