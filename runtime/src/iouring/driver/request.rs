@@ -119,7 +119,7 @@ impl WriteBuffers {
 /// Each variant owns all buffers and FDs needed by the kernel plus progress
 /// cursors. The loop calls [build_sqe](Self::build_sqe) to produce the next
 /// SQE and [on_cqe](Self::on_cqe) to evaluate completions and produce the
-/// terminal [Output]. [timeout](Self::timeout) and [fail](Self::fail)
+/// terminal [Output]. [interrupt](Self::interrupt) and [fail](Self::fail)
 /// resolve requests the kernel never completed.
 pub(super) enum Request {
     Send(SendRequest),

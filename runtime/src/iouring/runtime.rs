@@ -738,12 +738,18 @@ impl Worker {
         // worker's contexts or sleep futures and drop them only when their
         // own teardown observes the abort cascade, possibly after the join
         // loop has already drained the registry), so a monotone flag gates
-        // the check rather than any point-in-time registry state.
-        let multi_worker = executor.shared.spawned_workers.load(Ordering::Relaxed);
-        assert!(
-            multi_worker || Arc::weak_count(&executor) == 0,
-            "executor still has weak references"
-        );
+        // the check rather than any point-in-time registry state. It runs
+        // only when no caught payload is pending: an escape observed then is
+        // usually a consequence of the pending panic (the root died before
+        // releasing or joining whatever holds the reference), and this
+        // diagnostic must not replace the payload that explains it.
+        if result.is_ok() && teardown.is_ok() && close_wakers.is_ok() {
+            let multi_worker = executor.shared.spawned_workers.load(Ordering::Relaxed);
+            assert!(
+                multi_worker || Arc::weak_count(&executor) == 0,
+                "executor still has weak references"
+            );
+        }
 
         // Handle the result — resume the original panic after cleanup if one
         // was caught, preferring it over a panic from task teardown, and
@@ -1361,6 +1367,7 @@ impl Context {
             // the closure is task failure (as on the inline path, where `f`
             // runs in the caller's task), not worker failure.
             let panicker = thread_shared.panicker.clone();
+            let panic_shared = Arc::clone(&thread_shared);
             let wrapped = async move {
                 let result = match catch_unwind(AssertUnwindSafe(|| f(context))) {
                     Ok(future) => {
@@ -1372,7 +1379,14 @@ impl Context {
                 match result {
                     Ok(Ok(value)) => publisher.publish(Ok(value)),
                     Ok(Err(panic)) => {
-                        panicker.notify(panic);
+                        // Deliver to the root's interrupt. If the root
+                        // already finished (its receiver is gone), stash the
+                        // payload: a poll panic racing root completion must
+                        // still fail `start` through the join path's final
+                        // take, not vanish because this worker exits cleanly.
+                        if let Some(panic) = panicker.notify(panic) {
+                            let _ = panic_shared.worker_panic.lock().get_or_insert(panic);
+                        }
                         publisher.publish(Err(Error::Exited));
                     }
                     // Dropping the publisher (at the end of this block)
@@ -2117,6 +2131,65 @@ mod tests {
                 "{retained} exited worker threads retained until shutdown"
             );
         });
+    }
+
+    /// A pending root panic must propagate even when a context legitimately
+    /// escaped to a helper thread: the escaped-context diagnostic must not
+    /// replace the payload that explains why the cleanup never happened.
+    #[test]
+    fn test_root_panic_outranks_escape_diagnostic() {
+        let (send, recv) = std::sync::mpsc::channel();
+        let (release_send, release_recv) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let context: Context = recv.recv().unwrap();
+            release_recv.recv().unwrap();
+            drop(context);
+        });
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                send.send(context.child("escapee")).unwrap();
+                panic!("root cause");
+            })
+        }));
+        let payload = result.expect_err("root panic should propagate");
+        let message = payload.downcast_ref::<&str>().copied();
+        assert_eq!(message, Some("root cause"));
+
+        release_send.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    /// A dedicated task's poll panic that races root completion must still
+    /// fail `start` (with the default `catch_panics(false)`): the root's
+    /// interrupt receiver is already gone, so the payload routes through the
+    /// worker-panic stash instead of vanishing while the worker exits
+    /// cleanly.
+    #[test]
+    fn test_dedicated_poll_panic_races_root_completion() {
+        let (send, recv) = std::sync::mpsc::channel();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| async move {
+                let _handle = context
+                    .child("late")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        send.send(()).unwrap();
+                        std::thread::sleep(Duration::from_millis(300));
+                        panic!("late worker panic");
+                    });
+                // Return as soon as the task is mid-poll: the panic then
+                // lands after this worker's root future (and its interrupt
+                // receiver) is gone, while `start` waits in the join loop.
+                recv.recv().unwrap();
+            })
+        }));
+        let payload = result.expect_err("racing poll panic should fail start");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("late worker panic"));
     }
 
     /// A worker panic already observed by an opportunistic reap happened

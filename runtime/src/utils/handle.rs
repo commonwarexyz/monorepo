@@ -120,7 +120,11 @@ where
                     let _ = sender.send(Ok(result));
                 }
                 Ok(Err(panic)) => {
-                    panicker.notify(panic);
+                    // An undeliverable payload here means the root completed
+                    // on another thread in the same instant; the executors
+                    // using this wrapper have no later shutdown path to
+                    // route it through, so it is logged and dropped.
+                    let _ = panicker.notify(panic);
                     let _ = sender.send(Err(Error::Exited));
                 }
                 Err(Aborted) => {}
@@ -331,24 +335,31 @@ impl Panicker {
     }
 
     /// Notifies the [Panicker] that a panic has occurred.
-    pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
+    /// Notify the runtime of a task panic.
+    ///
+    /// Returns the payload when it could not be delivered: panics are not
+    /// being caught, no earlier panic claimed the interrupt, but the root
+    /// future (and its receiver) is already gone. Callers with a later
+    /// shutdown path should route the returned payload through it rather
+    /// than let the panic vanish.
+    pub(crate) fn notify(
+        &self,
+        panic: Box<dyn Any + Send + 'static>,
+    ) -> Option<Box<dyn Any + Send + 'static>> {
         // Log the panic
         let err = extract_panic_message(&*panic);
         error!(?err, "task panicked");
 
-        // If we are catching panics, just return
+        // If we are catching panics, the payload is absorbed by policy.
         if self.catch {
-            return;
+            return None;
         }
 
-        // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
-            return;
-        };
+        // If we've already sent a panic, later ones rank below it.
+        let sender = self.sender.lock().take()?;
 
-        // Send the panic
-        let _ = sender.send(panic);
+        // Send the panic; a dead receiver hands the payload back.
+        sender.send(panic).err()
     }
 }
 
