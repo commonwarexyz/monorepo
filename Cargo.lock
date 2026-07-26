@@ -1793,8 +1793,10 @@ version = "2026.7.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
+ "criterion",
  "dashmap",
  "futures",
+ "parking_lot",
  "proptest",
  "rayon",
 ]
