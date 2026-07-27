@@ -1651,6 +1651,7 @@ mod compact_variable_mmr {
             };
             assert_ne!(window_target, current_target);
 
+            // A retained leaf count paired with a different root is divergent.
             let source = Arc::new(source);
             let divergent_target = sync::compact::Target {
                 root: current_target.root,
@@ -2548,6 +2549,7 @@ mod compact_variable_mmb {
             };
             assert_ne!(window_target, current_target);
 
+            // A retained leaf count paired with a different root is divergent.
             let source = Arc::new(source);
             let divergent_target = sync::compact::Target {
                 root: current_target.root,
