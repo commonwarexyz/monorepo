@@ -621,6 +621,49 @@ mod tests {
         });
     }
 
+    /// A published snapshot serves a target one commit below its captured tip, so a
+    /// syncing peer whose selected floor lags this provider is not starved.
+    #[test]
+    fn produce_serves_below_tip_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("db")).await;
+            let below = db.target();
+
+            // Advance one commit so `below` sits under the captured tip.
+            let batch = db
+                .new_batch()
+                .append(U64::new(9))
+                .merkleize(&db, None, db.inactivity_floor_loc())
+                .await;
+            let (db, _) = db.apply_batch(batch).expect("apply should succeed");
+            let db = db.sync().await.expect("sync should succeed");
+            assert_ne!(db.target(), below);
+
+            use crate::stateful::db::ManagedDb as _;
+            let (_db, snapshot) = db.snapshot().await.expect("snapshot should succeed");
+            let (mut publisher, raw_source) = crate::stateful::db::Publisher::new(&context);
+            publisher.install_durable(snapshot);
+            let source = crate::stateful::db::MemberSource::new(raw_source, |s| s);
+            let _publisher = publisher;
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(source)));
+            let request = handler::Request::from_target(below.clone());
+            let (response_tx, response_rx) = oneshot::channel();
+
+            actor.handle_produce(request, response_tx).await;
+
+            let encoded = response_rx.await.expect("response should be served");
+            let cfg = (
+                (..=MAX_PINNED_NODES).into(),
+                (),
+                MAX_PROOF_DIGESTS_PER_ELEMENT,
+            );
+            let state =
+                compact::State::<mmr::Family, TestOp, sha256::Digest>::decode_cfg(encoded, &cfg)
+                    .expect("served state should decode");
+            assert_eq!(state.leaf_count, below.leaf_count);
+        });
+    }
+
     #[test]
     fn downstream_rejection_marks_peer_invalid() {
         deterministic::Runner::default().start(|context| async move {

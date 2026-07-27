@@ -197,7 +197,7 @@ where
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::compact::Target<F, H::Digest>;
-    type Snapshot = Arc<StateSnapshot<F, H::Digest, Operation<F, FixedEncoding<V>>, ()>>;
+    type Snapshot = Arc<StateSnapshot<F, E, H::Digest, Operation<F, FixedEncoding<V>>, ()>>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -228,13 +228,13 @@ where
         // Start the sync before capturing so the tip witness in the capture is the one
         // the handle proves durable. Publication of the unproven tip waits on the handle.
         let (db, handle) = db.start_sync().await?;
-        let snapshot = Arc::new(db.compact_snapshot());
-        Ok((db, snapshot, handle))
+        let (db, snapshot) = db.compact_snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
-        let snapshot = Arc::new(self.compact_snapshot());
-        Ok((self, snapshot))
+        let (db, snapshot) = self.compact_snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -272,7 +272,7 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::compact::Target<F, H::Digest>;
-    type Snapshot = Arc<StateSnapshot<F, H::Digest, Operation<F, VariableEncoding<V>>, C>>;
+    type Snapshot = Arc<StateSnapshot<F, E, H::Digest, Operation<F, VariableEncoding<V>>, C>>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -306,13 +306,13 @@ where
         // Start the sync before capturing so the tip witness in the capture is the one
         // the handle proves durable. Publication of the unproven tip waits on the handle.
         let (db, handle) = db.start_sync().await?;
-        let snapshot = Arc::new(db.compact_snapshot());
-        Ok((db, snapshot, handle))
+        let (db, snapshot) = db.compact_snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
-        let snapshot = Arc::new(self.compact_snapshot());
-        Ok((self, snapshot))
+        let (db, snapshot) = self.compact_snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {

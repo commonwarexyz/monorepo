@@ -115,6 +115,9 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
 /// The contiguous variable journal that backs a witness [`Store`].
 pub(crate) type Journal<E, F, D> = variable::Journal<E, Witness<F, D>>;
 
+/// An owned frozen reader over a witness journal, captured by [`Store::snapshot`].
+pub(crate) type Reader<E, F, D> = variable::Reader<'static, E, Witness<F, D>>;
+
 /// How a persisted witness entry is made durable.
 #[derive(Clone, Copy)]
 enum Durability {
@@ -379,8 +382,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     {
         self.check_import_persisted()?;
 
-        let (pos, entry) = self
-            .position_of(target)
+        let (pos, entry) = position_of(&self.journal, target)
             .await?
             .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
         let (witness, op) = rebuild_and_verify::<F, D, H, S, Op>(
@@ -406,7 +408,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Ok(self);
         }
         // Clamp below the tip so the journal never empties: the tip is the current state.
-        let pos = Self::first_at_or_above(&self.journal, pruning_boundary)
+        let pos = first_at_or_above(&self.journal, pruning_boundary)
             .await?
             .min(bounds.end - 1);
         (self.journal, _) = self.journal.prune(pos).await?;
@@ -434,42 +436,22 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         &self,
         leaf_count: Location<F>,
     ) -> Result<Option<Witness<F, D>>, Error<F>> {
-        Ok(self.position_of(leaf_count).await?.map(|(_, entry)| entry))
+        entry_at(&self.journal, leaf_count).await
     }
 
-    /// Find the journal position and entry committing exactly `target` leaves, or `None` if
-    /// no retained entry does.
-    async fn position_of(
-        &self,
-        target: Location<F>,
-    ) -> Result<Option<(u64, Witness<F, D>)>, Error<F>> {
-        let pos = Self::first_at_or_above(&self.journal, target).await?;
-        if pos >= self.journal.bounds().end {
-            return Ok(None);
+    /// Capture an owned frozen reader over the retained witness journal, for serving
+    /// below-tip targets from a snapshot. Bounds are frozen at capture, and owned blob
+    /// handles keep captured entries readable across later prunes.
+    ///
+    /// Returns no reader while a compact-sync import is pending: the journal still holds
+    /// the previous partition's contents, so only the cached tip is servable.
+    pub(crate) async fn snapshot(mut self) -> Result<(Self, Option<Reader<E, F, D>>), Error<F>> {
+        if self.import_pending() {
+            return Ok((self, None));
         }
-        let entry = self.journal.read(pos).await?;
-        Ok((entry.proof.leaves == target).then_some((pos, entry)))
-    }
-
-    /// Binary search for the first retained position whose entry commits at least `leaf_count`
-    /// leaves, or the end of the journal if none does.
-    async fn first_at_or_above(
-        reader: &impl Contiguous<Item = Witness<F, D>>,
-        leaf_count: Location<F>,
-    ) -> Result<u64, Error<F>> {
-        let bounds = reader.bounds();
-        let (mut lo, mut hi) = (bounds.start, bounds.end);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if reader.read(mid).await?.proof.leaves < leaf_count {
-                // The entry at `mid` is below `leaf_count`, so the answer is after it.
-                lo = mid + 1;
-            } else {
-                // The entry at `mid` qualifies, so the answer is `mid` or before it.
-                hi = mid;
-            }
-        }
-        Ok(lo)
+        let reader;
+        (self.journal, reader) = self.journal.snapshot().await?;
+        Ok((self, Some(reader)))
     }
 
     /// Clear the journal so the imported witness becomes its only entry.
@@ -487,6 +469,65 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         self.journal.destroy().await?;
         Ok(())
     }
+}
+
+/// The retained entry in `reader` committing exactly `leaf_count` leaves, if any.
+///
+/// Shared by the live [`Store`] serve path and owned snapshot readers.
+pub(crate) async fn entry_at<F, D>(
+    reader: &impl Contiguous<Item = Witness<F, D>>,
+    leaf_count: Location<F>,
+) -> Result<Option<Witness<F, D>>, Error<F>>
+where
+    F: Family,
+    D: Digest,
+{
+    Ok(position_of(reader, leaf_count)
+        .await?
+        .map(|(_, entry)| entry))
+}
+
+/// Find the position and entry in `reader` committing exactly `target` leaves, or `None` if
+/// no retained entry does.
+async fn position_of<F, D>(
+    reader: &impl Contiguous<Item = Witness<F, D>>,
+    target: Location<F>,
+) -> Result<Option<(u64, Witness<F, D>)>, Error<F>>
+where
+    F: Family,
+    D: Digest,
+{
+    let pos = first_at_or_above(reader, target).await?;
+    if pos >= reader.bounds().end {
+        return Ok(None);
+    }
+    let entry = reader.read(pos).await?;
+    Ok((entry.proof.leaves == target).then_some((pos, entry)))
+}
+
+/// Binary search for the first retained position whose entry commits at least `leaf_count`
+/// leaves, or the end of the journal if none does.
+async fn first_at_or_above<F, D>(
+    reader: &impl Contiguous<Item = Witness<F, D>>,
+    leaf_count: Location<F>,
+) -> Result<u64, Error<F>>
+where
+    F: Family,
+    D: Digest,
+{
+    let bounds = reader.bounds();
+    let (mut lo, mut hi) = (bounds.start, bounds.end);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if reader.read(mid).await?.proof.leaves < leaf_count {
+            // The entry at `mid` is below `leaf_count`, so the answer is after it.
+            lo = mid + 1;
+        } else {
+            // The entry at `mid` qualifies, so the answer is `mid` or before it.
+            hi = mid;
+        }
+    }
+    Ok(lo)
 }
 
 /// Build a witness for the last commit.

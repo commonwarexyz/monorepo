@@ -496,17 +496,26 @@ where
 
     /// Capture an owned immutable [StateSnapshot] of the database's durable compact state.
     ///
-    /// The snapshot is frozen at capture, so it does not observe later mutations and serves the
-    /// captured commit's compact state while this database continues to mutate and persist.
+    /// The snapshot is frozen at capture, so it does not observe later mutations. It serves
+    /// the captured commit's compact state — and, from a frozen reader over the witness
+    /// journal, any commit still retained at capture — while this database continues to
+    /// mutate and persist. Capture is cheap (owned handles over already-sealed journal
+    /// state); the snapshot must not outlive a rewind into its captured range.
     #[commonware_macros::stability(ALPHA)]
-    pub fn compact_snapshot(&self) -> StateSnapshot<F, H::Digest, Operation<F, K, V>, C>
+    pub async fn compact_snapshot(
+        mut self,
+    ) -> Result<(Self, StateSnapshot<F, E, H::Digest, Operation<F, K, V>, C>), Error<F>>
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        StateSnapshot::new(
+        let retained;
+        (self.witness, retained) = self.witness.snapshot().await?;
+        let snapshot = StateSnapshot::new(
             self.witness.with(Clone::clone),
+            retained,
             self.commit_codec_config.clone(),
-        )
+        );
+        Ok((self, snapshot))
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -772,11 +781,11 @@ mod tests {
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.commit().await.unwrap();
 
-            let snapshot = db.compact_snapshot();
+            let (db, snapshot) = db.compact_snapshot().await.unwrap();
             let captured = db.target();
             assert_eq!(snapshot.target(), captured);
             assert_eq!(snapshot.root(), db.root());
-            let state = snapshot.compact_state(captured.clone()).unwrap();
+            let state = snapshot.compact_state(captured.clone()).await.unwrap();
             assert_eq!(state.leaf_count, captured.leaf_count);
 
             // Advance the live database to a new durable commit.
@@ -792,13 +801,18 @@ mod tests {
 
             // The snapshot still serves the captured commit, byte-identically, and reports
             // the live target as stale relative to its own.
-            let state2 = snapshot.compact_state(captured.clone()).unwrap();
+            let state2 = snapshot.compact_state(captured.clone()).await.unwrap();
             assert_eq!(state.pinned_nodes, state2.pinned_nodes);
             assert_eq!(state.last_commit_op, state2.last_commit_op);
             assert!(matches!(
-                snapshot.compact_state(advanced.clone()),
+                snapshot.compact_state(advanced.clone()).await,
                 Err(compact_sync::ServeError::StaleTarget { current, .. }) if current == captured
             ));
+
+            // The bootstrap commit sits below the captured tip and stays servable from
+            // the snapshot's frozen journal reader.
+            let bootstrap = compact_sync::Target::new(snapshot.root(), Location::new(1));
+            assert!(snapshot.compact_state(bootstrap).await.is_ok());
 
             // The live serve path serves the new commit and reaches the captured target
             // through the retained witness journal.
