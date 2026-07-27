@@ -460,6 +460,36 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
+    /// Durably truncate `section` to its longest contiguous prefix of well-formed pages, but only
+    /// when that prefix still covers `floor`.
+    ///
+    /// The per-section scan at open sizes a section by its last valid page, so an interior hole
+    /// survives whenever a later page does. Replay tolerates that, but a composite journal that
+    /// reads entries by position cannot: a page recovered through its shorter checksum slot is
+    /// refused by the page cache even inside its committed prefix. Removing the hole first makes
+    /// that prefix the section's tip, which reads serve from the write buffer.
+    ///
+    /// A hole below `floor` lost acknowledged data. The section is left untouched so the caller's
+    /// durable-end checks report it with the evidence intact.
+    pub(super) async fn repair_prefix(mut self, section: u64, floor: u64) -> Result<Self, Error> {
+        let Some(blob) = self.0.manager.get_mut(section) else {
+            return Ok(self);
+        };
+        let size = blob.size();
+        let valid = blob.recoverable_prefix_len().await?;
+        if valid >= size || valid < floor {
+            return Ok(self);
+        }
+
+        warn!(
+            section,
+            size, valid, "interior hole above the durable end: truncating"
+        );
+        blob.resize(valid).await?;
+        blob.sync().await?;
+        Ok(self)
+    }
+
     /// Sync the given `sections` to storage.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
         self.0.sync(sections).await?;
@@ -577,8 +607,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section. The exception is [Error::ReplayInterrupted], which ends the
-    /// replay.
+    /// next section. [Error::ReplayInterrupted] and errors from a mutable repair end
+    /// the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
         // A dropped future can interrupt a repair, leaving the section's writer with
         // in-memory state that no longer matches the blob. Fail the replay rather than
@@ -687,10 +717,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         self.repairing = true;
         let repaired = repair_blob(&mut self.journal, section, valid_offset).await;
         self.repairing = false;
-        self.sections.pop_front();
         match repaired {
-            Ok(()) => None,
-            Err(err) => self.fail(err),
+            Ok(()) => {
+                self.sections.pop_front();
+                None
+            }
+            Err(err) => {
+                // A failed resize or sync leaves the writer's in-memory and durable state
+                // uncertain. Do not read or repair any later section through this journal.
+                self.sections.clear();
+                self.fail(err)
+            }
         }
     }
 
@@ -856,6 +893,73 @@ mod tests {
             .await
             .expect("failed to re-init");
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_repair_sync_error_is_terminal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            // Reopen u64 data as fixed-size digests. Section 1 has one complete digest followed
+            // by an incomplete item, section 2 consists only of an incomplete item, and section
+            // 3 has one complete digest. This makes any progress after section 1 observable as
+            // either a repair of section 2 or a read from section 3.
+            let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to init");
+            for (section, count) in [(1, 5), (2, 1), (3, 4)] {
+                for value in 0..count {
+                    (journal, _) = journal
+                        .append(section, &value)
+                        .await
+                        .expect("failed to append");
+                }
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            let (later_blob, later_size_before) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("failed to inspect later section");
+            drop(later_blob);
+
+            let mut replay =
+                Journal::<_, Digest>::init(context.child("second"), cfg.clone(), NZUsize!(1024))
+                    .await
+                    .expect("failed to re-init");
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+
+            let (section, position, _) = replay
+                .next()
+                .await
+                .expect("expected complete item before trailing bytes")
+                .expect("failed to replay complete item");
+            assert_eq!((section, position), (1, 0));
+            assert!(
+                matches!(replay.next().await, Some(Err(Error::Runtime(_)))),
+                "repair must surface the injected sync failure"
+            );
+
+            // A mutable repair failure is terminal even after storage becomes healthy. Otherwise
+            // this call repairs section 2 and then yields section 3's item.
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(replay.next().await.is_none());
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            let (_, later_size_after) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("failed to re-inspect later section");
+            assert_eq!(
+                later_size_after, later_size_before,
+                "terminal replay must not repair a later section"
+            );
         });
     }
 
@@ -1760,6 +1864,101 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_replay_preserves_acknowledged_items_in_torn_partial_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A clean page size keeps the corruption offset arithmetic simple.
+            const LOGICAL_PAGE: u64 = 1024;
+            // Physical pages append a 12-byte CRC record to their logical bytes.
+            const PHYSICAL_PAGE: u64 = LOGICAL_PAGE + 12;
+            let cfg = Config {
+                partition: "test-partition".into(),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Sync a prefix that ends part-way into a later page, so the acknowledged boundary
+            // falls inside the page torn below.
+            let synced_count: u64 = 50;
+            let mut journal = init_journal::<_, Digest>(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to init");
+            for i in 0..synced_count {
+                (journal, _) = journal
+                    .append(1, &test_digest(i))
+                    .await
+                    .expect("failed to append acknowledged prefix");
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            let synced_size = journal.size(1).expect("missing section");
+            assert!(
+                synced_size > LOGICAL_PAGE && !synced_size.is_multiple_of(LOGICAL_PAGE),
+                "the acknowledged boundary must fall inside a later page, got {synced_size}"
+            );
+
+            // Fill that page and several more, then materialize them. The torn page's record now
+            // carries the committed length in one slot and the full length in the other.
+            for i in synced_count..500 {
+                (journal, _) = journal
+                    .append(1, &test_digest(i))
+                    .await
+                    .expect("failed to append tail");
+            }
+            journal = journal
+                .sync_all()
+                .await
+                .expect("failed to materialize candidate tail");
+            drop(journal);
+
+            // Model a torn rewrite: the bytes the rewrite appended to the page never landed,
+            // while the committed prefix and its slot did. The full-length slot stops validating,
+            // so the page falls back to the committed length.
+            let torn_page = synced_size / LOGICAL_PAGE;
+            let committed_in_page = synced_size % LOGICAL_PAGE;
+            let (blob, _) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            blob.write_at_sync(
+                torn_page * PHYSICAL_PAGE + committed_in_page,
+                vec![0xFFu8; (LOGICAL_PAGE - committed_in_page) as usize],
+            )
+            .await
+            .expect("failed to tear the rewritten suffix");
+            drop(blob);
+
+            let mut replay = Journal::<_, Digest>::init(
+                context.child("second"),
+                cfg.clone(),
+                // Prefetch the whole section so the fallback page shares a batch with the pages
+                // that survive past it.
+                NZUsize!(1024 * 1024),
+            )
+            .await
+            .expect("failed to re-init");
+            let mut items = Vec::<Digest>::new();
+            while let Some(result) = replay.next().await {
+                let (_, _, item) = result.expect("replay must repair, not fail");
+                items.push(item);
+            }
+            let journal = replay.finish().expect("failed to finish replay");
+
+            // Every acknowledged item survives, and the section truncates to exactly the
+            // acknowledged boundary rather than to the start of the torn page.
+            let expected = (0..synced_count).map(test_digest).collect::<Vec<_>>();
+            assert_eq!(items, expected, "acknowledged items must survive intact");
+            assert_eq!(
+                journal.size(1).expect("missing section"),
+                synced_size,
+                "repair must truncate to the acknowledged boundary"
+            );
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    /// Mirror of [test_replay_preserves_acknowledged_items_in_torn_partial_page] for a page whose
+    /// checksum fails outright rather than falling back to a committed shorter length.
     #[test_traced]
     fn test_replay_repairs_torn_interior_page() {
         // A torn flush can leave an interior page invalid while a later page survives. The

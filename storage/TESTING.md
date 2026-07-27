@@ -24,7 +24,12 @@ fn test_storage_operations() {
 
 ## Recovery and corruption
 
-Persist data, drop the database, and initialize it again to test clean recovery. To simulate an interrupted write, resize a blob after writing it; to simulate corruption, overwrite a checksum or truncate data. Reinitialize and verify that replay recovers to the last valid item.
+Persist data, drop the database, and initialize it again to test clean recovery. Use the
+deterministic runtime's `start_and_recover` for power-loss tests: it may retain any subset of bytes
+from unsynced writes, rather than only a prefix. In fuzz targets, pass a `FuzzRng` constructed from
+a dedicated input byte field to the runner so corpus mutations explore scheduling, fault, and crash
+choices. To inject durable corruption directly, overwrite a checksum or truncate data and sync the
+mutation before reopening.
 
 ```rust
 let (blob, size) = context.open(&partition, &name).await.unwrap();

@@ -26,6 +26,13 @@ use std::num::NonZeroUsize;
 /// buffer state and [Self::sync] may use [Blob::write_at_sync], which is not a durability barrier
 /// for those external mutations.
 ///
+/// # Cancellation safety
+///
+/// An error or cancellation during a physical write or resize can leave the writer poisoned. Once
+/// poisoned, fallible operations return [Error::Aborted]; drop the writer and reopen the blob.
+/// [Self::size] still reports the staged in-memory tip and must not be used to infer the recovered
+/// size of a poisoned writer.
+///
 /// # Example
 ///
 /// ```
@@ -64,6 +71,12 @@ pub struct Write<B: Blob> {
 
     /// Durability state for plain writes and range-sync writes.
     sync_state: SyncState,
+
+    /// Whether a shrink must be made durable before a later mutation can reuse truncated bytes.
+    needs_sync_before_write: bool,
+
+    /// Whether cancellation or failure interrupted a non-retryable mutation.
+    poisoned: bool,
 }
 
 impl<B: Blob> Write<B> {
@@ -75,6 +88,9 @@ impl<B: Blob> Write<B> {
             buffer: Buffer::new(size, capacity.get(), pool),
             // Existing blob contents may not be durable yet.
             sync_state: SyncState::Dirty,
+            // A pre-wrapped mutation may have shrunk the blob without making that shrink durable.
+            needs_sync_before_write: true,
+            poisoned: false,
         }
     }
 
@@ -95,8 +111,18 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
+    /// Reject reuse after a mutation that may have partially changed the blob.
+    const fn ensure_usable(&self) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Aborted);
+        }
+        Ok(())
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        self.ensure_usable()?;
+
         // Ensure the read doesn't overflow.
         let end_offset = offset
             .checked_add(len as u64)
@@ -140,6 +166,36 @@ impl<B: Blob> Write<B> {
         Ok(self.blob.read_at(offset, len).await?.freeze())
     }
 
+    /// Make a prior shrink durable before another mutation can reuse truncated bytes.
+    async fn prepare_write(&mut self) -> Result<(), Error> {
+        if self.needs_sync_before_write {
+            self.sync_state.sync(&self.blob).await?;
+            self.needs_sync_before_write = false;
+        }
+        Ok(())
+    }
+
+    /// Write bytes to the underlying blob after making any prior shrink durable.
+    async fn write_blob(
+        &mut self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.poisoned = true;
+        self.prepare_write().await?;
+        self.sync_state.write_at(&self.blob, offset, bufs).await?;
+        self.poisoned = false;
+        Ok(())
+    }
+
+    /// Resize the underlying blob, rejecting reuse until the mutation completes.
+    async fn resize_blob(&mut self, len: u64) -> Result<(), Error> {
+        self.poisoned = true;
+        self.sync_state.resize(&self.blob, len).await?;
+        self.poisoned = false;
+        Ok(())
+    }
+
     /// Write bytes from `buf` at `offset`.
     ///
     /// Data is merged into the in-memory tip buffer when possible, otherwise buffered data may be
@@ -151,6 +207,7 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
+        self.ensure_usable()?;
         let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
@@ -178,9 +235,7 @@ impl<B: Blob> Write<B> {
             if self.buffer.offset < chunk_end
                 && let Some((old_buf, old_offset)) = self.buffer.take()
             {
-                self.sync_state
-                    .write_at(&self.blob, old_offset, old_buf)
-                    .await?;
+                self.write_blob(old_offset, old_buf).await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
                     current_offset += chunk_len as u64;
@@ -193,9 +248,7 @@ impl<B: Blob> Write<B> {
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
             let direct = bufs.split_to(chunk_len);
-            self.sync_state
-                .write_at(&self.blob, current_offset, direct)
-                .await?;
+            self.write_blob(current_offset, direct).await?;
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this
@@ -210,21 +263,32 @@ impl<B: Blob> Write<B> {
     ///
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
+    /// Before a later write or growth reuses truncated bytes, the writer makes the shrink durable.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
+        self.ensure_usable()?;
+        let old_size = self.buffer.size();
+        if len > old_size {
+            self.prepare_write().await?;
+        }
+
         // Flush buffered data to the underlying blob.
         //
         // This can only happen if the new size is greater than the current size.
         if let Some((buf, offset)) = self.buffer.resize(len) {
-            self.sync_state.write_at(&self.blob, offset, buf).await?;
+            self.write_blob(offset, buf).await?;
         }
 
-        self.sync_state.resize(&self.blob, len).await?;
+        self.resize_blob(len).await?;
+        if len < old_size {
+            self.needs_sync_before_write = true;
+        }
 
         Ok(())
     }
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&mut self) -> Result<(), Error> {
+        self.ensure_usable()?;
         if let Some((buf, offset)) = self.buffer.take() {
             return self.write_blob_sync(offset, buf).await;
         }
@@ -238,8 +302,11 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
+        if let Err(err) = self.ensure_usable() {
+            return Handle::ready(Err(err));
+        }
         if let Some((buf, offset)) = self.buffer.take()
-            && let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await
+            && let Err(err) = self.write_blob(offset, buf).await
         {
             return Handle::ready(Err(err));
         }
@@ -249,7 +316,12 @@ impl<B: Blob> Write<B> {
 
     /// Wait for any started sync to complete without starting a new sync.
     pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
-        self.sync_state.wait_for_pending().await
+        self.ensure_usable()?;
+        self.sync_state.wait_for_pending().await?;
+        if matches!(self.sync_state, SyncState::Clean) {
+            self.needs_sync_before_write = false;
+        }
+        Ok(())
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -261,13 +333,19 @@ impl<B: Blob> Write<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
+        self.poisoned = true;
+        self.prepare_write().await?;
         self.sync_state
             .write_at_sync(&self.blob, offset, bufs)
-            .await
+            .await?;
+        self.poisoned = false;
+        Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync_blob(&mut self) -> Result<(), Error> {
-        self.sync_state.sync(&self.blob).await
+        self.sync_state.sync(&self.blob).await?;
+        self.needs_sync_before_write = false;
+        Ok(())
     }
 }

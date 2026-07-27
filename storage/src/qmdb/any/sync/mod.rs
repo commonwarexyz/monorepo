@@ -140,6 +140,14 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
+            async fn prepare_sync(
+                _context: Self::Context,
+                _config: &Self::Config,
+                _target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+            ) -> Result<(), qmdb::Error<F>> {
+                Ok(())
+            }
+
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,

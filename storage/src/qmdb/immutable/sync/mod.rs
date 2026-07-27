@@ -42,6 +42,14 @@ where
     type Digest = H::Digest;
     type Context = E;
 
+    async fn prepare_sync(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
+    ) -> Result<(), qmdb::Error<F>> {
+        Ok(())
+    }
+
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
     /// # Behavior

@@ -86,6 +86,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
+use commonware_utils::bitmap::Readable as _;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -118,6 +119,11 @@ where
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
+///
+/// Every physical partition used by `merkle_config` and `journal_config` must be distinct. A fixed
+/// journal may use its raw prefix, `-blobs`, and `-metadata`; a variable journal uses `_data` and
+/// the raw/`-blobs`/`-metadata` expansion of `_offsets`. A variable journal does not use its raw
+/// base, so equal raw base strings are allowed when these expanded sets do not intersect.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.
@@ -174,7 +180,7 @@ where
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
     cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
-    bitmap: Option<Arc<Shared<N>>>,
+    mut bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -201,6 +207,17 @@ where
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
         (log, _) = log.append(&commit_floor).await?;
         log = log.sync().await?;
+    }
+
+    // A genesis-only log cannot have a pruned bitmap. This identifies a completed log reset after
+    // an interrupted Current destroy without confusing it with a prune whose metadata was synced
+    // before the log itself was pruned.
+    if log.size() == 1
+        && bitmap
+            .as_ref()
+            .is_some_and(|bitmap| bitmap.pruned_chunks() != 0)
+    {
+        bitmap = None;
     }
 
     let index = I::new(context.child("index"), cfg.translator);

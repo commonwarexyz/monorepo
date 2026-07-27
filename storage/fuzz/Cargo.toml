@@ -246,6 +246,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "segmented_journal_crash_recovery"
+path = "fuzz_targets/segmented_journal_crash_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "queue_operations"
 path = "fuzz_targets/queue_operations.rs"
 test = false
@@ -269,6 +276,13 @@ bench = false
 [[bin]]
 name = "current_crash_recovery"
 path = "fuzz_targets/current_crash_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_crash_recovery"
+path = "fuzz_targets/archive_crash_recovery.rs"
 test = false
 doc = false
 bench = false

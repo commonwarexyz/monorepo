@@ -1631,7 +1631,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::destroy].
-    pub(crate) async fn destroy(self) -> Result<(), Error> {
+    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
+        // Stage a recoverable reset before removing either half. If a later removal is interrupted,
+        // initialization completes the reset and can retry destruction.
+        self.offsets = self.offsets.stage_clear_intent(0).await?;
         self.blobs.destroy().await?;
         self.offsets.destroy().await
     }
@@ -1870,7 +1873,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             let size = offsets_bounds.end;
             if !offsets_bounds.is_empty() {
                 warn!("crash repair: clearing offsets to {size} (prune-all crash)");
-                offsets = offsets.clear_to_size(size).await?;
+                if size == u64::MAX {
+                    // The fixed journal intentionally rejects clearing to an append-exhausted
+                    // size. This journal reached MAX through a valid last append, so collapse its
+                    // retained offsets by pruning instead; reads and destruction remain usable.
+                    (offsets, _) = offsets.prune(size).await?;
+                } else {
+                    offsets = offsets.clear_to_size(size).await?;
+                }
             }
             return Ok((offsets, size..size));
         };
@@ -1894,7 +1904,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             partition.remove(blob).await?;
         }
         warn!("crash repair: clearing offsets to {target} (empty data)");
-        let offsets = offsets.clear_to_size(target).await?;
+        let offsets = if target == u64::MAX {
+            // `clear_to_size(MAX)` is rejected because appending is impossible, but recovery only
+            // needs to collapse the already-maximal offsets journal to an empty readable range.
+            offsets.prune(target).await?.0
+        } else {
+            offsets.clear_to_size(target).await?
+        };
         Ok((offsets, target..target))
     }
 
@@ -2357,9 +2373,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partitions may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// If interrupted, the journal remains openable and `destroy` can be retried.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -3041,6 +3055,64 @@ mod tests {
             // The next append would overflow the size; it must return a recoverable error
             // rather than panicking.
             assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_prune_all_at_max_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-all-at-max".into(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), u64::MAX - 1)
+                    .await
+                    .unwrap();
+            (journal, _) = journal.append(&7).await.unwrap();
+            journal = journal.sync().await.unwrap();
+            assert_eq!(journal.bounds(), (u64::MAX - 1)..u64::MAX);
+
+            // Cancel prune after it removes the only item-bearing data blob, while the offsets
+            // journal still retains the last position at size MAX.
+            journal.0.halt_before_offsets_prune = true;
+            {
+                let prune = journal.prune(u64::MAX);
+                futures::pin_mut!(prune);
+                assert!(
+                    futures::poll!(prune.as_mut()).is_pending(),
+                    "prune must park before pruning offsets"
+                );
+            }
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("MAX-sized prune recovery must remain openable");
+            assert_eq!(journal.bounds(), u64::MAX..u64::MAX);
+            assert!(matches!(
+                journal.read(u64::MAX - 1).await,
+                Err(Error::ItemPruned(position)) if position == u64::MAX - 1
+            ));
+            assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
+
+            // The failed append is non-mutating. Reopen to destroy the exhausted journal, then
+            // reopen and destroy the fresh empty journal again.
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), u64::MAX..u64::MAX);
+            journal.destroy().await.unwrap();
+
+            let journal = Journal::<_, u64>::init(context.child("fourth"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -7581,6 +7653,45 @@ mod tests {
             assert_eq!(bounds.start, 5);
             assert_eq!(journal.read(bounds.end - 1).await.unwrap(), 500);
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_journal_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "destroy-test".into(),
+                items_per_section: NZU64!(2),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..5 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Cancel the production future after the staged reset and one successful data-blob
+            // removal, leaving the offsets clear intent to finish recovery.
+            journal.0.blobs.halt_destroy_after_first_remove();
+            {
+                let destroy = journal.destroy();
+                futures::pin_mut!(destroy);
+                assert!(
+                    futures::poll!(destroy.as_mut()).is_pending(),
+                    "destroy must park after removing its first data blob"
+                );
+            }
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .expect("interrupted destroy must leave openable storage");
             journal.destroy().await.unwrap();
         });
     }

@@ -99,6 +99,14 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
     /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
+    /// Test-only: park destruction after removing metadata.
+    #[cfg(test)]
+    halt_destroy_after_metadata: bool,
+
+    /// Test-only: park destruction after removing the ordinal.
+    #[cfg(test)]
+    halt_destroy_after_ordinal: bool,
+
     // Metrics
     gets: Counter,
     has: Counter,
@@ -188,6 +196,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             metadata,
             freezer,
             ordinal,
+            #[cfg(test)]
+            halt_destroy_after_metadata: false,
+            #[cfg(test)]
+            halt_destroy_after_ordinal: false,
             gets,
             has,
             syncs,
@@ -348,8 +360,18 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // that outlives the data it describes fails the next init rather than being recovered.
         self.metadata.destroy().await?;
 
+        #[cfg(test)]
+        if self.halt_destroy_after_metadata {
+            std::future::pending::<()>().await;
+        }
+
         // Destroy ordinal
         self.ordinal.destroy().await?;
+
+        #[cfg(test)]
+        if self.halt_destroy_after_ordinal {
+            std::future::pending::<()>().await;
+        }
 
         // Destroy freezer
         self.freezer.destroy().await?;
@@ -377,6 +399,18 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Park destruction after its metadata await.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after_metadata(&mut self) {
+        self.0.halt_destroy_after_metadata = true;
+    }
+
+    /// Park destruction after its ordinal await.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after_ordinal(&mut self) {
+        self.0.halt_destroy_after_ordinal = true;
     }
 }
 

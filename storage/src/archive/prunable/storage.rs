@@ -155,6 +155,10 @@ struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: Co
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
+    /// Test-only: park destruction after removing metadata and before touching the journals.
+    #[cfg(test)]
+    halt_destroy_after_metadata: bool,
+
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
@@ -204,7 +208,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     /// Record every in-flight sync that has since completed, without blocking on the rest.
-    fn observe_unproven(&mut self) {
+    fn observe_unproven(&mut self) -> Result<(), Error> {
+        // A prior checkpoint publication may have failed without its composite handle being
+        // observed. Surface that fatal error before inspecting data syncs or mutating storage.
+        self.metadata.poll_sync()?;
+
         let completed = self
             .unproven
             .iter()
@@ -217,10 +225,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             .collect::<Vec<_>>();
         for (section, size, result) in completed {
             self.unproven.remove(&section);
-            if result.is_ok() {
-                self.mark_durable(section, size);
+            match result {
+                Ok(()) => self.mark_durable(section, size),
+                Err(err) => return Err(crate::journal::Error::Runtime(err).into()),
             }
         }
+        Ok(())
     }
 
     /// Index size each section would reach if a sync issued now completed.
@@ -243,11 +253,18 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
+        if cfg.metadata_partition == cfg.key_partition
+            || cfg.metadata_partition == cfg.value_partition
+        {
+            return Err(crate::journal::Error::InvalidConfiguration(
+                "metadata_partition must be distinct from key_partition and value_partition".into(),
+            )
+            .into());
+        }
+
         // Load the durable-size checkpoint. An archive written before checkpoints existed has
-        // none, and recovers every section by scan. Recovery does not publish what it validated,
-        // so a section that never receives another write keeps rescanning until it is pruned.
-        // Publishing here instead would need every adopted section synced first, since replayed
-        // bytes are readable after a process crash without being durable.
+        // none and recovers every section by scan. A later data sync publishes that section's
+        // durable size.
         let metadata = Metadata::<E, U64, VecU64>::init(
             context.child("metadata"),
             MetadataConfig {
@@ -332,6 +349,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
+            #[cfg(test)]
+            halt_destroy_after_metadata: false,
             indices,
             extra_indices,
             intervals,
@@ -448,17 +467,19 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         key: K,
         data: V,
         skip_if_index_exists: bool,
-    ) -> Result<(Box<Self>, bool), Error> {
+    ) -> Result<Box<Self>, Error> {
+        self.observe_unproven()?;
+
         // A put below the prune floor is satisfied without storing
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
             debug!(index, oldest_allowed, "ignoring put below prune floor");
-            return Ok((self, false));
+            return Ok(self);
         }
 
         // Check for existing index when enforcing single-item semantics.
         if skip_if_index_exists && self.indices.contains_key(&index) {
-            return Ok((self, true));
+            return Ok(self);
         }
 
         // Write value and index entry atomically (glob first, then index)
@@ -489,11 +510,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok((self, true))
+        Ok(self)
     }
 
     /// See [Archive::prune].
     async fn prune(mut self: Box<Self>, min: u64) -> Result<Box<Self>, Error> {
+        self.observe_unproven()?;
+
         // Update `min` to reflect section mask
         let min = self.section(min);
 
@@ -510,7 +533,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // Drop the pruned sections from the checkpoint before their blobs are removed. A crash
         // between this sync and the removals merely leaves old sections to be scanned again,
         // while the reverse order would report a pruned section as lost.
-        self.observe_unproven();
         self.unproven = self.unproven.split_off(&min);
         let removed = self
             .metadata
@@ -574,6 +596,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [crate::archive::Archive::sync].
     async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.observe_unproven()?;
+
         // Update metrics (`requested` sections were already counted by `start_sync`)
         self.syncs.inc_by(self.pending.len() as u64);
         self.requested.append(&mut self.pending);
@@ -585,7 +609,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Every requested section is now durable at the size observed above, so publish the
         // checkpoint before returning.
-        self.observe_unproven();
+        self.observe_unproven()?;
         for (section, size) in sizes {
             self.unproven.remove(&section);
             self.mark_durable(section, size);
@@ -599,6 +623,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [crate::archive::Archive::start_sync].
     async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
+        self.observe_unproven()?;
+
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
 
@@ -614,9 +640,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // being started. Metadata permits only one write at a time, so skip publication rather
         // than waiting when its previous write is still in flight, and let a later sync carry the
         // accumulated updates. Publishing first keeps a failure here from stranding a data sync
-        // the caller can no longer observe.
-        self.observe_unproven();
-        let checkpoint_handle = if self.checkpoint_dirty && self.metadata.poll_sync()? {
+        // the caller can no longer observe. Poll unconditionally so a failed prior publication is
+        // surfaced even when there is nothing new to publish.
+        let idle = self.metadata.poll_sync()?;
+        let checkpoint_handle = if self.checkpoint_dirty && idle {
             let (metadata, handle) = self.metadata.start_sync().await?;
             self.metadata = metadata;
             self.checkpoint_dirty = false;
@@ -679,7 +706,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // which `Oversized::repair` reports as unrecoverable loss, and `init` is the only way to
         // obtain the handle `destroy` needs.
         self.metadata.destroy().await?;
+
+        #[cfg(test)]
+        if self.halt_destroy_after_metadata {
+            std::future::pending::<()>().await;
+        }
+
+        // Without a checkpoint every section recovers at floor zero, so an interrupted destroy
+        // leaves storage the next init can open by scan and destroy again.
         self.oversized.destroy().await?;
+
         Ok(())
     }
 
@@ -781,6 +817,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.0 = self.0.prune(min).await?;
         Ok(self)
     }
+
+    /// Park destruction after its metadata await.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after_metadata(&mut self) {
+        self.0.halt_destroy_after_metadata = true;
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -790,17 +832,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     type Value = V;
 
     async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put_internal(index, key, data, true).await?;
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         Ok(self)
     }
 
     async fn put_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
-        if !stored {
-            return Ok(self);
-        }
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         self.sync().await
     }
 
@@ -810,12 +847,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         key: K,
         data: V,
     ) -> Result<(Self, Handle<()>), Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
-        if !stored {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         self.start_sync().await
     }
 
@@ -875,17 +907,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn put_multi(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put_internal(index, key, data, false).await?;
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         Ok(self)
     }
 
     async fn put_multi_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
-        if !stored {
-            return Ok(self);
-        }
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         crate::archive::Archive::sync(self).await
     }
 
@@ -895,17 +922,258 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         key: K,
         data: V,
     ) -> Result<(Self, Handle<()>), Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
-        if !stored {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         crate::archive::Archive::start_sync(self).await
     }
 
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.0.has_at(index, key).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        archive::{Archive as _, Error},
+        metadata::Error as MetadataError,
+        translator::FourCap,
+    };
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        Blob as _, BufferPooler, Error as RError, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync, release_pending_syncs},
+    };
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use std::collections::BTreeMap;
+
+    type TestArchive =
+        Archive<FourCap, DelayedSyncContext<deterministic::Context>, FixedBytes<64>, i32>;
+
+    fn test_config<E: BufferPooler>(context: &E, prefix: &str) -> Config<FourCap, ()> {
+        Config {
+            translator: FourCap,
+            metadata_partition: format!("{prefix}-metadata"),
+            key_partition: format!("{prefix}-keys"),
+            key_page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(2)),
+            value_partition: format!("{prefix}-values"),
+            compression: None,
+            codec_config: (),
+            items_per_section: NZU64!(1),
+            key_write_buffer: NZUsize!(1),
+            value_write_buffer: NZUsize!(1),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    async fn snapshot_partition(
+        context: &deterministic::Context,
+        partition: &str,
+    ) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let mut snapshot = BTreeMap::new();
+        for name in context
+            .scan(partition)
+            .await
+            .expect("failed to scan partition")
+        {
+            let (blob, size) = context
+                .open(partition, &name)
+                .await
+                .expect("failed to open blob");
+            let contents = if size == 0 {
+                Vec::new()
+            } else {
+                blob.read_at(0, usize::try_from(size).expect("blob too large"))
+                    .await
+                    .expect("failed to read blob")
+                    .coalesce()
+                    .as_ref()
+                    .to_vec()
+            };
+            snapshot.insert(name, contents);
+        }
+        snapshot
+    }
+
+    async fn snapshot_data(
+        context: &deterministic::Context,
+        cfg: &Config<FourCap, ()>,
+    ) -> (BTreeMap<Vec<u8>, Vec<u8>>, BTreeMap<Vec<u8>, Vec<u8>>) {
+        (
+            snapshot_partition(context, &cfg.key_partition).await,
+            snapshot_partition(context, &cfg.value_partition).await,
+        )
+    }
+
+    async fn start_checkpoint_sync(
+        context: DelayedSyncContext<deterministic::Context>,
+        cfg: Config<FourCap, ()>,
+        pending: &PendingSyncs,
+    ) -> (TestArchive, Handle<()>) {
+        let archive = TestArchive::init(context.child("archive"), cfg)
+            .await
+            .expect("failed to initialize archive");
+        let archive = archive
+            .put(0, FixedBytes::new([0; 64]), 0)
+            .await
+            .expect("failed to put first item");
+        let (archive, first) = archive
+            .start_sync()
+            .await
+            .expect("failed to start first sync");
+        release_pending_syncs(pending);
+        first.await.expect("failed to complete first sync");
+
+        let archive = archive
+            .put(1, FixedBytes::new([1; 64]), 1)
+            .await
+            .expect("failed to put second item");
+        archive
+            .start_sync()
+            .await
+            .expect("failed to start checkpoint sync")
+    }
+
+    fn fail_checkpoint_sync(pending: &PendingSyncs) {
+        next_pending_sync(pending)
+            .release
+            .send(Err(RError::Io(
+                std::io::Error::other("injected checkpoint sync failure").into(),
+            )))
+            .expect("checkpoint sync receiver dropped");
+    }
+
+    fn assert_checkpoint_error(error: Error) {
+        assert!(
+            matches!(
+                error,
+                Error::Metadata(MetadataError::Runtime(RError::Io(_)))
+            ),
+            "expected retained checkpoint failure, got {error:?}"
+        );
+    }
+
+    #[test_traced]
+    fn test_aliased_metadata_partition_is_side_effect_free() {
+        deterministic::Runner::default().start(|context| async move {
+            for (label, alias_key_partition) in [("key", true), ("value", false)] {
+                let mut cfg = test_config(&context, label);
+                cfg.metadata_partition = if alias_key_partition {
+                    cfg.key_partition.clone()
+                } else {
+                    cfg.value_partition.clone()
+                };
+
+                let partitions = [
+                    cfg.metadata_partition.clone(),
+                    cfg.key_partition.clone(),
+                    cfg.value_partition.clone(),
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+                let mut before = BTreeMap::new();
+                for partition in &partitions {
+                    let (blob, _) = context
+                        .open(partition, b"sentinel")
+                        .await
+                        .expect("failed to seed partition");
+                    blob.write_at_sync(0, vec![0xA5; 3])
+                        .await
+                        .expect("failed to seed blob");
+                    before.insert(
+                        partition.clone(),
+                        snapshot_partition(&context, partition).await,
+                    );
+                }
+
+                let result =
+                    Archive::<_, _, FixedBytes<64>, i32>::init(context.child(label), cfg).await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                            _
+                        )))
+                    ),
+                    "{label}: expected InvalidConfiguration"
+                );
+                for partition in &partitions {
+                    assert_eq!(
+                        snapshot_partition(&context, partition).await,
+                        before[partition],
+                        "{label}: rejected configuration changed {partition}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_unpolled_failed_checkpoint_blocks_put_without_mutation() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("storage"),
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&delayed, "unpolled-checkpoint");
+            let (archive, composite) = start_checkpoint_sync(delayed, cfg.clone(), &pending).await;
+            assert_eq!(pending.lock().len(), 3);
+
+            // The checkpoint is the first sync started by the second interval. Fail it without
+            // polling the composite handle, leaving both current data syncs in flight.
+            fail_checkpoint_sync(&pending);
+            let before = snapshot_data(&context, &cfg).await;
+            let result = archive.put(2, FixedBytes::new([2; 64]), 2).await;
+            let after = snapshot_data(&context, &cfg).await;
+
+            drop(composite);
+            release_pending_syncs(&pending);
+            assert_eq!(after, before, "failed put mutated archive storage");
+            assert_checkpoint_error(result.expect_err("put must surface checkpoint failure"));
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_failed_checkpoint_blocks_sync_without_mutation() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("storage"),
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&delayed, "dropped-checkpoint");
+            let (archive, composite) = start_checkpoint_sync(delayed, cfg.clone(), &pending).await;
+            assert_eq!(pending.lock().len(), 3);
+
+            // Accept another write while the checkpoint is pending, then drop the only composite
+            // observer and fail that checkpoint. The next blocking sync must not touch storage.
+            let archive = archive
+                .put(2, FixedBytes::new([2; 64]), 2)
+                .await
+                .expect("failed to put third item");
+            fail_checkpoint_sync(&pending);
+            drop(composite);
+            release_pending_syncs(&pending);
+
+            let before = snapshot_data(&context, &cfg).await;
+            pending.arm();
+            let mut sync = Box::pin(archive.sync());
+            let result = futures::poll!(sync.as_mut());
+            let calls = pending.calls();
+            drop(sync);
+            let after = snapshot_data(&context, &cfg).await;
+            pending.unblock();
+
+            assert_eq!(calls, 0, "failed sync issued a durability operation");
+            assert_eq!(after, before, "failed sync mutated archive storage");
+            let std::task::Poll::Ready(Err(error)) = result else {
+                panic!("sync must immediately surface checkpoint failure");
+            };
+            assert_checkpoint_error(error);
+        });
     }
 }
 

@@ -329,7 +329,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+        contiguous::{Mutable, fixed::Config as FConfig, variable::Config as VConfig},
     },
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
@@ -444,9 +444,35 @@ where
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
+    // A durable replacement intent means state sync may have published a new backing generation
+    // without publishing matching graft metadata. Reset both backing components while retaining
+    // the intent, then clear the intent and old graft metadata atomically. Every interrupted retry
+    // therefore converges on an empty, reusable generation rather than interpreting mixed state.
+    let mut metadata =
+        db::open_metadata::<F, _>(context.child("metadata"), &metadata_partition).await?;
+    if db::pending_sync::<F, _, H::Digest>(&metadata)?.is_some() {
+        let journal = <J as authenticated::Backing<E>>::init(
+            context.child("pending_sync_journal"),
+            config.journal_config.clone(),
+        )
+        .await?;
+        <J as Mutable>::destroy(journal).await?;
+
+        let hasher = crate::qmdb::hasher::<H>();
+        let merkle = merkle::full::Merkle::<F, _, _, S>::init(
+            context.child("pending_sync_merkle"),
+            &hasher,
+            config.merkle_config.clone(),
+        )
+        .await?;
+        merkle.destroy().await?;
+
+        metadata.clear();
+        metadata = metadata.sync().await?;
+    }
+
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.child("metadata"), &metadata_partition).await?;
+    let (pruned_chunks, mut pinned_nodes) = db::load_metadata(&metadata)?;
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
     // metadata, then hand it to `any` which becomes the sole owner. `any::init_with_bitmap`
@@ -456,6 +482,14 @@ where
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
+    let reset_metadata = pruned_chunks != 0 && any.log.size() == 1;
+    if reset_metadata {
+        // The authenticated log retained genesis, so graft metadata from a previously destroyed
+        // pruned log is stale. Clear it durably; a failed clear is retried on the next init.
+        metadata.clear();
+        metadata = metadata.sync().await?;
+        pinned_nodes.clear();
+    }
 
     // Build the grafted tree from the bitmap and ops tree.
     let ops_size = any.log.merkle.size();
@@ -1425,6 +1459,7 @@ pub mod tests {
         32,
         Sequential,
     >;
+
     type OrderedFixedP1Db = ordered::fixed::partitioned::Db<
         mmr::Family,
         Context,

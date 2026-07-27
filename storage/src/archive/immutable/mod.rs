@@ -271,4 +271,126 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (boundary, after_ordinal) in [("metadata", false), ("ordinal", true)] {
+                let cfg = Config {
+                    metadata_partition: format!("destroy-{boundary}-metadata"),
+                    freezer_table_partition: format!("destroy-{boundary}-freezer-table"),
+                    freezer_table_initial_size: 4,
+                    freezer_table_resize_frequency: 2,
+                    freezer_table_resize_chunk_size: 1,
+                    freezer_key_partition: format!("destroy-{boundary}-freezer-key"),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: format!("destroy-{boundary}-freezer-value"),
+                    freezer_value_target_size: 1024,
+                    freezer_value_compression: None,
+                    ordinal_partition: format!("destroy-{boundary}-ordinal"),
+                    items_per_section: NZU64!(1),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                };
+                let key = Sha256::hash(&[boundary.as_bytes()]);
+                let first = if after_ordinal {
+                    "destroy_ordinal_first"
+                } else {
+                    "destroy_metadata_first"
+                };
+                let archive: Archive<_, Digest, i32> =
+                    Archive::init(context.child(first), cfg.clone())
+                        .await
+                        .unwrap();
+                let archive = archive.put(0, key, 7).await.unwrap();
+                let mut archive = archive.sync().await.unwrap();
+
+                if after_ordinal {
+                    archive.halt_destroy_after_ordinal();
+                } else {
+                    archive.halt_destroy_after_metadata();
+                }
+                {
+                    let destroy = archive.destroy();
+                    futures::pin_mut!(destroy);
+                    assert!(
+                        futures::poll!(destroy.as_mut()).is_pending(),
+                        "destroy must park after its {boundary} await"
+                    );
+                }
+
+                let second = if after_ordinal {
+                    "destroy_ordinal_second"
+                } else {
+                    "destroy_metadata_second"
+                };
+                let archive: Archive<_, Digest, i32> = Archive::init(context.child(second), cfg)
+                    .await
+                    .expect("interrupted destroy must leave openable storage");
+                archive.destroy().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn test_zero_freezer_value_target_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                metadata_partition: "zero-target-metadata".into(),
+                freezer_table_partition: "zero-target-table".into(),
+                freezer_table_initial_size: 4,
+                freezer_table_resize_frequency: 2,
+                freezer_table_resize_chunk_size: 1,
+                freezer_key_partition: "zero-target-freezer-key".into(),
+                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_value_partition: "zero-target-freezer-value".into(),
+                freezer_value_target_size: 0,
+                freezer_value_compression: None,
+                ordinal_partition: "zero-target-ordinal".into(),
+                items_per_section: NZU64!(1),
+                freezer_key_write_buffer: NZUsize!(1024),
+                freezer_value_write_buffer: NZUsize!(1024),
+                ordinal_write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                codec_config: (),
+            };
+            let mut archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            let entries = [
+                (Sha256::hash(&[b"zero-a"]), 1),
+                (Sha256::hash(&[b"zero-b"]), 2),
+                (Sha256::hash(&[b"zero-c"]), 3),
+            ];
+            for (index, (key, value)) in entries.iter().enumerate() {
+                archive = archive.put(index as u64, *key, *value).await.unwrap();
+            }
+            let archive = archive.sync().await.unwrap();
+            drop(archive);
+
+            let archive: Archive<_, Digest, i32> = Archive::init(context.child("second"), cfg)
+                .await
+                .expect("zero-sized freezer target must remain reopenable");
+            for (index, (_, value)) in entries.iter().enumerate() {
+                assert_eq!(
+                    archive
+                        .get(crate::archive::Identifier::Index(index as u64))
+                        .await
+                        .unwrap(),
+                    Some(*value)
+                );
+            }
+            archive.destroy().await.unwrap();
+        });
+    }
 }

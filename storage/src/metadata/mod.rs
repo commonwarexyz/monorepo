@@ -135,6 +135,47 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for removals in 1..=2 {
+                let cfg = Config {
+                    partition: format!("test-{removals}"),
+                    codec_config: ((0..).into(), ()),
+                };
+                let mut metadata =
+                    Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                metadata.put(U64::new(1), vec![7]);
+                let mut metadata = metadata.sync().await.unwrap();
+                metadata.put(U64::new(1), vec![8]);
+                let mut metadata = metadata.sync().await.unwrap();
+
+                // Cancel after removing the superseded copy and after removing both copies.
+                metadata.halt_destroy_after_removals(removals);
+                {
+                    let destroy = metadata.destroy();
+                    futures::pin_mut!(destroy);
+                    assert!(
+                        futures::poll!(destroy.as_mut()).is_pending(),
+                        "destroy must park after {removals} blob removals"
+                    );
+                }
+
+                let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                    .await
+                    .expect("interrupted destroy must remain openable");
+                assert_eq!(
+                    metadata.get(&U64::new(1)).map(Vec::as_slice),
+                    (removals == 1).then_some(&[8][..])
+                );
+                metadata.destroy().await.unwrap();
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_start_sync_failure_fails_next_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

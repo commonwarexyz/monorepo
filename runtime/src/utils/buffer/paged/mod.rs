@@ -307,6 +307,12 @@ impl Checksum {
     /// if what should have been the most recent CRC doesn't validate, in which case it will be
     /// zeroed and the other CRC used as a fallback.
     fn validate_page(buf: &[u8]) -> Option<Self> {
+        Self::validate_page_with_status(buf).map(|(record, _)| record)
+    }
+
+    /// Validate a page and identify an invalid inactive slot that must be retired before reuse.
+    /// A failed authoritative slot is zeroed in the returned record.
+    fn validate_page_with_status(buf: &[u8]) -> Option<(Self, Option<Slot>)> {
         let physical_page_size = buf.len() as u64;
         if physical_page_size < CHECKSUM_SIZE {
             error!(
@@ -320,6 +326,7 @@ impl Checksum {
         let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
         let mut crc_bytes = &buf[crc_start_idx..];
         let mut crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
+        let primary_slot = crc_record.authoritative();
         let (len, crc) = crc_record.get_crc();
 
         // Validate that len is in the valid range [1, page_size].
@@ -335,7 +342,7 @@ impl Checksum {
             // len is too large so this CRC isn't valid. Fall back to the other CRC.
             debug!("Invalid CRC: len too long. Using fallback CRC");
             if crc_record.validate_fallback(buf, crc_start_idx) {
-                return Some(crc_record);
+                return Some((crc_record, Some(primary_slot)));
             }
             return None;
         }
@@ -344,12 +351,28 @@ impl Checksum {
         if computed_crc != crc {
             debug!("Invalid CRC: doesn't match page contents. Using fallback CRC");
             if crc_record.validate_fallback(buf, crc_start_idx) {
-                return Some(crc_record);
+                return Some((crc_record, Some(primary_slot)));
             }
             return None;
         }
 
-        Some(crc_record)
+        let inactive_slot = primary_slot.other();
+        let (inactive_len, inactive_crc) = crc_record.get_slot(inactive_slot);
+        let inactive_len = inactive_len as usize;
+        let inactive_valid = inactive_len != 0
+            && inactive_len <= crc_start_idx
+            && Crc32::checksum(&buf[..inactive_len]) == inactive_crc;
+        let safely_retired = inactive_len == 0 && inactive_crc == 0;
+        let retire = (!inactive_valid && !safely_retired).then_some(inactive_slot);
+        Some((crc_record, retire))
+    }
+
+    /// Return one checksum slot without considering authority.
+    const fn get_slot(&self, slot: Slot) -> (u16, u32) {
+        match slot {
+            Slot::First => (self.len1, self.crc1),
+            Slot::Second => (self.len2, self.crc2),
+        }
     }
 
     /// Attempts to validate a CRC record based on its fallback CRC because the primary CRC failed

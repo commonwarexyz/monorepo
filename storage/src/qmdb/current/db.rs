@@ -28,7 +28,7 @@ use crate::{
         operation::Operation as _,
     },
 };
-use commonware_codec::{Codec, CodecShared, DecodeExt};
+use commonware_codec::{Codec, CodecShared, DecodeExt, Encode};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -53,6 +53,21 @@ const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
+
+/// Prefix used for a pending state-sync replacement.
+const PENDING_SYNC_PREFIX: u8 = 2;
+
+/// On-disk format version for a pending state-sync replacement.
+const PENDING_SYNC_VERSION: u8 = 1;
+
+const PENDING_SYNC_ACTIVE: u8 = 0;
+const PENDING_SYNC_REJECTED: u8 = 1;
+
+/// Durable state-sync replacement intent.
+pub(super) struct PendingSync<F: merkle::Family, D: Digest> {
+    pub(super) target: qmdb::sync::Target<F, D>,
+    pub(super) rejected: bool,
+}
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
@@ -839,8 +854,12 @@ where
         // Destructure before the await boundary to avoid stack growth from
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
+        // Keep graft metadata until the backing log has completed its recoverable reset: a pruned
+        // log cannot be reconstructed without it. If the reset wins the race with a crash, Any's
+        // empty-log initialization ignores the now-stale pruning boundary.
+        any.destroy().await?;
         metadata.destroy().await?;
-        any.destroy().await
+        Ok(())
     }
 }
 
@@ -1212,26 +1231,120 @@ pub(super) async fn build_grafted_tree<
     Ok(grafted_tree)
 }
 
-/// Load the metadata and recover the pruning state persisted by previous runs.
+/// Open the Current-layer metadata store without interpreting its active generation.
+pub(super) async fn open_metadata<F: merkle::Family, E: Context>(
+    context: E,
+    partition: &str,
+) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+    let metadata_cfg = MConfig {
+        partition: partition.into(),
+        codec_config: ((0..).into(), ()),
+    };
+    Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg)
+        .await
+        .map_err(Into::into)
+}
+
+/// Load a durable state-sync replacement intent, if present.
+pub(super) fn pending_sync<F: merkle::Family, E: Context, D: Digest>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+) -> Result<Option<PendingSync<F, D>>, Error<F>> {
+    let mut keys = metadata
+        .keys()
+        .filter(|key| key.prefix() == PENDING_SYNC_PREFIX);
+    let Some(key) = keys.next() else {
+        return Ok(None);
+    };
+    if key.value() != 0 || keys.next().is_some() {
+        return Err(Error::DataCorrupted("invalid pending sync marker"));
+    }
+
+    let value = metadata
+        .get(key)
+        .ok_or(Error::DataCorrupted("missing pending sync value"))?;
+    let Some((&version, value)) = value.split_first() else {
+        return Err(Error::DataCorrupted("invalid pending sync version"));
+    };
+    if version != PENDING_SYNC_VERSION {
+        return Err(Error::DataCorrupted("invalid pending sync version"));
+    }
+    let Some((&state, target)) = value.split_first() else {
+        return Err(Error::DataCorrupted("invalid pending sync state"));
+    };
+    let rejected = match state {
+        PENDING_SYNC_ACTIVE => false,
+        PENDING_SYNC_REJECTED => true,
+        _ => return Err(Error::DataCorrupted("invalid pending sync state")),
+    };
+    let target = qmdb::sync::Target::<F, D>::decode(target)
+        .map_err(|_| Error::DataCorrupted("invalid pending sync target"))?;
+    Ok(Some(PendingSync { target, rejected }))
+}
+
+fn encode_pending_sync<F: merkle::Family, D: Digest>(
+    target: &qmdb::sync::Target<F, D>,
+    rejected: bool,
+) -> Vec<u8> {
+    let target = target.encode();
+    let mut value = Vec::with_capacity(2 + target.len());
+    value.push(PENDING_SYNC_VERSION);
+    value.push(if rejected {
+        PENDING_SYNC_REJECTED
+    } else {
+        PENDING_SYNC_ACTIVE
+    });
+    value.extend_from_slice(&target);
+    value
+}
+
+/// Durably record the target whose state sync may replace the active generation.
+pub(super) async fn stage_sync<F: merkle::Family, E: Context, D: Digest>(
+    mut metadata: Metadata<E, U64, Vec<u8>>,
+    target: &qmdb::sync::Target<F, D>,
+) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+    if let Some(pending) = pending_sync::<F, _, D>(&metadata)?
+        && !pending.rejected
+        && pending.target == *target
+    {
+        return Ok(metadata);
+    }
+    metadata.put(
+        U64::new(PENDING_SYNC_PREFIX, 0),
+        encode_pending_sync(target, false),
+    );
+    metadata.sync().await.map_err(Into::into)
+}
+
+/// Mark the current replacement target as rejected before returning a root mismatch.
+pub(super) async fn reject_sync<F: merkle::Family, E: Context, D: Digest>(
+    mut metadata: Metadata<E, U64, Vec<u8>>,
+) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+    let pending = pending_sync::<F, _, D>(&metadata)?
+        .ok_or(Error::DataCorrupted("missing pending sync target"))?;
+    if pending.rejected {
+        return Ok(metadata);
+    }
+    metadata.put(
+        U64::new(PENDING_SYNC_PREFIX, 0),
+        encode_pending_sync(&pending.target, true),
+    );
+    metadata.sync().await.map_err(Into::into)
+}
+
+/// Load the pruning state for the active metadata generation.
 ///
-/// The metadata store holds two kinds of entries (keyed by prefix):
+/// The metadata store holds two active kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
 ///   pruned. This tells us where the active portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
-///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
-pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
-    context: E,
-    partition: &str,
-) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error<F>> {
-    let metadata_cfg = MConfig {
-        partition: partition.into(),
-        codec_config: ((0..).into(), ()),
-    };
-    let metadata =
-        Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
+pub(super) fn load_metadata<F: merkle::Graftable, E: Context, D: Digest>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+) -> Result<(usize, Vec<D>), Error<F>> {
+    if pending_sync::<F, _, D>(metadata)?.is_some() {
+        return Err(Error::DataCorrupted("pending sync was not recovered"));
+    }
 
     let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
     let pruned_chunks = match metadata.get(&key) {
@@ -1270,7 +1383,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         Vec::new()
     };
 
-    Ok((metadata, pruned_chunks, pinned_nodes))
+    Ok((pruned_chunks, pinned_nodes))
 }
 
 #[cfg(test)]
@@ -1571,6 +1684,50 @@ mod tests {
             assert_eq!(db.inactivity_floor_loc(), floor);
             assert_eq!(db.root(), root);
             assert!(db.any.bitmap.pruned_bits() > *durable_floor);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_interrupted_destroy_reopens_pruned_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let suffix = "interrupted-destroy";
+            let mut db = MmrDb::init(ctx.child("first"), fixed_config::<OneCap>(suffix, &ctx))
+                .await
+                .unwrap();
+            for _ in 0..5 {
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+            }
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
+            assert!(db.any.bitmap.pruned_chunks() > 0);
+
+            // Fail after the authenticated log has staged its reset but before Current removes
+            // the graft metadata needed by the old, pruned log.
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default().remove(1.0);
+            assert!(db.destroy().await.is_err());
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            let db = MmrDb::init(ctx.child("second"), fixed_config::<OneCap>(suffix, &ctx))
+                .await
+                .expect("interrupted destroy must leave an openable database");
+            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
+
+            // Commit new history without Current::sync, then reopen again. Stale graft metadata
+            // must not be able to reattach to the replacement log on this second startup.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 16).await;
+            let root = db.root();
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&16u64.to_be_bytes()]);
+            drop(db);
+
+            let db = MmrDb::init(ctx.child("third"), fixed_config::<OneCap>(suffix, &ctx))
+                .await
+                .expect("replacement history must remain reopenable");
+            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
             db.destroy().await.unwrap();
         });
     }

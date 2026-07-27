@@ -53,6 +53,12 @@ loop {
 }
 ```
 
+Recovery retains completed syncs exactly. For mutations after the last completed sync, it models
+filesystem writeback by independently losing or retaining writes, tearing them at a prefix or an
+arbitrary subset of bytes, and preserving their file extents and resize operations independently.
+Do not assume unsynced data is wholly lost or that surviving bytes form a prefix. A completed
+`write_at_sync` makes that write durable without promoting earlier unsynced operations.
+
 ## Verification checklist
 
 - Check determinism with `context.auditor().state()` when relevant.

@@ -1,11 +1,12 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::BoxDynRng};
+use crate::{Error, Handle, IoBuf, IoBufs, IoBufsMut, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
 use std::{
     io::Error as IoError,
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -38,10 +39,10 @@ pub struct Config {
     /// Failure rate for `write_at` operations.
     pub write_rate: Option<f64>,
 
-    /// Probability that a write failure is a partial write (some bytes written
-    /// before failure) rather than a complete failure (no bytes written).
+    /// Probability that a write failure samples an arbitrary subset of bytes to persist rather
+    /// than deterministically persisting none. The sampled subset may itself be empty or complete.
     /// Only applies when `write_rate` triggers a failure.
-    /// Value from 0.0 (always complete failure) to 1.0 (always partial write).
+    /// Value from 0.0 (never sample) to 1.0 (always sample).
     pub partial_write_rate: Option<f64>,
 
     /// Failure rate for `sync` operations.
@@ -96,7 +97,7 @@ impl Config {
         self
     }
 
-    /// Set the partial write rate (probability of partial vs complete write failure).
+    /// Set the probability of sampling a sporadic byte subset on write failure.
     pub const fn partial_write(mut self, rate: f64) -> Self {
         self.partial_write_rate = Some(rate);
         self
@@ -138,6 +139,27 @@ impl Config {
 struct Oracle {
     rng: Arc<Mutex<BoxDynRng>>,
     config: Arc<RwLock<Config>>,
+}
+
+fn selected_ranges(len: usize, mut next_mask: impl FnMut() -> u64) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    let mut mask = 0u64;
+    for index in 0..len {
+        let bit = index % u64::BITS as usize;
+        if bit == 0 {
+            mask = next_mask();
+        }
+        if mask & (1 << bit) != 0 {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            ranges.push(start..index);
+        }
+    }
+    if let Some(start) = start {
+        ranges.push(start..len);
+    }
+    ranges
 }
 
 impl Oracle {
@@ -194,6 +216,16 @@ impl Oracle {
         } else {
             None
         }
+    }
+
+    /// Select an arbitrary subset of byte ranges for a failed write.
+    fn try_partial_write(&self, rate: Option<f64>, len: usize) -> Option<Vec<Range<usize>>> {
+        if len == 0 || !self.roll(rate) {
+            return None;
+        }
+
+        let mut rng = self.rng.lock();
+        Some(selected_ranges(len, || rng.random()))
     }
 }
 
@@ -283,6 +315,28 @@ impl<B: crate::Blob> Blob<B> {
             size: Arc::new(AtomicU64::new(size)),
         }
     }
+
+    async fn persist_partial_write(
+        &self,
+        offset: u64,
+        buf: IoBuf,
+        ranges: Vec<Range<usize>>,
+    ) -> Result<(), Error> {
+        for range in ranges {
+            let range_offset = offset
+                .checked_add(range.start as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let range_end = offset
+                .checked_add(range.end as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            self.inner
+                .write_at_sync(range_offset, buf.slice(range))
+                .await?;
+            // A later range can be cancelled independently after this one is already durable.
+            self.size.fetch_max(range_end, Ordering::Relaxed);
+        }
+        Ok(())
+    }
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
@@ -308,25 +362,25 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
+        let end = offset
+            .checked_add(total_bytes)
+            .ok_or(Error::OffsetOverflow)?;
 
         let (should_fail, partial_rate) = self.ctx.check_write_fault();
         if should_fail {
-            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
-                // Partial write: write some bytes, sync, then fail
-                self.inner
-                    .write_at(offset, bufs.coalesce().slice(..bytes as usize))
+            if let Some(ranges) = self
+                .ctx
+                .try_partial_write(partial_rate, total_bytes as usize)
+            {
+                self.persist_partial_write(offset, bufs.coalesce(), ranges)
                     .await?;
-                self.inner.sync().await?;
-                self.size
-                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
                 return Err(injected_io_error().into());
             }
             return Err(injected_io_error().into());
         }
 
         self.inner.write_at(offset, bufs).await?;
-        self.size
-            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        self.size.fetch_max(end, Ordering::Relaxed);
         Ok(())
     }
 
@@ -337,18 +391,21 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
+        let end = offset
+            .checked_add(total_bytes)
+            .ok_or(Error::OffsetOverflow)?;
         if total_bytes == 0 {
             return Ok(());
         }
 
         let (should_fail, partial_rate) = self.ctx.check_write_fault();
         if should_fail {
-            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
-                self.inner
-                    .write_at_sync(offset, bufs.coalesce().slice(..bytes as usize))
+            if let Some(ranges) = self
+                .ctx
+                .try_partial_write(partial_rate, total_bytes as usize)
+            {
+                self.persist_partial_write(offset, bufs.coalesce(), ranges)
                     .await?;
-                self.size
-                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
                 return Err(injected_io_error().into());
             }
             return Err(injected_io_error().into());
@@ -356,14 +413,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
         if self.ctx.should_fail(Op::Sync) {
             self.inner.write_at(offset, bufs).await?;
-            self.size
-                .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+            self.size.fetch_max(end, Ordering::Relaxed);
             return Err(injected_io_error().into());
         }
 
         self.inner.write_at_sync(offset, bufs).await?;
-        self.size
-            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        self.size.fetch_max(end, Ordering::Relaxed);
         Ok(())
     }
 
@@ -372,9 +427,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if should_fail {
             let current = self.size.load(Ordering::Relaxed);
             if let Some(len) = self.ctx.try_partial(partial_rate, current, len) {
-                // Partial resize: resize to intermediate size, sync, then fail
                 self.inner.resize(len).await?;
-                self.inner.sync().await?;
                 self.size.store(len, Ordering::Relaxed);
                 return Err(injected_io_error().into());
             }
@@ -440,6 +493,13 @@ mod tests {
                 config,
             }
         }
+    }
+
+    #[test]
+    fn test_selected_ranges_include_empty_and_complete_subsets() {
+        assert!(selected_ranges(8, || 0).is_empty());
+        assert_eq!(selected_ranges(8, || u64::MAX), vec![0..8]);
+        assert_eq!(selected_ranges(8, || 0b1010_0110), vec![1..3, 5..6, 7..8]);
     }
 
     #[tokio::test]
@@ -638,20 +698,93 @@ mod tests {
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let data = b"hello world".to_vec();
+        blob.resize(data.len() as u64).await.unwrap();
+        blob.sync().await.unwrap();
         let result = blob.write_at(0, data.clone()).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
         let (inner_blob, size) = h.inner.open("partition", b"test").await.unwrap();
-        let bytes_written = size as usize;
+        assert_eq!(size, data.len() as u64);
+        let persisted = inner_blob.read_at(0, data.len()).await.unwrap().coalesce();
+        let persisted = persisted.as_ref();
         assert!(
-            bytes_written > 0 && bytes_written < data.len(),
-            "Expected partial write: {bytes_written} bytes out of {}",
-            data.len()
+            persisted
+                .iter()
+                .zip(&data)
+                .any(|(actual, expected)| actual == expected)
         );
+        assert!(persisted.contains(&0));
+        assert!(
+            persisted
+                .iter()
+                .zip(&data)
+                .all(|(actual, expected)| *actual == 0 || actual == expected)
+        );
+        let first_omitted = persisted.iter().position(|byte| *byte == 0).unwrap();
+        assert!(
+            persisted[first_omitted + 1..]
+                .iter()
+                .zip(&data[first_omitted + 1..])
+                .any(|(actual, expected)| actual == expected)
+        );
+    }
 
-        let read_result = inner_blob.read_at(0, bytes_written).await.unwrap();
-        assert_eq!(read_result.coalesce().as_ref(), &data[..bytes_written]);
+    #[tokio::test]
+    async fn test_faulty_storage_partial_write_at_sync() {
+        let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let data = vec![0xA5; 64];
+        blob.resize(data.len() as u64).await.unwrap();
+        blob.sync().await.unwrap();
+
+        assert!(matches!(
+            blob.write_at_sync(0, data.clone()).await,
+            Err(Error::Io(_))
+        ));
+
+        let (inner_blob, size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(size, data.len() as u64);
+        let persisted = inner_blob.read_at(0, data.len()).await.unwrap().coalesce();
+        let persisted = persisted.as_ref();
+        assert!(persisted.contains(&0xA5));
+        assert!(persisted.contains(&0));
+    }
+
+    #[tokio::test]
+    async fn test_partial_write_does_not_promote_earlier_dirty_bytes() {
+        let h = Harness::new(Config::default());
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.resize(32).await.unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(0, b"dirty".to_vec()).await.unwrap();
+
+        *h.config.write() = Config::default().write(1.0).partial_write(1.0);
+        assert!(matches!(
+            blob.write_at(16, vec![0xA5; 16]).await,
+            Err(Error::Io(_))
+        ));
+        drop(blob);
+
+        let (inner, _) = h.inner.open("partition", b"test").await.unwrap();
+        let selected = inner.read_at(16, 16).await.unwrap().coalesce();
+        assert!(selected.as_ref().contains(&0xA5));
+        assert!(selected.as_ref().contains(&0));
+        drop(inner);
+
+        // Lose the earlier ordinary write. The sparse ranges persisted by the failed write remain
+        // durable without pulling the unrelated dirty bytes through a full sync.
+        h.inner.simulate_crash(|| 0);
+        let (inner, _) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(
+            inner.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+            &[0; 5]
+        );
+        assert_eq!(
+            inner.read_at(16, 16).await.unwrap().coalesce().as_ref(),
+            selected.as_ref()
+        );
     }
 
     #[tokio::test]
@@ -679,8 +812,11 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Io(_))));
 
-        let (_, size) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(size, 0, "No partial write possible for single byte");
+        let (inner, size) = h.inner.open("partition", b"test").await.unwrap();
+        assert!(size <= 1);
+        if size == 1 {
+            assert_eq!(inner.read_at(0, 1).await.unwrap().coalesce(), b"x");
+        }
     }
 
     #[tokio::test]
@@ -695,11 +831,16 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Io(_))));
 
-        let (_, actual_size) = h.inner.open("partition", b"test").await.unwrap();
+        let actual_size = blob.size.load(Ordering::Relaxed);
         assert!(
             actual_size > 0 && actual_size < target_size,
             "Expected partial resize: size {actual_size} should be between 0 and {target_size}"
         );
+
+        drop(blob);
+        h.inner.simulate_crash(|| 1);
+        let (_, recovered_size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(recovered_size, actual_size);
     }
 
     #[tokio::test]
@@ -721,10 +862,41 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Io(_))));
 
-        let (_, actual_size) = h.inner.open("partition", b"test").await.unwrap();
+        let actual_size = blob.size.load(Ordering::Relaxed);
         assert!(
             actual_size > target_size && actual_size < 100,
             "Expected partial shrink: size {actual_size} should be between {target_size} and 100"
+        );
+
+        drop(blob);
+        h.inner.simulate_crash(|| 1);
+        let (_, recovered_size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(recovered_size, actual_size);
+    }
+
+    #[tokio::test]
+    async fn test_partial_resize_does_not_sync_prior_write() {
+        let h = Harness::new(Config::default());
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.resize(32).await.unwrap();
+        blob.sync().await.unwrap();
+        blob.write_at(0, b"dirty").await.unwrap();
+
+        *h.config.write() = Config::default().resize(1.0).partial_resize(1.0);
+        assert!(matches!(blob.resize(64).await, Err(Error::Io(_))));
+        let partial_size = blob.size.load(Ordering::Relaxed);
+        assert!(partial_size > 32 && partial_size < 64);
+        drop(blob);
+
+        // Lose the earlier write while retaining the failed resize. The partial resize must not
+        // implicitly make unrelated dirty bytes durable.
+        let mut decisions = [0, 1].into_iter();
+        h.inner.simulate_crash(|| decisions.next().unwrap());
+        let (recovered, recovered_size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(recovered_size, partial_size);
+        assert_eq!(
+            recovered.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+            &[0; 5]
         );
     }
 
@@ -778,11 +950,16 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Io(_))));
 
-        let (_, actual_size) = h.inner.open("partition", b"test").await.unwrap();
+        let actual_size = blob.size.load(Ordering::Relaxed);
         assert!(
             actual_size > target_size && actual_size < 50,
             "Expected partial shrink from 50: size {actual_size} should be between {target_size} and 50"
         );
+
+        drop(blob);
+        h.inner.simulate_crash(|| 1);
+        let (_, recovered_size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(recovered_size, actual_size);
     }
 
     #[tokio::test]
