@@ -108,7 +108,8 @@ impl Variant for MinPk {
     /// of its respective `r_i`, equals one:
     /// `prod_i((e(hm_i,pk_i) * e(sig_i,-G1::one()))^{r_i}) == 1`
     ///
-    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
+    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings,
+    /// onto `pk_i` rather than `hm_i` because G1 multiplication is cheaper):
     /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
     ///
     /// The second term `e(r_i * sig_i,-G1::one())` can be computed efficiently with Multi-Scalar Multiplication:
@@ -210,13 +211,14 @@ impl Variant for MinSig {
     /// raised to the power of its respective `r_i`, equals one:
     /// `prod_i((e(pk_i,hm_i) * e(-G2::one(),sig_i))^{r_i}) == 1`
     ///
-    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
-    /// `prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
+    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings,
+    /// onto `hm_i` rather than `pk_i` because G1 multiplication is cheaper):
+    /// `prod_i(e(pk_i,r_i * hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
     ///
     /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently with Multi-Scalar Multiplication:
     /// `e(-G2::one(),sum_i(r_i * sig_i))`
     ///
-    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
+    /// Finally, we aggregate all pairings `e(pk_i,r_i * hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
@@ -240,11 +242,11 @@ impl Variant for MinSig {
             .map(|_| SmallScalar::random(&mut *rng))
             .collect();
 
-        let (s_agg, scaled_pks) = par.join(
+        let (s_agg, scaled_hms) = par.join(
             || G1::msm(signatures, &scalars, par),
-            || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
+            || par.map_collect_vec(hms.iter().zip(scalars.iter()), |(&hm, s)| hm * s),
         );
-        if !G1::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G2::generator()) {
+        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
         Ok(())

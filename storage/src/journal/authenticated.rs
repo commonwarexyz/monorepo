@@ -377,18 +377,20 @@ where
 {
     /// Begin durably persisting the journal.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
-    /// the Merkle structure is not durably persisted, so recovery may be required on startup in
-    /// the event of a crash (use [Self::sync] for the stronger guarantee).
-    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
-        // limit memory bloat.
-        let ((journal, handle), merkle) = try_join!(
-            self.journal.start_commit().map_err(Error::Journal),
-            self.merkle.flush().map_err(Error::Merkle)
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// Also tries to advance the recovery watermarks to bound startup recovery. Use
+    /// [Self::sync] to guarantee no recovery is needed.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let (journal_handle, merkle_handle);
+        ((self.journal, journal_handle), (self.merkle, merkle_handle)) = try_join!(
+            self.journal.start_sync().map_err(Error::Journal),
+            self.merkle.start_sync().map_err(Error::Merkle)
         )?;
-        (self.journal, self.merkle) = (journal, merkle);
 
+        let handle =
+            Handle::from_future(
+                async move { try_join!(journal_handle, merkle_handle).map(|_| ()) },
+            );
         Ok((self, handle))
     }
 
@@ -992,8 +994,8 @@ where
         Self::rewind(self, size).await.map_err(Self::map_error)
     }
 
-    async fn start_commit(self) -> Result<(Self, Handle<()>), JournalError> {
-        Self::start_commit(self).await.map_err(Self::map_error)
+    async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
+        Self::start_sync(self).await.map_err(Self::map_error)
     }
 
     async fn commit(self) -> Result<Self, JournalError> {
@@ -1049,7 +1051,10 @@ mod tests {
         BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
+            next_pending_sync,
+        },
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -2068,10 +2073,10 @@ mod tests {
         executor.start(test_sync_inner::<mmb::Family>);
     }
 
-    /// Awaiting a start_commit handle provides commit-level durability: committed operations
+    /// Awaiting a start_sync handle provides commit-level durability: committed operations
     /// survive a reopen, with recovery re-aligning the Merkle structure.
-    async fn test_start_commit_durability_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_empty_journal::<F>(context.child("first"), "start_commit").await;
+    async fn test_start_sync_durability_inner<F: Family + PartialEq>(context: Context) {
+        let mut journal = create_empty_journal::<F>(context.child("first"), "start_sync").await;
         let expected_ops: Vec<_> = (0..5).map(|i| create_operation::<F>(i as u8)).collect();
         for op in expected_ops.iter() {
             (journal, _) = journal.append(op).await.unwrap();
@@ -2082,12 +2087,12 @@ mod tests {
             .unwrap();
 
         let handle;
-        (journal, handle) = journal.start_commit().await.unwrap();
+        (journal, handle) = journal.start_sync().await.unwrap();
         handle.await.unwrap();
         let root = journal_root(&journal);
         drop(journal);
 
-        let journal = create_empty_journal::<F>(context.child("second"), "start_commit").await;
+        let journal = create_empty_journal::<F>(context.child("second"), "start_sync").await;
         assert_eq!(journal.size(), 6);
         assert_eq!(journal_root(&journal), root);
         for (i, expected_op) in expected_ops.iter().enumerate() {
@@ -2097,18 +2102,18 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_start_commit_durability_mmr() {
+    fn test_start_sync_durability_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_start_commit_durability_inner::<mmr::Family>);
+        executor.start(test_start_sync_durability_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_start_commit_durability_mmb() {
+    fn test_start_sync_durability_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_start_commit_durability_inner::<mmb::Family>);
+        executor.start(test_start_sync_durability_inner::<mmb::Family>);
     }
 
-    /// Delayed-sync context for exercising in-flight commit handles.
+    /// Delayed-sync context for exercising in-flight sync handles.
     type DelayedCtx = DelayedSyncContext<deterministic::Context>;
 
     /// Authenticated journal over a delayed-sync storage backend.
@@ -2137,13 +2142,13 @@ mod tests {
         )
     }
 
-    /// A commit handle must not block journal use while the backend sync is pending.
+    /// A sync handle must not block journal use while the backend sync is pending.
     #[test_traced("INFO")]
-    fn test_start_commit_overlaps_work() {
+    fn test_start_sync_overlaps_work() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_journal(&context, "first", "start_commit_overlap", &pending);
+            let open = open_delayed_journal(&context, "first", "start_sync_overlap", &pending);
             let mut journal = drive_pending_syncs(&pending, open).await.unwrap();
             for i in 0..4 {
                 (journal, _) = journal
@@ -2156,12 +2161,8 @@ mod tests {
             let entered_before = pending.entered();
             let completions_before = pending.completions();
             let handle;
-            (journal, handle) = journal.start_commit().await.unwrap();
-            assert_eq!(
-                pending.starts(),
-                starts_before + 1,
-                "start_commit began exactly one blob sync"
-            );
+            (journal, handle) = journal.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
             assert_eq!(pending.completions(), completions_before);
 
             // Observe the sync while the journal keeps working.
@@ -2188,39 +2189,37 @@ mod tests {
             pending.unblock();
             waiter.await.unwrap();
 
-            // The mid-sync append is durable after the next commit.
+            // The mid-sync append is durable after the next sync.
             (journal, _) = journal
                 .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
                 .await
                 .unwrap();
             let handle;
-            (journal, handle) = journal.start_commit().await.unwrap();
+            (journal, handle) = journal.start_sync().await.unwrap();
             handle.await.unwrap();
             let root = journal.root(0).unwrap();
             drop(journal);
 
-            let journal =
-                open_delayed_journal(&context, "second", "start_commit_overlap", &pending)
-                    .await
-                    .unwrap();
+            let journal = open_delayed_journal(&context, "second", "start_sync_overlap", &pending)
+                .await
+                .unwrap();
             assert_eq!(journal.size(), 6);
             assert_eq!(journal.root(0).unwrap(), root);
         });
     }
 
-    /// A commit whose in-flight sync fails surfaces the error through both the returned handle
-    /// and the next durability operation.
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
     #[test_traced("INFO")]
-    fn test_start_commit_failure_propagates() {
+    fn test_start_sync_failure_propagates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Pass syncs through so opening the journal doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut journal =
-                open_delayed_journal(&context, "first", "start_commit_fail", &pending)
-                    .await
-                    .unwrap();
+            let mut journal = open_delayed_journal(&context, "first", "start_sync_fail", &pending)
+                .await
+                .unwrap();
             for i in 0..4 {
                 (journal, _) = journal
                     .append(&create_operation::<mmr::Family>(i))
@@ -2232,10 +2231,10 @@ mod tests {
             pending.arm_fail();
 
             let handle;
-            (journal, handle) = journal.start_commit().await.unwrap();
+            (journal, handle) = journal.start_sync().await.unwrap();
             assert!(
                 handle.await.is_err(),
-                "the commit handle surfaces the failure"
+                "the sync handle surfaces the failure"
             );
             let starts_before = pending.starts();
             // A failed mutable method consumes the journal per the failures-are-fatal contract.
@@ -2251,6 +2250,54 @@ mod tests {
                 starts_before,
                 "the surfaced error is the retained failure, not a fresh sync's"
             );
+        });
+    }
+
+    /// A merkle-only sync failure fails the joined handle even though the operation log's own
+    /// sync succeeded.
+    #[test_traced("INFO")]
+    fn test_start_sync_merkle_failure_fails_handle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_journal(&context, "first", "merkle_fail", &pending);
+            let mut journal = drive_pending_syncs(&pending, open).await.unwrap();
+            for i in 0..4 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+
+            // Prove the appends durable, then dirty only the merkle journal: commit syncs the
+            // operation log but merely flushes merkle nodes.
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            for i in 4..6 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+            journal = drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+
+            // The operation log's data is already durable, so its only parked sync is the
+            // watermark advance: release it, then fail the merkle journal's syncs.
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            let ops_watermark = next_pending_sync(&pending);
+            ops_watermark.release.send(Ok(())).unwrap();
+            fail_pending_syncs(&pending);
+            assert!(
+                handle.await.is_err(),
+                "a merkle-only failure surfaces on the joined handle"
+            );
+
+            // The merkle journal retained the failure: the next sync resurfaces it.
+            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
         });
     }
 

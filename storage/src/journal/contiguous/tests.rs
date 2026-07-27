@@ -1323,7 +1323,7 @@ where
 }
 
 #[boxed]
-async fn test_start_commit_durability<F, Fut, J>(factory: F)
+async fn test_start_sync_durability<F, Fut, J>(factory: F)
 where
     F: Fn(&'static str) -> Fut,
     Fut: Future<Output = Result<J, Error>>,
@@ -1334,7 +1334,7 @@ where
         (journal, _) = journal.append(&(i * 10)).await.unwrap();
     }
     let handle;
-    (journal, handle) = journal.start_commit().await.unwrap();
+    (journal, handle) = journal.start_sync().await.unwrap();
     handle.await.unwrap();
     let size = journal.bounds().end;
     drop(journal);
@@ -1348,16 +1348,16 @@ where
 }
 
 #[test]
-fn test_fixed_start_commit_durability() {
+fn test_fixed_start_sync_durability() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = fixed::Config {
-            partition: "fixed-start-commit".into(),
+            partition: "fixed-start-sync".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_start_commit_durability(|label| {
+        test_start_sync_durability(|label| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(context.child(label), cfg)
         })
@@ -1366,18 +1366,18 @@ fn test_fixed_start_commit_durability() {
 }
 
 #[test]
-fn test_variable_start_commit_durability() {
+fn test_variable_start_sync_durability() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = variable::Config {
-            partition: "variable-start-commit".into(),
+            partition: "variable-start-sync".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_start_commit_durability(|label| {
+        test_start_sync_durability(|label| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(context.child(label), cfg)
         })
@@ -1385,9 +1385,9 @@ fn test_variable_start_commit_durability() {
     });
 }
 
-/// A commit handle must not block journal use while backend sync is pending.
+/// A sync handle must not block journal use while backend sync is pending.
 #[boxed]
-async fn test_start_commit_overlaps_work<F, Fut, J>(
+async fn test_start_sync_overlaps_work<F, Fut, J>(
     context: deterministic::Context,
     pending: PendingSyncs,
     make: F,
@@ -1407,7 +1407,7 @@ async fn test_start_commit_overlaps_work<F, Fut, J>(
     }
 
     let handle;
-    (journal, handle) = journal.start_commit().await.unwrap();
+    (journal, handle) = journal.start_sync().await.unwrap();
     assert!(pending.starts() >= 1);
     assert_eq!(pending.completions(), 0);
 
@@ -1432,9 +1432,9 @@ async fn test_start_commit_overlaps_work<F, Fut, J>(
     waiter.await.unwrap();
     assert!(pending.completions() >= 1);
 
-    // Mid-sync append is durable after the next commit.
+    // Mid-sync append is durable after the next sync.
     let handle;
-    (journal, handle) = journal.start_commit().await.unwrap();
+    (journal, handle) = journal.start_sync().await.unwrap();
     handle.await.unwrap();
     drop(journal);
 
@@ -1452,10 +1452,10 @@ async fn test_start_commit_overlaps_work<F, Fut, J>(
     journal.destroy().await.unwrap();
 }
 
-/// A commit handle completes only once both the tail sync and the predecessor's rollover sync
+/// A sync handle completes only once both the tail sync and the predecessor's rollover sync
 /// are durable.
 #[boxed]
-async fn test_start_commit_overlaps_predecessor_and_tail<F, Fut, J>(
+async fn test_start_sync_overlaps_predecessor_and_tail<F, Fut, J>(
     context: deterministic::Context,
     pending: PendingSyncs,
     make: F,
@@ -1477,7 +1477,7 @@ async fn test_start_commit_overlaps_predecessor_and_tail<F, Fut, J>(
     assert!(starts_before > 0);
 
     let handle;
-    (journal, handle) = journal.start_commit().await.unwrap();
+    (journal, handle) = journal.start_sync().await.unwrap();
     assert!(
         pending.starts() > starts_before,
         "tail sync was not started while predecessor was in flight"
@@ -1497,7 +1497,7 @@ async fn test_start_commit_overlaps_predecessor_and_tail<F, Fut, J>(
     futures::pin_mut!(handle);
     assert!(
         handle.as_mut().now_or_never().is_none(),
-        "commit handle completed without the predecessor sync"
+        "sync handle completed without the predecessor sync"
     );
 
     // Releasing the predecessor completes the handle.
@@ -1506,10 +1506,10 @@ async fn test_start_commit_overlaps_predecessor_and_tail<F, Fut, J>(
     journal.destroy().await.unwrap();
 }
 
-/// A commit whose in-flight sync fails surfaces the error through both the returned handle and the
-/// next durability operation.
+/// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+/// returned handle and the next durability operation.
 #[boxed]
-async fn test_start_commit_failure_propagates<F, Fut, J>(
+async fn test_start_sync_failure_propagates<F, Fut, J>(
     context: deterministic::Context,
     pending: PendingSyncs,
     make: F,
@@ -1533,10 +1533,10 @@ async fn test_start_commit_failure_propagates<F, Fut, J>(
     pending.unblock();
 
     let handle;
-    (journal, handle) = journal.start_commit().await.unwrap();
+    (journal, handle) = journal.start_sync().await.unwrap();
     assert!(
         handle.await.is_err(),
-        "the commit handle surfaces the failure"
+        "the sync handle surfaces the failure"
     );
     let starts_before = pending.starts();
     // A failed mutable method consumes the journal per the failures-are-fatal contract.
@@ -1572,17 +1572,17 @@ fn variable_overlap_cfg(context: &deterministic::Context, partition: &str) -> va
 }
 
 #[test]
-fn test_fixed_start_commit_overlaps_predecessor_and_tail() {
+fn test_fixed_start_sync_overlaps_predecessor_and_tail() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = fixed::Config {
-            partition: "fixed-start-commit-predecessor".into(),
+            partition: "fixed-start-sync-predecessor".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_start_commit_overlaps_predecessor_and_tail(context, pending, move |ctx| {
+        test_start_sync_overlaps_predecessor_and_tail(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
@@ -1590,19 +1590,19 @@ fn test_fixed_start_commit_overlaps_predecessor_and_tail() {
 }
 
 #[test]
-fn test_variable_start_commit_overlaps_predecessor_and_tail() {
+fn test_variable_start_sync_overlaps_predecessor_and_tail() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = variable::Config {
-            partition: "variable-start-commit-predecessor".into(),
+            partition: "variable-start-sync-predecessor".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
         };
-        test_start_commit_overlaps_predecessor_and_tail(context, pending, move |ctx| {
+        test_start_sync_overlaps_predecessor_and_tail(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
@@ -1610,12 +1610,12 @@ fn test_variable_start_commit_overlaps_predecessor_and_tail() {
 }
 
 #[test]
-fn test_fixed_start_commit_overlaps_work() {
+fn test_fixed_start_sync_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-commit-overlap");
-        test_start_commit_overlaps_work(context, pending, move |ctx| {
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-overlap");
+        test_start_sync_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -1624,12 +1624,12 @@ fn test_fixed_start_commit_overlaps_work() {
 }
 
 #[test]
-fn test_variable_start_commit_overlaps_work() {
+fn test_variable_start_sync_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-commit-overlap");
-        test_start_commit_overlaps_work(context, pending, move |ctx| {
+        let cfg = variable_overlap_cfg(&context, "variable-start-sync-overlap");
+        test_start_sync_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -1638,12 +1638,12 @@ fn test_variable_start_commit_overlaps_work() {
 }
 
 #[test]
-fn test_fixed_start_commit_failure_propagates() {
+fn test_fixed_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-commit-fail");
-        test_start_commit_failure_propagates(context, pending, move |ctx| {
+        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-fail");
+        test_start_sync_failure_propagates(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
@@ -1651,12 +1651,12 @@ fn test_fixed_start_commit_failure_propagates() {
 }
 
 #[test]
-fn test_variable_start_commit_failure_propagates() {
+fn test_variable_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-commit-fail");
-        test_start_commit_failure_propagates(context, pending, move |ctx| {
+        let cfg = variable_overlap_cfg(&context, "variable-start-sync-fail");
+        test_start_sync_failure_propagates(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;

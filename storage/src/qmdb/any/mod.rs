@@ -616,8 +616,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Test that state committed via an awaited start_commit handle is recovered on reopen.
-    pub(crate) async fn test_any_db_start_commit_recovery<F: Family, D, V>(
+    /// Test that state committed via an awaited start_sync handle is recovered on reopen.
+    pub(crate) async fn test_any_db_start_sync_recovery<F: Family, D, V>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -637,7 +637,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        let (db, handle) = db.start_commit().await.unwrap();
+        let (db, handle) = db.start_sync().await.unwrap();
         handle.await.unwrap();
         let committed_root = db.root();
         let committed_size = db.size();
@@ -1605,7 +1605,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
-    test_for_all_variants!(with_reopen: test_any_db_start_commit_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 

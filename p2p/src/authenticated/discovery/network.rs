@@ -1,12 +1,18 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    actors::{dialer, listener, router, spawner, tracker},
-    channels::{self, Channels},
+    actors::{dialer, listener, spawner, tracker},
     config::Config,
-    types,
 };
-use crate::{Channel, authenticated::discovery::types::InfoVerifier};
+use crate::{
+    Channel,
+    authenticated::{
+        channels::{self, Channels},
+        data::MAX_PAYLOAD_DATA_OVERHEAD,
+        discovery::types::InfoVerifier,
+        router,
+    },
+};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -163,7 +169,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             max_message_size: self
                 .cfg
                 .max_message_size
-                .saturating_add(types::MAX_PAYLOAD_DATA_OVERHEAD),
+                .saturating_add(MAX_PAYLOAD_DATA_OVERHEAD),
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

@@ -236,10 +236,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        let Some(verified) = self
+        let verified;
+        (self, verified) = self
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
-            .await?
-        else {
+            .await?;
+        let Some(verified) = verified else {
             return Ok(self);
         };
         (self.journal, _) = self.journal.append(&verified.witness).await?;
@@ -258,11 +259,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Returns `None` if the durable tip already matches the in-memory Merkle and no import is
     /// pending, otherwise the witness to append and install in the cache.
     async fn stage<H, S>(
-        &mut self,
+        mut self,
         merkle: &compact::Merkle<F, D, S>,
         inactivity_floor_loc: Location<F>,
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
-    ) -> Result<Option<VerifiedWitness<F, D>>, Error<F>>
+    ) -> Result<(Self, Option<VerifiedWitness<F, D>>), Error<F>>
     where
         H: Hasher<Digest = D>,
         S: Strategy,
@@ -274,7 +275,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         let cached_leaves = self.with(|w| w.leaf_count());
         let verified = if cached_leaves == merkle.leaves() {
             if !self.import_pending.load(Ordering::Relaxed) {
-                return Ok(None);
+                return Ok((self, None));
             }
             self.with(|w| w.clone())
         } else if cached_leaves > merkle.leaves() {
@@ -283,9 +284,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?
         };
         if self.import_pending.load(Ordering::Relaxed) {
-            self.clear_for_import().await?;
+            self = self.clear_for_import().await?;
         }
-        Ok(Some(verified))
+        Ok((self, Some(verified)))
     }
 
     /// Rewind the journal so the entry committing exactly `target` leaves becomes the tip, then
@@ -397,10 +398,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     ///
     /// Clears to a nonzero size: if a crash interrupts the import, reopen sees a non-empty
     /// journal with an unreadable tip and fails, instead of mistaking it for a fresh db.
-    async fn clear_for_import(&mut self) -> Result<(), Error<F>> {
+    async fn clear_for_import(mut self) -> Result<Self, Error<F>> {
         let size = self.journal.size();
-        self.journal.clear_to_size(size.max(1)).await?;
-        Ok(())
+        self.journal = self.journal.clear_to_size(size.max(1)).await?;
+        Ok(self)
     }
 
     /// Destroy all persisted witness state.

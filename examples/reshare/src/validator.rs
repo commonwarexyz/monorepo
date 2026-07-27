@@ -34,6 +34,7 @@ use commonware_glue::{
         db::{DatabaseSet, p2p::standard as qmdb_resolver},
     },
 };
+use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Supervisor as _, buffer::paged::CacheRef, tokio};
@@ -56,6 +57,7 @@ pub struct Validator {
 }
 
 /// Start every validator actor and run until one fails.
+#[boxed]
 pub async fn run(context: tokio::Context, args: Validator) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");

@@ -2,22 +2,19 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, deterministic};
-use commonware_storage::metadata::{Config, Error as MetadataError, Metadata};
-use commonware_utils::{FuzzRng, sequence::U64};
+use commonware_storage::metadata::{Config, Metadata};
+use commonware_utils::sequence::U64;
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MetadataOperation {
     Put { key: u64, value: Vec<u8> },
-    Upsert { key: u64, value: Vec<u8> },
-    UpsertSync { key: u64, value: Vec<u8> },
     Get { key: u64 },
     Remove { key: u64 },
     Clear,
     Sync,
     Destroy,
-    DestroyWithRemoveFault { rate: u8 },
     Keys { prefix: Option<Vec<u8>> },
     RemovePrefix { prefix: Vec<u8> },
     PutLargeValue { key: u64 },
@@ -27,7 +24,6 @@ enum MetadataOperation {
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     operations: Vec<MetadataOperation>,
-    raw_bytes: Vec<u8>,
 }
 
 fn bytes_u64(k: u64) -> [u8; 8] {
@@ -35,8 +31,7 @@ fn bytes_u64(k: u64) -> [u8; 8] {
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
-    let runner = deterministic::Runner::new(cfg);
+    let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let cfg = Config {
@@ -55,17 +50,6 @@ fn fuzz(input: FuzzInput) {
                     metadata.put(U64::new(*key), value.clone());
                     model.insert(*key, value.clone());
                 }
-                MetadataOperation::Upsert { key, value } => {
-                    metadata.upsert(U64::new(*key), |current| *current = value.clone());
-                    model.insert(*key, value.clone());
-                }
-                MetadataOperation::UpsertSync { key, value } => {
-                    metadata
-                        .upsert_sync(U64::new(*key), |current| *current = value.clone())
-                        .await
-                        .unwrap();
-                    model.insert(*key, value.clone());
-                }
                 MetadataOperation::Get { key } => {
                     let a = metadata.get(&U64::new(*key));
                     let b = model.get(key).cloned();
@@ -81,22 +65,10 @@ fn fuzz(input: FuzzInput) {
                     model.clear();
                 }
                 MetadataOperation::Sync => {
-                    metadata.sync().await.unwrap();
+                    metadata = metadata.sync().await.unwrap();
                 }
                 MetadataOperation::Destroy => {
                     metadata.destroy().await.unwrap();
-                    return;
-                }
-                MetadataOperation::DestroyWithRemoveFault { rate } => {
-                    *context.storage_fault_config().write() = deterministic::FaultConfig {
-                        remove_rate: Some((f64::from(*rate) + 1.0) / 257.0),
-                        ..Default::default()
-                    };
-                    let result = metadata.destroy().await;
-                    assert!(
-                        result.is_ok() || matches!(result, Err(MetadataError::Runtime(_))),
-                        "unexpected destroy result: {result:?}",
-                    );
                     return;
                 }
                 MetadataOperation::Keys { prefix } => {

@@ -3,7 +3,7 @@
 use clap::{Arg, Command as ClapCommand, value_parser};
 use colored::Colorize;
 use commonware_cryptography::{Signer, ed25519};
-use commonware_macros::select_loop;
+use commonware_macros::{boxed, select_loop};
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{WrappedReceiver, WrappedSender, wrap},
@@ -504,6 +504,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 }
 
 /// Check if a single command would succeed without executing side effects
+#[boxed]
 async fn process_single_command_check<C: Clock>(
     ctx: &C,
     command_ctx: &CommandContext,
@@ -527,39 +528,19 @@ async fn process_single_command_check<C: Clock>(
         Command::Or(cmd1, cmd2) => {
             let cmd1_test = (command.0, cmd1.as_ref().clone());
             let cmd2_test = (command.0, cmd2.as_ref().clone());
-            let result1 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd1_test,
-                received,
-            ))
-            .await;
-            let result2 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd2_test,
-                received,
-            ))
-            .await;
+            let result1 =
+                process_single_command_check(ctx, command_ctx, &cmd1_test, received).await;
+            let result2 =
+                process_single_command_check(ctx, command_ctx, &cmd2_test, received).await;
             result1 || result2
         }
         Command::And(cmd1, cmd2) => {
             let cmd1_test = (command.0, cmd1.as_ref().clone());
             let cmd2_test = (command.0, cmd2.as_ref().clone());
-            let result1 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd1_test,
-                received,
-            ))
-            .await;
-            let result2 = Box::pin(process_single_command_check(
-                ctx,
-                command_ctx,
-                &cmd2_test,
-                received,
-            ))
-            .await;
+            let result1 =
+                process_single_command_check(ctx, command_ctx, &cmd1_test, received).await;
+            let result2 =
+                process_single_command_check(ctx, command_ctx, &cmd2_test, received).await;
             result1 && result2
         }
         _ => {

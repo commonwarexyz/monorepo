@@ -32,14 +32,15 @@ impl StorageWorkload for MetadataWorkload {
             context.fill(value.as_mut_slice());
             metadata.put(U64::new(i), value);
         }
-        metadata.sync().await?;
+        metadata = metadata.sync().await?;
 
         for i in (0..items).step_by(3) {
             let mut value = vec![0; context.random_range(0..512)];
             context.fill(value.as_mut_slice());
             metadata.put(U64::new(i), value);
         }
-        metadata.sync().await
+        metadata.sync().await?;
+        Ok(())
     }
 }
 
