@@ -99,7 +99,7 @@ where
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
 
-    /// Duration of each fixed-target sync window.
+    /// How long state sync remains on a target before considering a newer finalized target.
     pub(super) retarget_delay: Duration,
 
     /// Fixed marshal frontier being drained before the next sync window.

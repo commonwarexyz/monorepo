@@ -164,7 +164,7 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// Duration of the fixed-target state sync window.
+    /// How long state sync remains on a target before considering a newer finalized target.
     retarget_delay: NonZeroDuration,
 
     /// Periodic prune configuration.
