@@ -327,7 +327,8 @@
 //! include it as a view-entry certificate; every honest participant missing it can also make the same direct request
 //! from the proposal that exposed the gap.
 //!
-//! The local subscriber records why the view was requested, without adding that distinction to the wire. A covering
+//! The local fetch purpose records why the view was requested, without adding that distinction to the wire. Every
+//! admitted certificate, including gossip verified by the batcher, updates this resolver state. A covering
 //! nullification retires background repair and targeted nullification demand throughout its term, but preserves a
 //! targeted request for a certified parent. A terminal certification verdict retires only targeted parent demand at
 //! that exact view: success supplies the parent, while failure permanently rules it out and starts background

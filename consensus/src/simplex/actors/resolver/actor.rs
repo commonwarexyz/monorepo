@@ -1,7 +1,7 @@
 use super::{
-    super::AncestryRequirement,
+    super::Purpose,
     Config,
-    ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage, Subscription},
+    ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     state::{Effect, FetchReason},
 };
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
         scheme::Scheme,
         types::Certificate,
     },
-    types::{Epoch, Round as Rnd, View},
+    types::{Epoch, View},
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
@@ -195,13 +195,13 @@ impl<
                         self.certified(&mut resolver, round.view(), success);
                     }
                     MailboxMessage::Resolve {
-                        round,
+                        proposal_view,
                         view,
-                        requirement,
+                        purpose,
                         target,
                         ..
                     } => {
-                        self.resolve(&mut resolver, round, view, requirement, target);
+                        self.resolve(&mut resolver, proposal_view, view, purpose, target);
                     }
                 }
             },
@@ -215,7 +215,7 @@ impl<
     }
 
     /// Records a certificate and applies its resolver lifecycle effects.
-    fn updated<R: Resolver<Key = U64, Subscriber = Subscription>>(
+    fn updated<R: Resolver<Key = U64, Subscriber = Purpose>>(
         &mut self,
         resolver: &mut R,
         certificate: Certificate<S, D>,
@@ -225,10 +225,12 @@ impl<
             Certificate::Nullification(nullification) => (None, Some(nullification.view())),
             Certificate::Notarization(_) => (None, None),
         };
-        if let Some(nullified) = nullified
-            && nullified.term_end(self.state.term_length()) > self.last_finalized
-        {
-            self.known_nullifications.insert(nullified);
+        if let Some(nullified) = nullified {
+            let term_end = nullified.term_end(self.state.term_length());
+            if term_end > self.last_finalized {
+                self.known_nullifications.insert(nullified);
+            }
+            self.retire(resolver, Purpose::Nullification, nullified, term_end);
         }
         let effects = self.state.handle(certificate);
         self.apply_effects(resolver, effects);
@@ -247,7 +249,7 @@ impl<
     }
 
     /// Handles a certification outcome from the voter.
-    fn certified<R: Resolver<Key = U64, Subscriber = Subscription>>(
+    fn certified<R: Resolver<Key = U64, Subscriber = Purpose>>(
         &mut self,
         resolver: &mut R,
         view: View,
@@ -271,12 +273,13 @@ impl<
                 response.send_lossy(success);
             }
         }
+        self.retire(resolver, Purpose::Parent, view, view);
         let effects = self.state.handle_certified(view, success);
         self.apply_effects(resolver, effects);
     }
 
     /// Applies the side effects requested by [super::state::State] to the resolver.
-    fn apply_effects<R: Resolver<Key = U64, Subscriber = Subscription>>(
+    fn apply_effects<R: Resolver<Key = U64, Subscriber = Purpose>>(
         &mut self,
         resolver: &mut R,
         effects: Vec<Effect>,
@@ -288,19 +291,6 @@ impl<
                     cause,
                     reason,
                 } => self.fetch(resolver, view, cause, reason),
-                Effect::Retire {
-                    requirement,
-                    start,
-                    end,
-                } => {
-                    let start = U64::from(start);
-                    let end = U64::from(end);
-                    let _ = resolver.retain(move |candidate, subscription| {
-                        *candidate < start
-                            || *candidate > end
-                            || !subscription.is_retired_by(requirement)
-                    });
-                }
                 Effect::RetainAbove(floor) => {
                     // A certification at or below the floor may be aborted
                     // rather than reported, so a response held for it would
@@ -314,23 +304,32 @@ impl<
                         }
                     }
                     let floor = U64::from(floor);
-                    let _ = resolver.retain(move |candidate, subscription| match subscription {
-                        Subscription::Backfill => *candidate > floor,
-                        // A certified floor does not identify which proposal
-                        // ancestry requirement it satisfies. Matching
-                        // nullification and parent-certification effects prune
-                        // targeted subscribers separately; finalization is the
-                        // universal boundary.
-                        Subscription::Targeted(_) => true,
+                    let _ = resolver.retain(move |candidate, purpose| {
+                        purpose.is_targeted() || *candidate > floor
                     });
                 }
             }
         }
     }
 
+    /// Removes demand made unnecessary by matching terminal evidence.
+    fn retire<R: Resolver<Key = U64, Subscriber = Purpose>>(
+        &self,
+        resolver: &mut R,
+        resolved: Purpose,
+        start: View,
+        end: View,
+    ) {
+        let start = U64::from(start);
+        let end = U64::from(end);
+        let _ = resolver.retain(move |candidate, purpose| {
+            *candidate < start || *candidate > end || !purpose.is_retired_by(resolved)
+        });
+    }
+
     /// Issues a resolver fetch for `view`, attaching a span that records why the
     /// fetch was needed and which view's processing caused it.
-    fn fetch<R: Resolver<Key = U64, Subscriber = Subscription>>(
+    fn fetch<R: Resolver<Key = U64, Subscriber = Purpose>>(
         &self,
         resolver: &mut R,
         view: View,
@@ -346,7 +345,7 @@ impl<
         );
         let _ = resolver.fetch(Fetch {
             key: U64::from(view),
-            subscriber: Subscription::Backfill,
+            subscriber: Purpose::Backfill,
             span,
         });
     }
@@ -355,31 +354,31 @@ impl<
     fn resolve<R>(
         &self,
         resolver: &mut R,
-        round: Rnd,
+        proposal_view: View,
         view: View,
-        requirement: AncestryRequirement,
+        purpose: Purpose,
         target: S::PublicKey,
     ) where
-        R: TargetedResolver<Key = U64, Subscriber = Subscription, PublicKey = S::PublicKey>,
+        R: TargetedResolver<Key = U64, Subscriber = Purpose, PublicKey = S::PublicKey>,
     {
-        if view >= round.view()
+        if view >= proposal_view
             || view <= self.last_finalized
-            || self.requirement_resolved(view, requirement)
+            || self.purpose_resolved(view, purpose)
         {
             return;
         }
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
-            cause = round.view().traced(),
+            cause = proposal_view.traced(),
             view = view.traced(),
             reason = "proposal_ancestry",
-            requirement = requirement.as_str()
+            purpose = purpose.as_str()
         );
         let _ = resolver.fetch_targeted(
             Fetch {
                 key: U64::from(view),
-                subscriber: Subscription::Targeted(requirement),
+                subscriber: purpose,
                 span,
             },
             NonEmptyVec::new(target),
@@ -389,14 +388,15 @@ impl<
     /// Returns whether local evidence has already made this targeted demand
     /// unnecessary. Keeping this knowledge separately from resolver storage
     /// prevents an older queued request from resurrecting retired work.
-    fn requirement_resolved(&self, view: View, requirement: AncestryRequirement) -> bool {
-        match requirement {
-            AncestryRequirement::Nullification => self
+    fn purpose_resolved(&self, view: View, purpose: Purpose) -> bool {
+        match purpose {
+            Purpose::Nullification => self
                 .known_nullifications
                 .range(view.covering_range(self.state.term_length()))
                 .next_back()
                 .is_some(),
-            AncestryRequirement::Parent => self.resolved_parents.contains(&view),
+            Purpose::Parent => self.resolved_parents.contains(&view),
+            Purpose::Backfill => false,
         }
     }
 
@@ -485,7 +485,7 @@ impl<
     }
 
     /// Handles a message from the [p2p::Engine].
-    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Subscription>>(
+    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Purpose>>(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
@@ -598,9 +598,10 @@ mod tests {
     use commonware_cryptography::{
         certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
     };
-    use commonware_macros::test_async;
+    use commonware_macros::{select, test_async};
+    use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner, Supervisor, deterministic};
+    use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
     use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use std::{collections::BTreeSet, sync::Arc};
 
@@ -625,8 +626,8 @@ mod tests {
     /// Tracks the set of pending requests the way the resolver engine would.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        outstanding: Arc<Mutex<BTreeSet<(U64, Subscription)>>>,
-        targeted: Arc<Mutex<Vec<(U64, Subscription, PublicKey)>>>,
+        outstanding: Arc<Mutex<BTreeSet<(U64, Purpose)>>>,
+        targeted: Arc<Mutex<Vec<(U64, Purpose, PublicKey)>>>,
     }
 
     impl RecordingResolver {
@@ -640,7 +641,7 @@ mod tests {
                 .collect()
         }
 
-        fn targeted(&self) -> Vec<(u64, Subscription, PublicKey)> {
+        fn targeted(&self) -> Vec<(u64, Purpose, PublicKey)> {
             self.targeted
                 .lock()
                 .iter()
@@ -648,7 +649,7 @@ mod tests {
                 .collect()
         }
 
-        fn subscriptions(&self, view: u64) -> Vec<Subscription> {
+        fn subscriptions(&self, view: u64) -> Vec<Purpose> {
             self.outstanding
                 .lock()
                 .iter()
@@ -659,11 +660,11 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = U64;
-        type Subscriber = Subscription;
+        type Subscriber = Purpose;
 
         fn fetch<F>(&mut self, key: F) -> Feedback
         where
-            F: Into<Fetch<U64, Subscription>> + Send,
+            F: Into<Fetch<U64, Purpose>> + Send,
         {
             let fetch = key.into();
             self.outstanding
@@ -674,7 +675,7 @@ mod tests {
 
         fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<U64, Subscription>> + Send,
+            F: Into<Fetch<U64, Purpose>> + Send,
         {
             for key in keys {
                 self.fetch(key);
@@ -684,7 +685,7 @@ mod tests {
 
         fn retain(
             &mut self,
-            predicate: impl Fn(&U64, &Subscription) -> bool + Send + 'static,
+            predicate: impl Fn(&U64, &Purpose) -> bool + Send + 'static,
         ) -> Feedback {
             self.outstanding
                 .lock()
@@ -698,7 +699,7 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<U64, Subscription>> + Send,
+            fetch: impl Into<Fetch<U64, Purpose>> + Send,
             targets: NonEmptyVec<PublicKey>,
         ) -> Feedback {
             let fetch = fetch.into();
@@ -715,7 +716,7 @@ mod tests {
 
         fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<PublicKey>)>) -> Feedback
         where
-            F: Into<Fetch<U64, Subscription>> + Send,
+            F: Into<Fetch<U64, Purpose>> + Send,
         {
             for (fetch, targets) in fetches {
                 self.fetch_targeted(fetch, targets);
@@ -750,7 +751,181 @@ mod tests {
     }
 
     #[test_async]
-    async fn apply_effects_maintains_resolver_pending_set() {
+    async fn targeted_fetch_does_not_restrict_existing_backfill() {
+        let runtime = deterministic::Runner::timed(Duration::from_secs(10));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            let mut connections = Vec::new();
+            for participant in &participants {
+                connections.push(
+                    oracle
+                        .control(participant.clone())
+                        .register(2, Quota::per_second(NZU32!(1_000)))
+                        .await
+                        .unwrap(),
+                );
+            }
+            let mut connections = connections.into_iter();
+            let requester_connection = connections.next().unwrap();
+            let (_target_sender, mut target_receiver) = connections.next().unwrap();
+            let responder_connection = connections.next().unwrap();
+            let _unused_connection = connections.next().unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(
+                    participants[0].clone(),
+                    participants[1].clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    participants[1].clone(),
+                    participants[0].clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+
+            let (requester_voter_sender, mut requester_voter_receiver) =
+                mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let (requester, mut requester_mailbox) = TestActor::new(
+                context.child("requester"),
+                Config {
+                    scheme: schemes[0].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_concurrent: NZUsize!(4),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TermLength::ONE,
+                },
+            );
+            let _requester = requester.start(
+                voter::Mailbox::new(requester_voter_sender),
+                requester_connection.0,
+                requester_connection.1,
+            );
+
+            let (responder_voter_sender, _responder_voter_receiver) =
+                mailbox::new(context.child("responder_voter"), NZUsize!(8));
+            let (responder, mut responder_mailbox) = TestActor::new(
+                context.child("responder"),
+                Config {
+                    scheme: schemes[2].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_concurrent: NZUsize!(4),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TermLength::ONE,
+                },
+            );
+            let _responder = responder.start(
+                voter::Mailbox::new(responder_voter_sender),
+                responder_connection.0,
+                responder_connection.1,
+            );
+
+            let requested = View::new(1);
+            let available = build_nullification(&schemes, &verifier, EPOCH, requested);
+            responder_mailbox.updated(Certificate::Nullification(available.clone()));
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Advancing to view 2 creates unrestricted background demand for
+            // view 1. The only connected peer is the silent target, so seeing
+            // its request proves the background fetch is already in flight.
+            requester_mailbox.updated(Certificate::Nullification(build_nullification(
+                &schemes,
+                &verifier,
+                EPOCH,
+                View::new(2),
+            )));
+            let (requester_key, _) = select! {
+                request = target_receiver.recv() => request.expect("target channel closed"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("background request did not reach silent target");
+                },
+            };
+            assert_eq!(requester_key, participants[0]);
+
+            // Add targeted ancestry demand for the same key and silent peer.
+            // It must attach a subscriber without narrowing the in-flight
+            // unrestricted fetch.
+            requester_mailbox.resolve(
+                View::new(3),
+                requested,
+                Purpose::Nullification,
+                participants[1].clone(),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Remove the silent target and expose a different responder. If
+            // the targeted demand narrowed the fetch, recovery cannot finish.
+            oracle
+                .remove_link(participants[0].clone(), participants[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(participants[1].clone(), participants[0].clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    participants[0].clone(),
+                    participants[2].clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(participants[2].clone(), participants[0].clone(), link)
+                .await
+                .unwrap();
+
+            let recovered = select! {
+                message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("unrestricted fetch was narrowed to the silent target");
+                },
+            };
+            assert!(matches!(
+                recovered,
+                voter::Message::Verified {
+                    certificate: Certificate::Nullification(nullification),
+                    ..
+                } if nullification == available
+            ));
+        });
+    }
+
+    #[test_async]
+    async fn updates_maintain_resolver_pending_set() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -761,59 +936,45 @@ mod tests {
 
             // The first certificate opens the fetch window at the term anchors.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
-            let effects = actor
-                .state
-                .handle(Certificate::Nullification(nullification));
-            actor.apply_effects(&mut resolver, effects);
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);
 
             // A covering nullification retains out only its own term's requests
             // (here, the request at its own view): views below its start and
             // above its term end stay pending.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            let effects = actor
-                .state
-                .handle(Certificate::Nullification(nullification));
-            actor.apply_effects(&mut resolver, effects);
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
 
             // A mid-term floor raise drops the requests below it and re-scans
             // the stranded term tail (view 5).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(4));
-            let effects = actor.state.handle(Certificate::Finalization(finalization));
-            actor.apply_effects(&mut resolver, effects);
+            actor.updated(&mut resolver, Certificate::Finalization(finalization));
             assert_eq!(resolver.outstanding(), vec![5, 11, 16]);
 
             // A below-floor nullification covering the floor's term retains
             // out the request at its term end (view 5), not just the request
             // at its own view.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-            let effects = actor
-                .state
-                .handle(Certificate::Nullification(nullification));
-            actor.apply_effects(&mut resolver, effects);
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![11, 16]);
 
             // A floor raise drops the request at the floor view itself and
             // re-scans the stranded term tail (view 12).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(11));
-            let effects = actor.state.handle(Certificate::Finalization(finalization));
-            actor.apply_effects(&mut resolver, effects);
+            actor.updated(&mut resolver, Certificate::Finalization(finalization));
             assert_eq!(resolver.outstanding(), vec![12, 16]);
 
             // A nullification at the floor covering the floor's term retains
             // out mid-term requests strictly inside its range.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
-            let effects = actor
-                .state
-                .handle(Certificate::Nullification(nullification));
-            actor.apply_effects(&mut resolver, effects);
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![16]);
         });
     }
 
     #[test_async]
-    async fn targeted_fetches_drop_only_when_requirement_is_satisfied() {
+    async fn targeted_fetches_drop_only_when_purpose_is_satisfied() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -825,48 +986,39 @@ mod tests {
             let mut actor = build_actor(context, verifier.clone());
             let mut resolver = RecordingResolver::default();
             let requested = View::new(3);
-            let round = Rnd::new(EPOCH, View::new(10));
 
             actor.resolve(
                 &mut resolver,
-                round,
+                View::new(10),
                 requested,
-                AncestryRequirement::Nullification,
+                Purpose::Nullification,
                 participants[0].clone(),
             );
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(11)),
+                View::new(11),
                 requested,
-                AncestryRequirement::Parent,
+                Purpose::Parent,
                 participants[1].clone(),
             );
             resolver.fetch(Fetch {
                 key: U64::from(requested),
-                subscriber: Subscription::Backfill,
+                subscriber: Purpose::Backfill,
                 span: tracing::Span::none(),
             });
             assert_eq!(
                 resolver.targeted(),
                 vec![
-                    (
-                        3,
-                        Subscription::Targeted(AncestryRequirement::Nullification),
-                        participants[0].clone()
-                    ),
-                    (
-                        3,
-                        Subscription::Targeted(AncestryRequirement::Parent),
-                        participants[1].clone()
-                    ),
+                    (3, Purpose::Nullification, participants[0].clone()),
+                    (3, Purpose::Parent, participants[1].clone()),
                 ]
             );
             assert_eq!(
                 resolver.subscriptions(3),
                 vec![
-                    Subscription::Backfill,
-                    Subscription::Targeted(AncestryRequirement::Nullification),
-                    Subscription::Targeted(AncestryRequirement::Parent),
+                    Purpose::Backfill,
+                    Purpose::Nullification,
+                    Purpose::Parent,
                 ]
             );
 
@@ -880,22 +1032,19 @@ mod tests {
                     &schemes, &verifier, EPOCH, requested,
                 )),
             );
-            assert_eq!(
-                resolver.subscriptions(3),
-                vec![Subscription::Targeted(AncestryRequirement::Parent)]
-            );
+            assert_eq!(resolver.subscriptions(3), vec![Purpose::Parent]);
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(14)),
+                View::new(14),
                 requested,
-                AncestryRequirement::Nullification,
+                Purpose::Nullification,
                 participants[2].clone(),
             );
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(14)),
+                View::new(14),
                 requested.next(),
-                AncestryRequirement::Nullification,
+                Purpose::Nullification,
                 participants[2].clone(),
             );
             assert_eq!(resolver.targeted().len(), 2);
@@ -906,36 +1055,33 @@ mod tests {
             let second_requested = requested.next_term_start(actor.state.term_length());
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(12)),
+                View::new(12),
                 second_requested,
-                AncestryRequirement::Nullification,
+                Purpose::Nullification,
                 participants[2].clone(),
             );
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(13)),
+                View::new(13),
                 second_requested,
-                AncestryRequirement::Parent,
+                Purpose::Parent,
                 participants[3].clone(),
             );
             resolver.fetch(Fetch {
                 key: U64::from(second_requested),
-                subscriber: Subscription::Backfill,
+                subscriber: Purpose::Backfill,
                 span: tracing::Span::none(),
             });
             actor.certified(&mut resolver, second_requested, true);
             assert_eq!(
                 resolver.subscriptions(6),
-                vec![
-                    Subscription::Backfill,
-                    Subscription::Targeted(AncestryRequirement::Nullification),
-                ]
+                vec![Purpose::Backfill, Purpose::Nullification,]
             );
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(14)),
+                View::new(14),
                 second_requested,
-                AncestryRequirement::Parent,
+                Purpose::Parent,
                 participants[0].clone(),
             );
             assert_eq!(resolver.targeted().len(), 4);
@@ -961,9 +1107,9 @@ mod tests {
             assert!(actor.resolved_parents.is_empty());
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, finalized.next()),
+                finalized.next(),
                 requested,
-                AncestryRequirement::Parent,
+                Purpose::Parent,
                 participants[0].clone(),
             );
             assert!(resolver.outstanding().is_empty());
@@ -999,16 +1145,14 @@ mod tests {
             actor.certified(&mut resolver, view, true);
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(10)),
+                View::new(10),
                 view,
-                AncestryRequirement::Nullification,
+                Purpose::Nullification,
                 participants[0].clone(),
             );
             assert_eq!(
                 resolver.subscriptions(3),
-                vec![Subscription::Targeted(
-                    AncestryRequirement::Nullification
-                )]
+                vec![Purpose::Nullification]
             );
 
             // The resolver still prefers the certified floor when producing
@@ -1026,9 +1170,9 @@ mod tests {
             );
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(11)),
+                View::new(11),
                 view,
-                AncestryRequirement::Nullification,
+                Purpose::Nullification,
                 participants[1].clone(),
             );
             assert_eq!(resolver.targeted().len(), 1);
@@ -1051,9 +1195,9 @@ mod tests {
 
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(10)),
+                View::new(10),
                 view,
-                AncestryRequirement::Parent,
+                Purpose::Parent,
                 participants[0].clone(),
             );
             actor.updated(
@@ -1065,12 +1209,12 @@ mod tests {
             // A false certification verdict is permanent. Parent repair is
             // retired, while ordinary repair asks for the nullification that
             // can now cover the failed view.
-            assert_eq!(resolver.subscriptions(5), vec![Subscription::Backfill]);
+            assert_eq!(resolver.subscriptions(5), vec![Purpose::Backfill]);
             actor.resolve(
                 &mut resolver,
-                Rnd::new(EPOCH, View::new(11)),
+                View::new(11),
                 view,
-                AncestryRequirement::Parent,
+                Purpose::Parent,
                 participants[1].clone(),
             );
             assert_eq!(resolver.targeted().len(), 1);

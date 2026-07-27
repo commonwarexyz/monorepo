@@ -6279,7 +6279,9 @@ mod tests {
                 build_nullification(&schemes, Round::new(Epoch::new(333), view5), quorum);
             mailbox.recovered(Certificate::Nullification(nullification));
 
-            // Even after nullification, late certification should still be forwarded to resolver.
+            // Gossip must update resolver lifecycle state, and late
+            // certification must still be reported after nullification.
+            let mut nullification_forwarded = false;
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
@@ -6287,6 +6289,12 @@ mod tests {
                             if round.view() == view5 =>
                         {
                             break Some(success);
+                        }
+                        MailboxMessage::Certificate {
+                            certificate: Certificate::Nullification(nullification),
+                            ..
+                        } if nullification.view() == view5 => {
+                            nullification_forwarded = true;
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Certificate { .. }
@@ -6305,6 +6313,10 @@ mod tests {
                 reported,
                 Some(true),
                 "expected resolver to receive successful certification after nullification"
+            );
+            assert!(
+                nullification_forwarded,
+                "batcher gossip did not update resolver lifecycle state"
             );
         });
     }

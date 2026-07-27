@@ -1,4 +1,4 @@
-use super::{super::AncestryRequirement, round::Round};
+use super::{super::Purpose, round::Round};
 use crate::{
     Viewable,
     simplex::{
@@ -88,12 +88,12 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
     Ready(Context<D, S::PublicKey>, Proposal<D>),
     /// The proposal needs an ancestry certificate from its leader.
     Resolve {
-        /// Round containing the proposal that needs the certificate.
-        round: Rnd,
+        /// View containing the proposal that needs the certificate.
+        proposal_view: View,
         /// View whose certificate is needed.
         view: View,
-        /// Evidence needed for the proposal's ancestry.
-        requirement: AncestryRequirement,
+        /// Why the certificate is needed.
+        purpose: Purpose,
         /// Leader that must hold the certificate to have built the proposal.
         target: S::PublicKey,
     },
@@ -769,12 +769,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                let (requested, requirement) = match err {
+                let (requested, purpose) = match err {
                     ParentPayloadError::MissingNullification { missing_view, .. } => {
-                        (missing_view, AncestryRequirement::Nullification)
+                        (missing_view, Purpose::Nullification)
                     }
                     ParentPayloadError::ParentNotCertified { parent_view, .. } => {
-                        (parent_view, AncestryRequirement::Parent)
+                        (parent_view, Purpose::Parent)
                     }
                     ParentPayloadError::ParentNotBeforeProposal { .. }
                     | ParentPayloadError::IntraTermProposalSkipsViews { .. }
@@ -784,14 +784,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     .views
                     .get_mut(&view)
                     .expect("current round must exist")
-                    .request(requested, requirement)
+                    .request(requested)
                 {
                     return Verify::Wait;
                 }
                 return Verify::Resolve {
-                    round: proposal.round,
+                    proposal_view: proposal.view(),
                     view: requested,
-                    requirement,
+                    purpose,
                     target: leader.key,
                 };
             }
@@ -3468,14 +3468,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == parent_view
-                        && requirement == AncestryRequirement::Parent
+                        && purpose == Purpose::Parent
             ));
 
             // Late certification after nullification should unblock parent check for verification.
@@ -3652,14 +3652,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == blocked_view
-                        && requirement == AncestryRequirement::Nullification
+                        && purpose == Purpose::Nullification
             ));
             assert_eq!(state.next_timeout(), initial_deadline);
 
@@ -3733,14 +3733,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     target,
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == skipped_view
-                        && requirement == AncestryRequirement::Nullification
+                        && purpose == Purpose::Nullification
                         && target == expected_leader
             ));
 
@@ -3782,14 +3782,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == parent_view
-                        && requirement == AncestryRequirement::Parent
+                        && purpose == Purpose::Parent
             ));
 
             // A kindless response can instead contain the leader's preferred
@@ -3874,14 +3874,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == View::new(2)
-                        && requirement == AncestryRequirement::Nullification
+                        && purpose == Purpose::Nullification
             ));
         });
     }
@@ -3915,7 +3915,7 @@ mod tests {
                 state.try_verify(),
                 Verify::Resolve {
                     view,
-                    requirement: AncestryRequirement::Nullification,
+                    purpose: Purpose::Nullification,
                     ..
                 } if view == skipped_view
             ));
@@ -3942,14 +3942,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == retry_view
+                    if proposal_view == retry_view
                         && view == skipped_view
-                        && requirement == AncestryRequirement::Nullification
+                        && purpose == Purpose::Nullification
             ));
         });
     }
@@ -3986,14 +3986,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == skipped_view
-                        && requirement == AncestryRequirement::Nullification
+                        && purpose == Purpose::Nullification
             ));
 
             // Certification does not duplicate the still-active request.
@@ -4031,14 +4031,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == View::new(2)
-                        && requirement == AncestryRequirement::Parent
+                        && purpose == Purpose::Parent
             ));
         });
     }
@@ -4076,14 +4076,14 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    round,
+                    proposal_view,
                     view,
-                    requirement,
+                    purpose,
                     ..
                 }
-                    if round.view() == child_view
+                    if proposal_view == child_view
                         && view == View::new(2)
-                        && requirement == AncestryRequirement::Nullification
+                        && purpose == Purpose::Nullification
             ));
         });
     }

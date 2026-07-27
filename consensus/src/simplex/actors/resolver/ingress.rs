@@ -1,6 +1,6 @@
 use crate::{
     Epochable, Viewable,
-    simplex::{actors::AncestryRequirement, types::Certificate},
+    simplex::{actors::Purpose, types::Certificate},
     types::{Round as Rnd, View},
 };
 use bytes::Bytes;
@@ -11,35 +11,6 @@ use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 use tracing::{Span, info_span};
-
-/// Purpose attached to a resolver fetch.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum Subscription {
-    /// Background repair between the local floor and current view.
-    Backfill,
-    /// Ancestry requested from a leader whose proposal claimed it.
-    Targeted(AncestryRequirement),
-}
-
-impl Subscription {
-    /// Returns whether this subscriber came from proposal-targeted repair.
-    const fn is_targeted(self) -> bool {
-        matches!(self, Self::Targeted(_))
-    }
-
-    /// Returns whether local resolution of `requirement` retires this
-    /// subscriber.
-    ///
-    /// This does not constrain response validity: any certificate valid for
-    /// the peer-visible key completes every subscriber in that delivery.
-    pub(super) fn is_retired_by(self, requirement: AncestryRequirement) -> bool {
-        match self {
-            // Background repair only requests missing nullifications.
-            Self::Backfill => matches!(requirement, AncestryRequirement::Nullification),
-            Self::Targeted(expected) => expected == requirement,
-        }
-    }
-}
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
@@ -63,12 +34,12 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
     Resolve {
         /// The span carried with this message.
         span: Span,
-        /// Round of the proposal being verified.
-        round: Rnd,
+        /// View of the proposal being verified.
+        proposal_view: View,
         /// View whose certificate is needed.
         view: View,
-        /// Evidence needed for the proposal's ancestry.
-        requirement: AncestryRequirement,
+        /// Why the certificate is needed.
+        purpose: Purpose,
         /// Proposal leader to query.
         target: S::PublicKey,
     },
@@ -208,22 +179,16 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 ) => new_round.view() == old_round.view(),
                 (
                     Self::Resolve {
-                        round: new_round,
+                        proposal_view: new_proposal,
                         view: new_view,
-                        requirement: new_requirement,
                         ..
                     },
                     Self::Resolve {
-                        round: old_round,
+                        proposal_view: old_proposal,
                         view: old_view,
-                        requirement: old_requirement,
                         ..
                     },
-                ) => {
-                    new_round == old_round
-                        && new_view == old_view
-                        && new_requirement == old_requirement
-                }
+                ) => new_proposal == old_proposal && new_view == old_view,
                 _ => false,
             })
         {
@@ -273,22 +238,21 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Request proposal ancestry from its leader.
     pub(crate) fn resolve(
         &mut self,
-        round: Rnd,
+        proposal_view: View,
         view: View,
-        requirement: AncestryRequirement,
+        purpose: Purpose,
         target: S::PublicKey,
     ) {
         let _ = self.sender.enqueue(MailboxMessage::Resolve {
             span: info_span!(
                 "simplex.resolver.mailbox.resolve",
-                epoch = round.epoch().traced(),
-                proposal_view = round.view().traced(),
+                proposal_view = proposal_view.traced(),
                 view = view.traced(),
-                requirement = requirement.as_str()
+                purpose = purpose.as_str()
             ),
-            round,
+            proposal_view,
             view,
-            requirement,
+            purpose,
             target,
         });
     }
@@ -370,7 +334,7 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
-    type Subscriber = Subscription;
+    type Subscriber = Purpose;
 
     fn deliver(
         &mut self,
@@ -499,14 +463,8 @@ mod tests {
                 Delivery {
                     key: U64::from(View::new(3)),
                     subscribers: non_empty_vec![
-                        (
-                            Subscription::Targeted(AncestryRequirement::Nullification),
-                            Span::none()
-                        ),
-                        (
-                            Subscription::Targeted(AncestryRequirement::Parent),
-                            Span::none()
-                        )
+                        (Purpose::Nullification, Span::none()),
+                        (Purpose::Parent, Span::none())
                     ],
                 },
                 Bytes::new(),
@@ -520,11 +478,8 @@ mod tests {
                 Delivery {
                     key: U64::from(View::new(3)),
                     subscribers: non_empty_vec![
-                        (
-                            Subscription::Targeted(AncestryRequirement::Parent),
-                            Span::none()
-                        ),
-                        (Subscription::Backfill, Span::none())
+                        (Purpose::Parent, Span::none()),
+                        (Purpose::Backfill, Span::none())
                     ],
                 },
                 Bytes::new(),
@@ -550,15 +505,15 @@ mod tests {
     fn resolve_msg(
         proposal_view: View,
         view: View,
-        requirement: AncestryRequirement,
+        purpose: Purpose,
     ) -> MailboxMessage<TestScheme, Sha256Digest> {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, b"resolver-policy-target", 5);
         MailboxMessage::Resolve {
             span: Span::none(),
-            round: Round::new(EPOCH, proposal_view),
+            proposal_view,
             view,
-            requirement,
+            purpose,
             target: participants[0].clone(),
         }
     }
@@ -635,15 +590,11 @@ mod tests {
         let mut overflow = Pending::default();
         MailboxMessage::handle(
             &mut overflow,
-            resolve_msg(
-                View::new(10),
-                View::new(2),
-                AncestryRequirement::Nullification,
-            ),
+            resolve_msg(View::new(10), View::new(2), Purpose::Nullification),
         );
         MailboxMessage::handle(
             &mut overflow,
-            resolve_msg(View::new(10), View::new(5), AncestryRequirement::Parent),
+            resolve_msg(View::new(10), View::new(5), Purpose::Parent),
         );
         MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
 
@@ -657,41 +608,34 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Resolve {
-                round,
+                proposal_view,
                 view,
-                requirement: AncestryRequirement::Parent,
+                purpose: Purpose::Parent,
                 ..
-            }) if round.view() == View::new(10) && view == View::new(5)
+            }) if proposal_view == View::new(10) && view == View::new(5)
         ));
     }
 
     #[test]
-    fn resolve_requirements_deduplicate_independently() {
+    fn resolve_deduplicates_by_proposal_and_requested_view() {
         let mut overflow = Pending::default();
-        for requirement in [
-            AncestryRequirement::Nullification,
-            AncestryRequirement::Nullification,
-            AncestryRequirement::Parent,
+        for purpose in [
+            Purpose::Nullification,
+            Purpose::Nullification,
+            Purpose::Parent,
         ] {
             MailboxMessage::handle(
                 &mut overflow,
-                resolve_msg(View::new(10), View::new(3), requirement),
+                resolve_msg(View::new(10), View::new(3), purpose),
             );
         }
 
         let overflow = drain(overflow);
-        assert_eq!(overflow.len(), 2);
+        assert_eq!(overflow.len(), 1);
         assert!(matches!(
             &overflow[0],
             MailboxMessage::Resolve {
-                requirement: AncestryRequirement::Nullification,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &overflow[1],
-            MailboxMessage::Resolve {
-                requirement: AncestryRequirement::Parent,
+                purpose: Purpose::Nullification,
                 ..
             }
         ));
@@ -725,16 +669,12 @@ mod tests {
         MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(2))));
         MailboxMessage::handle(
             &mut overflow,
-            resolve_msg(
-                View::new(10),
-                View::new(2),
-                AncestryRequirement::Nullification,
-            ),
+            resolve_msg(View::new(10), View::new(2), Purpose::Nullification),
         );
         MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(4))));
         MailboxMessage::handle(
             &mut overflow,
-            resolve_msg(View::new(10), View::new(4), AncestryRequirement::Parent),
+            resolve_msg(View::new(10), View::new(4), Purpose::Parent),
         );
 
         let mut overflow = drain(overflow);
@@ -753,7 +693,7 @@ mod tests {
             overflow.pop_front(),
             Some(MailboxMessage::Resolve {
                 view,
-                requirement: AncestryRequirement::Parent,
+                purpose: Purpose::Parent,
                 ..
             }) if view == View::new(4)
         ));

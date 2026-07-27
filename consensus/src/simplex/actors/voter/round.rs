@@ -1,7 +1,4 @@
-use super::{
-    super::AncestryRequirement,
-    slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus},
-};
+use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
         actors::span::ViewSpan,
@@ -72,10 +69,9 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalize: bool,
     broadcast_finalization: bool,
     certify: CertifyState,
-    // Last ancestry requirement requested from this round's leader. Ancestry
-    // only grows as certificates arrive, so a different request always
-    // advances the proposal toward verification.
-    requested: Option<(View, AncestryRequirement)>,
+    // Last ancestry view requested from this round's leader. For a fixed
+    // proposal, each view is either skipped or the named parent, never both.
+    requested: Option<View>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -153,13 +149,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Records an ancestry view requested from the leader. Returns `false`
-    /// when the same request is already active.
-    pub fn request(&mut self, view: View, requirement: AncestryRequirement) -> bool {
-        let request = (view, requirement);
-        if self.requested == Some(request) {
+    /// when the same view was already requested.
+    pub fn request(&mut self, view: View) -> bool {
+        if self.requested == Some(view) {
             return false;
         }
-        self.requested = Some(request);
+        self.requested = Some(view);
         true
     }
 
@@ -707,7 +702,7 @@ mod tests {
     use commonware_utils::{futures::AbortablePool, test_rng};
 
     #[test]
-    fn ancestry_request_deduplicates_exact_requirement() {
+    fn ancestry_request_deduplicates_view() {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
         let round_info = Rnd::new(Epoch::new(1), View::new(10));
@@ -715,10 +710,10 @@ mod tests {
             Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
         let requested = View::new(3);
 
-        assert!(round.request(requested, AncestryRequirement::Nullification));
-        assert!(!round.request(requested, AncestryRequirement::Nullification));
-        assert!(round.request(requested, AncestryRequirement::Parent));
-        assert!(!round.request(requested, AncestryRequirement::Parent));
+        assert!(round.request(requested));
+        assert!(!round.request(requested));
+        assert!(round.request(requested.next()));
+        assert!(!round.request(requested.next()));
     }
 
     #[test]

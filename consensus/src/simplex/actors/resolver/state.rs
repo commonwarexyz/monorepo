@@ -1,9 +1,6 @@
 use crate::{
     Viewable,
-    simplex::{
-        actors::AncestryRequirement,
-        types::{Certificate, Notarization},
-    },
+    simplex::types::{Certificate, Notarization},
     types::{TermLength, View},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
@@ -38,12 +35,6 @@ pub(crate) enum Effect {
         cause: View,
         /// Why the fetch is needed.
         reason: FetchReason,
-    },
-    /// Demand for `requirement` is resolved over this inclusive range.
-    Retire {
-        requirement: AncestryRequirement,
-        start: View,
-        end: View,
     },
     /// Retain only views above this floor.
     RetainAbove(View),
@@ -108,15 +99,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         match certificate {
             Certificate::Nullification(nullification) => {
                 let view = nullification.view();
-                // A nullification can still be needed by proposal ancestry at
-                // or below a certified floor. Retire that targeted demand even
-                // when the certificate is no longer useful to background
-                // repair and is therefore not retained below.
-                effects.push(Effect::Retire {
-                    requirement: AncestryRequirement::Nullification,
-                    start: view,
-                    end: view.term_end(self.term_length),
-                });
                 if covers_above_floor(view, self.term_length, self.floor_view()) {
                     self.nullifications
                         .insert(view, Certificate::Nullification(nullification));
@@ -144,14 +126,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Handle a certification result from the voter.
     pub fn handle_certified(&mut self, view: View, success: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
-        // Certification is terminal. Success makes this exact view a usable
-        // parent; failure permanently rules it out and makes fetching another
-        // notarization for it useless.
-        effects.push(Effect::Retire {
-            requirement: AncestryRequirement::Parent,
-            start: view,
-            end: view,
-        });
         if success {
             // Certification passed: raise the floor to the notarization if we
             // still hold it. This may occur before or after a nullification
@@ -338,36 +312,11 @@ mod tests {
         }
     }
 
-    fn retire_nullification(start: u64, end: u64) -> Effect {
-        Effect::Retire {
-            requirement: AncestryRequirement::Nullification,
-            start: View::new(start),
-            end: View::new(end),
-        }
-    }
-
-    fn retire_parent(view: u64) -> Effect {
-        Effect::Retire {
-            requirement: AncestryRequirement::Parent,
-            start: View::new(view),
-            end: View::new(view),
-        }
-    }
-
     fn apply_effects(outstanding: &mut BTreeSet<View>, effects: &[Effect]) {
         for effect in effects {
             match *effect {
                 Effect::Fetch { view, .. } => {
                     outstanding.insert(view);
-                }
-                Effect::Retire {
-                    requirement,
-                    start,
-                    end,
-                } => {
-                    if requirement == AncestryRequirement::Nullification {
-                        outstanding.retain(|view| *view < start || *view > end);
-                    }
                 }
                 Effect::RetainAbove(floor) => {
                     outstanding.retain(|view| *view > floor);
@@ -388,7 +337,13 @@ mod tests {
 
         let nullification_v4 = build_nullification(&schemes, &verifier, EPOCH, View::new(4));
         let effects = state.handle(Certificate::Nullification(nullification_v4.clone()));
-        assert_eq!(effects[0], retire_nullification(4, 4));
+        assert_eq!(
+            effects,
+            vec![
+                fetch(1, 4, FetchReason::MissingNullification),
+                fetch(2, 4, FetchReason::MissingNullification),
+            ]
+        );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(
@@ -398,7 +353,11 @@ mod tests {
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
         let effects = state.handle(Certificate::Nullification(nullification_v2.clone()));
-        assert_eq!(effects[0], retire_nullification(2, 2));
+        assert_eq!(
+            effects,
+            vec![fetch(3, 2, FetchReason::MissingNullification)]
+        );
+        outstanding.remove(&View::new(2));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(
@@ -408,7 +367,8 @@ mod tests {
 
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
         let effects = state.handle(Certificate::Nullification(nullification_v1.clone()));
-        assert_eq!(effects[0], retire_nullification(1, 1));
+        assert!(effects.is_empty());
+        outstanding.remove(&View::new(1));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(
@@ -429,7 +389,6 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                retire_nullification(14, 15),
                 fetch(1, 14, FetchReason::MissingNullification),
                 fetch(6, 14, FetchReason::MissingNullification),
                 fetch(11, 14, FetchReason::MissingNullification),
@@ -440,11 +399,13 @@ mod tests {
 
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
         let effects = state.handle(Certificate::Nullification(nullification_v1));
+        outstanding.remove(&View::new(1));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![6, 11]);
 
         let nullification_v6 = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
         let effects = state.handle(Certificate::Nullification(nullification_v6));
+        outstanding.remove(&View::new(6));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![11]);
     }
@@ -496,6 +457,7 @@ mod tests {
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
         let effects = state.handle(Certificate::Nullification(nullification_v2.clone()));
+        outstanding.remove(&View::new(4));
         apply_effects(&mut outstanding, &effects);
 
         assert!(outstanding.is_empty());
@@ -519,7 +481,7 @@ mod tests {
 
         let nullification_v2 = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
         let effects = state.handle(Certificate::Nullification(nullification_v2.clone()));
-        assert_eq!(effects, vec![retire_nullification(2, 5)]);
+        assert!(effects.is_empty());
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
@@ -530,7 +492,7 @@ mod tests {
         assert!(state.nullifications.is_empty());
 
         let effects = state.handle(Certificate::Nullification(nullification_v2));
-        assert_eq!(effects, vec![retire_nullification(2, 5)]);
+        assert!(effects.is_empty());
         assert!(state.nullifications.is_empty());
     }
 
@@ -584,7 +546,7 @@ mod tests {
 
         let nullification_v4 = build_nullification(&schemes, &verifier, EPOCH, View::new(4));
         let effects = state.handle(Certificate::Nullification(nullification_v4.clone()));
-        assert_eq!(effects, vec![retire_nullification(4, 4)]);
+        assert!(effects.is_empty());
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
@@ -594,7 +556,7 @@ mod tests {
 
         let nullification_v1 = build_nullification(&schemes, &verifier, EPOCH, View::new(1));
         let effects = state.handle(Certificate::Nullification(nullification_v1));
-        assert_eq!(effects, vec![retire_nullification(1, 1)]);
+        assert!(effects.is_empty());
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -655,17 +617,11 @@ mod tests {
         // Certification fails for view 5
         let effects = state.handle_certified(View::new(5), false);
 
-        // View 5 is marked failed, targeted parent demand is retired, and only
-        // the failed view gets a new background request. Requests answered by
-        // the failed notarization are retried by the resolver engine.
+        // View 5 is marked failed and only the failed view gets a new
+        // background request. Requests answered by the failed notarization
+        // are retried by the resolver engine.
         assert!(state.is_failed(View::new(5)));
-        assert_eq!(
-            effects,
-            vec![
-                retire_parent(5),
-                fetch(5, 5, FetchReason::CertificationFailed),
-            ]
-        );
+        assert_eq!(effects, vec![fetch(5, 5, FetchReason::CertificationFailed)]);
     }
 
     #[test]
@@ -693,34 +649,8 @@ mod tests {
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
-        assert_eq!(
-            effects,
-            vec![retire_parent(5), Effect::RetainAbove(View::new(5))]
-        );
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
         assert!(!state.is_failed(View::new(5)));
-    }
-
-    #[test]
-    fn certification_satisfies_exact_parent_below_higher_floor() {
-        let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
-
-        let lower = View::new(3);
-        let higher = View::new(5);
-        state.handle(Certificate::Notarization(build_notarization(
-            &schemes, &verifier, EPOCH, lower,
-        )));
-        state.handle(Certificate::Notarization(build_notarization(
-            &schemes, &verifier, EPOCH, higher,
-        )));
-        state.handle_certified(higher, true);
-
-        // Raising the floor prunes the lower candidate, but a delayed valid
-        // certification result still completes a request for that exact
-        // parent. A numeric floor raise alone would not do so.
-        let effects = state.handle_certified(lower, true);
-        assert_eq!(effects, vec![retire_parent(3)]);
-        assert_eq!(state.floor_view(), higher);
     }
 
     #[test]
@@ -835,7 +765,6 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                retire_nullification(14, 15),
                 fetch(1, 14, FetchReason::MissingNullification),
                 fetch(6, 14, FetchReason::MissingNullification),
                 fetch(11, 14, FetchReason::MissingNullification),
@@ -857,10 +786,7 @@ mod tests {
         let effects = state.handle(Certificate::Nullification(nullification_v20));
         assert_eq!(
             effects,
-            vec![
-                retire_nullification(20, 20),
-                fetch(16, 20, FetchReason::MissingNullification),
-            ]
+            vec![fetch(16, 20, FetchReason::MissingNullification)]
         );
     }
 
@@ -883,7 +809,7 @@ mod tests {
 
         let effects = state.handle_certified(View::new(5), false);
         assert!(state.is_failed(View::new(5)));
-        assert_eq!(effects, vec![retire_parent(5)]);
+        assert!(effects.is_empty());
     }
 
     #[test]
@@ -903,10 +829,7 @@ mod tests {
             ]
         );
         let effects = state.handle_certified(View::new(5), true);
-        assert_eq!(
-            effects,
-            vec![retire_parent(5), Effect::RetainAbove(View::new(5))]
-        );
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
 
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)

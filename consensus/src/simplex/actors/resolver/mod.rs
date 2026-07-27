@@ -28,63 +28,38 @@
 //!
 //! Background repair cannot detect a split where one participant certified a notarization and
 //! another holds a covering nullification for the same view: both consider that view complete.
-//! A proposal exposes both the exact missing ancestry view and an elected leader that must hold
-//! evidence for it. The voter therefore adds a targeted subscriber for the existing view key.
-//! It uses the same certificate response format as background repair.
-//! Resolver work is deduplicated by key: if an unrestricted background subscriber already exists
-//! when a response is delivered, that shared fetch remains unrestricted rather than being narrowed
-//! to the proposal leader, and delivery is treated as background repair. A background subscriber
-//! added while a targeted-only response is being validated does not retroactively change that
-//! delivery's classification or request an immediate re-gossip.
+//! A proposal exposes the missing view and a leader that must hold useful evidence, so the voter
+//! adds a targeted purpose to the existing view key. The request and encoded certificate response
+//! are unchanged; see [the Simplex overview](crate::simplex) for the protocol rationale.
 //!
-//! The key does not identify a certificate kind. A producer deterministically serves its
-//! certified or finalized floor when it covers the key, preferring that floor when a covering
-//! nullification also exists; otherwise it serves the nullification. If the producer's floor
-//! changed after it constructed the proposal, the response may align the next proposal instead
-//! of repairing the current one.
+//! The wire key does not identify a certificate kind. A producer serves its certified or finalized
+//! floor when it covers the key, preferring that floor when a nullification also exists; otherwise
+//! it serves the covering nullification. A late floor change or Byzantine proposal can therefore
+//! produce a valid response that does not repair the triggering proposal. Such a kind mismatch is
+//! accepted without faulting the peer, and the voter reruns the full ancestry check before voting.
+//! Malformed, key-incompatible, or cryptographically invalid evidence is rejected. Notarizations
+//! additionally remain pending until application certification, whose terminal failure also
+//! produces a negative verdict. A later proposal can request the view again.
 //!
-//! The peer-visible key remains kindless, but each local subscriber records whether it needs a
-//! covering nullification or the named certified parent. A covering nullification removes
-//! background demand and targeted nullification demand throughout its term while preserving
-//! targeted parent demand. A terminal certification verdict removes targeted parent demand at
-//! that exact view while preserving nullification demand: success supplies the parent, while
-//! failure permanently rules it out and starts background nullification repair. A certified-floor
-//! increase alone cannot identify either requirement and therefore does not remove targeted
-//! subscribers. Finalization is the universal boundary: it removes every subscriber at or below
-//! its view, and queued requests are pruned by their ancestry view so delayed proposal work cannot
-//! recreate them. Resolved requirements are remembered locally until finalization makes their
-//! range irrelevant, preventing an older queued request from resurrecting work after matching
-//! evidence was processed.
+//! Local fetch purposes govern retention, not response validity. A nullification removes background
+//! and targeted-nullification demand throughout its term. A terminal certification verdict removes
+//! targeted-parent demand at its exact view. A floor raise alone removes only background demand;
+//! finalization removes all demand at or below its view. Tombstones prevent delayed mailbox work
+//! from recreating demand after matching evidence or finalization.
 //!
-//! A valid response completes the subscribers to which the resolver delivered it even if its kind
-//! does not satisfy an older proposal. It still communicates the producer's current deterministic
-//! ancestry preference, and a later proposal can re-arm the view if necessary. Kind mismatch alone
-//! is not a validation failure and does not fault the serving peer. Only malformed,
-//! key-incompatible, or cryptographically invalid evidence, or a notarization whose application
-//! certification terminates unsuccessfully, receives a failure verdict. Later proposals can also
-//! add leaders to the target set while a request remains active. Targets are key-scoped, so a target
-//! made obsolete by matching local evidence can remain attached while another subscriber keeps the
-//! same key active. Consequently, distinct unsatisfied targeted keys and some obsolete targets can
-//! accumulate while finalization is stalled; there is no independent bound on this local request
-//! state. This lifetime avoids relying on elapsed time or proposal age for correctness.
+//! Resolver work is deduplicated by key. A shared background subscriber keeps the fetch unrestricted
+//! and follows the normal gossip path; background demand arriving during validation does not
+//! retroactively reclassify a targeted-only delivery. Targeted-only delivery suppresses immediate
+//! certificate gossip, though timeout retry may later include the certificate as view-entry
+//! evidence.
 //!
-//! A valid response need not satisfy the triggering proposal. A late floor raise can make an
-//! honest leader return a newly preferred notarization instead of the nullification used to build
-//! its proposal, while a Byzantine leader can name an uncertified parent and return its preferred
-//! nullification. The voter requests a particular view only once per round to avoid a response
-//! loop. It votes only if the resulting ancestry is complete; a later proposal can arm another
-//! request for the same view.
-//!
-//! This pull takes a request and response after the mismatch is detected, while broadcasting
-//! conflicting evidence takes one message delay. When the fetch remains targeted, the extra delay
-//! retrieves the leader's current preferred evidence without all-peer fanout. Repairing the
-//! triggering proposal is opportunistic: the
-//! response and application verification must both complete before its timer expires. If the
-//! response is still outstanding at that point, the request remains active unless matching local
-//! evidence or finalization retires it. If the response has completed, its evidence remains
-//! available even though the fetch itself is done. Targeted-only delivery does not cause an
-//! immediate certificate broadcast, although ordinary timeout-retry logic can later include the
-//! certificate in a view-entry broadcast.
+//! Unanswered targeted demand persists until matching evidence or finalization, without an elapsed
+//! time or proposal-age heuristic. Distinct keys can therefore accumulate while finalization
+//! stalls, and a key-scoped target can remain while another subscriber keeps the key active. A
+//! targeted pull costs a request and response instead of one broadcast delay, but avoids all-peer
+//! fanout. It rescues the triggering proposal only if the response and application work complete
+//! before that proposal's timer expires; later proposals still benefit from evidence that arrives
+//! after the timer.
 //!
 //! # Mid-Term Floor Raises
 //!
