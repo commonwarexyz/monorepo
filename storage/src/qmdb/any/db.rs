@@ -922,6 +922,7 @@ where
         self.advance_durable();
         let (log, handle) = self.log.start_sync().await?;
         self.log = log;
+
         // Installing the journal's new barrier observes its predecessor. Promote the old
         // frontier before replacing it, then record the state covered by this sync.
         self.advance_durable();

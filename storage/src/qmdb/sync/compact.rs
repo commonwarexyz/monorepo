@@ -22,16 +22,14 @@
 //! Ordinary mutations become servable only on durable persistence:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
-//! - [`Database::from_validated_state`] reconstructs the already-validated state without
-//!   persisting it. That imported tip is immediately servable from memory, but is not restart
-//!   stable until [`Database::persist_compact_state`] succeeds; older on-disk witnesses are not
-//!   exposed while replacement is pending.
+//! - [`Database::from_validated_state`] makes validated state immediately servable;
+//!   [`Database::persist_compact_state`] makes it restart-stable.
 //! - Compact db persistence appends one witness entry during `commit` or `sync`.
 //! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
-//! Outside that validated-import exception, unsynced in-memory mutations are intentionally not
-//! servable: `target()` and compact-state responses lag behind `apply_batch()` until the db's next
-//! sync. A target identifies the currently servable witness; it is not itself a durability signal.
+//! Other unsynced in-memory mutations are intentionally not servable: `target()` and compact-state
+//! responses lag behind `apply_batch()` until the db's next sync. A target identifies the currently
+//! servable witness; it is not itself a durability signal.
 //!
 //! # Safety and invariants
 //!
@@ -386,24 +384,18 @@ where
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
 }
 
-/// Maximum queued target updates drained per scheduling tick.
-const MAX_UPDATE_DRAIN_PER_TICK: usize = 32;
-
 /// Drain and validate the target updates queued at entry without blocking, returning the newest.
-async fn drain_latest_target<T, E>(
+fn drain_latest_target<T, E>(
     update_rx: &mut mpsc::Receiver<T>,
     current: &T,
     mut validate: impl FnMut(&T, &T) -> Result<(), E>,
 ) -> Result<Option<T>, E> {
     let mut latest = None;
-    for drained in 1..=update_rx.len() {
+    for _ in 0..update_rx.len() {
         match update_rx.try_recv() {
             Ok(update) => {
                 validate(latest.as_ref().unwrap_or(current), &update)?;
                 latest = Some(update);
-                if drained.is_multiple_of(MAX_UPDATE_DRAIN_PER_TICK) {
-                    reschedule().await;
-                }
             }
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                 break;
@@ -450,7 +442,6 @@ where
         if let Some(update_rx) = update_rx.as_mut()
             && let Some(update) =
                 drain_latest_target(update_rx, &target, validate_compact_target_update)
-                    .await
                     .map_err(Error::Engine)?
         {
             target = update;
@@ -504,7 +495,6 @@ where
         if let Some(update_rx) = update_rx.as_mut()
             && let Some(update) =
                 drain_latest_target(update_rx, &target, validate_compact_target_update)
-                    .await
                     .map_err(Error::Engine)?
         {
             target = update;
@@ -1511,7 +1501,6 @@ mod tests {
             };
             let latest =
                 drain_latest_target(&mut receiver, &current, |_, _| Ok::<(), Infallible>(()))
-                    .await
                     .unwrap()
                     .expect("snapshot should not be empty");
             assert_eq!(latest.value, 2);
@@ -1530,7 +1519,7 @@ mod tests {
             sender.try_send(newest).unwrap();
             sender.try_send(rollback).unwrap();
             assert!(matches!(
-                drain_latest_target(&mut receiver, &current, validate_compact_target_update,).await,
+                drain_latest_target(&mut receiver, &current, validate_compact_target_update,),
                 Err(super::EngineError::InvalidCompactTarget(_))
             ));
         });

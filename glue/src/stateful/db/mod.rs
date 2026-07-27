@@ -80,7 +80,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
+use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner};
 use commonware_storage::{
     merkle::Location,
     qmdb::sync::{compact, resolver},
@@ -102,8 +102,6 @@ use std::{
     sync::Arc,
 };
 use tracing::debug;
-
-const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
 pub mod current;
@@ -807,7 +805,6 @@ where
     D: Digest,
     T: Clone + PartialEq + Send + Sync,
 {
-    let mut drained = 0usize;
     let mut latest = None;
     loop {
         let update = match tip_updates.as_mut().map(ring::Receiver::try_recv) {
@@ -819,7 +816,6 @@ where
             }
             None => break,
         };
-        drained += 1;
 
         update.record(|new_anchor, new_target| {
             let latest_height = latest
@@ -831,9 +827,6 @@ where
                 latest = Some((new_anchor, new_target));
             }
         });
-        if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-            reschedule().await;
-        }
     }
 
     let Some((new_anchor, new_target)) = latest else {
@@ -1337,11 +1330,9 @@ async fn drain_generation_updates<T>(
     T: Clone + PartialEq,
 {
     if let Some(updates) = generation_rx.as_mut() {
-        let mut drained = 0usize;
-        loop {
+        for _ in 0..updates.len() {
             match updates.try_recv() {
                 Ok((generation, target)) => {
-                    drained += 1;
                     *current_generation = generation;
                     *current_target = target;
 
@@ -1355,9 +1346,6 @@ async fn drain_generation_updates<T>(
                             return;
                         }
                         *last_reported_generation = Some(*current_generation);
-                    }
-                    if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-                        reschedule().await;
                     }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
@@ -1697,15 +1685,15 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
-        CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb,
-        StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        CoordinatorState, DatabaseSet, ManagedDb, Shared, StateSyncDb, StateSyncSet,
+        SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
         Clock, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _,
-        deterministic, reschedule,
+        deterministic,
     };
     use commonware_utils::channel::{mpsc, oneshot, ring};
     use futures::{FutureExt, SinkExt, pin_mut};
@@ -3193,17 +3181,12 @@ mod tests {
             let mut observed_update = false;
             loop {
                 if let Some(update_rx) = tip_updates.as_mut() {
-                    let mut drained = 0usize;
-                    loop {
+                    for _ in 0..update_rx.len() {
                         match update_rx.try_recv() {
                             Ok(update) => {
-                                drained += 1;
                                 final_target = update;
                                 observed_update = true;
                                 reported_target = None;
-                                if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-                                    reschedule().await;
-                                }
                             }
                             Err(mpsc::error::TryRecvError::Empty) => {
                                 break;
