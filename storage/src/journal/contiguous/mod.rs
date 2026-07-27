@@ -286,12 +286,8 @@ pub trait Mutable: Contiguous + Sized {
 
     /// Return a conservative range of retained positions known to be durable.
     ///
-    /// The end may trail readable or recovered state. The default reports no retained positions
-    /// as known durable, causing callers to take the conservative persistence path.
-    fn durable(&mut self) -> Range<u64> {
-        let start = self.bounds().start;
-        start..start
-    }
+    /// The end may trail readable or recovered state.
+    fn durable(&mut self) -> Range<u64>;
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
