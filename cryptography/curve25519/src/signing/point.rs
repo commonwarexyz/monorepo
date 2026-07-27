@@ -111,7 +111,7 @@ impl EdwardsPoint {
 
     /// Decompresses `LANES` point encodings at once, running the arithmetic-heavy part of the
     /// sqrt kernel above (the `u`/`v` setup and the `(p-5)/8` exponentiation) 8-wide via
-    /// [`FieldVec`], then finishing the branchy case analysis and sign fixup per lane exactly as
+    /// `FieldVec`, then finishing the branchy case analysis and sign fixup per lane exactly as
     /// [`EdwardsPoint::decompress`] does (see there for the candidate's derivation). Point
     /// decompression is a full modular exponentiation per point, so batching it this way (rather
     /// than looping over 8 calls to `decompress`) is where most of batch verification's cost
@@ -264,7 +264,7 @@ impl EdwardsPoint {
 /// point (`Z` implicit `1`) together with its precomputed `2d*T` (`T = X*Y`, exactly, since
 /// `Z = 1` needs no division to recover it). This is the one sub-computation worth caching once
 /// and reusing across every addition a point participates in: a point can be added into a bucket
-/// in up to [`super::msm::NUM_WINDOWS`] separate windows, and without caching, each of those
+/// in up to `msm::NUM_WINDOWS` separate windows, and without caching, each of those
 /// additions would redo the same `T*2d` multiply on the exact same (unchanging) `T`. `(Y+X)`/
 /// `(Y-X)` are *not* cached: recomputing them costs only a field addition/subtraction (not a
 /// multiply), so caching them would spend extra storage for no real savings.
@@ -455,7 +455,7 @@ impl PointVec {
     /// so an operand that skipped reduction before reaching `square`/`mul` is now a compile error
     /// rather than a silent hardware bug (see the `field_vec` module docs); the fused backend
     /// carries the same discipline by hand, mirrored from this fallback line for line (see
-    /// [`field_vec::avx512::point_double`]). Re-verify against
+    /// `field_vec::avx512::point_double`). Re-verify against
     /// `tests::point_vec_interleaved_double_and_add_matches_scalar` (which exercises well past
     /// both the original failure's round count and the real MSM's window count) on real AVX-512
     /// hardware before trusting a further change here.

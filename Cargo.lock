@@ -1530,6 +1530,8 @@ dependencies = [
 name = "commonware-cryptography-curve25519"
 version = "2026.7.0"
 dependencies = [
+ "arbitrary",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-parallel",
  "commonware-utils",

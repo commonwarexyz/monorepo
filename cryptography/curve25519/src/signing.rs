@@ -5,9 +5,9 @@ mod msm;
 mod point;
 mod scalar;
 
+use crate::field_vec::LANES;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use crate::field_vec::LANES;
 use commonware_parallel::{Sequential, Strategy};
 use core::sync::atomic::{AtomicBool, Ordering};
 pub use error::Error;
@@ -281,7 +281,11 @@ where
             points[k].as_ref().map_or_else(
                 || {
                     failed.store(true, Ordering::Relaxed);
-                    Term::new(MixedPoint::new(&EdwardsPoint::IDENTITY), &Scalar::ZERO, width)
+                    Term::new(
+                        MixedPoint::new(&EdwardsPoint::IDENTITY),
+                        &Scalar::ZERO,
+                        width,
+                    )
                 },
                 |point| Term::new(MixedPoint::new(point), &resolved[k].1, width),
             )
@@ -410,12 +414,11 @@ fn verify_batch_inner(
             let point = points[order[start as usize].1 as usize];
             Term::new(MixedPoint::new(point), &group_scalar((start, end)), width)
         };
-        let a_terms: Vec<Term> =
-            if groups.len() < parallel_min_items(strategy.parallelism(), 300) {
-                Sequential.map_collect_vec(groups.iter(), a_body)
-            } else {
-                strategy.map_collect_vec(groups.iter(), a_body)
-            };
+        let a_terms: Vec<Term> = if groups.len() < parallel_min_items(strategy.parallelism(), 300) {
+            Sequential.map_collect_vec(groups.iter(), a_body)
+        } else {
+            strategy.map_collect_vec(groups.iter(), a_body)
+        };
         msm::multiscalar_mul_terms_parallel(
             &[full.as_flattened(), &tail, &a_terms, &basepoint],
             width,
@@ -450,7 +453,7 @@ fn verify_batch_inner(
 /// equations (see [`VerifyingKey::verify`]) rather than each one independently, via a single
 /// multi-scalar multiplication over the batch's `R` and `A` points. `rng` must be a
 /// cryptographically secure source of randomness: it seeds the per-signature combination
-/// coefficients (see [`batch_coefficients`]), and predictable coefficients let an attacker
+/// coefficients (see `batch_coefficients`), and predictable coefficients let an attacker
 /// construct a batch that passes here despite containing a forged signature. Given a strong
 /// `rng`, a false positive (an invalid batch passing) happens with probability at most `2⁻¹²⁸`.
 /// `strategy` controls whether the batch's stages run serially or spread across a thread pool
@@ -481,7 +484,7 @@ pub fn verify_batch<'a>(
 ///
 /// Identical to [`verify_batch`], except it takes raw 32-byte verification key encodings
 /// directly rather than requiring the caller to have already constructed a [`VerifyingKey`]: `A`
-/// is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so a
+/// is coalesced by its raw encoding before ever being decompressed (see `group_ranges`), so a
 /// signer reused across the batch is decompressed once, not once per signature, and the
 /// deduplicated `A` encodings join `R`'s per-signature encodings in the same uniform
 /// decompression pass. Use this starting from raw wire bytes with no cached keys; use
@@ -542,7 +545,6 @@ mod tests {
             batch_coefficients(&[8u8; 32], 0)[0].0
         );
     }
-
 
     /// Generates `n` valid `(VerifyingKey, Signature, message)` triples, signed by independent
     /// keys over independent messages using the `ed25519-consensus` reference implementation.
@@ -637,10 +639,13 @@ mod tests {
         let batch = valid_batch(4);
         let mut invalid = [0u8; 32];
         invalid[0] = 2;
-        let items = batch
-            .iter()
-            .enumerate()
-            .map(|(i, (vk, sig, msg))| (if i == 2 { &invalid } else { &vk.bytes }, sig, msg.as_slice()));
+        let items = batch.iter().enumerate().map(|(i, (vk, sig, msg))| {
+            (
+                if i == 2 { &invalid } else { &vk.bytes },
+                sig,
+                msg.as_slice(),
+            )
+        });
         assert!(!verify_batch_bytes(&mut rng, items, &Sequential));
     }
 

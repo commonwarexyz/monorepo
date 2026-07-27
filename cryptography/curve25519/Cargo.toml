@@ -21,6 +21,8 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+arbitrary.workspace = true
+commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = [ "std" ] }
 commonware-utils = { workspace = true, features = [ "std" ] }
 criterion.workspace = true
@@ -36,4 +38,4 @@ path = "benches/batch_verify.rs"
 
 [features]
 default = [ "std" ]
-std = [ "commonware-parallel/std" ]
+std = [ "commonware-macros/std", "commonware-parallel/std", "thiserror/std" ]

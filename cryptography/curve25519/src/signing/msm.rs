@@ -298,7 +298,7 @@ mod transposed {
     }
 
     /// Folds `LANES` lanes' worth of one window's bucket stripes into `result`, vectorized
-    /// across all `LANES` lanes via [`PointVec`] (see [`super::scalar::fold_buckets`] for the
+    /// across all `LANES` lanes via [`PointVec`] (see `scalar::fold_buckets` for the
     /// non-transposed version of this running-sum trick, and for why starting below the
     /// untouched top buckets is exact).
     fn fold_buckets(
@@ -687,8 +687,9 @@ mod tests {
                 scalar_windows[window] = scalar::window_partial(&chunks, 0, mid, window, WIDTH)
                     .add(&scalar::window_partial(&chunks, mid, total, window, WIDTH));
                 transposed_windows[window] =
-                    transposed::window_partial(&chunks, 0, mid, window, WIDTH)
-                        .add(&transposed::window_partial(&chunks, mid, total, window, WIDTH));
+                    transposed::window_partial(&chunks, 0, mid, window, WIDTH).add(
+                        &transposed::window_partial(&chunks, mid, total, window, WIDTH),
+                    );
             }
 
             assert!(

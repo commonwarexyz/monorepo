@@ -25,7 +25,7 @@
 //! at bit 52 no longer lands on a column boundary (weight `2^(51(i+j)) * 2^52 = 2 *
 //! 2^(51(i+j+1))`), so high halves carry a coefficient of 2 -- handled by accumulating low-half
 //! and high-half terms in separate register chains and combining with one shift-free doubling add
-//! at the end (see [`avx512::mul_regs_loose`]). The multiply-accumulate count is unchanged (25
+//! at the end (see `avx512::mul_regs_loose`). The multiply-accumulate count is unchanged (25
 //! `vpmadd52lo` + 25 `vpmadd52hi`, exactly as at radix 52).
 //!
 //! The `2^255 = 19` wraparound fold is computed as `19*z = (z << 4) + (z << 1) + z` -- plain
@@ -52,7 +52,7 @@
 //!   [`Unreduced::reduce`], a single parallel carry pass.
 //! - [`Unreduced`]: limbs may run a few bits over 51 (every public constructor keeps them below
 //!   `~2^53`; the fused AVX-512 kernels privately track looser intermediates up to `~2^60`, per-
-//!   call-site -- see [`avx512`]). The natural result of [`Unreduced::add`]/[`Unreduced::sub`] and
+//!   call-site -- see `avx512`). The natural result of [`Unreduced::add`]/[`Unreduced::sub`] and
 //!   of packing raw field elements via [`Unreduced::from_lanes`]. A [`Reduced`] value casts to
 //!   [`Unreduced`] for free (`From`); going the other way costs the one-pass [`Unreduced::reduce`].
 //!   Operations that consume two `Reduced` operands but don't preserve the reduced bound (`add`,
@@ -405,9 +405,9 @@ impl Unreduced {
 }
 
 /// Computes one step of the Hisil-Wong-Carter-Dawson unified point-addition formula 8-wide (see
-/// [`crate::signing::point::PointVec::add`]) via a single fused AVX-512 function when available,
+/// `PointVec::add`) via a single fused AVX-512 function when available,
 /// with every intermediate held in registers rather than round-tripping through memory once per
-/// field operation (see [`avx512::point_add`]'s doc comment) -- returns `None` on any CPU without
+/// field operation (see `avx512::point_add`'s doc comment) -- returns `None` on any CPU without
 /// this backend, in which case callers fall back to chaining the ordinary `Reduced`/`Unreduced`
 /// methods (which cost the same on such CPUs either way, since there is no faster fused path to
 /// miss out on).
@@ -438,9 +438,9 @@ pub(crate) fn fused_point_add(
 }
 
 /// Computes one step of the mixed-addition formula 8-wide (see
-/// [`crate::signing::point::PointVec::add_mixed`]) via a single fused AVX-512 function when
+/// `PointVec::add_mixed`) via a single fused AVX-512 function when
 /// available, same [`fused_point_add`] pattern and for the same reason (see
-/// [`avx512::point_add_mixed`]'s doc comment) -- returns `None` on any CPU without this backend.
+/// `avx512::point_add_mixed`'s doc comment) -- returns `None` on any CPU without this backend.
 // Not `const`: on `x86_64` this calls `avx512::available()`, a runtime CPU check (see
 // `simd_available`'s own `#[allow]` for the same reason).
 #[allow(clippy::missing_const_for_fn, clippy::too_many_arguments)]
@@ -465,9 +465,9 @@ pub(crate) fn fused_point_add_mixed(
 }
 
 /// Computes the dedicated `dbl-2008-hwcd` doubling formula 8-wide (see
-/// [`crate::signing::point::PointVec::double`]) via a single fused AVX-512 function when
+/// `PointVec::double`) via a single fused AVX-512 function when
 /// available, same [`fused_point_add`] pattern and for the same reason (see
-/// [`avx512::point_double`]'s doc comment) -- returns `None` on any CPU without this backend.
+/// `avx512::point_double`'s doc comment) -- returns `None` on any CPU without this backend.
 // Not `const`: on `x86_64` this calls `avx512::available()`, a runtime CPU check (see
 // `simd_available`'s own `#[allow]` for the same reason).
 #[allow(clippy::missing_const_for_fn)]
