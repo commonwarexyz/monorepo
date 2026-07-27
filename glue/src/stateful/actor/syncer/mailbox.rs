@@ -98,10 +98,9 @@ where
             {
                 Some(artifact) => return Some(artifact),
                 None => {
-                    // The caller acknowledges marshal after this returns. Wait until the
-                    // live sync coordinator has actually recorded the new tip update;
-                    // enqueueing it into Syncer is not enough to prove the eventual sync
-                    // artifact includes this finalized block.
+                    // Wait until the live sync coordinator has recorded the new tip update.
+                    // Enqueueing it into Syncer is not enough to prove the eventual sync
+                    // artifact includes the target or to discard its handoff state.
                     if observed.await.is_ok() {
                         return None;
                     }

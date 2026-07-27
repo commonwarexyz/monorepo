@@ -2768,6 +2768,75 @@ mod tests {
         });
     }
 
+    /// Recovery rewinds offsets beyond the durable data prefix and rebuilds them from retained
+    /// data.
+    #[test_traced]
+    fn test_recovery_rewinds_offsets_ahead_of_data() {
+        let partition = "variable-recovery-offsets-ahead".to_string();
+        let executor = deterministic::Runner::default();
+        let ((), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            |context| async move {
+                let cfg = Config {
+                    partition,
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(2048),
+                };
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg)
+                    .await
+                    .unwrap();
+                for i in 0..6u64 {
+                    (journal, _) = journal.append(&i).await.unwrap();
+                }
+
+                // Commit through 6, then leave positions 6..9 in a partial data blob while
+                // pruning makes their offsets durable.
+                let mut journal = journal.commit().await.unwrap();
+                for i in 6..9u64 {
+                    (journal, _) = journal.append(&i).await.unwrap();
+                }
+                let (mut journal, pruned) = journal.prune(5).await.unwrap();
+                assert!(pruned);
+                assert_eq!(journal.bounds(), 5..9);
+                assert_eq!(journal.0.barrier.size(), 6);
+                assert_eq!(journal.0.offsets.barrier(), 9);
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let cfg = Config {
+                partition,
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..6);
+            assert_eq!(journal.test_offsets_size(), 6);
+            assert_eq!(journal.read(5).await.unwrap(), 5);
+
+            (journal, _) = journal.append(&6).await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..7);
+            for i in 5..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_start_sync_advances_offsets_watermark_lagged() {
         let executor = deterministic::Runner::default();

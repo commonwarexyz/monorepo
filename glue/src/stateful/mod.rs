@@ -56,18 +56,18 @@
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. For each finalized block while state sync is live,
-//!   the actor drains sync targets toward a fixed certified frontier, then holds
-//!   that frontier for the configured sync window. Blocks arriving during the
-//!   window are queued; on expiry their intermediate targets are coalesced into
-//!   the newest one. Once the syncer freezes databases at `database_anchor`, the
-//!   actor enters normal processing. If a finalized block above `database_anchor`
-//!   arrives first, the actor processes it during handoff. Durable metadata is
-//!   marked in-progress before any database mutation and is marked complete at
-//!   the converged anchor before handoff acknowledgement. A crash before
-//!   completion restarts through the state-sync path from the persisted floor,
-//!   reopening the existing sync journals. A lagging floor sampled during restart
-//!   cannot move that floor backward. Subsequent restarts after completion take
-//!   the marshal sync path to ensure a contiguous stream.
+//!   the actor first ensures a persisted certified recovery frontier covers the
+//!   block, then acknowledges it. It holds each live sync target for the configured
+//!   window while newer target changes are queued and coalesced. Once the syncer
+//!   freezes databases at `database_anchor`, the actor enters normal processing. If
+//!   a finalized block above `database_anchor` arrives first, the actor processes it
+//!   during handoff. Durable metadata is marked in-progress before any database
+//!   mutation and is marked complete only after the converged state and any required
+//!   handoff blocks are durable. A crash before completion restarts through the
+//!   state-sync path from the persisted floor, reopening the existing sync journals.
+//!   A lagging floor sampled during restart cannot move that floor backward.
+//!   Subsequent restarts after completion take the marshal sync path to ensure a
+//!   contiguous stream.
 //!
 //! # Lazy Recovery
 //!
@@ -291,9 +291,10 @@ where
     /// flight. Blocks already reflected by startup reconciliation or completed
     /// state sync are reported without reapplying them.
     ///
-    /// During peer state sync, blocks acknowledged while syncing continues are used only to
-    /// update the target. Blocks still held when sync completes are reported during handoff after
-    /// the database set is ready.
+    /// During peer state sync, finalizations are acknowledged once durable recovery metadata
+    /// covers them. Their target changes may be coalesced; if sync completes before a queued
+    /// target is recorded, the affected blocks are reported during handoff after the database set
+    /// is ready.
     ///
     /// Inherited from marshal's reporter stream, this is an at-least-once notification:
     /// a crash after this hook runs but before the block's flush and the marshal

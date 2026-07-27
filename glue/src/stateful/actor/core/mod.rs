@@ -114,9 +114,10 @@ where
     pub sync_config: SyncEngineConfig,
 
     /// Duration for which state sync remains on a fixed target before considering a newer
-    /// finalized target. Finalizations received during this window are queued and coalesced when
-    /// it expires. The newest queued target may then replace the current sync target. Choose a
-    /// delay long enough for a typical sync attempt to complete.
+    /// finalized target. Target changes from finalizations received during this window are queued
+    /// and coalesced when it expires. Their acknowledgements do not wait for the window: they are
+    /// released after durable recovery metadata covers them. Choose a delay long enough for a
+    /// typical sync attempt to complete.
     pub retarget_delay: NonZeroDuration,
 
     /// Periodic database and marshal pruning configuration.
@@ -256,7 +257,7 @@ where
             resolvers: self.resolvers,
             sync_completed,
             retarget_delay: self.retarget_delay.get(),
-            retarget_frontier: None,
+            recovery_frontier: None,
             pending_retarget: None,
             prune_config: self.prune_config,
             metrics,

@@ -559,9 +559,8 @@ where
 
 /// Tip update delivered to a live state-sync session.
 ///
-/// The optional observation barrier is used by the stateful actor to delay
-/// marshal acknowledgement until the sync coordinator has recorded the new
-/// anchor and targets.
+/// The optional observation barrier lets the sender retain handoff state until
+/// the sync coordinator has recorded the new anchor and targets.
 pub struct TipUpdate<D: Digest, T> {
     anchor: Anchor<D>,
     targets: T,
