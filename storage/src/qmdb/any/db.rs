@@ -452,7 +452,7 @@ where
         // commit justifies the target yet.
         if self.barrier().start < prune_loc {
             self.log = self.log.commit().await?;
-            self.mark_commits_durable();
+            self.mark_commit_durable();
         }
         let boundary;
         (self.log, boundary) = self.log.prune(prune_loc).await?;
@@ -478,8 +478,8 @@ where
         self.durable.clone()
     }
 
-    /// Record that every appended commit is proven durable.
-    pub(crate) fn mark_commits_durable(&mut self) {
+    /// Record that the current commit is proven durable.
+    pub(crate) fn mark_commit_durable(&mut self) {
         self.pending_commit = None;
         self.durable = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
     }
@@ -892,7 +892,7 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
-        self.mark_commits_durable();
+        self.mark_commit_durable();
         Ok(self)
     }
 
@@ -919,15 +919,13 @@ where
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_sync_calls.inc();
         let pending = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
-        self.advance_durable();
         let (log, handle) = self.log.start_sync().await?;
         self.log = log;
 
-        // Installing the journal's new barrier observes its predecessor. Promote the old
-        // frontier before replacing it, then record the state covered by this sync.
+        // Installing the journal's new barrier observes its predecessor. Promote any commit
+        // covered by that barrier before tracking the state covered by this sync.
         self.advance_durable();
         self.pending_commit = Some(pending);
-        self.advance_durable();
         Ok((self, handle))
     }
 
@@ -948,7 +946,7 @@ where
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;
-        self.mark_commits_durable();
+        self.mark_commit_durable();
         Ok(self)
     }
 

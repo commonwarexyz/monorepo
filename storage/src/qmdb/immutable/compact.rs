@@ -423,12 +423,7 @@ where
         self.last_commit_metadata.clone()
     }
 
-    /// Return the compact-sync target described by the current witness.
-    ///
-    /// This normally reflects the last durably persisted commit, which may lag behind live
-    /// in-memory mutations until [`Self::commit`] or [`Self::sync`] is called. During a validated
-    /// compact-sync import it reflects the in-memory imported witness before persistence, so this
-    /// method is not a durability indicator.
+    /// Return the compact-sync target represented by the current witness.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
@@ -1239,6 +1234,7 @@ mod tests {
             let db = db.sync().await.unwrap();
             let tip_target = db.target();
 
+            // A retained leaf count paired with a different root is divergent.
             let divergent_target =
                 compact_sync::Target::new(tip_target.root, rewind_target.leaf_count);
             assert_ne!(divergent_target.root, rewind_target.root);

@@ -535,7 +535,7 @@ where
         );
         if durable_boundary < boundary {
             self.any.log = self.any.log.commit().await?;
-            self.any.mark_commits_durable();
+            self.any.mark_commit_durable();
         }
         Ok(self)
     }

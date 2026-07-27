@@ -151,14 +151,14 @@ where
                     .map(|pending| pending.finalized)
                     .unwrap_or_default();
                 let handoffs = self.prepare_handoffs(finalized);
-                self.transition_many(handoffs).await;
+                self.transition(handoffs).await;
                 return;
             },
             _ = retarget_timeout => {
                 let handoffs;
                 (self, handoffs) = self.handle_retarget_timeout().await;
                 if let Some(handoffs) = handoffs {
-                    self.transition_many(handoffs).await;
+                    self.transition(handoffs).await;
                     return;
                 }
             },
@@ -215,7 +215,7 @@ where
                         .instrument(process)
                         .await;
                     if let Some(handoff) = handoff {
-                        self.transition(Some(handoff)).await;
+                        self.transition([handoff]).await;
                         return;
                     }
                 }
@@ -406,11 +406,10 @@ where
 
     /// Transitions to [`Processing`] state once the database set has converged
     /// on the state sync [`Anchor`].
-    async fn transition(self, handoff: Option<FinalizedHandoff<Arc<A::Block>>>) {
-        self.transition_many(handoff.into_iter().collect()).await;
-    }
-
-    async fn transition_many(mut self, mut handoffs: VecDeque<FinalizedHandoff<Arc<A::Block>>>) {
+    async fn transition(
+        mut self,
+        handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>,
+    ) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
 
@@ -425,7 +424,7 @@ where
 
         self.sync_metadata = self.sync_metadata.set_complete(synced_height).await;
 
-        while let Some(handoff) = handoffs.pop_front() {
+        for handoff in handoffs {
             match handoff {
                 FinalizedHandoff::Covered(block, acknowledgement)
                 | FinalizedHandoff::Reflected(block, acknowledgement) => {
