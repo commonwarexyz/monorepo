@@ -62,6 +62,11 @@ jobs:
       run: just check-fmt
     - name: Lint
       run: just clippy ${{ matrix.flags }}
+    # The iouring feature must compile out cleanly on non-Linux targets, and
+    # no test matrix enables it off Ubuntu.
+    - name: Check iouring feature on non-Linux
+      if: matrix.os != 'ubuntu-latest'
+      run: cargo check --all-targets -p commonware-runtime --features iouring
     - name: Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
       run: just dylint

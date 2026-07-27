@@ -13,6 +13,8 @@ mod config;
 mod error;
 mod filesystem;
 mod report;
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+mod ring_size;
 mod runner;
 mod workload;
 
@@ -36,7 +38,7 @@ fn main() -> Result<()> {
             // so in-flight operations never contend for waiter slots.
             use commonware_runtime::iouring;
             let ring = iouring::RingConfig {
-                size: (cfg.inflight as u32).saturating_mul(2).max(1024),
+                size: cfg.iouring_ring_size().expect("validated benchmark config"),
                 ..Default::default()
             };
             let runtime_cfg = iouring::Config::default()
