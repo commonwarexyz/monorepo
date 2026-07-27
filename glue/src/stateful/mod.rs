@@ -211,6 +211,7 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
@@ -250,6 +251,7 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
@@ -277,6 +279,7 @@ where
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 

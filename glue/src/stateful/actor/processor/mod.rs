@@ -315,6 +315,7 @@ where
             self.app.propose(
                 (runtime_context, consensus_context),
                 ancestry,
+                &self.databases,
                 batches,
                 input,
             ),
@@ -486,8 +487,12 @@ where
         let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
             &mut response,
-            self.app
-                .verify((runtime_context, consensus_context), ancestry, batches),
+            self.app.verify(
+                (runtime_context, consensus_context),
+                ancestry,
+                &self.databases,
+                batches,
+            ),
         )
         .await
         {
@@ -679,6 +684,7 @@ where
                 self.app.apply(
                     (context.child("rebuild_pending_apply"), consensus_context),
                     &block,
+                    &self.databases,
                     batches,
                 ),
             )
@@ -749,6 +755,7 @@ where
                     .apply(
                         (context.child("finalize_replay"), block_context),
                         block,
+                        &self.databases,
                         batches,
                     )
                     .await;
@@ -1173,6 +1180,7 @@ mod tests {
             &mut self,
             context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1199,6 +1207,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             let mut ancestry = Box::pin(ancestry);
@@ -1215,6 +1224,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
+            _databases: &Self::Databases,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             Self::execute(block.height(), block.context.round.view(), batches).await
@@ -1450,6 +1460,7 @@ mod tests {
                             consensus_context,
                         ),
                         &block,
+                        &self.processor.databases,
                         batches,
                     )
                     .await;

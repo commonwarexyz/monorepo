@@ -65,6 +65,7 @@ where
         &mut self,
         context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -89,6 +90,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Validation from higher layers:
@@ -105,6 +107,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         Self::execute(block.height(), batches).await

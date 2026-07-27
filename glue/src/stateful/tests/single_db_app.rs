@@ -208,6 +208,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -230,6 +231,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -249,6 +251,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         Self::execute(block.height(), batches).await

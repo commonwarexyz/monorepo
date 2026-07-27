@@ -388,6 +388,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -398,6 +399,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             None
@@ -407,6 +409,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
+            _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             TestMerkleized

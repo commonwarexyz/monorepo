@@ -253,6 +253,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -277,6 +278,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Reshare final-block payload validation is enforced by the surrounding
@@ -290,6 +292,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
+        _databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         Self::execute(block.height(), batches).await
