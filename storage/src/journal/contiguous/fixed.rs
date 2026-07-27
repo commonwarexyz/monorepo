@@ -1157,9 +1157,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok((self, true))
     }
 
-    /// See [Journal::start_prune]. `watermark` is the proven-durable frontier
-    /// ([`Barrier::size`](super::durability::Barrier::size)); the caller supplies it so the
-    /// variable journal can pass its joint frontier instead of the offsets sub-journal's own.
+    /// See [Journal::start_prune].
+    ///
+    /// `watermark` is the frontier below which all represented data is proven durable.
     pub(crate) async fn start_prune(
         mut self: Box<Self>,
         min_item_pos: u64,
@@ -1177,14 +1177,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .min(self.blobs.tail_blob_index())
             .max(super::position_to_blob(self.bounds.start, items_per_blob));
 
-        // The max keeps a mid-blob adopted boundary from regressing to its blob's start. With
-        // `min_blob <= watermark_blob` and the durable boundary never exceeding the frontier,
-        // `new_boundary <= watermark`, so the retained data below it is already durable and no data
-        // sync is needed. This is load-bearing: a boundary past the frontier would let a crash lose
-        // retained data that was recorded as pruned.
+        // The max keeps a mid-blob adopted boundary from regressing to its blob's start.
         let new_boundary =
             super::blob_first_position(min_blob, items_per_blob)?.max(self.bounds.start);
-        assert!(new_boundary <= watermark);
 
         if target_blob > watermark_blob {
             warn!(
@@ -1199,6 +1194,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Ok((self, PruneHandle::noop(new_boundary)));
         }
 
+        // Retained data below the boundary must be durable, or a crash could lose data recorded as
+        // pruned; the real-prune path (past the no-op above) guarantees `new_boundary <= watermark`.
+        assert!(new_boundary <= watermark);
+
         // Adopt the boundary in memory. A dropped future consumes the journal, discarding this
         // advance; the boundary the returned handle persists is what recovery completes on reopen.
         self.bounds.start = new_boundary;
@@ -1208,7 +1207,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // sync is needed, and recording the frontier advances the durable watermark for free. The
         // write's durability is joined by the returned handle; recovery treats an ahead boundary as
         // an interrupted prune and completes the removal, so the unlink is deferred below.
-        let (checkpoint, boundary) = self
+        let (checkpoint, persist) = self
             .checkpoint
             .start_persist(new_boundary, watermark)
             .await?;
@@ -1222,7 +1221,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .update(self.bounds.end, self.bounds.start, items_per_blob);
 
         let handle = Handle::from_future(async move {
-            boundary.await?;
+            persist.await?;
             removal.await
         });
         Ok((self, PruneHandle::new(new_boundary, handle)))
@@ -1486,17 +1485,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// `min_item_pos` is clamped down to the proven-durable frontier: only already-synced data is
     /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped (logging a
     /// warning) rather than rejected; use [`Self::prune`] to prune data not yet synced. As with
-    /// `prune`, blob boundaries are preserved, so slightly fewer items than requested may be pruned.
+    /// `prune`, blob boundaries are preserved, so slightly fewer items than requested may be
+    /// pruned.
     ///
     /// The boundary is recorded by a pipelined checkpoint write (which also advances the recovery
     /// watermark to the frontier) and the freed blobs are unlinked as the returned [PruneHandle]
     /// completes. Like [`Self::start_sync`], recording the boundary waits for a prior in-flight
-    /// checkpoint sync before starting a new one. Await the handle to observe a durable boundary and
-    /// removed blobs, or drive it off the hot path. Cancelling this call (dropping its future before
-    /// it returns) consumes the journal and discards the in-memory boundary advance, as with any
-    /// mutating method; dropping the returned handle does neither. A dropped or crashed removal is
-    /// completed by recovery from the durable boundary, so the unlink never has to finish atomically
-    /// or in order.
+    /// checkpoint sync before starting a new one. Await the handle to observe a durable boundary
+    /// and removed blobs, or drive it off the hot path. A dropped or crashed removal is completed
+    /// by recovery from the durable boundary, so the unlink never has to finish atomically or in
+    /// order.
     pub async fn start_prune(mut self, min_item_pos: u64) -> Result<(Self, PruneHandle), Error> {
         let watermark = self.0.barrier.size();
         let (inner, handle) = self.0.start_prune(min_item_pos, watermark).await?;

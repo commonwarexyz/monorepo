@@ -167,9 +167,9 @@ where
 /// output mirrors a durability [Handle]: `Ok(())` once the boundary is durable and the blobs are
 /// removed.
 ///
-/// The handle unlinks blobs by index and borrows nothing, so it can outlive its journal. It
-/// reserves the journal's partition: before reopening that partition in the same process, drive or
-/// drop the handle, or a stale unlink could remove blobs the reopened journal relies on.
+/// The handle may remain active after its journal is dropped and reserves the journal's partition.
+/// Before reopening that partition in the same process, await or drop the handle; otherwise a stale
+/// unlink could remove blobs used by the reopened journal.
 #[must_use = "await or spawn the handle to observe completion and reclaim the pruned blobs"]
 pub struct PruneHandle {
     boundary: u64,
@@ -178,7 +178,9 @@ pub struct PruneHandle {
 }
 
 impl PruneHandle {
-    /// A prune that advanced the boundary; `inner` records it durable and unlinks the blobs.
+    /// A prune that advanced the boundary.
+    ///
+    /// `inner` durably records the pruning boundary and unlinks the blobs.
     pub(super) const fn new(boundary: u64, inner: Handle<()>) -> Self {
         Self {
             boundary,
@@ -202,8 +204,8 @@ impl PruneHandle {
         self.boundary
     }
 
-    /// Whether this call advanced the logical pruning boundary. `false` means the request was at or
-    /// below the existing boundary, so awaiting the handle is a resolved no-op.
+    /// Whether this call pruned anything (freed at least one whole blob). Awaiting the handle is a
+    /// resolved no-op when `false`.
     pub const fn pruned(&self) -> bool {
         self.pruned
     }
