@@ -1609,8 +1609,7 @@ mod compact_variable_mmr {
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
 
-            // A target past the tip is refused so the client refetches once the source
-            // catches up.
+            // A target past the tip is stale.
             let ahead_target = sync::compact::Target {
                 root: current_target.root,
                 leaf_count: Location::new(*current_target.leaf_count + 1),
@@ -1628,8 +1627,8 @@ mod compact_variable_mmr {
         });
     }
 
-    /// A full source declines targets it can no longer authenticate instead of reporting them as
-    /// storage failures: the commit was pruned away, or the leaf count never named a commit.
+    /// A full source classifies a pruned commit as stale and a retained non-commit boundary as
+    /// divergent.
     #[test_traced("WARN")]
     fn test_compact_full_source_declines_unservable_target() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -1639,8 +1638,7 @@ mod compact_variable_mmr {
                     .await
                     .unwrap();
 
-            // Commit repeatedly so the log spans more than one section, declaring a floor on the
-            // last batch that lets `prune` drop the section holding the earliest commit.
+            // Build an early target that can be pruned and a later retained target.
             let prune_loc = Location::new(8);
             let mut early_target = None;
             let mut late_target = None;
@@ -2489,8 +2487,7 @@ mod compact_variable_mmb {
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
 
-            // A target past the tip is refused so the client refetches once the source
-            // catches up.
+            // A target past the tip is stale.
             let ahead_target = sync::compact::Target {
                 root: current_target.root,
                 leaf_count: Location::new(*current_target.leaf_count + 1),
@@ -2508,8 +2505,8 @@ mod compact_variable_mmb {
         });
     }
 
-    /// A full source declines targets it can no longer authenticate instead of reporting them as
-    /// storage failures: the commit was pruned away, or the leaf count never named a commit.
+    /// A full source classifies a pruned commit as stale and a retained non-commit boundary as
+    /// divergent.
     #[test_traced("WARN")]
     fn test_compact_full_source_declines_unservable_target() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -2519,8 +2516,7 @@ mod compact_variable_mmb {
                     .await
                     .unwrap();
 
-            // Commit repeatedly so the log spans more than one section, declaring a floor on the
-            // last batch that lets `prune` drop the section holding the earliest commit.
+            // Build an early target that can be pruned and a later retained target.
             let prune_loc = Location::new(8);
             let mut early_target = None;
             let mut late_target = None;

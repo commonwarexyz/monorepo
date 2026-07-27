@@ -4190,9 +4190,7 @@ mod tests {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Drop the production prune future while it is parked after the data-blob
-            // removal, before offsets.prune has made the appended offsets durable: a
-            // genuine cancellation at that await.
+            // Cancel pruning after data-blob removal but before `offsets.prune`.
             journal.0.halt_before_offsets_prune = true;
             {
                 let fut = journal.prune(10);

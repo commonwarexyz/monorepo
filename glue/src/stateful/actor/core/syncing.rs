@@ -1334,9 +1334,8 @@ mod tests {
         });
     }
 
-    /// A retargeted finalization persists its floor before marshal is acknowledged: the sync
-    /// engine's durable state advances toward the new target, so a crash after the ack must
-    /// resume from the new floor, not the original one.
+    /// Acknowledging a retargeted finalization requires its certified floor to be durably
+    /// recoverable.
     #[test]
     fn retarget_persists_floor_before_acknowledgement() {
         deterministic::Runner::default().start(|mut context| async move {

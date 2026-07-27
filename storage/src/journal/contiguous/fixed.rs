@@ -845,9 +845,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         (self, Handle::from_future(completion))
     }
 
-    /// Begin raising the recovery watermark toward `size`, capped at the barrier. The cap is
-    /// load-bearing for the variable journal, which passes a size proven durable only for its
-    /// data blobs.
+    /// Begin raising the recovery watermark toward `size`, capped at the durable barrier.
     pub(super) async fn start_watermark_sync(
         mut self: Box<Self>,
         size: u64,

@@ -295,9 +295,8 @@ mod tests {
 
     /// Database whose finalize flush completes only when the test releases it.
     ///
-    /// Its `prune` records immediately, eliding the impl-side barrier real
-    /// databases provide (pruning waits for pending flushes, pinned in
-    /// `stateful::db::any` tests), so the actor's own scheduling is exposed.
+    /// Its `prune` records immediately without waiting for pending flushes,
+    /// isolating the actor's scheduling behavior.
     struct GatedFlushDb {
         control: FlushControl,
     }
@@ -569,10 +568,9 @@ mod tests {
         });
     }
 
-    /// While parked idle with a flush pending, a released flush must fire its
-    /// acknowledgement, a simultaneously reported block must not be lost to
-    /// the completion (the historical lost-message shape), and a flush that
-    /// never completes must leave its block unacknowledged.
+    /// While the loop is idle, a completed flush must release its acknowledgement without
+    /// displacing a simultaneously reported block, while an incomplete flush must leave its block
+    /// unacknowledged.
     #[test]
     fn idle_acks_follow_flush_outcome() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
@@ -617,8 +615,8 @@ mod tests {
         });
     }
 
-    /// A flush failure must panic the processing loop with the database
-    /// identified (the fatal policy), rather than acknowledging the block.
+    /// A flush failure must panic the processing loop with the database identified and leave the
+    /// block unacknowledged.
     #[test]
     #[should_panic(expected = "database finalize flush failed (type")]
     fn flush_failure_panics_processing() {

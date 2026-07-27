@@ -713,10 +713,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Ok(self);
         }
 
-        // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        // Once the durable end covers the prune position, the durable journal prefix always
-        // covers the metadata boundary written below, so the flush is skipped. Nodes past
-        // the durable end stay cached and are not guaranteed to survive a crash.
+        // Sync unless the durable journal prefix covers the metadata boundary written below.
+        // Nodes beyond the durable end remain cached and are not guaranteed to survive a crash.
         if self.durable().end < pos {
             self = self.sync().await?;
         }

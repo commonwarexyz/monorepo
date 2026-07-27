@@ -976,8 +976,8 @@ mod tests {
         });
     }
 
-    /// `prune` of a durably justified target must complete without waiting on
-    /// a newer in-flight flush (the storage fast path).
+    /// `prune` of a durably justified target must complete without waiting on a newer in-flight
+    /// flush.
     #[test]
     fn prune_skips_barrier_for_durable_target() {
         deterministic::Runner::default().start(|context| async move {
@@ -1048,9 +1048,7 @@ mod tests {
         });
     }
 
-    /// `prune` must not complete while a finalize flush is still parked: its
-    /// internal commit serializes behind the in-flight sync chain (the impl
-    /// side of [`DatabaseSet::prune`]'s contract).
+    /// `prune` must not complete while the target's finalize flush remains pending.
     #[test]
     fn prune_waits_for_pending_finalize_flush() {
         deterministic::Runner::default().start(|context| async move {

@@ -1478,8 +1478,7 @@ mod tests {
             false
         }
 
-        /// Finalize `block` and wait for its deferred flush, restoring the
-        /// blocking-durability semantics the assertions below rely on.
+        /// Finalize `block` and wait for its deferred flush.
         /// Returns whether the block was newly applied (`false` for a
         /// duplicate report).
         #[boxed]

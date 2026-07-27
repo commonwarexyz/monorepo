@@ -741,10 +741,8 @@ where
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
 
-    // Serve any commit the source can still prove: a syncing client's target trails the server by
-    // its fetch latency, so its target root is usually an older root of this same history.
-    // Targets past the tip or below the provable window are declined so the client refetches a
-    // servable one.
+    // A retained commit is servable only while its final leaf remains within the provable window.
+    // Targets ahead of the tip or below that window are stale.
     if leaf_count > current.leaf_count || last_commit_loc < provable.start {
         return Err(ServeError::StaleTarget {
             requested: target,
