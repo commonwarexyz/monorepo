@@ -89,11 +89,14 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Far-future cap for sleep durations so conversions to [Instant] cannot
+/// Far-future cap for timer durations so conversions to [Instant] cannot
 /// overflow (e.g. when sleeping until [SystemTime::limit]).
 ///
+/// Sleep durations are clamped to this value, and [Config::validate] rejects
+/// network timeouts above it for policy consistency with that clamp.
+///
 /// [SystemTime::limit]: commonware_utils::SystemTimeExt::limit
-const MAX_SLEEP: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+const MAX_TIMER_DURATION: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
 
 #[derive(Debug)]
 struct Metrics {
@@ -283,6 +286,23 @@ impl Config {
         self.storage_buffer_pool_cfg
             .clone()
             .unwrap_or_else(BufferPoolConfig::for_storage)
+    }
+
+    /// Rejects configurations the runtime must not start with.
+    ///
+    /// Called at the beginning of [crate::Runner::start], before any startup
+    /// side effect. Panics when either network timeout exceeds
+    /// [MAX_TIMER_DURATION], keeping timeout policy consistent with the
+    /// runtime's sleep clamp.
+    fn validate(&self) {
+        assert!(
+            self.network_cfg.connect_timeout <= MAX_TIMER_DURATION,
+            "connect_timeout must be at most 30 years"
+        );
+        assert!(
+            self.network_cfg.read_write_timeout <= MAX_TIMER_DURATION,
+            "read_write_timeout must be at most 30 years"
+        );
     }
 }
 
@@ -793,6 +813,9 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
+        // Reject dangerous configurations before any startup side effect.
+        self.cfg.validate();
+
         // Create a new registry
         let registry = Registry::new();
         let mut root_registry = registry.clone();
@@ -853,7 +876,7 @@ impl crate::Runner for Runner {
             }
             Sleeper {
                 executor: process_executor.clone(),
-                time: Instant::now() + duration.min(MAX_SLEEP),
+                time: Instant::now() + duration.min(MAX_TIMER_DURATION),
                 state: None,
             }
         });
@@ -1731,7 +1754,7 @@ impl Clock for Context {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         Sleeper {
             executor: self.executor.clone(),
-            time: Instant::now() + duration.min(MAX_SLEEP),
+            time: Instant::now() + duration.min(MAX_TIMER_DURATION),
             state: None,
         }
     }
@@ -1869,6 +1892,42 @@ mod tests {
     use commonware_parallel::Strategy as _;
     use commonware_utils::{NZUsize, channel::oneshot};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// Property: network timeouts at exactly the 30-year policy bound pass
+    /// validation. Setup: both timeouts set to [MAX_TIMER_DURATION]. Action:
+    /// drive the private validator directly so no ring is constructed.
+    /// Expected: validation returns without panicking.
+    #[test]
+    fn test_config_accepts_maximum_network_timeouts() {
+        Config::default()
+            .with_connect_timeout(MAX_TIMER_DURATION)
+            .with_read_write_timeout(MAX_TIMER_DURATION)
+            .validate();
+    }
+
+    /// Property: a connect timeout above the 30-year policy bound is rejected
+    /// at validation. Setup: connect timeout one nanosecond past the bound.
+    /// Action: drive the private validator directly so no ring is
+    /// constructed. Expected: panic with the documented message.
+    #[test]
+    #[should_panic(expected = "connect_timeout must be at most 30 years")]
+    fn test_config_rejects_excessive_connect_timeout() {
+        Config::default()
+            .with_connect_timeout(MAX_TIMER_DURATION + Duration::from_nanos(1))
+            .validate();
+    }
+
+    /// Property: a read/write timeout above the 30-year policy bound is
+    /// rejected at validation. Setup: read/write timeout one nanosecond past
+    /// the bound. Action: drive the private validator directly so no ring is
+    /// constructed. Expected: panic with the documented message.
+    #[test]
+    #[should_panic(expected = "read_write_timeout must be at most 30 years")]
+    fn test_config_rejects_excessive_read_write_timeout() {
+        Config::default()
+            .with_read_write_timeout(MAX_TIMER_DURATION + Duration::from_nanos(1))
+            .validate();
+    }
 
     /// A dedicated task runs on its own worker with its own ring: storage
     /// and network operations issued from it must work end to end, including

@@ -227,11 +227,20 @@ pub struct RingConfig {
     /// Maximum request timeout supported by the userspace timeout wheel.
     ///
     /// Deadlines are clamped to this horizon. This value should be set to the
-    /// largest expected per-request deadline budget.
+    /// largest expected per-request deadline budget. Must be non-zero, and the
+    /// runtime raises it to cover both configured network timeouts.
+    ///
+    /// The wheel allocates a power of two of slots above
+    /// `ceil(horizon / tick) + 1`, capped at 1,048,576 slots: a configuration
+    /// that rounds above the cap panics at startup, before allocation. At the
+    /// cap the wheel holds about 28 MiB of fixed metadata per worker on 64-bit
+    /// builds, and with the default 5 ms [Self::timeout_wheel_tick] the cap
+    /// corresponds to a horizon of about 87 minutes. Larger horizons require a
+    /// coarser tick.
     pub max_request_timeout: Duration,
-    /// The maximum time the io_uring event loop will wait during the drain phase
-    /// after producer disconnect has been fully observed and buffered channel
-    /// work has been drained.
+    /// The maximum time the io_uring event loop waits for outstanding
+    /// requests during the drain phase, after runtime teardown has closed the
+    /// driver to new admissions.
     ///
     /// If None, the event loop will wait indefinitely for in-flight requests
     /// to complete during that drain phase. In this case, the caller should be
@@ -246,7 +255,14 @@ pub struct RingConfig {
     /// Tick granularity used by the userspace timeout wheel.
     ///
     /// Smaller values increase timing precision but increase wakeup and wheel
-    /// processing frequency.
+    /// processing frequency. Must be non-zero.
+    ///
+    /// The tick also bounds the wheel size: slots round up to a power of two
+    /// above `ceil(horizon / tick) + 1` and are capped at 1,048,576, so a
+    /// smaller tick supports a shorter [Self::max_request_timeout] horizon
+    /// before the startup panic (about 87 minutes at the default 5 ms tick).
+    /// At the cap the wheel holds about 28 MiB of fixed metadata per worker
+    /// on 64-bit builds.
     pub timeout_wheel_tick: Duration,
     /// Adaptive idle spinner configuration.
     pub idle_spinner: SpinnerConfig,

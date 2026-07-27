@@ -25,6 +25,20 @@
 use super::WaiterId;
 use std::time::{Duration, Instant};
 
+/// Maximum number of slots the timeout wheel may allocate.
+///
+/// The slot count rounds up to a power of two above `ceil(horizon / tick) + 1`,
+/// and every slot carries fixed metadata (a bucket vector, an active count, and
+/// occupancy bits), about 28 MiB total at this cap on 64-bit builds. A
+/// configuration that rounds above the cap panics in [`TimeoutWheel::slots_for`]
+/// before any slot-proportional allocation. At the default 5 ms tick the cap
+/// corresponds to an effective horizon of about 87 minutes, and larger horizons
+/// stay reachable by increasing the tick.
+///
+/// This limit must agree with the public documentation on
+/// `RingConfig::max_request_timeout` and `RingConfig::timeout_wheel_tick`.
+const MAX_TIMEOUT_WHEEL_SLOTS: usize = 1 << 20;
+
 /// Monotonic timeout-wheel tick in the wheel's local time domain.
 ///
 /// This is derived from `start` and `tick_nanos` inside [`TimeoutWheel::advance`]
@@ -104,8 +118,10 @@ impl TimeoutWheel {
 
     /// Return the number of slots required to cover `max_timeout`.
     ///
-    /// The result is rounded up to a power of two for fast modulo-by-mask
-    /// indexing.
+    /// The result is `ceil(max_timeout / tick) + 1` rounded up to a power of
+    /// two for fast modulo-by-mask indexing. All arithmetic is checked, and
+    /// the rounded slot count must not exceed [MAX_TIMEOUT_WHEEL_SLOTS]: both
+    /// violations panic here, before any slot-proportional allocation.
     fn slots_for(max_timeout: Duration, tick_nanos: u64) -> usize {
         assert!(
             !max_timeout.is_zero(),
@@ -113,11 +129,20 @@ impl TimeoutWheel {
         );
         assert!(tick_nanos > 0, "timeout wheel tick must be non-zero");
         let max_timeout_nanos = Self::duration_to_nanos_saturating(max_timeout);
-        let required_ticks = max_timeout_nanos.div_ceil(tick_nanos) + 1;
-        usize::try_from(required_ticks)
+        let required_ticks = max_timeout_nanos
+            .div_ceil(tick_nanos)
+            .checked_add(1)
+            .expect("timeout wheel size overflow");
+        let slots = usize::try_from(required_ticks)
             .expect("timeout wheel size overflow")
             .checked_next_power_of_two()
-            .expect("timeout wheel size overflow")
+            .expect("timeout wheel size overflow");
+        assert!(
+            slots <= MAX_TIMEOUT_WHEEL_SLOTS,
+            "timeout wheel requires {slots} slots, maximum is {MAX_TIMEOUT_WHEEL_SLOTS}. \
+             Reduce max_request_timeout or increase timeout_wheel_tick"
+        );
+        slots
     }
 
     /// Create a timeout wheel.
@@ -872,6 +897,60 @@ mod tests {
             let _ = TimeoutWheel::new(Duration::from_millis(100), Duration::ZERO, Instant::now());
         }));
         assert!(zero_tick.is_err());
+    }
+
+    #[test]
+    fn test_slots_for_accepts_maximum() {
+        // Property: the largest accepted configuration computes exactly the
+        // slot cap without constructing a wheel (construction would allocate
+        // about 28 MiB needlessly).
+        // Setup: at the default 5 ms tick, a 5_242_875 ms horizon requires
+        // 1_048_575 ticks plus the guard tick, exactly 2^20 slots.
+        // Action: derive the slot count.
+        // Expected: the cap itself is returned and accepted.
+        let tick_nanos = TimeoutWheel::duration_to_nanos_saturating(TICK);
+        assert_eq!(
+            TimeoutWheel::slots_for(Duration::from_millis(5_242_875), tick_nanos),
+            MAX_TIMEOUT_WHEEL_SLOTS
+        );
+    }
+
+    #[test]
+    fn test_slots_for_rejects_excessive_config() {
+        // Property: the first configuration that rounds above the slot cap
+        // panics with the documented message before any allocation.
+        // Setup: one nanosecond past the largest accepted horizon at the
+        // default 5 ms tick rounds the slot count to 2^21.
+        // Action: derive the slot count.
+        // Expected: panic with the exact cap message.
+        let tick_nanos = TimeoutWheel::duration_to_nanos_saturating(TICK);
+        let horizon = Duration::from_millis(5_242_875) + Duration::from_nanos(1);
+        let err = catch_unwind(AssertUnwindSafe(|| {
+            let _ = TimeoutWheel::slots_for(horizon, tick_nanos);
+        }))
+        .unwrap_err();
+        let message = err
+            .downcast_ref::<String>()
+            .expect("cap panic should carry a formatted message");
+        assert_eq!(
+            message,
+            "timeout wheel requires 2097152 slots, maximum is 1048576. \
+             Reduce max_request_timeout or increase timeout_wheel_tick"
+        );
+    }
+
+    #[test]
+    fn test_slots_for_rejects_tick_count_overflow() {
+        // Property: a saturated horizon hits the checked guard-tick add
+        // instead of wrapping to a tiny wheel in release builds.
+        // Setup: Duration::MAX saturates to u64::MAX nanoseconds, and a 1 ns
+        // tick makes the guard-tick addition overflow.
+        // Action: derive the slot count.
+        // Expected: panic from the checked add, never a 1-slot wheel.
+        let err = catch_unwind(AssertUnwindSafe(|| {
+            let _ = TimeoutWheel::slots_for(Duration::MAX, 1);
+        }));
+        assert!(err.is_err(), "saturated horizon must panic, not wrap");
     }
 
     #[test]
