@@ -91,6 +91,28 @@ impl From<IoBufs> for WriteBuffers {
     }
 }
 
+impl VectoredBuffers {
+    /// Refresh the iovec scratch from the current chunks and return the
+    /// pointer and entry count for the next `Writev` SQE.
+    #[inline]
+    fn refresh_iovecs(&mut self) -> (*const libc::iovec, u32) {
+        let max_iovecs = self.bufs.chunk_count().min(self.iovecs.len());
+        // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+        let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
+                max_iovecs,
+            )
+        };
+        let iovecs_len = self
+            .bufs
+            .chunks_vectored(io_slices)
+            .try_into()
+            .expect("iovecs_len exceeds u32");
+        (self.iovecs.as_ptr(), iovecs_len)
+    }
+}
+
 impl WriteBuffers {
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
@@ -358,24 +380,12 @@ impl SendRequest {
                 .build()
             }
             WriteBuffers::Vectored(v) => {
-                let max_iovecs = v.bufs.chunk_count().min(v.iovecs.len());
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        v.iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        max_iovecs,
-                    )
-                };
-                let iovecs_len = v
-                    .bufs
-                    .chunks_vectored(io_slices)
-                    .try_into()
-                    .expect("iovecs_len exceeds u32");
+                let (ptr, len) = v.refresh_iovecs();
 
                 // `Writev` is sufficient here because network sends only need
-                // ordered byte delivery; this layer does not need sendmsg
+                // ordered byte delivery. This layer does not need sendmsg
                 // ancillary data or zerocopy completion management.
-                opcode::Writev::new(fd, v.iovecs.as_ptr(), iovecs_len).build()
+                opcode::Writev::new(fd, ptr, len).build()
             }
         }
     }
@@ -591,21 +601,8 @@ impl WriteAtRequest {
                 .build()
             }
             WriteBuffers::Vectored(v) => {
-                let max_iovecs = v.bufs.chunk_count().min(v.iovecs.len());
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        v.iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        max_iovecs,
-                    )
-                };
-                let iovecs_len = v
-                    .bufs
-                    .chunks_vectored(io_slices)
-                    .try_into()
-                    .expect("iovecs_len exceeds u32");
-
-                opcode::Writev::new(fd, v.iovecs.as_ptr(), iovecs_len)
+                let (ptr, len) = v.refresh_iovecs();
+                opcode::Writev::new(fd, ptr, len)
                     .offset(offset)
                     .rw_flags(rw_flags)
                     .build()
