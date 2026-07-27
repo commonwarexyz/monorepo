@@ -115,8 +115,8 @@ where
 
     /// Duration for which state sync remains on a fixed target before considering a newer
     /// finalized target. Finalizations received during this window are queued and coalesced when
-    /// it expires. A queued target may supersede the current fetch at expiry, so this should cover
-    /// the expected duration of a sync attempt.
+    /// it expires. The newest queued target may then replace the current sync target. Choose a
+    /// delay long enough for a typical sync attempt to complete.
     pub retarget_delay: NonZeroDuration,
 
     /// Periodic database and marshal pruning configuration.
