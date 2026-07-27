@@ -261,14 +261,14 @@ where
             }
             let (case, layout) = attack_cases
                 .into_iter()
-                .nth(self.input.case_selector as usize % count)
+                .nth(usize::from(self.input.case_selector) % count)
                 .expect("selected AttackLayout case must exist");
             (case, Some(layout))
         } else {
             let count = cases.len();
             let case = cases
                 .into_iter()
-                .nth(self.input.case_selector as usize % count)
+                .nth(usize::from(self.input.case_selector) % count)
                 .expect("selected general case must exist");
             (case, None)
         };
@@ -519,24 +519,20 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
             StackSelection {
                 application: ApplicationChoice::AlwaysAccept,
                 marshal: MarshalChoice::Deferred,
-                max_pending_acks: NZUsize!(1),
+                max_pending_acks: NZUsize!(2),
             },
             vec![0],
         );
     };
-    // Keep application, wrapper, and backpressure selection independent while
-    // preserving the remaining bytes as identical scenario/runtime entropy.
+    // Keep application and wrapper selection independent while preserving the
+    // remaining bytes as identical scenario/runtime entropy.
     let application = ApplicationChoice::from_selector(selector);
     let wrapper = if selector & 0b10 == 0 {
         MarshalChoice::Deferred
     } else {
         MarshalChoice::Inline
     };
-    let max_pending_acks = if selector & 0b100 == 0 {
-        NZUsize!(1)
-    } else {
-        NZUsize!(2)
-    };
+    let max_pending_acks = NZUsize!(2);
     let entropy = if entropy.is_empty() {
         vec![0]
     } else {

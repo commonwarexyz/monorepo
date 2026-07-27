@@ -9,16 +9,34 @@ use commonware_consensus::{
     types::{Epoch, Participant, Round, View},
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Handle, IoBuf, Spawner, spawn_cell};
-use rand::{Rng, RngExt as _};
+use rand::RngExt as _;
 use rand_core::CryptoRng;
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::VecDeque,
+    future::{Future as _, poll_fn},
+    task::Poll,
+    time::Duration,
+};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 const LATEST_PROPOSALS_MIN_LEN: u64 = 10;
 const LATEST_PROPOSALS_MAX_LEN: usize = 100;
+
+/// Poll one receive operation without waiting when the channel is empty.
+async fn try_receive<R: Receiver>(
+    receiver: &mut R,
+) -> Option<commonware_p2p::Message<R::PublicKey>> {
+    let mut receive = std::pin::pin!(receiver.recv());
+    poll_fn(|context| {
+        Poll::Ready(match receive.as_mut().poll(context) {
+            Poll::Ready(result) => result.ok(),
+            Poll::Pending => None,
+        })
+    })
+    .await
+}
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
 pub struct Disrupter<
@@ -171,13 +189,6 @@ where
         proposal
     }
 
-    fn bytes(&mut self) -> Vec<u8> {
-        let len = self.context.random::<u8>();
-        let mut bytes = vec![0u8; len as usize];
-        self.context.fill_bytes(&mut bytes);
-        bytes
-    }
-
     fn mutate_bytes(&mut self, input: &[u8]) -> Vec<u8> {
         if input.is_empty() {
             return vec![0];
@@ -238,58 +249,55 @@ where
         let (mut resolver_sender, mut resolver_receiver) = resolver_network;
 
         loop {
-            // Send disruptive messages across all channels
+            // Emit a sampled proactive vote action.
             match (self.context.random::<u8>()) % 7 {
                 0 => self.send_random_vote(&mut vote_sender).await,
-                1 => self.send_proposal(&mut vote_sender).await,
+                1 => self.send_proposal_vote(&mut vote_sender).await,
                 2 => {
                     // Equivocation style: send multiple different proposals
-                    self.send_proposal(&mut vote_sender).await;
-                    self.send_proposal(&mut vote_sender).await;
+                    self.send_proposal_vote(&mut vote_sender).await;
+                    self.send_proposal_vote(&mut vote_sender).await;
                 }
-                3 => {
-                    self.send_random_message(&mut cert_sender).await;
-                }
-                4 => {
-                    self.send_random_message(&mut resolver_sender).await;
-                }
+                3 | 4 => self.send_random_vote(&mut vote_sender).await,
                 5 => {
                     // flood random victim
                     self.flood_victim(&mut vote_sender).await;
                 }
                 _ => {
-                    // Send on multiple channels simultaneously
-                    self.send_proposal(&mut vote_sender).await;
-                    self.send_random_message(&mut cert_sender).await;
-                    self.send_random_message(&mut resolver_sender).await;
+                    // Burst multiple vote actions.
+                    self.send_proposal_vote(&mut vote_sender).await;
+                    self.send_random_vote(&mut vote_sender).await;
+                    self.send_random_vote(&mut vote_sender).await;
                 }
             }
 
-            select! {
-                result = vote_receiver.recv() => {
-                    if let Ok((_, msg)) = result {
-                        self.handle_vote(&mut vote_sender, msg.into()).await;
-                    }
-                },
-                result = cert_receiver.recv() => {
-                    if let Ok((_, msg)) = result {
-                        self.handle_certificate(&mut cert_sender, msg.into()).await;
-                    }
-                },
-                result = resolver_receiver.recv() => {
-                    if let Ok((_, msg)) = result {
-                        self.handle_resolver(&mut resolver_sender, msg.into()).await;
-                    }
-                },
-                _ = self.context.sleep(TIMEOUT) => {
-                    self.send_random_vote(&mut vote_sender).await;
-                    self.send_random_message(&mut cert_sender).await;
-                    self.send_random_message(&mut resolver_sender).await;
-                },
+            let mut received = false;
+            loop {
+                let mut pass_received = false;
+                if let Some((_, message)) = try_receive(&mut vote_receiver).await {
+                    self.handle_vote(&mut vote_sender, message.into()).await;
+                    pass_received = true;
+                }
+                if let Some((_, message)) = try_receive(&mut cert_receiver).await {
+                    self.handle_certificate(&mut cert_sender, message.into())
+                        .await;
+                    pass_received = true;
+                }
+                if let Some((_, message)) = try_receive(&mut resolver_receiver).await {
+                    self.handle_resolver(&mut resolver_sender, message.into())
+                        .await;
+                    pass_received = true;
+                }
+                if !pass_received {
+                    break;
+                }
+                received = true;
             }
 
-            // Keep non-finalizing configurations from spinning at one simulated timestamp.
-            self.context.sleep(TIMEOUT).await;
+            if !received {
+                // Keep non-finalizing configurations from spinning at one simulated timestamp.
+                self.context.sleep(TIMEOUT).await;
+            }
         }
     }
 
@@ -444,12 +452,14 @@ where
                 self.last_notarized_view,
                 self.last_nullified_view,
             );
-            let msg = self.normalize_epoch(proposal).encode();
-            let _ = sender.send(Recipients::One(victim.clone()), msg, true);
+            if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                let message = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+                let _ = sender.send(Recipients::One(victim.clone()), message, true);
+            }
         }
     }
 
-    async fn send_proposal(&mut self, sender: &mut impl Sender) {
+    async fn send_proposal_vote(&mut self, sender: &mut impl Sender) {
         if !self.is_faulty_view(self.current_view()) {
             return;
         }
@@ -462,16 +472,10 @@ where
             self.last_notarized_view,
             self.last_nullified_view,
         );
-        let msg = self.normalize_epoch(proposal).encode();
-        let _ = sender.send(Recipients::All, msg, true);
-    }
-
-    async fn send_random_message(&mut self, sender: &mut impl Sender) {
-        if !self.is_faulty_view(self.current_view()) {
-            return;
+        if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+            let message = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+            let _ = sender.send(Recipients::All, message, true);
         }
-        let cert = self.bytes();
-        let _ = sender.send(Recipients::All, IoBuf::from(cert), true);
     }
 
     async fn send_random_vote(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
@@ -532,8 +536,18 @@ where
                 }
             }
             Message::Random => {
-                let bytes = self.bytes();
-                let _ = sender.send(recipients, bytes, true);
+                let proposal = self.strategy.mutate_proposal(
+                    self.context.as_mut(),
+                    &proposal,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                );
+                if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                    let message = Vote::<S, Sha256Digest>::Notarize(vote).encode();
+                    let _ = sender.send(recipients, message, true);
+                }
             }
         }
     }

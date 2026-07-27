@@ -98,7 +98,7 @@ pub struct MarshalTwinsInput {
     /// Number of adversarial Twins rounds before the synchronous suffix.
     pub rounds: u8,
     /// Selects one case from the sampled Twins scenario set.
-    pub case_selector: u8,
+    pub case_selector: u16,
     /// Repeat one partition pattern across the adversarial prefix.
     pub sustained: bool,
     /// Byzantine message mutation strategy used by the secondary twin.

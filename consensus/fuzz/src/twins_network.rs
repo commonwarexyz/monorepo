@@ -2,9 +2,8 @@
 //!
 //! Both the generic Simplex campaigns and marshal-backed campaigns use these
 //! factories so twin halves are split and routed with identical semantics.
-//! Routing is type-aware when a payload exposes a protocol view. Undecodable
-//! payloads retain their requested recipients so malformed Byzantine traffic
-//! still reaches the protocol receiver.
+//! Routing is intentionally type-aware: payloads without a decodable protocol
+//! view are rejected because no Twins partition can be selected for them.
 
 use crate::simplex;
 use commonware_codec::{Decode, DecodeExt, Read};
@@ -56,10 +55,8 @@ pub(crate) fn vote_forwarder<P: simplex::Simplex>(
 + Sync
 + Clone
 + 'static {
-    move |origin, recipients, message| {
-        let Ok(vote) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
-            return Some(recipients.clone());
-        };
+    move |origin, _, message| {
+        let vote = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()).ok()?;
         let (primary, secondary) =
             scenario.partitions(vote.view(), term_length, participants.as_ref());
         match origin {
@@ -80,12 +77,10 @@ pub(crate) fn certificate_forwarder<P: simplex::Simplex>(
 + Clone
 + 'static {
     let codec = scheme.certificate_codec_config();
-    move |origin, recipients, message| {
-        let Ok(certificate) =
+    move |origin, _, message| {
+        let certificate =
             Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut message.as_ref(), &codec)
-        else {
-            return Some(recipients.clone());
-        };
+                .ok()?;
         let (primary, secondary) =
             scenario.partitions(certificate.view(), term_length, participants.as_ref());
         match origin {
@@ -141,10 +136,8 @@ pub(crate) fn resolver_forwarder<P: simplex::Simplex>(
 + Clone
 + 'static {
     let codec = scheme.certificate_codec_config();
-    move |origin, recipients, message| {
-        let Some(view) = resolver_view::<P>(message, &codec) else {
-            return Some(recipients.clone());
-        };
+    move |origin, _, message| {
+        let view = resolver_view::<P>(message, &codec)?;
         let (primary, secondary) = scenario.partitions(view, term_length, participants.as_ref());
         match origin {
             SplitOrigin::Primary => Some(Recipients::Some(primary)),
