@@ -270,7 +270,7 @@ where
     ///
     /// This is [`Self::bounds`] narrowed to what the Merkle structure still retains, which a sync
     /// can leave ahead of the operations log's own pruning boundary.
-    pub fn provable_bounds(&self) -> std::ops::Range<Location<F>> {
+    pub(crate) fn provable_bounds(&self) -> std::ops::Range<Location<F>> {
         self.journal.provable_start()..Location::new(self.journal.bounds().end)
     }
 
@@ -405,6 +405,9 @@ where
                 loc,
                 self.inactivity_floor_loc,
             ));
+        }
+        if loc <= Location::new(self.journal.bounds().start) {
+            return Ok(self);
         }
         // Recovery rewinds to the last durable commit, which may sit below the boundary
         // while the floor-declaring commit is unflushed (pruning it away would leave the
@@ -965,7 +968,16 @@ pub(crate) mod tests {
             .append(V::Value::make(3))
             .merkleize(&db, None, second_commit_loc)
             .await;
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
+
+        let durable = db.journal.durable();
+        let retained_start = db.bounds().start;
+        db = db.prune(retained_start).await.unwrap();
+        assert_eq!(
+            db.journal.durable(),
+            durable,
+            "a no-op prune must not commit an unsynced tip",
+        );
 
         // Valid prune: up to the floor (previous commit location).
         let root = db.root();

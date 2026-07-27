@@ -273,7 +273,6 @@ pub trait Merkleized: Sized + Send + Sync {
     /// Create a child unmerkleized batch that reads through this batch's
     /// pending changes before falling back to the database's applied state.
     ///
-    /// In QMDB, this maps to `merkleized_batch.new_batch()`.
     fn new_batch(&self) -> Self::Unmerkleized;
 }
 
@@ -341,8 +340,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Apply a merkleized batch's changeset to the underlying database and
     /// begin persisting it.
     ///
-    /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)` and `db.start_sync()`.
     /// The returned database reflects the batch immediately. The returned
     /// handle resolves once the batch is durable, and failures of the deferred
     /// flush surface only there, so the caller must observe every handle.
@@ -595,11 +592,13 @@ impl<D: Digest, T> TipUpdate<D, T> {
         )
     }
 
-    pub(crate) fn record(mut self) -> (Anchor<D>, T) {
-        if let Some(observed) = self.observed.take() {
+    /// Record the update before releasing its observation barrier.
+    pub(crate) fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
+        let result = record(self.anchor, self.targets);
+        if let Some(observed) = self.observed {
             let _ = observed.send(());
         }
-        (self.anchor, self.targets)
+        result
     }
 }
 
@@ -767,15 +766,20 @@ where
                             tip_updates = None;
                             continue;
                         };
-                        let (new_anchor, new_target) = update.record();
-                        if new_anchor.height <= current_anchor.height {
+                        let target = update.record(|new_anchor, new_target| {
+                            if new_anchor.height <= current_anchor.height {
+                                return None;
+                            }
+                            current_anchor = new_anchor;
+                            if new_target == current_target {
+                                return None;
+                            }
+                            current_target = new_target.clone();
+                            Some(new_target)
+                        });
+                        let Some(new_target) = target else {
                             continue;
-                        }
-                        current_anchor = new_anchor;
-                        if new_target == current_target {
-                            continue;
-                        }
-                        current_target = new_target.clone();
+                        };
                         if !target_tx.send_lossy(new_target).await {
                             return (current_anchor, current_target);
                         }
@@ -818,20 +822,19 @@ where
         };
         drained += 1;
 
-        let (new_anchor, new_target) = update.record();
+        update.record(|new_anchor, new_target| {
+            let latest_height = latest
+                .as_ref()
+                .map_or(current_anchor.height, |(anchor, _): &(Anchor<D>, T)| {
+                    anchor.height
+                });
+            if new_anchor.height > latest_height {
+                latest = Some((new_anchor, new_target));
+            }
+        });
         if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
             reschedule().await;
         }
-
-        let latest_height = latest
-            .as_ref()
-            .map_or(current_anchor.height, |(anchor, _): &(Anchor<D>, T)| {
-                anchor.height
-            });
-        if new_anchor.height <= latest_height {
-            continue;
-        }
-        latest = Some((new_anchor, new_target));
     }
 
     let Some((new_anchor, new_target)) = latest else {
@@ -1057,8 +1060,9 @@ macro_rules! impl_state_sync_set {
                                 loop {
                                     match updates.try_recv() {
                                         Ok(update) => {
-                                            let (anchor, targets) = update.record();
-                                            state.record_tip_update(anchor, targets);
+                                            update.record(|anchor, targets| {
+                                                state.record_tip_update(anchor, targets);
+                                            });
                                         }
                                         Err(ring::TryRecvError::Empty) => break,
                                         Err(ring::TryRecvError::Disconnected) => {
@@ -1127,8 +1131,9 @@ macro_rules! impl_state_sync_set {
                                         tip_updates = None;
                                         continue;
                                     };
-                                    let (anchor, targets) = update.record();
-                                    state.record_tip_update(anchor, targets);
+                                    update.record(|anchor, targets| {
+                                        state.record_tip_update(anchor, targets);
+                                    });
                                 },
                             };
                         }
@@ -3517,6 +3522,22 @@ mod tests {
     }
 
     #[test]
+    fn tip_update_observation_follows_recording() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (update, mut observed) = TipUpdate::with_observation(anchor(1), 7u64);
+            let mut recorded = None;
+
+            update.record(|new_anchor, new_target| {
+                assert!((&mut observed).now_or_never().is_none());
+                recorded = Some((new_anchor, new_target));
+            });
+
+            assert_eq!(recorded, Some((anchor(1), 7)));
+            observed.await.expect("recorded update should be observed");
+        });
+    }
+
+    #[test]
     fn single_tip_update_drain_keeps_highest_recorded_target() {
         deterministic::Runner::default().start(|_context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
@@ -4353,8 +4374,11 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
-            context.sleep(Duration::from_millis(1)).await;
+            let (update, observed) = TipUpdate::with_observation(anchor(9), (9, 7));
+            let _ = tip_tx.send(update).await;
+            observed
+                .await
+                .expect("tuple coordinator should record the tip update");
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 

@@ -1729,8 +1729,9 @@ fn test_variable_durable_range_well_formed_after_collapsing_prune_crash() {
         }
         // Commit syncs the data blobs without persisting the offsets watermark.
         journal = journal.commit().await.unwrap();
-        // The forced prune path commits the offsets journal (again no watermark) and
-        // removes every item-bearing blob, leaving the journal empty-aligned.
+        // The commit covered the data barrier, so the prune commits only the offsets journal
+        // (again no watermark) before removing every item-bearing blob, leaving the journal
+        // empty-aligned.
         (journal, _) = journal.prune(30).await.unwrap();
         drop(journal);
     });

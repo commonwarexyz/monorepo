@@ -259,9 +259,11 @@ pub(crate) mod test {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(&context, "delayed", "start_sync_overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let initial_barrier = db.barrier();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
             db = apply_write(db, key0, value0).await;
+            let first_barrier = db.inactivity_floor_loc()..db.bounds().end;
 
             let starts_before = pending.starts();
             let entered_before = pending.entered();
@@ -284,19 +286,31 @@ pub(crate) mod test {
             let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
             let value1 = Sha256::hash(&[&200u64.to_be_bytes()]);
             db = apply_write(db, key1, value1).await;
+            let second_barrier = db.inactivity_floor_loc()..db.bounds().end;
             assert_eq!(
                 pending.completions(),
                 completions_before,
                 "the database made progress while the sync was still in flight"
             );
+            assert_eq!(
+                db.barrier(),
+                initial_barrier,
+                "an in-flight sync cannot make either applied batch durable"
+            );
 
             pending.unblock();
             waiter.await.unwrap();
+            assert_eq!(
+                db.barrier(),
+                first_barrier,
+                "the first sync covers its snapshot, not the newer applied batch"
+            );
 
             // The mid-sync batch is durable after the next sync.
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
+            assert_eq!(db.barrier(), second_barrier);
             let root = db.root();
             let size = db.bounds().end;
             drop(db);

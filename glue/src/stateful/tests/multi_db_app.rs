@@ -335,6 +335,7 @@ pub(crate) struct MultiDbEngine {
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
+    retained_marshal_blocks: usize,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
@@ -359,6 +360,7 @@ impl MultiDbEngine {
                 update_channel_size: NZUsize!(256),
                 max_retained_roots: 32,
             },
+            retained_marshal_blocks: 10,
             sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
             sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -378,6 +380,7 @@ impl MultiDbEngine {
             update_channel_size: NZUsize!(4),
             max_retained_roots: 32,
         };
+        self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
     }
 }
@@ -642,10 +645,11 @@ impl EngineDefinition for MultiDbEngine {
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: self.sync_config,
+                retarget_grace: NZDuration!(Duration::from_secs(1)),
                 prune_config: Some(PruneConfig {
                     max_pending_acks,
                     maintenance_interval: NZUsize!(5),
-                    retained_marshal_blocks: 10,
+                    retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
             },

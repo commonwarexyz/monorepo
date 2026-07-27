@@ -501,7 +501,7 @@ where
 ///
 /// The Merkle is reset to the witness's `(leaf_count, pinned_nodes)`, the root is recomputed
 /// from the rebuilt frontier, and the witness's proof is verified against that root.
-fn rebuild_and_verify<F, D, H, S, Op>(
+pub(crate) fn rebuild_and_verify<F, D, H, S, Op>(
     witness: Witness<F, D>,
     merkle: &compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,

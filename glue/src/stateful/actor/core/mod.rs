@@ -25,7 +25,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{NonZeroDuration, channel::oneshot};
 use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
@@ -113,6 +113,12 @@ where
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
+    /// Duration for which state sync remains on a fixed target before considering a newer
+    /// finalized target. Finalizations received during this window are queued and coalesced when
+    /// it expires. A queued target may supersede the current fetch at expiry, so this should cover
+    /// the expected duration of a sync attempt.
+    pub retarget_grace: NonZeroDuration,
+
     /// Periodic database and marshal pruning configuration.
     ///
     /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
@@ -158,6 +164,9 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
+    /// Duration of the fixed-target state sync window.
+    retarget_grace: NonZeroDuration,
+
     /// Periodic prune configuration.
     prune_config: Option<PruneConfig>,
 }
@@ -193,6 +202,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
+                retarget_grace: config.retarget_grace,
                 prune_config: config.prune_config,
             },
             Mailbox::new(sender),
@@ -245,6 +255,9 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
+            retarget_grace: self.retarget_grace.get(),
+            retarget_frontier: None,
+            pending_retarget: None,
             prune_config: self.prune_config,
             metrics,
         };
@@ -319,7 +332,7 @@ mod tests {
         Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
+    use commonware_utils::{NZDuration, NZU16, NZU64, NZUsize, channel::mpsc};
     use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
@@ -342,7 +355,7 @@ mod tests {
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            Ok(Self)
+            Ok(Self::default())
         }
     }
 
@@ -452,6 +465,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
+                    retarget_grace: NZDuration!(Duration::from_secs(1)),
                     prune_config: None,
                 },
             );

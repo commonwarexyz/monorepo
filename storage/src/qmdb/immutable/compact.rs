@@ -425,14 +425,16 @@ where
 
     /// Return the compact-sync target described by the current witness.
     ///
-    /// This reflects the last durably persisted commit, which may lag behind live in-memory
-    /// mutations until [`Self::commit`] or [`Self::sync`] is called.
+    /// This normally reflects the last durably persisted commit, which may lag behind live
+    /// in-memory mutations until [`Self::commit`] or [`Self::sync`] is called. During a validated
+    /// compact-sync import it reflects the in-memory imported witness before persistence, so this
+    /// method is not a durability indicator.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// Return the compact-sync state for `target`, or a stale-target error if no retained
-    /// witness commits it.
+    /// Return the compact-sync state for `target`, or an error if the target is invalid or no
+    /// retained witness authenticates it.
     pub(crate) async fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
@@ -440,47 +442,87 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
+        target
+            .validate()
+            .map_err(compact_sync::ServeError::InvalidTarget)?;
+
         // Hold the witness lock only long enough to snapshot the tip entry; decode outside
-        // it so concurrent readers do not contend. A target below the tip is served from
-        // the retained witness journal: a syncing client's target trails the source by its
-        // fetch latency, and the client verifies the payload against its own target root.
-        // [`witness::Store::prune`] bounds how far back this reaches.
-        let tip = self
-            .witness
-            .with(|w| (target.leaf_count == w.leaf_count()).then(|| w.witness.clone()));
-        let entry = match tip {
-            Some(entry) => entry,
+        // it so concurrent readers do not contend. The tip carries the root it was verified
+        // against, so matching the whole target there is free. A target below the tip is
+        // served from the retained witness journal: a syncing client's target trails the
+        // source by its fetch latency. [`witness::Store::prune`] bounds how far back this
+        // reaches.
+        let (current, tip) = self.witness.with(|w| {
+            let current = w.target();
+            let tip = (current == target).then(|| w.witness.clone());
+            (current, tip)
+        });
+        let (entry, op) = match tip {
+            Some(entry) => {
+                let op = Operation::<F, K, V>::decode_cfg(
+                    entry.op_bytes.as_ref(),
+                    &self.commit_codec_config,
+                )
+                .map_err(|_| {
+                    compact_sync::ServeError::Database(Error::DataCorrupted(
+                        "invalid commit operation",
+                    ))
+                })?;
+                (entry, op)
+            }
+
+            // The cached tip proves the only root this source has at its current leaf count.
+            None if target.leaf_count == current.leaf_count => {
+                return Err(compact_sync::ServeError::DivergentTarget {
+                    requested: target,
+                    current,
+                });
+            }
+
             // While an import is pending the journal still holds the previous partition's
             // contents, so only the cached tip is servable.
             None if self.witness.import_pending() => {
                 return Err(compact_sync::ServeError::StaleTarget {
                     requested: target,
-                    current: self.target(),
+                    current,
                 });
             }
-            // A below-tip entry is this db's own durable write: reads are checksummed, so
-            // whatever decodes is what was written, and the client verifies every payload
-            // against its own target root. A divergent target at a retained leaf count
-            // therefore surfaces as client-side rejection, not a serve-time check.
-            None => self
-                .witness
-                .entry_at(target.leaf_count)
-                .await
-                .map_err(compact_sync::ServeError::Database)?
-                .ok_or_else(|| compact_sync::ServeError::StaleTarget {
-                    requested: target.clone(),
-                    current: self.target(),
-                })?,
+            None => {
+                let entry = self
+                    .witness
+                    .entry_at(target.leaf_count)
+                    .await
+                    .map_err(compact_sync::ServeError::Database)?
+                    .ok_or_else(|| compact_sync::ServeError::StaleTarget {
+                        requested: target.clone(),
+                        current: current.clone(),
+                    })?;
+
+                // Rebuild the retained frontier before serving it. This authenticates the pins,
+                // commit operation, and proof together rather than trusting the journal checksum.
+                let merkle = compact_merkle::Merkle::new(self.merkle.strategy().clone());
+                let (verified, op) =
+                    witness::rebuild_and_verify::<F, H::Digest, H, S, Operation<F, K, V>>(
+                        entry,
+                        &merkle,
+                        &self.commit_codec_config,
+                        Operation::has_floor,
+                    )
+                    .map_err(compact_sync::ServeError::Database)?;
+                if verified.root != target.root {
+                    return Err(compact_sync::ServeError::DivergentTarget {
+                        requested: target,
+                        current,
+                    });
+                }
+                (verified.witness, op)
+            }
         };
         let Witness {
-            op_bytes,
             proof: last_commit_proof,
             pinned_nodes,
+            ..
         } = entry;
-        let op = Operation::<F, K, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
-            .map_err(|_| {
-                compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
-            })?;
         Ok(compact_sync::State {
             leaf_count: target.leaf_count,
             pinned_nodes,
@@ -704,6 +746,30 @@ mod tests {
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_state_rejects_invalid_and_divergent_targets() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-invalid-target").await;
+            let current = db.target();
+            let invalid_target = compact_sync::Target::new(current.root, Location::new(0));
+
+            assert!(matches!(
+                db.compact_state(invalid_target).await,
+                Err(compact_sync::ServeError::InvalidTarget(_))
+            ));
+
+            let divergent_target =
+                compact_sync::Target::new(Digest::from([0xff; 32]), current.leaf_count);
+            assert_ne!(divergent_target.root, current.root);
+            assert!(matches!(
+                db.compact_state(divergent_target.clone()).await,
+                Err(compact_sync::ServeError::DivergentTarget { requested, current: actual })
+                    if requested == divergent_target && actual == current
+            ));
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("INFO")]
@@ -1152,7 +1218,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_rewind_rejects_corrupt_target_entry() {
+    fn test_compact_historical_entry_validation() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "immutable-corrupt-rewind-target";
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
@@ -1163,7 +1229,7 @@ mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
-            let rewind_target = db.target().leaf_count;
+            let rewind_target = db.target();
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
@@ -1172,6 +1238,15 @@ mod tests {
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let tip_target = db.target();
+
+            let divergent_target =
+                compact_sync::Target::new(tip_target.root, rewind_target.leaf_count);
+            assert_ne!(divergent_target.root, rewind_target.root);
+            assert!(matches!(
+                db.compact_state(divergent_target.clone()).await,
+                Err(compact_sync::ServeError::DivergentTarget { requested, current })
+                    if requested == divergent_target && current == tip_target
+            ));
             drop(db);
 
             // Corrupt the rewind target's entry (the journal holds bootstrap, target, tip).
@@ -1194,9 +1269,15 @@ mod tests {
             .unwrap();
             assert_eq!(reopened.target(), tip_target);
 
+            // Historical serving verifies the retained frontier before returning it.
+            assert!(matches!(
+                reopened.compact_state(rewind_target.clone()).await,
+                Err(compact_sync::ServeError::Database(Error::DataCorrupted(_)))
+            ));
+
             // The corrupt entry fails the rewind before any truncation.
             assert!(matches!(
-                reopened.rewind(rewind_target).await,
+                reopened.rewind(rewind_target.leaf_count).await,
                 Err(Error::DataCorrupted(_))
             ));
 

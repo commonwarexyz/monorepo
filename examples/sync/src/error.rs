@@ -26,6 +26,10 @@ pub enum Error {
     #[error("stale compact target: {0}")]
     StaleTarget(String),
 
+    /// Compact target cannot be authenticated by the source's retained history.
+    #[error("divergent compact target: {0}")]
+    DivergentTarget(String),
+
     /// Database operation failed
     #[error("database operation failed")]
     Database(#[from] commonware_storage::qmdb::Error<commonware_storage::mmr::Family>),
@@ -61,6 +65,7 @@ impl Error {
         match self {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::StaleTarget(_) => ErrorCode::StaleTarget,
+            Self::DivergentTarget(_) => ErrorCode::DivergentTarget,
             Self::Database(_) => ErrorCode::DatabaseError,
             Self::Network(_) => ErrorCode::NetworkError,
             _ => ErrorCode::InternalError,

@@ -987,6 +987,7 @@ impl EngineDefinition for ReshareEngine {
                     update_channel_size: NZUsize!(256),
                     max_retained_roots: 8,
                 },
+                retarget_grace: NZDuration!(Duration::from_secs(1)),
                 prune_config: None,
             },
         );

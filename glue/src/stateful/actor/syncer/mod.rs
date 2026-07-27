@@ -246,6 +246,7 @@ where
                         floor.proposal.payload == existing.proposal.payload,
                         "selected state sync floor conflicts with the persisted in-progress round",
                     );
+                    return self;
                 }
             }
             Some(SyncState::Complete(_)) => {

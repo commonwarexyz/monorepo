@@ -241,15 +241,14 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
-    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
-    /// proof matching the historical root.
+    /// The requested `historical_size` is not a retained commit boundary, so the wrapper cannot
+    /// derive the `inactive_peaks` count needed to construct a proof matching a historical root.
     ///
     /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
     /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
-    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
-    /// commit that would have governed the size.
-    #[error("historical floor pruned for size: {0}")]
+    /// fires when the size is zero or the caller passes a retained non-commit-boundary size.
+    /// Pruned operations are reported separately as [`crate::journal::Error::ItemPruned`].
+    #[error("historical size is not a retained commit boundary: {0}")]
     HistoricalFloorPruned(Location<F>),
 }
 

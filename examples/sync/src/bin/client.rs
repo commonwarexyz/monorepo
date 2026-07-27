@@ -379,6 +379,16 @@ where
                 );
                 continue;
             }
+            Err(sync::Error::Resolver(Error::Server {
+                code: ErrorCode::DivergentTarget,
+                message,
+            })) => {
+                warn!(
+                    sync_iteration = iteration,
+                    "{label} server returned a divergent target: {message}; retrying"
+                );
+                continue;
+            }
             Err(err) => return Err(err.into()),
         };
         info!(

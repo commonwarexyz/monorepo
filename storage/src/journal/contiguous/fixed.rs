@@ -845,7 +845,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         (self, Handle::from_future(completion))
     }
 
-    /// Begin raising the recovery watermark toward `size`, capped at the barrier.
+    /// Begin raising the recovery watermark toward `size`, capped at the barrier. The cap is
+    /// load-bearing for the variable journal, which passes a size proven durable only for its
+    /// data blobs.
     pub(super) async fn start_watermark_sync(
         mut self: Box<Self>,
         size: u64,
@@ -1371,6 +1373,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
+    ///
+    /// The retained boundary must be justified by durable data: recovery must not need pruned
+    /// items to explain retained state. If [`Mutable::durable`] already covers the aligned
+    /// boundary, this may skip syncing, so a successful prune does not make newer appends durable.
     ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.

@@ -13,6 +13,7 @@ use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Buf, BufMut, Handle};
+use commonware_utils::sync::Mutex;
 use std::convert::Infallible;
 
 pub(crate) type TestDatabases = Shared<TestDb>;
@@ -48,7 +49,17 @@ impl Merkleized for TestMerkleized {
 }
 
 #[derive(Default)]
-pub(crate) struct TestDb;
+pub(crate) struct TestDb {
+    finalize: Mutex<Option<Handle<()>>>,
+}
+
+impl TestDb {
+    pub(crate) fn with_finalize(handle: Handle<()>) -> Self {
+        Self {
+            finalize: Mutex::new(Some(handle)),
+        }
+    }
+}
 
 impl<E: Send> ManagedDb<E> for TestDb {
     type Unmerkleized = TestUnmerkleized;
@@ -62,7 +73,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-        Ok(Self)
+        Ok(Self::default())
     }
 
     async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
@@ -74,7 +85,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
-        Ok((self, Handle::ready(Ok(()))))
+        let handle = self
+            .finalize
+            .lock()
+            .take()
+            .unwrap_or_else(|| Handle::ready(Ok(())));
+        Ok((self, handle))
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -222,7 +238,7 @@ impl<
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb)
+    Shared::new("test", TestDb::default())
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

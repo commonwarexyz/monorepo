@@ -186,7 +186,7 @@ mod tests {
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
-            let _ = update.record();
+            update.record(|_, _| {});
 
             assert!(update_targets.await.is_none());
         });

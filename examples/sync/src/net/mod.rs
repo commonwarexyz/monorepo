@@ -18,7 +18,7 @@ pub(super) trait Message: Encode + DecodeExt<()> + Sized + Send + Sync + 'static
 }
 
 /// Error codes for protocol errors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCode {
     /// Invalid request parameters.
     InvalidRequest,
@@ -32,6 +32,8 @@ pub enum ErrorCode {
     Timeout,
     /// Internal server error.
     InternalError,
+    /// Compact target cannot be authenticated by the source's retained history.
+    DivergentTarget,
 }
 
 impl Write for ErrorCode {
@@ -43,6 +45,7 @@ impl Write for ErrorCode {
             Self::StaleTarget => 3u8,
             Self::Timeout => 4u8,
             Self::InternalError => 5u8,
+            Self::DivergentTarget => 6u8,
         };
         discriminant.write(buf);
     }
@@ -66,6 +69,7 @@ impl Read for ErrorCode {
             3 => Ok(Self::StaleTarget),
             4 => Ok(Self::Timeout),
             5 => Ok(Self::InternalError),
+            6 => Ok(Self::DivergentTarget),
             _ => Err(Error::InvalidEnum(discriminant)),
         }
     }
@@ -128,29 +132,19 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case(ErrorCode::InvalidRequest)]
-    #[case(ErrorCode::DatabaseError)]
-    #[case(ErrorCode::NetworkError)]
-    #[case(ErrorCode::StaleTarget)]
-    #[case(ErrorCode::Timeout)]
-    #[case(ErrorCode::InternalError)]
-    fn test_error_code_roundtrip_serialization(#[case] error_code: ErrorCode) {
-        // Serialize
+    #[case(ErrorCode::InvalidRequest, 0)]
+    #[case(ErrorCode::DatabaseError, 1)]
+    #[case(ErrorCode::NetworkError, 2)]
+    #[case(ErrorCode::StaleTarget, 3)]
+    #[case(ErrorCode::Timeout, 4)]
+    #[case(ErrorCode::InternalError, 5)]
+    #[case(ErrorCode::DivergentTarget, 6)]
+    fn test_error_code_serialization(#[case] error_code: ErrorCode, #[case] discriminant: u8) {
         let encoded = error_code.encode().to_vec();
+        assert_eq!(encoded, [discriminant]);
 
-        // Deserialize
         let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
-
-        // Verify they match
-        match (&error_code, &decoded) {
-            (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
-            (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
-            (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
-            (ErrorCode::StaleTarget, ErrorCode::StaleTarget) => {}
-            (ErrorCode::Timeout, ErrorCode::Timeout) => {}
-            (ErrorCode::InternalError, ErrorCode::InternalError) => {}
-            _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
-        }
+        assert_eq!(decoded, error_code);
     }
 
     #[test]

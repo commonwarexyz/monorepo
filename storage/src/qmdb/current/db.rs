@@ -1956,9 +1956,8 @@ mod tests {
             }
         }
 
-        // End the phase as an unclean shutdown: either a prune dropped between the metadata
-        // sync and the log prune (the crash cut that bricked reopen twice before), or a
-        // plain crash with the db dropped mid-life.
+        // End the phase as an unclean shutdown: either cancel a prune between the metadata
+        // sync and log prune, or drop the db mid-life.
         if commits.len() > SIM_WINDOW && rng.random_range(0..3u32) == 0 {
             let (_, _, boundary) = commits[commits.len() - 1 - SIM_WINDOW];
             if boundary <= db.sync_boundary() {
@@ -2021,9 +2020,8 @@ mod tests {
         });
     }
 
-    /// Randomized crash-interleaving simulation for both families and both workload
-    /// regimes. Every pruning-window bug found on this branch was an interleaving of these
-    /// actions; this is the net for the class, not any single instance.
+    /// Randomized crash-interleaving simulation for both families and both workload regimes,
+    /// covering pruning-window failures caused by different orderings of these actions.
     #[test_traced]
     fn test_current_crash_interleaving_recovers_and_rewinds() {
         for seed in 0..8u64 {

@@ -23,10 +23,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
@@ -94,9 +91,8 @@ pub struct Db<
     /// durable in the log, up to that commit's operation count.
     pub(crate) durable: std::ops::Range<Location<F>>,
 
-    /// Commits appended but not yet proven durable, oldest first, each as its declared
-    /// inactivity floor up to its operation count.
-    pub(crate) pending_commits: VecDeque<std::ops::Range<Location<F>>>,
+    /// A commit frontier that may be covered by the log's next durable barrier.
+    pub(crate) pending_commit: Option<std::ops::Range<Location<F>>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -463,15 +459,11 @@ where
         Ok((self, boundary))
     }
 
-    /// Advance [Self::durable] past every commit the log has proven durable.
+    /// Advance [Self::durable] when the pending commit is proven durable.
     pub(crate) fn advance_durable(&mut self) {
         let barrier = Location::new(self.log.durable().end);
-        while let Some(window) = self.pending_commits.front().cloned() {
-            if window.end > barrier {
-                break;
-            }
+        if let Some(window) = self.pending_commit.take_if(|window| window.end <= barrier) {
             self.durable = window;
-            self.pending_commits.pop_front();
         }
     }
 
@@ -488,7 +480,7 @@ where
 
     /// Record that every appended commit is proven durable.
     pub(crate) fn mark_commits_durable(&mut self) {
-        self.pending_commits.clear();
+        self.pending_commit = None;
         self.durable = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
     }
 
@@ -742,7 +734,7 @@ where
             ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
-        self.pending_commits.clear();
+        self.pending_commit = None;
         self.durable = Location::new(0)..Location::new(0);
         self.root = self
             .log
@@ -874,7 +866,7 @@ where
             snapshot: index,
             last_commit_loc,
             durable: inactivity_floor_loc..Location::new(*last_commit_loc + 1),
-            pending_commits: VecDeque::new(),
+            pending_commit: None,
             active_keys,
             bitmap,
             metrics,
@@ -926,8 +918,15 @@ where
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_sync_calls.inc();
+        let pending = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
+        self.advance_durable();
         let (log, handle) = self.log.start_sync().await?;
         self.log = log;
+        // Installing the journal's new barrier observes its predecessor. Promote the old
+        // frontier before replacing it, then record the state covered by this sync.
+        self.advance_durable();
+        self.pending_commit = Some(pending);
+        self.advance_durable();
         Ok((self, handle))
     }
 

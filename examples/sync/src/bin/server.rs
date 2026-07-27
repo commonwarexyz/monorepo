@@ -122,6 +122,7 @@ fn error_message<DB>(
 where
     DB: ExampleDatabase,
 {
+    warn!(request_id, ?error, "failed to handle request");
     state.error_counter.inc();
     wire::Message::Error(ErrorResponse {
         request_id,
@@ -134,6 +135,7 @@ fn unexpected_message<DB>(state: &State<DB>, request_id: u64) -> wire::Message<D
 where
     DB: ExampleDatabase,
 {
+    warn!(request_id, "received unexpected message type");
     state.error_counter.inc();
     wire::Message::Error(ErrorResponse {
         request_id,
@@ -304,24 +306,13 @@ where
     );
 
     // Get the historical proof and operations
-    let result = database
+    let (proof, operations) = database
         .historical_proof(request.op_count, request.start_loc, max_ops)
-        .await;
-
-    let (proof, operations) = result.map_err(|err| {
-        warn!(?err, "failed to generate historical proof");
-        Error::Database(err)
-    })?;
+        .await?;
 
     // Optionally fetch pinned nodes
     let pinned_nodes = if request.include_pinned_nodes {
-        let nodes = database
-            .pinned_nodes_at(request.start_loc)
-            .await
-            .map_err(|err| {
-                warn!(?err, "failed to get pinned nodes");
-                Error::Database(err)
-            })?;
+        let nodes = database.pinned_nodes_at(request.start_loc).await?;
         Some(nodes)
     } else {
         None
@@ -362,14 +353,12 @@ where
 
     let compact_state = compact::Resolver::get_compact_state(&state.database, request.target)
         .await
-        .map_err(|err| {
-            warn!(?err, "failed to serve compact state");
-            match err {
-                compact::ServeError::Database(err) => Error::Database(err),
-                compact::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
-                compact::ServeError::MissingSource => Error::DatabaseUnavailable,
-                compact::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
-            }
+        .map_err(|err| match err {
+            compact::ServeError::Database(err) => Error::Database(err),
+            compact::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
+            compact::ServeError::DivergentTarget { .. } => Error::DivergentTarget(err.to_string()),
+            compact::ServeError::MissingSource => Error::DatabaseUnavailable,
+            compact::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
         })?;
 
     Ok(wire::GetCompactStateResponse {
