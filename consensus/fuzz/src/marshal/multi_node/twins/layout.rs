@@ -1,7 +1,7 @@
 //! Focused split-header scenario selection.
 
 use super::PublicKeyOf;
-use crate::{BYZANTINE_IDX, simplex::Simplex};
+use crate::simplex::Simplex;
 use commonware_consensus::{
     simplex::mocks::twins,
     types::{TermLength, View},
@@ -32,14 +32,15 @@ fn contains<K: PartialEq>(partition: &[K], participant: &K) -> bool {
 pub(super) fn attack_layout<P: Simplex>(
     scenario: &twins::Scenario,
     participants: &[PublicKeyOf<P>],
+    byzantine: usize,
 ) -> Option<AttackLayout> {
     let rounds = scenario.rounds();
     let honest = (0..participants.len())
-        .filter(|idx| *idx != BYZANTINE_IDX)
+        .filter(|idx| *idx != byzantine)
         .collect::<Vec<_>>();
 
     for attack_idx in 1..rounds.len() {
-        if rounds[attack_idx].leader() != BYZANTINE_IDX {
+        if rounds[attack_idx].leader() != byzantine {
             continue;
         }
 

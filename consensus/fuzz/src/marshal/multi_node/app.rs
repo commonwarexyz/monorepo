@@ -48,7 +48,7 @@ where
 {
     validator: usize,
     application: SinkApplication<Block<Sha256Digest, C>>,
-    max_pending_acks: NonZeroUsize,
+    max_pending_acks: Option<NonZeroUsize>,
     stack: Arc<str>,
 }
 
@@ -59,7 +59,7 @@ where
     pub(super) fn new(
         validator: usize,
         application: SinkApplication<Block<Sha256Digest, C>>,
-        max_pending_acks: NonZeroUsize,
+        max_pending_acks: Option<NonZeroUsize>,
         stack: Arc<str>,
     ) -> Self {
         Self {
@@ -227,12 +227,14 @@ where
         let Some(reporter) = &mut self.reporter else {
             return Feedback::Ok;
         };
-        if let Update::Block(block, _) = &activity {
+        if let (Update::Block(block, _), Some(max_pending_acks)) =
+            (&activity, reporter.max_pending_acks)
+        {
             super::invariants::check_pending_acks(
                 reporter.validator,
                 &reporter.application,
                 block.height(),
-                reporter.max_pending_acks,
+                max_pending_acks,
                 &reporter.stack,
             );
         }

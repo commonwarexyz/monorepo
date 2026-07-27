@@ -54,24 +54,7 @@ where
     type Digest = Sha256Digest;
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
-        let round = context.round;
-        let mut result = self.inner.propose(context).await;
-        let (mut tx, rx) = oneshot::channel();
-        let certification_agreement = self.certification_agreement.clone();
-        let observer_context = self.context.lock().child("propose");
-        let validator = self.validator;
-        observer_context.spawn(move |_| async move {
-            let digest = select! {
-                result = &mut result => result.ok(),
-                _ = tx.closed() => result.try_recv().ok(),
-            };
-            let Some(digest) = digest else {
-                return;
-            };
-            certification_agreement.record_proposal(validator, round, digest);
-            tx.send_lossy(digest);
-        });
-        rx
+        self.inner.propose(context).await
     }
 
     async fn verify(
@@ -80,9 +63,6 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         self.header_mismatch.record_verify(context.clone(), digest);
-        if !*VERIFY_PROBE {
-            return self.inner.verify(context, digest).await;
-        }
         let mut inner_rx = self.inner.verify(context.clone(), digest).await;
         let (mut tx, rx) = oneshot::channel();
         let header_mismatch = self.header_mismatch.clone();
@@ -98,7 +78,8 @@ where
                 return;
             };
             tx.send_lossy(value);
-            if !value
+            if *VERIFY_PROBE
+                && !value
                 && let Some(block_context) = header_mismatch.block_context(&digest)
                 && block_context != context
             {

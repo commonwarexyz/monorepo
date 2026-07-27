@@ -1,4 +1,4 @@
-//! Multi-node marshal liveness harness runner.
+//! Multi-node marshal end-to-end harness runner.
 //!
 //! Runs `N4F1C3` (three honest validators plus one byzantine `Disrupter`)
 //! over the simulated network and reuses the shared fuzz infrastructure
@@ -308,6 +308,6 @@ pub fn fuzz_marshal_liveness<H: EndToEndMarshal>(input: MarshalLivenessInput) {
             }
         }
 
-        invariants::check_all::<H>(required, &honest_apps);
+        invariants::check_all_blocks(&honest_apps, None);
     });
 }

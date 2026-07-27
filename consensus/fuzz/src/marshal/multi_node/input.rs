@@ -97,7 +97,7 @@ pub struct MarshalTwinsInput {
     pub raw_bytes: Vec<u8>,
     /// Number of adversarial Twins rounds before the synchronous suffix.
     pub rounds: u8,
-    /// Selects one fixed-Byzantine case from the sampled scenario set.
+    /// Selects one case from the sampled Twins scenario set.
     pub case_selector: u8,
     /// Repeat one partition pattern across the adversarial prefix.
     pub sustained: bool,

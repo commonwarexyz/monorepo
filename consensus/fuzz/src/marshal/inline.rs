@@ -511,6 +511,7 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
         );
         let mut available = std::collections::HashSet::new();
         let mut poisoned = std::collections::HashSet::new();
+        let mut certification_requests = std::collections::HashSet::new();
 
         for event in input.events {
             match event {
@@ -611,6 +612,10 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
                     let block = &canonical[block_index(block_idx)];
                     let digest = block.digest();
                     let round = block.context.round;
+                    // Certification is single-shot for each `(round, digest)`.
+                    if !certification_requests.insert((round, digest)) {
+                        continue;
+                    }
                     let must_recover = poisoned.remove(&(round, digest));
                     let rx = wrapper.certify(round, digest).await;
                     if await_result {

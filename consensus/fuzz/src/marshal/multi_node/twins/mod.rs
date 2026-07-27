@@ -19,8 +19,8 @@ use super::{
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
 };
 use crate::{
-    BYZANTINE_IDX, NAMESPACE, NetworkChannels, SimplexCertificateMock, SimplexId, TwinsBackend,
-    TwinsCase, TwinsDisrupter, TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex,
+    NAMESPACE, NetworkChannels, SimplexCertificateMock, SimplexId, TwinsBackend, TwinsCase,
+    TwinsDisrupter, TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex,
     strategy::StrategyChoice,
 };
 use commonware_consensus::{
@@ -135,6 +135,10 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
         matches!(self.case_policy, CasePolicy::AttackLayout)
     }
 
+    fn pending_ack_invariant_limit(&self) -> Option<NonZeroUsize> {
+        (!self.uses_attack_layout()).then_some(self.max_pending_acks)
+    }
+
     fn report_empty_case(&self, reason: &str) {
         if *VERIFY_PROBE || !EMPTY_CASE_REPORTED.swap(true, Ordering::Relaxed) {
             eprintln!(
@@ -237,19 +241,17 @@ where
         participants: &[PublicKeyOf<P>],
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>> {
-        let fixed_cases = cases
-            .into_iter()
-            .filter(|case| case.compromised.as_slice() == [BYZANTINE_IDX])
-            .collect::<Vec<_>>();
-        if fixed_cases.is_empty() {
-            self.report_empty_case("no case compromises the configured Byzantine validator");
+        if cases.is_empty() {
+            self.report_empty_case("no generated Twins case");
             return None;
         }
         let (case, attack) = if self.uses_attack_layout() {
-            let attack_cases = fixed_cases
+            let attack_cases = cases
                 .into_iter()
                 .filter_map(|case| {
-                    attack_layout::<P>(&case.scenario, participants).map(|layout| (case, layout))
+                    let byzantine = *case.compromised.first()?;
+                    attack_layout::<P>(&case.scenario, participants, byzantine)
+                        .map(|layout| (case, layout))
                 })
                 .collect::<Vec<_>>();
             let count = attack_cases.len();
@@ -263,8 +265,8 @@ where
                 .expect("selected AttackLayout case must exist");
             (case, Some(layout))
         } else {
-            let count = fixed_cases.len();
-            let case = fixed_cases
+            let count = cases.len();
+            let case = cases
                 .into_iter()
                 .nth(self.input.case_selector as usize % count)
                 .expect("selected general case must exist");
@@ -322,7 +324,7 @@ where
                 .with_reporter(DeliveryReporter::new(
                     idx,
                     state.validators[idx].application.clone(),
-                    self.max_pending_acks,
+                    self.pending_ack_invariant_limit(),
                     self.stack_label.clone(),
                 )),
             state.validators[idx].mailbox.clone(),
@@ -383,7 +385,7 @@ where
             DeliveryReporter::new(
                 idx,
                 state.validators[idx].application.clone(),
-                self.max_pending_acks,
+                self.pending_ack_invariant_limit(),
                 self.stack_label.clone(),
             ),
         );

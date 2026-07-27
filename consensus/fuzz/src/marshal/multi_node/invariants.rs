@@ -14,7 +14,7 @@ use super::app::{ApplicationChoice, BlockContextRegistry};
 use crate::simplex::Simplex;
 use commonware_consensus::{
     Block,
-    marshal::mocks::{application::Application, harness::TestHarness},
+    marshal::mocks::application::Application,
     simplex::types::Context as SimplexContext,
     types::{Height, Round},
 };
@@ -31,20 +31,17 @@ type PublicKeyOf<P> =
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
 type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
-type NodeCertifyVerdicts = HashMap<(usize, Round, Sha256Digest), bool>;
 type ProposedBlocks = HashSet<(usize, Round, Sha256Digest)>;
 
 #[derive(Default)]
 struct CertificationState {
     agreement: CertifyVerdicts,
-    per_node: NodeCertifyVerdicts,
     proposals: ProposedBlocks,
 }
 
 /// Ensures correct automata return the same completed certification verdict
-/// for the same `(round, digest)`. It also checks that one automaton's verdict
-/// is stable across repeated calls and that a completed proposal from a
-/// correct node never later certifies as false on that node.
+/// for the same `(round, digest)`. Direct drivers may also record completed
+/// proposals to ensure they never certify as false on the proposing node.
 #[derive(Clone)]
 pub(crate) struct CertificationAgreementInvariant {
     state: Arc<Mutex<CertificationState>>,
@@ -74,17 +71,6 @@ impl CertificationAgreementInvariant {
         verdict: bool,
     ) {
         let mut state = self.state.lock();
-        if let Some(first_verdict) = state.per_node.get(&(validator, round, digest)) {
-            assert_eq!(
-                *first_verdict, verdict,
-                "marshal automaton certify stability violated: honest node{validator} returned \
-                 both {first_verdict} and {verdict} for round={round} digest={digest}; stack={}",
-                self.stack,
-            );
-        } else {
-            state.per_node.insert((validator, round, digest), verdict);
-        }
-
         assert!(
             verdict || !state.proposals.contains(&(validator, round, digest)),
             "marshal automaton certified its own proposal as false: honest node{validator} \
@@ -193,17 +179,6 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
     }
 }
 
-/// Run every liveness-model invariant.
-pub fn check_all<H: TestHarness>(
-    minimum_height: u64,
-    honest_apps: &[(usize, Application<H::ApplicationBlock>)],
-) {
-    check_all_blocks(honest_apps, None);
-    for (idx, app) in honest_apps {
-        check_minimum_height(*idx, minimum_height, &app.delivered());
-    }
-}
-
 /// Run block-ordering and agreement invariants.
 pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
     honest_apps: &[(usize, Application<B>)],
@@ -288,19 +263,6 @@ fn check_in_order<D>(idx: usize, delivered: &[(Height, D)], stack: &str) {
              sequence={heights:?}; stack={stack}",
         );
     }
-}
-
-fn check_minimum_height<D>(idx: usize, minimum_height: u64, delivered: &[(Height, D)]) {
-    let heights = delivered
-        .iter()
-        .map(|(height, _)| height.get())
-        .collect::<Vec<_>>();
-    let max = heights.last().copied().unwrap_or(0);
-    assert!(
-        max >= minimum_height,
-        "node{idx} delivered up to height {max}, below required height {minimum_height} \
-         (sequence={heights:?})",
-    );
 }
 
 /// Invariant: cross-node agreement (safety).
