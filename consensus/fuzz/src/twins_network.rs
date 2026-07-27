@@ -29,7 +29,7 @@ type PublicKey<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
 type TwinRecipients<P> = Recipients<PublicKey<P>>;
 type ForwardedRecipients<P> = Option<TwinRecipients<P>>;
 
-fn resolver_view<P: simplex::Simplex>(
+pub(crate) fn resolver_view<P: simplex::Simplex>(
     message: &IoBuf,
     codec: &<<P::Scheme as Verifier>::Certificate as Read>::Cfg,
 ) -> Option<View> {

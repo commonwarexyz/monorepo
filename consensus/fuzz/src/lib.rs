@@ -27,6 +27,7 @@ pub mod simplex_node;
 pub mod state_cov;
 pub mod strategy;
 mod twins_network;
+pub(crate) use twins_network::resolver_view as twins_resolver_view;
 pub mod types;
 pub mod utils;
 use crate::{
