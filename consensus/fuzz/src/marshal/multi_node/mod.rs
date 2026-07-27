@@ -26,7 +26,7 @@ use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 mod app;
 mod engine;
 mod input;
-mod invariants;
+pub(super) mod invariants;
 mod runner;
 mod twins;
 

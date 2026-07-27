@@ -2520,16 +2520,12 @@ pub(crate) trait TwinsBackend<P: simplex::Simplex> {
     fn term_length(&self) -> TermLength;
 
     /// Select the framework whose cases the shared driver will generate.
-    fn framework(
-        &mut self,
-        context: &mut deterministic::Context,
-        participants: usize,
-    ) -> twins::Framework;
+    fn framework(&mut self, rng: &mut FuzzRng, participants: usize) -> twins::Framework;
 
     /// Select one generated case and attach backend-specific metadata.
     fn select_case(
         &mut self,
-        context: &mut deterministic::Context,
+        rng: &mut FuzzRng,
         participants: &[PublicKeyOf<P>],
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>>;
@@ -2628,6 +2624,7 @@ pub(crate) trait TwinsBackend<P: simplex::Simplex> {
 pub(crate) async fn run_twins_with_backend<P, B>(
     context: &mut deterministic::Context,
     backend: &mut B,
+    entropy: Vec<u8>,
 ) where
     P: simplex::Simplex,
     B: TwinsBackend<P>,
@@ -2635,9 +2632,10 @@ pub(crate) async fn run_twins_with_backend<P, B>(
     let mut setup = backend.setup(context).await;
     let participants: Arc<[PublicKeyOf<P>]> = setup.participants.into();
     let term_length = backend.term_length();
-    let framework = backend.framework(context, participants.len());
-    let cases = twins::cases(context, framework);
-    let Some(case) = backend.select_case(context, participants.as_ref(), cases) else {
+    let mut scenario_rng = FuzzRng::new(entropy);
+    let framework = backend.framework(&mut scenario_rng, participants.len());
+    let cases = twins::cases(&mut scenario_rng, framework);
+    let Some(case) = backend.select_case(&mut scenario_rng, participants.as_ref(), cases) else {
         return;
     };
     assert!(
@@ -2968,12 +2966,8 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         P::effective_term_length(self.input.term_length)
     }
 
-    fn framework(
-        &mut self,
-        context: &mut deterministic::Context,
-        participants: usize,
-    ) -> twins::Framework {
-        let mode = if rand::RngExt::random_bool(context, 0.5) {
+    fn framework(&mut self, rng: &mut FuzzRng, participants: usize) -> twins::Framework {
+        let mode = if rand::RngExt::random_bool(rng, 0.5) {
             twins::Mode::Sampled
         } else {
             twins::Mode::Sustained
@@ -2989,14 +2983,14 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
 
     fn select_case(
         &mut self,
-        context: &mut deterministic::Context,
+        rng: &mut FuzzRng,
         _participants: &[PublicKeyOf<P>],
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>> {
         if cases.is_empty() {
             return None;
         }
-        let case_idx = rand::RngExt::random_range(context, 0..cases.len());
+        let case_idx = rand::RngExt::random_range(rng, 0..cases.len());
         let case = cases.into_iter().nth(case_idx)?;
         Some(TwinsCase {
             scenario: case.scenario,
@@ -3358,6 +3352,7 @@ fn run_twins<P: simplex::Simplex>(
     let hb_log_run = hb_log.clone();
     let execute = |warn_dispatch: Option<Dispatch>| {
         executor.start(|mut context| async move {
+            let scenario_entropy = input.raw_bytes.clone();
             let mut backend = MockTwinsBackend::<P>::new(
                 input,
                 role,
@@ -3366,7 +3361,7 @@ fn run_twins<P: simplex::Simplex>(
                 hb_log_run,
                 warn_dispatch,
             );
-            run_twins_with_backend::<P, _>(&mut context, &mut backend).await;
+            run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
         });
     };
 

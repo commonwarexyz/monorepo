@@ -14,12 +14,17 @@
 //! Generic over the context type `C` so the same builder serves both variants:
 //! standard uses `Context<Digest, K>`, coding uses `Context<Commitment, K>`.
 
+use commonware_actor::Feedback;
 use commonware_codec::Codec;
 use commonware_consensus::{
-    Application, Epochable, Heightable, Viewable,
+    Application, Epochable, Heightable, Reporter, Viewable,
     marshal::{
+        Update,
         ancestry::Ancestry,
-        mocks::{block::Block, harness::S as DefaultSigningScheme},
+        mocks::{
+            application::Application as SinkApplication, block::Block,
+            harness::S as DefaultSigningScheme,
+        },
     },
     types::View,
 };
@@ -29,7 +34,39 @@ use commonware_cryptography::{
 use commonware_runtime::{Clock as _, deterministic};
 use commonware_utils::sync::Mutex;
 use futures::StreamExt;
-use std::{collections::HashMap, fmt, marker::PhantomData, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, fmt, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration,
+};
+
+#[derive(Clone)]
+pub(super) struct DeliveryReporter<C>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
+    validator: usize,
+    application: SinkApplication<Block<Sha256Digest, C>>,
+    max_pending_acks: NonZeroUsize,
+    stack: Arc<str>,
+}
+
+impl<C> DeliveryReporter<C>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
+    pub(super) fn new(
+        validator: usize,
+        application: SinkApplication<Block<Sha256Digest, C>>,
+        max_pending_acks: NonZeroUsize,
+        stack: Arc<str>,
+    ) -> Self {
+        Self {
+            validator,
+            application,
+            max_pending_acks,
+            stack,
+        }
+    }
+}
 
 /// Out-of-band registry of blocks constructed by the fuzz applications.
 pub(super) struct BlockContextRegistry<C> {
@@ -65,44 +102,65 @@ impl<C: Clone> BlockContextRegistry<C> {
 }
 
 /// Honest block-building application, generic over the consensus context type.
-pub struct BlockBuilderApp<C, S = DefaultSigningScheme> {
+pub struct BlockBuilderApp<C, S = DefaultSigningScheme>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     verification_delay: Option<(View, Duration)>,
     block_contexts: Option<BlockContextRegistry<C>>,
+    reporter: Option<DeliveryReporter<C>>,
     _marker: PhantomData<fn() -> (C, S)>,
 }
 
-impl<C, S> Default for BlockBuilderApp<C, S> {
+impl<C, S> Default for BlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     fn default() -> Self {
         Self {
             verification_delay: None,
             block_contexts: None,
+            reporter: None,
             _marker: PhantomData,
         }
     }
 }
 
-impl<C, S> Clone for BlockBuilderApp<C, S> {
+impl<C, S> Clone for BlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     fn clone(&self) -> Self {
         Self {
             verification_delay: self.verification_delay,
             block_contexts: self.block_contexts.clone(),
+            reporter: self.reporter.clone(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<C, S> BlockBuilderApp<C, S> {
+impl<C, S> BlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     /// Delay verification at `view`, then return the normal successful verdict.
     pub const fn with_verification_delay(view: View, delay: Duration) -> Self {
         Self {
             verification_delay: Some((view, delay)),
             block_contexts: None,
+            reporter: None,
             _marker: PhantomData,
         }
     }
 
     pub(super) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
         self.block_contexts = Some(block_contexts);
+        self
+    }
+
+    pub(super) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
+        self.reporter = Some(reporter);
         self
     }
 }
@@ -152,6 +210,30 @@ where
             runtime.sleep(delay).await;
         }
         true
+    }
+}
+
+impl<C, S> Reporter for BlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    S: Send + 'static,
+{
+    type Activity = Update<Block<Sha256Digest, C>>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let Some(reporter) = &mut self.reporter else {
+            return Feedback::Ok;
+        };
+        if let Update::Block(block, _) = &activity {
+            super::invariants::check_pending_acks(
+                reporter.validator,
+                &reporter.application,
+                block.height(),
+                reporter.max_pending_acks,
+                &reporter.stack,
+            );
+        }
+        reporter.application.report(activity)
     }
 }
 
@@ -259,12 +341,18 @@ impl FaultyConfig {
 
 /// Block-building application that explores transient construction failures,
 /// verification latency, and deterministic application rejection.
-pub(super) struct FaultyBlockBuilderApp<C, S = DefaultSigningScheme> {
+pub(super) struct FaultyBlockBuilderApp<C, S = DefaultSigningScheme>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     inner: BlockBuilderApp<C, S>,
     config: FaultyConfig,
 }
 
-impl<C, S> FaultyBlockBuilderApp<C, S> {
+impl<C, S> FaultyBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     pub(super) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
         let inner = match verification_delay {
             Some((view, delay)) => BlockBuilderApp::with_verification_delay(view, delay),
@@ -277,14 +365,34 @@ impl<C, S> FaultyBlockBuilderApp<C, S> {
         self.inner = self.inner.with_block_contexts(block_contexts);
         self
     }
+
+    pub(super) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
+        self.inner = self.inner.with_reporter(reporter);
+        self
+    }
 }
 
-impl<C, S> Clone for FaultyBlockBuilderApp<C, S> {
+impl<C, S> Clone for FaultyBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             config: self.config,
         }
+    }
+}
+
+impl<C, S> Reporter for FaultyBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    S: Send + 'static,
+{
+    type Activity = Update<Block<Sha256Digest, C>>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        self.inner.report(activity)
     }
 }
 
@@ -329,12 +437,18 @@ where
 }
 
 /// Runtime-selected application for the shared general Twins corpus.
-pub(super) enum SelectedBlockBuilderApp<C, S = DefaultSigningScheme> {
+pub(super) enum SelectedBlockBuilderApp<C, S = DefaultSigningScheme>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     Basic(BlockBuilderApp<C, S>),
     Faulty(FaultyBlockBuilderApp<C, S>),
 }
 
-impl<C, S> SelectedBlockBuilderApp<C, S> {
+impl<C, S> SelectedBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     pub(super) fn new(
         choice: ApplicationChoice,
         config: FaultyConfig,
@@ -365,6 +479,13 @@ impl<C, S> SelectedBlockBuilderApp<C, S> {
         }
     }
 
+    pub(super) fn with_reporter(self, reporter: DeliveryReporter<C>) -> Self {
+        match self {
+            Self::Basic(inner) => Self::Basic(inner.with_reporter(reporter)),
+            Self::Faulty(inner) => Self::Faulty(inner.with_reporter(reporter)),
+        }
+    }
+
     pub(super) fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &C) -> bool
     where
         C: Codec<Cfg = ()> + Viewable,
@@ -376,11 +497,29 @@ impl<C, S> SelectedBlockBuilderApp<C, S> {
     }
 }
 
-impl<C, S> Clone for SelectedBlockBuilderApp<C, S> {
+impl<C, S> Clone for SelectedBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
     fn clone(&self) -> Self {
         match self {
             Self::Basic(application) => Self::Basic(application.clone()),
             Self::Faulty(application) => Self::Faulty(application.clone()),
+        }
+    }
+}
+
+impl<C, S> Reporter for SelectedBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    S: Send + 'static,
+{
+    type Activity = Update<Block<Sha256Digest, C>>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        match self {
+            Self::Basic(application) => application.report(activity),
+            Self::Faulty(application) => application.report(activity),
         }
     }
 }

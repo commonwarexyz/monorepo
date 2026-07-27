@@ -7,6 +7,7 @@
 //! `(round, digest)` models an honest notarization and must therefore recover
 //! through the candidate's embedded context.
 
+use super::multi_node::invariants::CertificationAgreementInvariant;
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_broadcast::Broadcaster as _;
@@ -304,6 +305,13 @@ impl ConsensusApplication<deterministic::Context> for InlineApp {
         let _ = ancestry.peek();
         let _ = ancestry.next().await;
         let (_, consensus_context) = context;
+        // A proposer commits to accepting its own proposal under this context.
+        // When this deliberately faulty mock rejects verification, it must not
+        // manufacture a proposal that would make the harness violate the
+        // Application contract by construction.
+        if !self.verify_result {
+            return None;
+        }
         let expected_parent = consensus_context.parent.1;
         let expected_height = Height::new(consensus_context.round.view().get());
         match self.propose_result.clone() {
@@ -389,7 +397,7 @@ fn context_for(kind: InlineContext, block: &B, canonical: &[B], me: &K) -> Conte
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum WrapperKind {
     Inline,
     Deferred,
@@ -498,6 +506,9 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
             .map(|idx| canonical[block_index(idx)].clone());
         let app = InlineApp::new(propose_result, input.app_verify_result);
         let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
+        let certification_invariant = CertificationAgreementInvariant::new(
+            format!("application=inline-app wrapper={kind:?}").into(),
+        );
         let mut available = std::collections::HashSet::new();
         let mut poisoned = std::collections::HashSet::new();
 
@@ -550,6 +561,7 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
                             _ = context.sleep(EVENT_SETTLE) => None,
                         };
                         if let Some(digest) = result {
+                            certification_invariant.record_proposal(0, round, digest);
                             let _ = wrapper.broadcast(digest, Plan::Propose { round });
                             assert!(
                                 marshal.get_block(&digest).await.is_some(),
@@ -610,6 +622,10 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
                                 EVENT_SETTLE
                             }) => None,
                         };
+                        if let Some(verdict) = result {
+                            certification_invariant
+                                .check_certify_agreement(0, round, digest, verdict);
+                        }
                         if must_recover {
                             assert_eq!(
                                 result,

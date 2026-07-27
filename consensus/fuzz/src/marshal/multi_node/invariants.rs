@@ -21,7 +21,8 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::sync::Mutex;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
+    num::NonZeroUsize,
     sync::Arc,
 };
 
@@ -30,32 +31,68 @@ type PublicKeyOf<P> =
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
 type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
+type NodeCertifyVerdicts = HashMap<(usize, Round, Sha256Digest), bool>;
+type ProposedBlocks = HashSet<(usize, Round, Sha256Digest)>;
+
+#[derive(Default)]
+struct CertificationState {
+    agreement: CertifyVerdicts,
+    per_node: NodeCertifyVerdicts,
+    proposals: ProposedBlocks,
+}
 
 /// Ensures correct automata return the same completed certification verdict
-/// for the same `(round, digest)`.
+/// for the same `(round, digest)`. It also checks that one automaton's verdict
+/// is stable across repeated calls and that a completed proposal from a
+/// correct node never later certifies as false on that node.
 #[derive(Clone)]
-pub(super) struct CertificationAgreementInvariant {
-    verdicts: Arc<Mutex<CertifyVerdicts>>,
+pub(crate) struct CertificationAgreementInvariant {
+    state: Arc<Mutex<CertificationState>>,
     stack: Arc<str>,
 }
 
 impl CertificationAgreementInvariant {
-    pub(super) fn new(stack: Arc<str>) -> Self {
+    pub(crate) fn new(stack: Arc<str>) -> Self {
         Self {
-            verdicts: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(CertificationState::default())),
             stack,
         }
     }
 
-    pub(super) fn check_certify_agreement(
+    pub(crate) fn record_proposal(&self, validator: usize, round: Round, digest: Sha256Digest) {
+        self.state
+            .lock()
+            .proposals
+            .insert((validator, round, digest));
+    }
+
+    pub(crate) fn check_certify_agreement(
         &self,
         validator: usize,
         round: Round,
         digest: Sha256Digest,
         verdict: bool,
     ) {
-        let mut verdicts = self.verdicts.lock();
-        if let Some((first_validator, first_verdict)) = verdicts.get(&(round, digest)) {
+        let mut state = self.state.lock();
+        if let Some(first_verdict) = state.per_node.get(&(validator, round, digest)) {
+            assert_eq!(
+                *first_verdict, verdict,
+                "marshal automaton certify stability violated: honest node{validator} returned \
+                 both {first_verdict} and {verdict} for round={round} digest={digest}; stack={}",
+                self.stack,
+            );
+        } else {
+            state.per_node.insert((validator, round, digest), verdict);
+        }
+
+        assert!(
+            verdict || !state.proposals.contains(&(validator, round, digest)),
+            "marshal automaton certified its own proposal as false: honest node{validator} \
+             round={round} digest={digest}; stack={}",
+            self.stack,
+        );
+
+        if let Some((first_validator, first_verdict)) = state.agreement.get(&(round, digest)) {
             assert_eq!(
                 *first_verdict, verdict,
                 "marshal automaton certify agreement violated: honest node{first_validator} \
@@ -65,7 +102,9 @@ impl CertificationAgreementInvariant {
             );
             return;
         }
-        verdicts.insert((round, digest), (validator, verdict));
+        state
+            .agreement
+            .insert((round, digest), (validator, verdict));
     }
 }
 
@@ -173,8 +212,57 @@ pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
     let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
         check_in_order(*idx, &app.delivered(), stack);
+        check_parent_linkage(*idx, &app.blocks(), stack);
     }
     agreement(honest_apps, stack);
+}
+
+/// Invariant: every pair of consecutively delivered blocks is parent-linked.
+fn check_parent_linkage<B: Block<Digest = Sha256Digest>>(
+    idx: usize,
+    blocks: &BTreeMap<Height, Arc<B>>,
+    stack: &str,
+) {
+    for (height, block) in blocks {
+        let Some(next_height) = height.get().checked_add(1).map(Height::new) else {
+            continue;
+        };
+        let Some(next) = blocks.get(&next_height) else {
+            continue;
+        };
+        assert_eq!(
+            next.parent(),
+            block.digest(),
+            "node{idx} delivered a chain with a broken parent link: height {} digest={} \
+             but height {} parent={}; stack={stack}",
+            height.get(),
+            block.digest(),
+            next_height.get(),
+            next.parent(),
+        );
+    }
+}
+
+/// Invariant: before height `H` is delivered, every height at or below
+/// `H - max_pending_acks` has been acknowledged.
+pub(super) fn check_pending_acks<B: Block>(
+    validator: usize,
+    application: &Application<B>,
+    height: Height,
+    max_pending_acks: NonZeroUsize,
+    stack: &str,
+) {
+    let acknowledged_through = height.get().saturating_sub(max_pending_acks.get() as u64);
+    let pending = application.pending_ack_heights();
+    assert!(
+        pending
+            .iter()
+            .all(|pending_height| pending_height.get() > acknowledged_through),
+        "marshal max_pending_acks backpressure violated: node{validator} delivered height {} \
+         while pending heights {pending:?} include a height at or below \
+         {acknowledged_through}; max_pending_acks={max_pending_acks}; stack={stack}",
+        height.get(),
+    );
 }
 
 /// Invariant: per-node in-order, gap-free delivery.
@@ -224,10 +312,11 @@ fn check_minimum_height<D>(idx: usize, minimum_height: u64, delivered: &[(Height
 ///
 /// [`check_in_order`] establishes that each node's delivery log is contiguous
 /// and contains no duplicate heights. Given that, requiring one digest per
-/// height across all honest nodes is equivalent to pairwise prefix
-/// compatibility. Heights are used instead of raw sequence indexes because a
-/// fresh application may surface genesis at height 0 or begin with the first
-/// finalized block at height 1.
+/// height across all honest delivery logs and current tips is equivalent to
+/// pairwise prefix compatibility and also checks that a tip agrees with any
+/// delivered block at the same height. Heights are used instead of raw
+/// sequence indexes because a fresh application may surface genesis at height
+/// 0 or begin with the first finalized block at height 1.
 ///
 /// This detects conflicting finalization, fork divergence, and recovery that
 /// delivers a different block at an already observed height.
@@ -235,19 +324,32 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
     honest_apps: &[(usize, Application<B>)],
     stack: &str,
 ) {
-    let mut seen: BTreeMap<Height, (usize, Sha256Digest)> = BTreeMap::new();
+    let mut seen: BTreeMap<Height, (usize, &'static str, Sha256Digest)> = BTreeMap::new();
     for (idx, app) in honest_apps {
         for (height, digest) in app.delivered() {
-            if let Some((first_idx, first_digest)) = seen.get(&height) {
+            if let Some((first_idx, first_source, first_digest)) = seen.get(&height) {
                 assert_eq!(
                     *first_digest,
                     digest,
-                    "honest fork at height {}: node{first_idx} delivered {first_digest:?} \
+                    "honest fork at height {}: node{first_idx} {first_source} {first_digest:?} \
                      but node{idx} delivered {digest:?}; stack={stack}",
                     height.get(),
                 );
             } else {
-                seen.insert(height, (*idx, digest));
+                seen.insert(height, (*idx, "delivered", digest));
+            }
+        }
+        if let Some((height, digest)) = app.tip() {
+            if let Some((first_idx, first_source, first_digest)) = seen.get(&height) {
+                assert_eq!(
+                    *first_digest,
+                    digest,
+                    "honest tip disagreement at height {}: node{first_idx} {first_source} \
+                     {first_digest:?} but node{idx} reported tip {digest:?}; stack={stack}",
+                    height.get(),
+                );
+            } else {
+                seen.insert(height, (*idx, "reported tip", digest));
             }
         }
     }

@@ -12,7 +12,7 @@ mod stack;
 
 use super::{
     app::{
-        ApplicationChoice, BlockBuilderApp, BlockContextRegistry, FaultyConfig,
+        ApplicationChoice, BlockBuilderApp, BlockContextRegistry, DeliveryReporter, FaultyConfig,
         SelectedBlockBuilderApp,
     },
     input::MarshalTwinsInput,
@@ -35,18 +35,19 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Receiver, Sender, simulated::Oracle};
 use commonware_runtime::{Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, sync::Mutex};
+use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
 use layout::{AttackLayout, attack_layout};
 use observer::ObservedMarshal;
 use rand::RngExt as _;
 use stack::{
-    ATTACK_SLOW_VERIFY_DELAY, ATTACK_VICTIM_VERIFY_DELAY, DeferredMarshal, InlineMarshal,
-    MarshalChoice, SelectedMarshal, TwinsBlockBuilder, TwinsMarshal, Validator, genesis_block,
-    register_engine_networks, setup_network, setup_network_links, setup_validator, start_engine,
-    wait_for_liveness,
+    ATTACK_SLOW_VERIFY_DELAY, ATTACK_VICTIM_VERIFY_DELAY, DEFAULT_MAX_PENDING_ACKS,
+    DeferredMarshal, InlineMarshal, MarshalChoice, SelectedMarshal, TwinsBlockBuilder,
+    TwinsMarshal, Validator, genesis_block, register_engine_networks, setup_network,
+    setup_network_links, setup_validator, start_engine, wait_for_liveness,
 };
 use std::{
     collections::HashMap,
+    num::NonZeroUsize,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
@@ -75,6 +76,13 @@ enum CasePolicy {
     AttackLayout,
 }
 
+#[derive(Clone, Copy)]
+struct StackSelection {
+    application: ApplicationChoice,
+    marshal: MarshalChoice,
+    max_pending_acks: NonZeroUsize,
+}
+
 struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
     input: MarshalTwinsInput,
     probe_input: Arc<str>,
@@ -83,6 +91,7 @@ struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
     marshal_choice: MarshalChoice,
     stack_label: Arc<str>,
     case_policy: CasePolicy,
+    max_pending_acks: NonZeroUsize,
     _marker: BackendMarker<P, A, M>,
 }
 
@@ -99,8 +108,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
         input: MarshalTwinsInput,
         probe_input: Arc<str>,
         case_policy: CasePolicy,
-        application_choice: ApplicationChoice,
-        marshal_choice: MarshalChoice,
+        selection: StackSelection,
         stack_label: Arc<str>,
         entropy: Vec<u8>,
     ) -> Self {
@@ -115,10 +123,11 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
             input,
             probe_input,
             app_config,
-            application_choice,
-            marshal_choice,
+            application_choice: selection.application,
+            marshal_choice: selection.marshal,
             stack_label,
             case_policy,
+            max_pending_acks: selection.max_pending_acks,
             _marker: std::marker::PhantomData,
         }
     }
@@ -172,6 +181,7 @@ where
                 validator.clone(),
                 ConstantProvider::new(schemes[idx].clone()),
                 genesis_block.clone(),
+                self.max_pending_acks,
             )
             .await;
             let networks = register_engine_networks::<P>(&oracle, validator.clone()).await;
@@ -199,11 +209,7 @@ where
         TermLength::ONE
     }
 
-    fn framework(
-        &mut self,
-        _context: &mut deterministic::Context,
-        participants: usize,
-    ) -> twins::Framework {
+    fn framework(&mut self, _rng: &mut FuzzRng, participants: usize) -> twins::Framework {
         let uses_attack_layout = self.uses_attack_layout();
         twins::Framework {
             participants,
@@ -228,7 +234,7 @@ where
 
     fn select_case(
         &mut self,
-        _context: &mut deterministic::Context,
+        _rng: &mut FuzzRng,
         participants: &[PublicKeyOf<P>],
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>> {
@@ -313,9 +319,16 @@ where
             self.marshal_choice,
             &context,
             BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
-                .with_block_contexts(state.block_contexts.clone()),
+                .with_block_contexts(state.block_contexts.clone())
+                .with_reporter(DeliveryReporter::new(
+                    idx,
+                    state.validators[idx].application.clone(),
+                    self.max_pending_acks,
+                    self.stack_label.clone(),
+                )),
             state.validators[idx].mailbox.clone(),
         );
+        state.validators[idx].start(primary_builder.clone());
         start_engine::<P, _, _>(
             context,
             oracle,
@@ -368,6 +381,12 @@ where
             self.app_config,
             verification_delay,
             state.block_contexts.clone(),
+            DeliveryReporter::new(
+                idx,
+                state.validators[idx].application.clone(),
+                self.max_pending_acks,
+                self.stack_label.clone(),
+            ),
         );
         let builder = <M as TwinsMarshal<P, A>>::create(
             self.marshal_choice,
@@ -375,6 +394,7 @@ where
             application,
             state.validators[idx].mailbox.clone(),
         );
+        state.validators[idx].start(builder.clone());
         state
             .honest
             .push((idx, state.validators[idx].application.clone()));
@@ -438,18 +458,12 @@ where
 
 /// Run the shared general Twins campaign.
 pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
-    let (application_choice, marshal_choice, entropy) = select_general_stack(&input.raw_bytes);
+    let (selection, entropy) = select_general_stack(&input.raw_bytes);
     fuzz_marshal_twins_with::<
         SimplexCertificateMock,
         SelectedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
         SelectedMarshal,
-    >(
-        input,
-        CasePolicy::General,
-        application_choice,
-        marshal_choice,
-        entropy,
-    );
+    >(input, CasePolicy::General, selection, entropy);
 }
 
 /// Run the standard-marshal Twins mutator with ID crypto and the focused
@@ -466,8 +480,11 @@ pub fn fuzz_marshal_twins_id_split_header(mut input: MarshalTwinsInput) {
     >(
         input.clone(),
         CasePolicy::AttackLayout,
-        ApplicationChoice::Basic,
-        MarshalChoice::Deferred,
+        StackSelection {
+            application: ApplicationChoice::Basic,
+            marshal: MarshalChoice::Deferred,
+            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
+        },
         input.raw_bytes,
     );
 }
@@ -486,45 +503,69 @@ pub fn fuzz_marshal_twins_id_split_header_inline(mut input: MarshalTwinsInput) {
     >(
         input.clone(),
         CasePolicy::AttackLayout,
-        ApplicationChoice::Basic,
-        MarshalChoice::Inline,
+        StackSelection {
+            application: ApplicationChoice::Basic,
+            marshal: MarshalChoice::Inline,
+            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
+        },
         input.raw_bytes,
     );
 }
 
-fn select_general_stack(raw_bytes: &[u8]) -> (ApplicationChoice, MarshalChoice, Vec<u8>) {
+fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
     let Some((&selector, entropy)) = raw_bytes.split_last() else {
-        return (ApplicationChoice::Basic, MarshalChoice::Deferred, vec![0]);
+        return (
+            StackSelection {
+                application: ApplicationChoice::Basic,
+                marshal: MarshalChoice::Deferred,
+                max_pending_acks: NZUsize!(1),
+            },
+            vec![0],
+        );
     };
-    // Keep application and wrapper selection independent while preserving the
-    // remaining bytes as identical scenario/runtime entropy for all four stacks.
+    // Keep application, wrapper, and backpressure selection independent while
+    // preserving the remaining bytes as identical scenario/runtime entropy.
     let application = ApplicationChoice::from_selector(selector);
     let wrapper = if selector & 0b10 == 0 {
         MarshalChoice::Deferred
     } else {
         MarshalChoice::Inline
     };
+    let max_pending_acks = if selector & 0b100 == 0 {
+        NZUsize!(1)
+    } else {
+        NZUsize!(2)
+    };
     let entropy = if entropy.is_empty() {
         vec![0]
     } else {
         entropy.to_vec()
     };
-    (application, wrapper, entropy)
+    (
+        StackSelection {
+            application,
+            marshal: wrapper,
+            max_pending_acks,
+        },
+        entropy,
+    )
 }
 
 fn fuzz_marshal_twins_with<P, A, M>(
     input: MarshalTwinsInput,
     case_policy: CasePolicy,
-    application_choice: ApplicationChoice,
-    marshal_choice: MarshalChoice,
+    selection: StackSelection,
     entropy: Vec<u8>,
 ) where
     P: Simplex,
     A: TwinsBlockBuilder<P>,
     M: TwinsMarshal<P, A> + TwinsMarshal<P, PrimaryApp<P>>,
 {
-    let stack_label: Arc<str> =
-        format!("application={application_choice} wrapper={marshal_choice}").into();
+    let stack_label: Arc<str> = format!(
+        "application={} wrapper={} max_pending_acks={}",
+        selection.application, selection.marshal, selection.max_pending_acks
+    )
+    .into();
     if *VERIFY_PROBE {
         eprintln!("[marshal-twins] selected stack: {stack_label}");
     }
@@ -538,15 +579,15 @@ fn fuzz_marshal_twins_with<P, A, M>(
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
+        let scenario_entropy = entropy.clone();
         let mut backend = MarshalTwinsBackend::<P, A, M>::new(
             input,
             probe_input,
             case_policy,
-            application_choice,
-            marshal_choice,
+            selection,
             stack_label,
             entropy,
         );
-        run_twins_with_backend::<P, _>(&mut context, &mut backend).await;
+        run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
     });
 }

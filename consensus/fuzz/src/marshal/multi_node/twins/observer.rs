@@ -54,7 +54,24 @@ where
     type Digest = Sha256Digest;
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
-        self.inner.propose(context).await
+        let round = context.round;
+        let mut result = self.inner.propose(context).await;
+        let (mut tx, rx) = oneshot::channel();
+        let certification_agreement = self.certification_agreement.clone();
+        let observer_context = self.context.lock().child("propose");
+        let validator = self.validator;
+        observer_context.spawn(move |_| async move {
+            let digest = select! {
+                result = &mut result => result.ok(),
+                _ = tx.closed() => result.try_recv().ok(),
+            };
+            let Some(digest) = digest else {
+                return;
+            };
+            certification_agreement.record_proposal(validator, round, digest);
+            tx.send_lossy(digest);
+        });
+        rx
     }
 
     async fn verify(

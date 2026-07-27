@@ -5,8 +5,8 @@ use super::{
     super::{
         ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
         app::{
-            ApplicationChoice, BlockBuilderApp, BlockContextRegistry, FaultyConfig,
-            SelectedBlockBuilderApp,
+            ApplicationChoice, BlockBuilderApp, BlockContextRegistry, DeliveryReporter,
+            FaultyConfig, SelectedBlockBuilderApp,
         },
     },
     B, Ctx, PublicKeyOf, SchemeOf,
@@ -15,18 +15,18 @@ use crate::{NetworkChannels, POST_GST_WINDOW, simplex::Simplex};
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Relay,
+    Automaton, CertifiableAutomaton, Relay, Reporter,
     marshal::{
-        Config, Start,
+        Config, Start, Update,
         core::{Actor, Mailbox},
         mocks::{
             application::Application,
             harness::{BLOCKS_PER_EPOCH, LINK, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA},
         },
-        resolver::p2p as resolver,
+        resolver::{handler, p2p as resolver},
         standard::{Deferred, Inline, Standard},
     },
-    simplex::{Engine, Floor, Plan, config},
+    simplex::{Engine, Floor, Plan, config, types::Finalization},
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -40,12 +40,14 @@ use commonware_p2p::{
     simulated::{Config as NetworkConfig, Network as SimulatedNetwork, Oracle},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Clock, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    Clock, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+pub(super) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 const POLL: Duration = Duration::from_millis(50);
 const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
 const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
@@ -69,12 +71,14 @@ pub(super) trait TwinsBlockBuilder<P: Simplex>:
         Block = B<P>,
         Input = (),
     > + Clone
+    + Reporter<Activity = Update<B<P>>>
 {
     fn create(
         choice: ApplicationChoice,
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
+        reporter: DeliveryReporter<Ctx<P>>,
     ) -> Self;
 
     fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &Ctx<P>) -> bool;
@@ -86,12 +90,15 @@ impl<P: Simplex> TwinsBlockBuilder<P> for BlockBuilderApp<Ctx<P>, SchemeOf<P>> {
         _config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
+        reporter: DeliveryReporter<Ctx<P>>,
     ) -> Self {
         let application = match verification_delay {
             Some((view, delay)) => Self::with_verification_delay(view, delay),
             None => Self::default(),
         };
-        application.with_block_contexts(block_contexts)
+        application
+            .with_block_contexts(block_contexts)
+            .with_reporter(reporter)
     }
 
     fn rejects(_choice: ApplicationChoice, _config: FaultyConfig, _context: &Ctx<P>) -> bool {
@@ -105,8 +112,11 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
+        reporter: DeliveryReporter<Ctx<P>>,
     ) -> Self {
-        Self::new(choice, config, verification_delay).with_block_contexts(block_contexts)
+        Self::new(choice, config, verification_delay)
+            .with_block_contexts(block_contexts)
+            .with_reporter(reporter)
     }
 
     fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &Ctx<P>) -> bool {
@@ -117,7 +127,8 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
 /// Instantiates the standard marshal wrapper used as the Simplex automaton and relay.
 pub(super) trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
     type Wrapper: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>
-        + Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>;
+        + Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>
+        + Reporter<Activity = Update<B<P>>>;
 
     fn create(
         choice: MarshalChoice,
@@ -243,6 +254,17 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> Relay for SelectedMarshalWrapper<P, A>
     }
 }
 
+impl<P: Simplex, A: TwinsBlockBuilder<P>> Reporter for SelectedMarshalWrapper<P, A> {
+    type Activity = Update<B<P>>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        match self {
+            Self::Deferred(wrapper) => wrapper.report(activity),
+            Self::Inline(wrapper) => wrapper.report(activity),
+        }
+    }
+}
+
 impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for SelectedMarshal {
     type Wrapper = SelectedMarshalWrapper<P, A>;
 
@@ -269,9 +291,46 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for SelectedMarshal
     }
 }
 
+type Finalizations<P> = immutable::Archive<
+    deterministic::Context,
+    Sha256Digest,
+    Finalization<SchemeOf<P>, Sha256Digest>,
+>;
+type FinalizedBlocks<P> = immutable::Archive<deterministic::Context, Sha256Digest, B<P>>;
+type MarshalActor<P> = Actor<
+    deterministic::Context,
+    Standard<B<P>>,
+    ConstantProvider<SchemeOf<P>, Epoch>,
+    Finalizations<P>,
+    FinalizedBlocks<P>,
+    FixedEpocher,
+    Sequential,
+>;
+type MarshalResolver<P> = (
+    handler::Receiver<Sha256Digest>,
+    resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+);
+
 pub(super) struct Validator<P: Simplex> {
     pub(super) mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
     pub(super) application: Application<B<P>>,
+    actor: Option<MarshalActor<P>>,
+    buffer: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
+    resolver: Option<MarshalResolver<P>>,
+}
+
+impl<P: Simplex> Validator<P> {
+    pub(super) fn start(&mut self, reporter: impl Reporter<Activity = Update<B<P>>>) {
+        let actor = self
+            .actor
+            .take()
+            .expect("marshal actor must be started exactly once");
+        let resolver = self
+            .resolver
+            .take()
+            .expect("marshal resolver must be installed before actor startup");
+        actor.start(reporter, self.buffer.clone(), resolver);
+    }
 }
 
 pub(super) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
@@ -326,8 +385,21 @@ pub(super) async fn setup_validator<P: Simplex>(
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
     genesis: B<P>,
+    max_pending_acks: NonZeroUsize,
 ) -> Validator<P> {
-    let application = Application::<B<P>>::default();
+    let application = if max_pending_acks <= NZUsize!(2) {
+        Application::<B<P>>::manual_ack()
+    } else {
+        Application::<B<P>>::default()
+    };
+    if max_pending_acks <= NZUsize!(2) {
+        let acknowledger = application.clone();
+        context.child("acknowledger").spawn(move |_| async move {
+            loop {
+                acknowledger.acknowledged().await;
+            }
+        });
+    }
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -335,7 +407,7 @@ pub(super) async fn setup_validator<P: Simplex>(
         mailbox_size: NZUsize!(100),
         view_retention: ViewDelta::new(10),
         max_repair: NZUsize!(10),
-        max_pending_acks: MAX_PENDING_ACKS,
+        max_pending_acks,
         block_codec_config: (),
         partition_prefix: format!("validator-{validator}"),
         prunable_items_per_section: NZU64!(10),
@@ -457,10 +529,12 @@ pub(super) async fn setup_validator<P: Simplex>(
         config,
     )
     .await;
-    actor.start(application.clone(), buffer, resolver);
     Validator {
         mailbox,
         application,
+        actor: Some(actor),
+        buffer,
+        resolver: Some(resolver),
     }
 }
 
