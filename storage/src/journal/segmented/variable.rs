@@ -2046,8 +2046,8 @@ mod tests {
     /// expose those committed bytes before reporting the invalid layout, or the repair truncates
     /// to the start of the page and durably discards acknowledged items.
     ///
-    /// Unlike the other torn-page tests, the acknowledged boundary lies inside the page that goes
-    /// invalid, so the recovered size is asserted exactly.
+    /// The acknowledged boundary lies inside the page that becomes invalid, so recovery must
+    /// preserve that exact boundary.
     #[test_traced]
     fn test_journal_replay_preserves_acknowledged_bytes_in_torn_partial_page() {
         let executor = deterministic::Runner::default();

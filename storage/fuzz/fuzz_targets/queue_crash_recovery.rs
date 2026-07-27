@@ -117,8 +117,6 @@ struct RecoveryState {
     values: BTreeMap<u64, u8>,
     /// Smallest end position guaranteed to survive.
     durable_size: u64,
-    /// Largest end position that may survive.
-    max_size: u64,
     /// Smallest pruning boundary guaranteed to survive.
     durable_prune: u64,
     /// Largest pruning boundary that may survive.
@@ -130,7 +128,6 @@ impl RecoveryState {
         Self {
             values: BTreeMap::new(),
             durable_size: 0,
-            max_size: 0,
             durable_prune: 0,
             max_prune: 0,
         }
@@ -138,12 +135,17 @@ impl RecoveryState {
 
     fn appended(&mut self, pos: u64, value: u8) {
         self.values.insert(pos, value);
-        self.max_size = self.max_size.max(pos + 1);
     }
 
     fn committed(&mut self, size: u64) {
+        self.values.retain(|&position, _| position < size);
         self.durable_size = size;
-        self.max_size = size;
+    }
+
+    fn max_size(&self) -> u64 {
+        self.values
+            .last_key_value()
+            .map_or(0, |(&position, _)| position + 1)
     }
 
     fn synced(&mut self, size: u64, boundary: u64) {
@@ -282,6 +284,7 @@ async fn verify_recovery(
 ) -> Queue<deterministic::Context, Vec<u8>> {
     let size = queue.size();
     let ack_floor = queue.ack_floor();
+    let max_size = state.max_size();
 
     assert!(
         size >= state.durable_size,
@@ -290,10 +293,10 @@ async fn verify_recovery(
         state.durable_size
     );
     assert!(
-        size <= state.max_size,
+        size <= max_size,
         "recovered size {} is greater than maximum expected {}",
         size,
-        state.max_size
+        max_size
     );
 
     assert!(
@@ -316,7 +319,7 @@ async fn verify_recovery(
     );
     if ack_floor > state.durable_prune {
         assert_eq!(
-            size, state.max_size,
+            size, max_size,
             "an advanced ack floor requires the complete pre-prune tip"
         );
     }

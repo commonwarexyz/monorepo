@@ -1957,8 +1957,7 @@ mod tests {
         });
     }
 
-    /// Mirror of [test_replay_preserves_acknowledged_items_in_torn_partial_page] for a page whose
-    /// checksum fails outright rather than falling back to a committed shorter length.
+    /// Recover a fully invalid interior page by truncating its unacknowledged suffix.
     #[test_traced]
     fn test_replay_repairs_torn_interior_page() {
         // A torn flush can leave an interior page invalid while a later page survives. The

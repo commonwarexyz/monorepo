@@ -99,13 +99,9 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
     /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
-    /// Test-only: park destruction after removing metadata.
+    /// Test-only: park destruction after this many component removals.
     #[cfg(test)]
-    halt_destroy_after_metadata: bool,
-
-    /// Test-only: park destruction after removing the ordinal.
-    #[cfg(test)]
-    halt_destroy_after_ordinal: bool,
+    halt_destroy_after: u8,
 
     // Metrics
     gets: Counter,
@@ -197,9 +193,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             freezer,
             ordinal,
             #[cfg(test)]
-            halt_destroy_after_metadata: false,
-            #[cfg(test)]
-            halt_destroy_after_ordinal: false,
+            halt_destroy_after: 0,
             gets,
             has,
             syncs,
@@ -361,7 +355,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         self.metadata.destroy().await?;
 
         #[cfg(test)]
-        if self.halt_destroy_after_metadata {
+        if self.halt_destroy_after == 1 {
             std::future::pending::<()>().await;
         }
 
@@ -369,7 +363,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         self.ordinal.destroy().await?;
 
         #[cfg(test)]
-        if self.halt_destroy_after_ordinal {
+        if self.halt_destroy_after == 2 {
             std::future::pending::<()>().await;
         }
 
@@ -401,16 +395,11 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
 
-    /// Park destruction after its metadata await.
+    /// Park destruction after `count` component-removal awaits.
     #[cfg(test)]
-    pub(crate) fn halt_destroy_after_metadata(&mut self) {
-        self.0.halt_destroy_after_metadata = true;
-    }
-
-    /// Park destruction after its ordinal await.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_ordinal(&mut self) {
-        self.0.halt_destroy_after_ordinal = true;
+    pub(crate) fn halt_destroy_after(&mut self, count: u8) {
+        assert!((1..=2).contains(&count));
+        self.0.halt_destroy_after = count;
     }
 }
 

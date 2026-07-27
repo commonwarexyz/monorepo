@@ -588,101 +588,47 @@ impl<B: Blob> Writer<B> {
         // Write the physical pages to the blob.
         // If there are protected regions in the first page, we need to write around them.
         let made_durable = match protected_regions {
-            Some((prefix_len, Slot::First)) => {
-                // Protected CRC is first: [page_size..page_size+6].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data in first page [prefix_len..page_size].
-                let has_first_write = prefix_len < page_size;
-                let mut made_durable = false;
+            Some((prefix_len, slot)) => {
+                // Preserve the authoritative CRC slot and write the ranges on either side. A
+                // single emitted range can be made durable directly; two require one later sync.
+                let protected_start = page_size + slot.offset();
+                let protected_end = protected_start + CHECKSUM_SLOT_SIZE;
+                debug_assert!(physical_pages.len() >= protected_end);
+                let has_first_write = prefix_len < protected_start;
+                let has_second_write = physical_pages.len() > protected_end;
+
                 if has_first_write {
                     let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(page_size - prefix_len);
-                    let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
+                    let first_payload = physical_pages.split_to(protected_start - prefix_len);
                     self.write_at_maybe_sync(
                         write_at_offset + prefix_len as u64,
                         first_payload,
                         sync && !has_second_write,
                     )
                     .await?;
-                    if !has_second_write {
-                        made_durable = sync;
-                    }
                 } else {
-                    // Skip the protected first page bytes when they are fully covered.
-                    let _ = physical_pages.split_to(page_size);
+                    let _ = physical_pages.split_to(protected_start);
                 }
 
-                // Write 2: second CRC of first page + all remaining pages [page_size+6..end].
-                if physical_pages.len() > CHECKSUM_SLOT_SIZE {
-                    let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
+                let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
+                if has_second_write {
                     self.write_at_maybe_sync(
-                        write_at_offset + (page_size + CHECKSUM_SLOT_SIZE) as u64,
+                        write_at_offset + protected_end as u64,
                         physical_pages,
                         sync && !has_first_write,
                     )
                     .await?;
-                    if !has_first_write {
-                        made_durable = sync;
-                    }
                 }
 
-                Ok::<_, Error>(made_durable)
-            }
-            Some((prefix_len, Slot::Second)) => {
-                // Protected CRC is second: [page_size+6..page_size+12].
-                //
-                // If only one of these writes is emitted, it can be made durable here. If
-                // both are emitted, keep them plain so one later sync covers both.
-                //
-                // Write 1: new data + first CRC of first page [prefix_len..page_size+6].
-                let first_crc_end = page_size + CHECKSUM_SLOT_SIZE;
-                let skip = physical_page_size - first_crc_end;
-                let has_first_write = prefix_len < first_crc_end;
-                let mut made_durable = false;
-                if has_first_write {
-                    let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(first_crc_end - prefix_len);
-                    let has_second_write = physical_pages.len() > skip;
-                    self.write_at_maybe_sync(
-                        write_at_offset + prefix_len as u64,
-                        first_payload,
-                        sync && !has_second_write,
-                    )
-                    .await?;
-                    if !has_second_write {
-                        made_durable = sync;
-                    }
-                } else {
-                    // Skip the fully protected first segment when no bytes from it need update.
-                    let _ = physical_pages.split_to(first_crc_end);
-                }
-
-                // Write 2: all remaining pages (if any) [physical_page_size..end].
-                if physical_pages.len() > skip {
-                    let _ = physical_pages.split_to(skip);
-                    self.write_at_maybe_sync(
-                        write_at_offset + physical_page_size as u64,
-                        physical_pages,
-                        sync && !has_first_write,
-                    )
-                    .await?;
-                    if !has_first_write {
-                        made_durable = sync;
-                    }
-                }
-
-                Ok::<_, Error>(made_durable)
+                sync && (has_first_write ^ has_second_write)
             }
             None => {
                 // No protected regions, write everything in one operation
                 self.write_at_maybe_sync(write_at_offset, physical_pages, sync)
                     .await?;
-                Ok::<_, Error>(sync)
+                sync
             }
-        }?;
+        };
 
         // Publish the new logical state only after every physical write completes. If a flush
         // future is cancelled between split writes, the unchanged buffer makes the next flush
@@ -3336,17 +3282,14 @@ mod tests {
     fn test_read_up_to_zero_len_truncates_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            // Open a new blob.
             let (blob, blob_size) = context
                 .open("test_partition", b"read_up_to_zero_len")
                 .await
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            // Create a page cache reference.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
-            // Create a Writer and write some data.
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();

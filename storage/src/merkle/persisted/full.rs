@@ -29,7 +29,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::{DecodeExt, Write};
+use commonware_codec::{DecodeExt, FixedSize, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
@@ -100,10 +100,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 }
 
 /// Configuration for a journal-backed Merkle structure.
-///
-/// The metadata partition must be distinct from every physical journal partition: the journal
-/// prefix itself (for legacy data), `{journal_partition}-blobs`, and
-/// `{journal_partition}-metadata`.
 #[derive(Clone)]
 pub struct Config<S: Strategy> {
     /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
@@ -196,9 +192,6 @@ pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 /// Prefix used for a pending state-sync reset boundary.
 const PENDING_RESET_PREFIX: u8 = 2;
 
-/// Prefix used for pinned nodes staged by a pending state-sync reset.
-const PENDING_NODE_PREFIX: u8 = 3;
-
 /// A durably staged state-sync reset.
 struct PendingReset<F: Family, D: Digest> {
     prune_loc: Location<F>,
@@ -210,51 +203,39 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     fn pending_reset(
         metadata: &Metadata<E, U64, Vec<u8>>,
     ) -> Result<Option<PendingReset<F, D>>, Error<F>> {
-        let marker_keys = metadata
+        let mut markers = metadata
             .keys()
-            .filter(|key| key.prefix() == PENDING_RESET_PREFIX)
-            .cloned()
-            .collect::<Vec<_>>();
-        let pending_node_keys = metadata
-            .keys()
-            .filter(|key| key.prefix() == PENDING_NODE_PREFIX)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        if marker_keys.is_empty() && pending_node_keys.is_empty() {
+            .filter(|key| key.prefix() == PENDING_RESET_PREFIX);
+        let Some(marker) = markers.next() else {
             return Ok(None);
-        }
-        if marker_keys.len() != 1 || marker_keys[0].value() != 0 {
+        };
+        if marker.value() != 0 || markers.next().is_some() {
             return Err(Error::DataCorrupted("invalid pending reset marker"));
         }
 
-        let boundary = metadata
-            .get(&marker_keys[0])
+        let encoded = metadata
+            .get(marker)
             .ok_or(Error::DataCorrupted("missing pending reset boundary"))?;
-        let boundary: [u8; 8] = boundary
-            .as_slice()
+        let boundary: [u8; 8] = encoded
+            .get(..u64::SIZE)
+            .ok_or(Error::DataCorrupted("invalid pending reset boundary"))?
             .try_into()
             .map_err(|_| Error::DataCorrupted("invalid pending reset boundary"))?;
         let prune_loc = Location::new(u64::from_be_bytes(boundary));
         Position::try_from(prune_loc)
             .map_err(|_| Error::DataCorrupted("invalid pending reset boundary"))?;
 
-        let positions = F::nodes_to_pin(prune_loc).collect::<Vec<_>>();
-        let mut expected_node_keys = positions
-            .iter()
-            .map(|pos| U64::new(PENDING_NODE_PREFIX, **pos))
-            .collect::<Vec<_>>();
-        expected_node_keys.sort_unstable();
-        if pending_node_keys != expected_node_keys {
+        let pin_count = F::nodes_to_pin(prune_loc).count();
+        let expected_len = u64::SIZE + pin_count * D::SIZE;
+        if encoded.len() != expected_len {
             return Err(Error::DataCorrupted("invalid pending reset pinned nodes"));
         }
 
-        let mut pinned_nodes = Vec::with_capacity(positions.len());
-        for pos in positions {
-            let bytes = metadata
-                .get(&U64::new(PENDING_NODE_PREFIX, *pos))
-                .ok_or(Error::DataCorrupted("missing pending reset pinned node"))?;
-            let digest = D::decode(bytes.as_ref())
+        let mut pinned_nodes = Vec::with_capacity(pin_count);
+        for index in 0..pin_count {
+            let start = u64::SIZE + index * D::SIZE;
+            let bytes = &encoded[start..start + D::SIZE];
+            let digest = D::decode(bytes)
                 .map_err(|_| Error::DataCorrupted("invalid pending reset pinned node"))?;
             pinned_nodes.push(digest);
         }
@@ -269,19 +250,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     async fn stage_reset(
         mut metadata: Metadata<E, U64, Vec<u8>>,
         prune_loc: Location<F>,
-        positions: &[Position<F>],
         pinned_nodes: &[D],
     ) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
-        debug_assert_eq!(positions.len(), pinned_nodes.len());
-        metadata
-            .retain(|key, _| !matches!(key.prefix(), PENDING_RESET_PREFIX | PENDING_NODE_PREFIX));
-        metadata.put(
-            U64::new(PENDING_RESET_PREFIX, 0),
-            prune_loc.as_u64().to_be_bytes().into(),
-        );
-        for (pos, digest) in positions.iter().zip(pinned_nodes) {
-            metadata.put(U64::new(PENDING_NODE_PREFIX, **pos), digest.to_vec());
+        debug_assert_eq!(F::nodes_to_pin(prune_loc).count(), pinned_nodes.len());
+        let mut encoded = Vec::with_capacity(u64::SIZE + pinned_nodes.len() * D::SIZE);
+        encoded.extend_from_slice(&prune_loc.as_u64().to_be_bytes());
+        for digest in pinned_nodes {
+            encoded.extend_from_slice(digest.as_ref());
         }
+        metadata.put(U64::new(PENDING_RESET_PREFIX, 0), encoded);
         metadata.sync().await.map_err(Error::Metadata)
     }
 
@@ -668,7 +645,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             // The outer metadata intent spans the journal's own recoverable clear protocol. Once
             // this sync completes, both ordinary init and init_sync finish the reset rather than
             // interpreting a mixture of the old projection and the new empty journal.
-            metadata = Self::stage_reset(metadata, prune_loc, &nodes_to_pin, &pinned_nodes).await?;
+            metadata = Self::stage_reset(metadata, prune_loc, &pinned_nodes).await?;
             journal = journal.clear_to_size(*prune_pos).await?;
             metadata =
                 Self::publish_reset(metadata, prune_loc, &nodes_to_pin, &pinned_nodes).await?;
@@ -2852,11 +2829,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let positions = F::nodes_to_pin(boundary).collect::<Vec<_>>();
                 let metadata = Merkle::<F, _, Digest, Sequential>::stage_reset(
                     metadata,
                     boundary,
-                    &positions,
                     &pinned_nodes,
                 )
                 .await
@@ -2881,7 +2856,7 @@ mod tests {
                 !merkle
                     .metadata
                     .keys()
-                    .any(|key| matches!(key.prefix(), PENDING_RESET_PREFIX | PENDING_NODE_PREFIX))
+                    .any(|key| key.prefix() == PENDING_RESET_PREFIX)
             );
             merkle.destroy().await.unwrap();
         });
@@ -2993,7 +2968,6 @@ mod tests {
                 metadata = Merkle::<F, _, Digest, Sequential>::stage_reset(
                     metadata,
                     boundary,
-                    &positions,
                     &pinned_nodes,
                 )
                 .await
@@ -3036,7 +3010,7 @@ mod tests {
                 !merkle
                     .metadata
                     .keys()
-                    .any(|key| matches!(key.prefix(), PENDING_RESET_PREFIX | PENDING_NODE_PREFIX))
+                    .any(|key| key.prefix() == PENDING_RESET_PREFIX)
             );
             merkle.destroy().await.unwrap();
         });

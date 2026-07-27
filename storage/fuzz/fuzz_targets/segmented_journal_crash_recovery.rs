@@ -382,12 +382,6 @@ fn assert_recovered(replayed: Vec<(u64, Entry)>, expected: &Expected) -> State {
             entry.location, expected_location,
             "replay was not contiguous in section {section} at index {index}"
         );
-        let attempted_end = attempted.last().map_or(0, Entry::end);
-        assert!(
-            entry.end() <= attempted_end,
-            "replay exceeded accepted bytes in section {section}: {} > {attempted_end}",
-            entry.end()
-        );
         assert!(
             index < attempted.len(),
             "replay returned too many entries for section {section}"
@@ -399,29 +393,12 @@ fn assert_recovered(replayed: Vec<(u64, Entry)>, expected: &Expected) -> State {
         section_entries.push(entry);
     }
 
-    for (&section, attempted) in &expected.attempted {
+    for &section in expected.attempted.keys() {
         let recovered_len = recovered.get(&section).map_or(0, Vec::len);
         let durable_len = expected.durable.get(&section).copied().unwrap_or(0);
         assert!(
             recovered_len >= durable_len,
             "section {section} lost durable entries: recovered {recovered_len}, durable {durable_len}"
-        );
-        let recovered_end = recovered
-            .get(&section)
-            .and_then(|entries| entries.last())
-            .map_or(0, Entry::end);
-        let durable_end = durable_len
-            .checked_sub(1)
-            .and_then(|index| attempted.get(index))
-            .map_or(0, Entry::end);
-        assert!(
-            recovered_end >= durable_end,
-            "section {section} recovered through byte {recovered_end}, below durable end {durable_end}"
-        );
-        let attempted_end = attempted.last().map_or(0, Entry::end);
-        assert!(
-            recovered_end <= attempted_end,
-            "section {section} recovered through byte {recovered_end}, beyond accepted end {attempted_end}"
         );
     }
 

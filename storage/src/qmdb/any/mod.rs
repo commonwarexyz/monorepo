@@ -119,11 +119,6 @@ where
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
-///
-/// Every physical partition used by `merkle_config` and `journal_config` must be distinct. A fixed
-/// journal may use its raw prefix, `-blobs`, and `-metadata`; a variable journal uses `_data` and
-/// the raw/`-blobs`/`-metadata` expansion of `_offsets`. A variable journal does not use its raw
-/// base, so equal raw base strings are allowed when these expanded sets do not intersect.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.

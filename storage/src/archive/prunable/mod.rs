@@ -183,8 +183,7 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
-    /// The partition to use for the archive's durable-size checkpoint. This must be distinct from
-    /// [Config::key_partition] and [Config::value_partition].
+    /// The partition to use for the archive's durable-size checkpoint.
     ///
     /// The checkpoint records how much of each section a completed sync made durable, so recovery
     /// can tell unacknowledged crash debris apart from damage to data the checkpoint covers.
@@ -942,9 +941,8 @@ mod tests {
         });
     }
 
-    /// Regression (#539): the archive uses only its explicitly configured `metadata_partition`
-    /// and never claims the previously-derived `{key_partition}-metadata` name. Foreign data
-    /// stored at that derived name by an unrelated component must be left untouched.
+    /// The archive owns only its explicitly configured `metadata_partition`. It must not claim
+    /// the implicit `{key_partition}-metadata` name or alter unrelated data stored there.
     #[test_traced]
     fn test_init_leaves_foreign_derived_metadata_untouched() {
         let executor = deterministic::Runner::default();
@@ -958,8 +956,6 @@ mod tests {
             blob.write_at_sync(0, vec![0xAB; 5]).await.unwrap();
             drop(blob);
 
-            // Configure the archive with an explicit metadata partition distinct from the
-            // derived name.
             let cfg = Config {
                 translator: FourCap,
                 metadata_partition: "orders-watermarks".into(),

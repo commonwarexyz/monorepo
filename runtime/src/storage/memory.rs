@@ -28,7 +28,7 @@ enum Mutation {
 struct Recovery {
     next_generation: u64,
     generations: BTreeMap<BlobKey, u64>,
-    pending: BTreeMap<(BlobKey, u64), Vec<Mutation>>,
+    pending: BTreeMap<BlobKey, Vec<Mutation>>,
 }
 
 fn apply_crash(
@@ -38,10 +38,7 @@ fn apply_crash(
 ) {
     let pending = std::mem::take(&mut recovery.pending);
 
-    for ((key, generation), mutations) in pending {
-        if recovery.generations.get(&key) != Some(&generation) {
-            continue;
-        }
+    for (key, mutations) in pending {
         let Some(content) = partitions
             .get_mut(&key.0)
             .and_then(|partition| partition.get_mut(&key.1))
@@ -119,9 +116,8 @@ impl Recovery {
     }
 
     fn remove(&mut self, key: &BlobKey) {
-        if let Some(generation) = self.generations.remove(key) {
-            self.pending.remove(&(key.clone(), generation));
-        }
+        self.generations.remove(key);
+        self.pending.remove(key);
     }
 }
 
@@ -273,15 +269,8 @@ impl crate::Storage for Storage {
                 partitions
                     .remove(partition)
                     .ok_or(crate::Error::PartitionMissing(partition.into()))?;
-                let keys = recovery
-                    .generations
-                    .keys()
-                    .filter(|key| key.0 == partition)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for key in keys {
-                    recovery.remove(&key);
-                }
+                recovery.generations.retain(|key, _| key.0 != partition);
+                recovery.pending.retain(|key, _| key.0 != partition);
             }
         }
         Ok(())
@@ -331,17 +320,22 @@ impl Blob {
         ))
     }
 
+    fn ensure_current(&self, recovery: &Recovery, key: &BlobKey) -> Result<(), crate::Error> {
+        self.ensure_current_epoch()?;
+        if recovery.generations.get(key) == Some(&self.generation) {
+            return Ok(());
+        }
+        Err(crate::Error::BlobMissing(
+            self.partition.clone(),
+            hex(&self.name),
+        ))
+    }
+
     fn sync_inner(&self) -> Result<(), crate::Error> {
         let new_content = self.content.read();
         let key = (self.partition.clone(), self.name.clone());
         let mut recovery = self.recovery.lock();
-        self.ensure_current_epoch()?;
-        if recovery.generations.get(&key) != Some(&self.generation) {
-            return Err(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ));
-        }
+        self.ensure_current(&recovery, &key)?;
 
         // Update partition content
         let mut partitions = self.partitions.lock();
@@ -355,38 +349,22 @@ impl Blob {
                 hex(&self.name),
             ))?;
         content.clone_from(&new_content);
-        recovery.pending.remove(&(key, self.generation));
+        recovery.pending.remove(&key);
         Ok(())
     }
 
     fn record(&self, mutation: Mutation) -> Result<(), crate::Error> {
         let key = (self.partition.clone(), self.name.clone());
         let mut recovery = self.recovery.lock();
-        self.ensure_current_epoch()?;
-        if recovery.generations.get(&key) != Some(&self.generation) {
-            return Err(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ));
-        }
-        recovery
-            .pending
-            .entry((key, self.generation))
-            .or_default()
-            .push(mutation);
+        self.ensure_current(&recovery, &key)?;
+        recovery.pending.entry(key).or_default().push(mutation);
         Ok(())
     }
 
     fn persist_write(&self, offset: usize, data: &IoBuf) -> Result<(), crate::Error> {
         let key = (self.partition.clone(), self.name.clone());
         let mut recovery = self.recovery.lock();
-        self.ensure_current_epoch()?;
-        if recovery.generations.get(&key) != Some(&self.generation) {
-            return Err(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ));
-        }
+        self.ensure_current(&recovery, &key)?;
 
         let mut partitions = self.partitions.lock();
         let content = partitions
@@ -394,7 +372,7 @@ impl Blob {
             .and_then(|partition| partition.get_mut(&self.name))
             .ok_or_else(|| crate::Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         Storage::apply_write(content, offset, data.as_ref());
-        if let Some(pending) = recovery.pending.get_mut(&(key, self.generation)) {
+        if let Some(pending) = recovery.pending.get_mut(&key) {
             pending.push(Mutation::Write {
                 offset,
                 data: data.clone(),
@@ -528,43 +506,29 @@ mod tests {
         telemetry::metrics::Registry,
     };
 
-    struct PausedIoBufs {
+    struct Paused<T> {
         checked_epoch: Arc<std::sync::Barrier>,
         resume: Arc<std::sync::Barrier>,
+        value: T,
     }
 
-    impl From<PausedIoBufs> for IoBufs {
-        fn from(paused: PausedIoBufs) -> Self {
-            paused.checked_epoch.wait();
-            paused.resume.wait();
-            Self::from(&b"stale"[..])
+    impl<T> Paused<T> {
+        fn into_inner(self) -> T {
+            self.checked_epoch.wait();
+            self.resume.wait();
+            self.value
         }
     }
 
-    struct PausedEmptyIoBufs {
-        checked_epoch: Arc<std::sync::Barrier>,
-        resume: Arc<std::sync::Barrier>,
-    }
-
-    impl From<PausedEmptyIoBufs> for IoBufs {
-        fn from(paused: PausedEmptyIoBufs) -> Self {
-            paused.checked_epoch.wait();
-            paused.resume.wait();
-            Self::default()
+    impl From<Paused<Self>> for IoBufs {
+        fn from(paused: Paused<Self>) -> Self {
+            paused.into_inner()
         }
     }
 
-    struct PausedIoBufsMut {
-        checked_epoch: Arc<std::sync::Barrier>,
-        resume: Arc<std::sync::Barrier>,
-        len: usize,
-    }
-
-    impl From<PausedIoBufsMut> for IoBufsMut {
-        fn from(paused: PausedIoBufsMut) -> Self {
-            paused.checked_epoch.wait();
-            paused.resume.wait();
-            Self::from(vec![0; paused.len])
+    impl From<Paused<Self>> for IoBufsMut {
+        fn from(paused: Paused<Self>) -> Self {
+            paused.into_inner()
         }
     }
 
@@ -713,9 +677,10 @@ mod tests {
             move || {
                 futures::executor::block_on(escaped.write_at(
                     0,
-                    PausedIoBufs {
+                    Paused {
                         checked_epoch,
                         resume,
+                        value: IoBufs::from(&b"stale"[..]),
                     },
                 ))
             }
@@ -751,10 +716,10 @@ mod tests {
                 futures::executor::block_on(escaped.read_at_buf(
                     0,
                     4,
-                    PausedIoBufsMut {
+                    Paused {
                         checked_epoch,
                         resume,
-                        len: 4,
+                        value: IoBufsMut::from(vec![0; 4]),
                     },
                 ))
             }
@@ -783,9 +748,10 @@ mod tests {
                 let checked_epoch = checked_epoch.clone();
                 let resume = resume.clone();
                 move || {
-                    let bufs = PausedEmptyIoBufs {
+                    let bufs = Paused {
                         checked_epoch,
                         resume,
+                        value: IoBufs::default(),
                     };
                     if range_sync {
                         futures::executor::block_on(escaped.write_at_sync(0, bufs))

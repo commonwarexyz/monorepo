@@ -208,10 +208,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     /// Record every in-flight sync that has since completed, without blocking on the rest.
-    fn observe_unproven(&mut self) -> Result<(), Error> {
+    fn observe_unproven(&mut self) -> Result<bool, Error> {
         // A prior checkpoint publication may have failed without its composite handle being
         // observed. Surface that fatal error before inspecting data syncs or mutating storage.
-        self.metadata.poll_sync()?;
+        let metadata_idle = self.metadata.poll_sync()?;
 
         let completed = self
             .unproven
@@ -230,7 +230,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 Err(err) => return Err(crate::journal::Error::Runtime(err).into()),
             }
         }
-        Ok(())
+        Ok(metadata_idle)
     }
 
     /// Index size each section would reach if a sync issued now completed.
@@ -623,7 +623,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// See [crate::archive::Archive::start_sync].
     async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
-        self.observe_unproven()?;
+        let metadata_idle = self.observe_unproven()?;
 
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
@@ -642,8 +642,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         // accumulated updates. Publishing first keeps a failure here from stranding a data sync
         // the caller can no longer observe. Poll unconditionally so a failed prior publication is
         // surfaced even when there is nothing new to publish.
-        let idle = self.metadata.poll_sync()?;
-        let checkpoint_handle = if self.checkpoint_dirty && idle {
+        let checkpoint_handle = if self.checkpoint_dirty && metadata_idle {
             let (metadata, handle) = self.metadata.start_sync().await?;
             self.metadata = metadata;
             self.checkpoint_dirty = false;
@@ -938,10 +937,11 @@ mod tests {
         archive::{Archive as _, Error},
         metadata::Error as MetadataError,
         translator::FourCap,
+        utils::snapshot_partition,
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufferPooler, Error as RError, Runner as _, Supervisor as _,
+        BufferPooler, Error as RError, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync, release_pending_syncs},
@@ -966,35 +966,6 @@ mod tests {
             value_write_buffer: NZUsize!(1),
             replay_buffer: NZUsize!(1024),
         }
-    }
-
-    async fn snapshot_partition(
-        context: &deterministic::Context,
-        partition: &str,
-    ) -> BTreeMap<Vec<u8>, Vec<u8>> {
-        let mut snapshot = BTreeMap::new();
-        for name in context
-            .scan(partition)
-            .await
-            .expect("failed to scan partition")
-        {
-            let (blob, size) = context
-                .open(partition, &name)
-                .await
-                .expect("failed to open blob");
-            let contents = if size == 0 {
-                Vec::new()
-            } else {
-                blob.read_at(0, usize::try_from(size).expect("blob too large"))
-                    .await
-                    .expect("failed to read blob")
-                    .coalesce()
-                    .as_ref()
-                    .to_vec()
-            };
-            snapshot.insert(name, contents);
-        }
-        snapshot
     }
 
     async fn snapshot_data(
@@ -1053,61 +1024,6 @@ mod tests {
             ),
             "expected retained checkpoint failure, got {error:?}"
         );
-    }
-
-    #[test_traced]
-    fn test_aliased_metadata_partition_is_side_effect_free() {
-        deterministic::Runner::default().start(|context| async move {
-            for (label, alias_key_partition) in [("key", true), ("value", false)] {
-                let mut cfg = test_config(&context, label);
-                cfg.metadata_partition = if alias_key_partition {
-                    cfg.key_partition.clone()
-                } else {
-                    cfg.value_partition.clone()
-                };
-
-                let partitions = [
-                    cfg.metadata_partition.clone(),
-                    cfg.key_partition.clone(),
-                    cfg.value_partition.clone(),
-                ]
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-                let mut before = BTreeMap::new();
-                for partition in &partitions {
-                    let (blob, _) = context
-                        .open(partition, b"sentinel")
-                        .await
-                        .expect("failed to seed partition");
-                    blob.write_at_sync(0, vec![0xA5; 3])
-                        .await
-                        .expect("failed to seed blob");
-                    before.insert(
-                        partition.clone(),
-                        snapshot_partition(&context, partition).await,
-                    );
-                }
-
-                let result =
-                    Archive::<_, _, FixedBytes<64>, i32>::init(context.child(label), cfg).await;
-                assert!(
-                    matches!(
-                        result,
-                        Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
-                            _
-                        )))
-                    ),
-                    "{label}: expected InvalidConfiguration"
-                );
-                for partition in &partitions {
-                    assert_eq!(
-                        snapshot_partition(&context, partition).await,
-                        before[partition],
-                        "{label}: rejected configuration changed {partition}"
-                    );
-                }
-            }
-        });
     }
 
     #[test_traced]

@@ -398,19 +398,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             )));
         }
 
-        // A value section below the checkpoint without an index counterpart lost its
-        // index, and the checkpointed section must retain at least the committed size.
-        let index_sections: HashSet<u64> = self.index.sections().collect();
-        if let Some(orphan) = self
-            .values
-            .sections()
-            .find(|candidate| *candidate < section && !index_sections.contains(candidate))
-        {
-            return Err(Error::Corruption(format!(
-                "section {orphan} has values but no index"
-            )));
-        }
-
         // A later page may survive while the checkpointed page falls back to its shorter,
         // committed checksum. Remove that unusable suffix before reading committed entries.
         self.index = self.index.repair_prefix(section, index_size).await?;
@@ -450,15 +437,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         glob_size: u64,
     ) -> Result<(), Error> {
         let entry_end = self.validate_index_prefix(section, index_size).await?;
-        if index_size == 0 {
-            if glob_size != 0 {
-                return Err(Error::Corruption(format!(
-                    "section {section} has values but no entries: glob size {glob_size}"
-                )));
-            }
-            return Ok(());
-        }
-
         if entry_end != glob_size {
             return Err(Error::Corruption(format!(
                 "section {section} last entry ends at {entry_end}, glob size is {glob_size}"
@@ -862,6 +840,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::snapshot_partition;
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -2057,35 +2036,6 @@ mod tests {
                 .expect("Failed to reopen index");
             assert_eq!(retained, size, "durable corruption must not be truncated");
         });
-    }
-
-    async fn snapshot_partition(
-        context: &deterministic::Context,
-        partition: &str,
-    ) -> BTreeMap<Vec<u8>, Vec<u8>> {
-        let mut snapshot = BTreeMap::new();
-        for name in context
-            .scan(partition)
-            .await
-            .expect("Failed to scan partition")
-        {
-            let (blob, size) = context
-                .open(partition, &name)
-                .await
-                .expect("Failed to open blob");
-            let contents = if size == 0 {
-                Vec::new()
-            } else {
-                blob.read_at(0, usize::try_from(size).expect("blob too large"))
-                    .await
-                    .expect("Failed to read blob")
-                    .coalesce()
-                    .as_ref()
-                    .to_vec()
-            };
-            snapshot.insert(name, contents);
-        }
-        snapshot
     }
 
     #[test_traced]

@@ -23,8 +23,8 @@
 //!
 //! # Expected
 //!
-//! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
-//! guaranteed-durable prefix plus size/pruning ceilings), not an exact state.
+//! A crash can land anywhere in a range, so `Expected` tracks a guaranteed-durable prefix and the
+//! whole items that may survive, not an exact state.
 //! `assert_matches_expected` checks recovery falls within them and snapshots it as the next cycle's
 //! start.
 //!
@@ -219,20 +219,19 @@ impl Params {
 
 /// Conservative bounds on what a recovery may produce after an unclean shutdown:
 /// - positions `[0, durable_prune)` are pruned (reads return `ItemPruned`),
-/// - positions `[max_prune, durable_len)` hold the exact content `values[pos]`,
-/// - the recovered size is in `[durable_len, max_size]`,
-/// - the recovered pruning boundary is in `[durable_prune, max_prune]`,
+/// - positions `[durable_prune, durable_len)` hold the exact content `values[pos]`,
+/// - the recovered size is in `[durable_len, allowed_values.len()]`,
+/// - the recovered pruning boundary is `durable_prune`, except for a staged variable-journal
+///   prune described by `advanced_prune`,
 /// - every recovered tail item is one of the whole items attempted at that position.
 #[derive(Clone, Default)]
 struct Expected {
     /// Guaranteed-durable prefix length; also the minimum recovered size.
     durable_len: u64,
-    /// Upper bound on the recovered size.
-    max_size: u64,
     /// Guaranteed pruning floor; positions below are guaranteed pruned.
     durable_prune: u64,
-    /// Upper bound on the recovered pruning boundary.
-    max_prune: u64,
+    /// Exact boundary if a failed variable-journal prune reached data removal.
+    advanced_prune: Option<u64>,
     /// Latest value appended at each position (index == position).
     values: Vec<Item>,
     /// Whole item values a crash may recover at each position. Rewinds can leave an old value in
@@ -254,58 +253,43 @@ impl Expected {
         self.allowed_values = self.values.iter().cloned().map(|item| vec![item]).collect();
     }
 
-    /// Successful append: not durable until the next sync/commit, so only raise the ceiling.
+    /// Successful append: not durable until the next sync/commit.
     fn appended(&mut self, item: Item) {
         let pos = self.values.len();
         self.values.push(item.clone());
         self.allow(pos, item);
-        self.max_size = self.max_size.max(self.values.len() as u64);
     }
 
     /// Failed append: either no item or the complete attempted item may have persisted.
     fn append_failed(&mut self, size_before: u64, item: Item) {
         self.allow(size_before as usize, item);
-        self.max_size = self.max_size.max(size_before + 1);
     }
 
     /// Sync pins size, content, and pruning boundary exactly.
     fn synced(&mut self, bounds: Range<u64>) {
         self.durable_len = bounds.end;
-        self.max_size = bounds.end;
         self.durable_prune = bounds.start;
-        self.max_prune = bounds.start;
         self.pin_live();
     }
 
     /// Commit pins the size but not the pruning boundary.
     fn committed(&mut self, size: u64) {
         self.durable_len = size;
-        self.max_size = size;
         self.pin_live();
     }
 
     /// Rewind: the truncated tail may or may not persist, so recovered size is in `[target, prev]`.
-    fn rewound(&mut self, target: u64, prev_size: u64) {
+    fn rewound(&mut self, target: u64) {
         self.durable_len = self.durable_len.min(target);
-        self.max_size = self.max_size.max(prev_size);
-    }
-
-    /// Successful prune durably deletes whole sections, so recovery can never reopen below
-    /// `boundary`; pin it exactly. (The boundary only moves forward.)
-    fn pruned(&mut self, boundary: u64) {
-        self.durable_prune = boundary;
-        self.max_prune = boundary;
-    }
-
-    /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not certain.
-    fn prune_failed(&mut self, ceiling: u64) {
-        self.max_prune = self.max_prune.max(ceiling);
     }
 }
 
 /// Trait abstracting over fixed and variable journals for the fuzz test.
 trait FuzzJournal: Sized {
     type Config;
+
+    /// Whether prune can return an error after removing its targeted data sections.
+    const PRUNE_ERROR_CAN_ADVANCE: bool;
 
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config;
 
@@ -350,6 +334,7 @@ async fn collect_replay<C: Contiguous<Item = Item>>(
 
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     type Config = FixedConfig;
+    const PRUNE_ERROR_CAN_ADVANCE: bool = false;
 
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
         FixedConfig {
@@ -415,6 +400,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
 impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     type Config = VariableConfig<()>;
+    const PRUNE_ERROR_CAN_ADVANCE: bool = true;
 
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
         VariableConfig {
@@ -489,27 +475,30 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
     } = journal.bounds();
     assert!(size >= boundary, "size {size} < boundary {boundary}");
 
-    // Size and boundary fall within the expected bounds.
-    assert!(
-        size >= expected.durable_len,
-        "recovered size {size} < durable_len {}",
-        expected.durable_len
-    );
-    assert!(
-        size <= expected.max_size,
-        "recovered size {size} > max_size {}",
-        expected.max_size
-    );
-    assert!(
-        boundary >= expected.durable_prune,
-        "recovered boundary {boundary} < durable_prune {}",
-        expected.durable_prune
-    );
-    assert!(
-        boundary <= expected.max_prune,
-        "recovered boundary {boundary} > max_prune {}",
-        expected.max_prune
-    );
+    let advanced = expected.advanced_prune == Some(boundary);
+    if advanced {
+        assert_eq!(
+            size,
+            expected.values.len() as u64,
+            "advanced prune recovered size {size} instead of the synced live size {}",
+            expected.values.len()
+        );
+    } else {
+        assert_eq!(
+            boundary, expected.durable_prune,
+            "recovered unexpected pruning boundary {boundary}"
+        );
+        assert!(
+            size >= expected.durable_len,
+            "recovered size {size} < durable_len {}",
+            expected.durable_len
+        );
+        assert!(
+            size <= expected.allowed_values.len() as u64,
+            "recovered size {size} exceeds attempted size {}",
+            expected.allowed_values.len()
+        );
+    }
 
     // Below the boundary every position is pruned.
     for pos in 0..boundary {
@@ -526,19 +515,20 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
             .read(pos)
             .await
             .unwrap_or_else(|e| panic!("in-bounds pos {pos} unreadable: {e:?}"));
-        if pos < expected.durable_len {
+        if advanced || pos < expected.durable_len {
             assert_eq!(
                 item, expected.values[pos as usize],
-                "content mismatch at durable pos {pos}"
+                "content mismatch at required pos {pos}"
+            );
+        } else {
+            assert!(
+                expected
+                    .allowed_values
+                    .get(pos as usize)
+                    .is_some_and(|allowed| allowed.contains(&item)),
+                "recovered unattempted content at pos {pos}: {item:?}"
             );
         }
-        assert!(
-            expected
-                .allowed_values
-                .get(pos as usize)
-                .is_some_and(|allowed| allowed.contains(&item)),
-            "recovered unattempted content at pos {pos}: {item:?}"
-        );
         values[pos as usize] = item;
     }
 
@@ -567,9 +557,8 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
     Expected {
         durable_len: size,
-        max_size: size,
         durable_prune: boundary,
-        max_prune: boundary,
+        advanced_prune: None,
         allowed_values: values.iter().cloned().map(|item| vec![item]).collect(),
         values,
     }
@@ -679,7 +668,7 @@ async fn run_ops<J: FuzzJournal>(
                     };
                     match journal.rewind(target).await {
                         Ok(journal) => {
-                            expected.rewound(target, bounds.end);
+                            expected.rewound(target);
                             expected.values.truncate(target as usize);
                             journal
                         }
@@ -698,7 +687,7 @@ async fn run_ops<J: FuzzJournal>(
                             return;
                         }
                         Err(_) => {
-                            expected.rewound(target.min(bounds.end), bounds.end);
+                            expected.rewound(target.min(bounds.end));
                             return;
                         }
                     }
@@ -712,8 +701,6 @@ async fn run_ops<J: FuzzJournal>(
                     Ok((journal, pruned)) => {
                         if pruned {
                             expected.synced(journal.bounds());
-                        } else {
-                            expected.pruned(journal.bounds().start);
                         }
                         journal
                     }
@@ -722,7 +709,11 @@ async fn run_ops<J: FuzzJournal>(
                         let capped = (*min_pos).min(size);
                         let section_floor =
                             capped / params.items_per_section * params.items_per_section;
-                        expected.prune_failed(section_floor);
+                        // Variable prune can fail after removing all targeted data sections, but
+                        // fixed prune cannot fail after removal begins.
+                        if J::PRUNE_ERROR_CAN_ADVANCE {
+                            expected.advanced_prune = Some(section_floor);
+                        }
                         return;
                     }
                 }

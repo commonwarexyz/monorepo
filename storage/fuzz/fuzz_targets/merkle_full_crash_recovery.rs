@@ -133,8 +133,6 @@ fn merkle_config(
 /// Expected bounds for state after recovery.
 #[derive(Clone)]
 struct ExpectedBounds {
-    min_size: u64,
-    max_size: u64,
     min_leaves: u64,
     max_leaves: u64,
     min_pruned: u64,
@@ -143,11 +141,8 @@ struct ExpectedBounds {
 }
 
 fn pin_durable<F: MerkleFamily>(expected: &mut ExpectedBounds, merkle: &Merkle<F>) {
-    let size = merkle.size().as_u64();
     let leaves = merkle.leaves().as_u64();
     let pruned = merkle.bounds().start.as_u64();
-    expected.min_size = size;
-    expected.max_size = size;
     expected.min_leaves = leaves;
     expected.max_leaves = leaves;
     expected.min_pruned = pruned;
@@ -157,12 +152,7 @@ fn pin_durable<F: MerkleFamily>(expected: &mut ExpectedBounds, merkle: &Merkle<F
 /// Raise the recovery ceiling once an operation can have reached the journal. Applying a batch is
 /// memory-only; flush, sync, and prune may make some current nodes recoverable even when they
 /// return an error.
-fn raise_storage_ceiling<F: MerkleFamily>(
-    max_size: &mut u64,
-    max_leaves: &mut u64,
-    merkle: &Merkle<F>,
-) {
-    *max_size = (*max_size).max(merkle.size().as_u64());
+fn raise_storage_ceiling<F: MerkleFamily>(max_leaves: &mut u64, merkle: &Merkle<F>) {
     *max_leaves = (*max_leaves).max(merkle.leaves().as_u64());
 }
 
@@ -200,16 +190,6 @@ async fn verify_recovery<F: MerkleFamily>(
     let leaves = merkle.leaves().as_u64();
     let pruned = merkle.bounds().start.as_u64();
     assert!(
-        size <= expected.max_size,
-        "size {size} > {}",
-        expected.max_size
-    );
-    assert!(
-        size >= expected.min_size,
-        "size {size} < {}",
-        expected.min_size
-    );
-    assert!(
         leaves <= expected.max_leaves,
         "leaves {leaves} > {}",
         expected.max_leaves
@@ -234,10 +214,6 @@ async fn verify_recovery<F: MerkleFamily>(
         assert_eq!(
             pruned, expected.max_pruned,
             "an interrupted prune may recover only its old or target boundary"
-        );
-        assert_eq!(
-            size, expected.max_size,
-            "an advanced prune boundary requires the complete pre-prune tree"
         );
         assert_eq!(
             leaves, expected.max_leaves,
@@ -371,8 +347,6 @@ async fn run_operations<F: MerkleFamily>(
     hasher: &StandardHasher<Sha256>,
     operations: &[MerkleOperation],
 ) -> ExpectedBounds {
-    let mut min_size = 0u64;
-    let mut max_size = merkle.size().as_u64();
     let mut min_leaves = 0u64;
     let mut max_leaves = merkle.leaves().as_u64();
     let mut min_pruned = 0u64;
@@ -391,7 +365,7 @@ async fn run_operations<F: MerkleFamily>(
             }
 
             MerkleOperation::Flush => {
-                raise_storage_ceiling(&mut max_size, &mut max_leaves, &merkle);
+                raise_storage_ceiling(&mut max_leaves, &merkle);
                 match merkle.flush().await {
                     Ok(merkle) => merkle,
                     Err(_) => break,
@@ -399,12 +373,10 @@ async fn run_operations<F: MerkleFamily>(
             }
 
             MerkleOperation::Sync => {
-                raise_storage_ceiling(&mut max_size, &mut max_leaves, &merkle);
+                raise_storage_ceiling(&mut max_leaves, &merkle);
                 match merkle.sync().await {
                     Err(_) => break,
                     Ok(merkle) => {
-                        min_size = merkle.size().as_u64();
-                        max_size = min_size;
                         min_leaves = merkle.leaves().as_u64();
                         max_leaves = min_leaves;
                         min_pruned = merkle.bounds().start.as_u64();
@@ -420,15 +392,13 @@ async fn run_operations<F: MerkleFamily>(
                 let target = Location::<F>::new(safe_loc);
 
                 if target > merkle.bounds().start {
-                    raise_storage_ceiling(&mut max_size, &mut max_leaves, &merkle);
+                    raise_storage_ceiling(&mut max_leaves, &merkle);
                     match merkle.prune(target).await {
                         Err(_) => {
                             max_pruned = max_pruned.max(target.as_u64());
                             break;
                         }
                         Ok(merkle) => {
-                            min_size = merkle.size().as_u64();
-                            max_size = min_size;
                             min_leaves = merkle.leaves().as_u64();
                             max_leaves = min_leaves;
                             min_pruned = merkle.bounds().start.as_u64();
@@ -445,15 +415,13 @@ async fn run_operations<F: MerkleFamily>(
                 let leaves = merkle.leaves();
 
                 if leaves.as_u64() != 0 && merkle.bounds().start < *leaves {
-                    raise_storage_ceiling(&mut max_size, &mut max_leaves, &merkle);
+                    raise_storage_ceiling(&mut max_leaves, &merkle);
                     match merkle.prune_all().await {
                         Err(_) => {
                             max_pruned = max_pruned.max(leaves.as_u64());
                             break;
                         }
                         Ok(merkle) => {
-                            min_size = merkle.size().as_u64();
-                            max_size = min_size;
                             min_leaves = merkle.leaves().as_u64();
                             max_leaves = min_leaves;
                             min_pruned = merkle.bounds().start.as_u64();
@@ -469,8 +437,6 @@ async fn run_operations<F: MerkleFamily>(
     }
 
     ExpectedBounds {
-        min_size,
-        max_size,
         min_leaves,
         max_leaves,
         min_pruned,

@@ -553,11 +553,10 @@ impl Runner {
         F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
-        let (output, checkpoint) = self.start_inner(f, true);
-        (output, checkpoint.expect("recovery checkpoint missing"))
+        self.start_inner(f, true)
     }
 
-    fn start_inner<F, Fut>(self, f: F, crash_boundary: bool) -> (Fut::Output, Option<Checkpoint>)
+    fn start_inner<F, Fut>(self, f: F, crash_boundary: bool) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
         Fut: Future,
@@ -725,22 +724,16 @@ impl Runner {
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
-        // Ordinary start() does not cross a crash boundary.
-        if !crash_boundary {
-            return (output, None);
+        if crash_boundary {
+            // Sample pending storage mutations and invalidate handles from the stopped runtime.
+            let mut rng = executor.rng.lock();
+            storage
+                .inner()
+                .inner()
+                .inner()
+                .simulate_crash(|| rng.random());
         }
 
-        // Cross the crash boundary before returning the checkpoint. This samples pending storage
-        // mutations and invalidates blob handles from the completed runtime.
-        let mut rng = executor.rng.lock();
-        storage
-            .inner()
-            .inner()
-            .inner()
-            .simulate_crash(|| rng.random());
-        drop(rng);
-
-        // Construct a checkpoint that can be used to restart the runtime.
         let checkpoint = Checkpoint {
             cycle: executor.cycle,
             deadline: executor.deadline,
@@ -754,7 +747,7 @@ impl Runner {
             storage_buffer_pool_cfg,
         };
 
-        (output, Some(checkpoint))
+        (output, checkpoint)
     }
 }
 
@@ -772,8 +765,7 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        let (output, checkpoint) = self.start_inner(f, false);
-        debug_assert!(checkpoint.is_none());
+        let (output, _) = self.start_inner(f, false);
         output
     }
 }

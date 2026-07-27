@@ -40,7 +40,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(2);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(4096);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Arbitrary, Clone, Copy, Debug)]
 enum Kind {
     Immutable,
     Prunable,
@@ -67,11 +67,7 @@ struct FuzzInput {
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let raw_bytes = u.arbitrary()?;
-        let kind = if u.arbitrary()? {
-            Kind::Immutable
-        } else {
-            Kind::Prunable
-        };
+        let kind = u.arbitrary()?;
         let compression = u.arbitrary()?;
         let items_per_section = NonZeroU64::new(u.int_in_range(1..=4)?).unwrap();
         let operation_count = u.int_in_range(1..=MAX_OPERATIONS)?;
@@ -84,8 +80,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
                 },
                 4 => Operation::Sync,
                 5 => Operation::StartSync,
-                6 => Operation::Prune {
+                6 if matches!(kind, Kind::Prunable) => Operation::Prune {
                     min: u.int_in_range(0..=MAX_OPERATIONS as u64)?,
+                },
+                6 => Operation::Put {
+                    value: u.arbitrary()?,
                 },
                 _ => Operation::Crash,
             };
@@ -114,8 +113,6 @@ struct Expected {
     durable: Model,
     /// Exact entries that may or may not survive the next crash.
     optional: Model,
-    /// Every index ever presented to `put`.
-    seen: BTreeSet<u64>,
     /// Next fresh index assigned to a generated put.
     next_index: u64,
 }
@@ -229,10 +226,7 @@ where
     A: ArchiveTrait<Key = Key, Value = Value>,
 {
     let mut actual = Model::new();
-    let mut indices = (0..=MAX_OPERATIONS as u64).collect::<BTreeSet<_>>();
-    indices.extend(expected.seen.iter().copied());
-
-    for index in indices {
+    for index in 0..=SECOND_SENTINEL_INDEX {
         let recovered = archive
             .get(Identifier::Index(index))
             .await
@@ -396,7 +390,6 @@ fn run_cycle<V: Variant>(
         )
         .await;
         let mut durable = live.clone();
-        let mut seen = expected.seen;
         let mut next_index = expected.next_index;
         // The prune floor belongs to an archive instance; reopening permits indices below a floor
         // established by the previous instance after its old sections have been removed.
@@ -411,7 +404,6 @@ fn run_cycle<V: Variant>(
                         .put(index, key_for(index), Value::new(value))
                         .await
                         .expect("archive put should succeed");
-                    seen.insert(index);
                     if index >= prune_floor {
                         live.entry(index).or_insert(value);
                     }
@@ -454,7 +446,6 @@ fn run_cycle<V: Variant>(
         Expected {
             durable,
             optional,
-            seen,
             next_index,
         }
     })
@@ -506,12 +497,9 @@ fn run<V: Variant>(input: FuzzInput) {
             .sync()
             .await
             .expect("sync after recovery should succeed");
-        let mut seen = expected.seen;
-        seen.insert(FIRST_SENTINEL_INDEX);
         Expected {
             durable: live,
             optional: Model::new(),
-            seen,
             next_index: expected.next_index,
         }
     });
@@ -535,8 +523,6 @@ fn run<V: Variant>(input: FuzzInput) {
                 settings.items_per_section,
             )
             .await;
-            let mut seen = next_expected.seen;
-
             if V::PRUNABLE {
                 for index in PRUNE_SENTINEL_INDICES {
                     let value = [index as u8; 32];
@@ -545,7 +531,6 @@ fn run<V: Variant>(input: FuzzInput) {
                         .await
                         .expect("pre-prune put should succeed");
                     live.insert(index, value);
-                    seen.insert(index);
                 }
                 archive = archive.sync().await.expect("pre-prune sync should succeed");
                 *fault_config.write() = deterministic::FaultConfig {
@@ -561,7 +546,6 @@ fn run<V: Variant>(input: FuzzInput) {
             Expected {
                 durable: live,
                 optional: Model::new(),
-                seen,
                 next_index: next_expected.next_index,
             }
         });
@@ -589,7 +573,6 @@ fn run<V: Variant>(input: FuzzInput) {
                         .filter(|(index, _)| **index < FIRST_SENTINEL_INDEX)
                         .map(|(&index, &value)| (index, value))
                         .collect(),
-                    seen: prune_expected.seen.clone(),
                     next_index: prune_expected.next_index,
                 }
             } else {
@@ -624,7 +607,6 @@ fn run<V: Variant>(input: FuzzInput) {
                 let post_prune = Expected {
                     durable: live.clone(),
                     optional: Model::new(),
-                    seen: prune_expected.seen.clone(),
                     next_index: prune_expected.next_index,
                 };
                 recover_model(

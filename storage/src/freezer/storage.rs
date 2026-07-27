@@ -447,7 +447,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Advance an epoch while preserving the headroom required by a published checkpoint.
     const fn next_epoch(checkpoint_epoch: u64) -> Option<u64> {
         match checkpoint_epoch.checked_add(2) {
-            Some(_) => checkpoint_epoch.checked_add(1),
+            Some(next) => Some(next - 1),
             None => None,
         }
     }
@@ -665,9 +665,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             )));
         }
 
+        let checkpoint = checkpoint.filter(|checkpoint| !checkpoint.is_empty());
+
         // Checkpoint restoration is destructive, so reject malformed checkpoints first. Apply the
         // same epoch-headroom invariant used when publishing a checkpoint.
-        if let Some(checkpoint) = checkpoint.filter(|checkpoint| !checkpoint.is_empty())
+        if let Some(checkpoint) = checkpoint
             && (checkpoint.table_size == 0
                 || !checkpoint.table_size.is_power_of_two()
                 || Self::next_epoch(checkpoint.epoch).is_none())
@@ -676,7 +678,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         }
 
         // A missing or empty checkpoint starts fresh: delete all existing freezer data
-        let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
+        let reset = checkpoint.is_none();
         if reset {
             for partition in [
                 &config.key_partition,
@@ -696,9 +698,8 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
-        if let Some(expected_table_len) = checkpoint
-            .filter(|checkpoint| !checkpoint.is_empty())
-            .map(|checkpoint| Self::table_offset(checkpoint.table_size))
+        if let Some(expected_table_len) =
+            checkpoint.map(|checkpoint| Self::table_offset(checkpoint.table_size))
             && table_len < expected_table_len
         {
             return Err(Error::CheckpointMismatch);
@@ -717,11 +718,9 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let oversized_checkpoint = checkpoint
-            .filter(|checkpoint| !checkpoint.is_empty())
-            .map_or((0, 0), |checkpoint| {
-                (checkpoint.section, checkpoint.oversized_size)
-            });
+        let oversized_checkpoint = checkpoint.map_or((0, 0), |checkpoint| {
+            (checkpoint.section, checkpoint.oversized_size)
+        });
         let oversized: Oversized<E, Record<K>, V> = Oversized::init_from_checkpoint(
             context.child("oversized"),
             oversized_cfg,
@@ -732,7 +731,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Determine checkpoint based on initialization scenario
         let (checkpoint, resizable) = match checkpoint {
             // Non-empty checkpoint: align existing data to it
-            Some(checkpoint) if !checkpoint.is_empty() => {
+            Some(checkpoint) => {
                 // Discard only data beyond the checkpointed table.
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
                 let mut modified = if table_len > expected_table_len {
@@ -1314,6 +1313,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::snapshot_partition;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -1324,6 +1324,7 @@ mod tests {
         NZU16, NZUsize,
         sequence::{FixedBytes, U64},
     };
+    use std::collections::BTreeMap;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -1368,26 +1369,7 @@ mod tests {
         }
     }
 
-    type PartitionSnapshot = Vec<(Vec<u8>, Vec<u8>)>;
-
-    async fn snapshot_partition(context: &Context, partition: &str) -> PartitionSnapshot {
-        let mut snapshot = Vec::new();
-        for name in context.scan(partition).await.unwrap() {
-            let (blob, len) = context.open(partition, &name).await.unwrap();
-            let contents = if len == 0 {
-                Vec::new()
-            } else {
-                blob.read_at(0, usize::try_from(len).unwrap())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref()
-                    .to_vec()
-            };
-            snapshot.push((name, contents));
-        }
-        snapshot
-    }
+    type PartitionSnapshot = BTreeMap<Vec<u8>, Vec<u8>>;
 
     async fn snapshot_partitions(
         context: &Context,

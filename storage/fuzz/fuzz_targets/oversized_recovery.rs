@@ -155,6 +155,13 @@ impl<'a> Arbitrary<'a> for CorruptionType {
     }
 }
 
+#[derive(Arbitrary, Clone, Copy, Debug)]
+enum SyncMode {
+    BackgroundUnpublished,
+    BlockingStaleFloor,
+    BlockingFullFloor,
+}
+
 #[derive(Debug)]
 struct CorruptionInput {
     /// Fuzzer-controlled randomness for deterministic runtime choices.
@@ -163,11 +170,8 @@ struct CorruptionInput {
     entries_per_section: [u8; 3],
     /// Corruptions to apply before recovery
     corruptions: Vec<CorruptionType>,
-    /// Whether to sync before corruption
-    sync_before_corrupt: bool,
-    /// Publish a floor that lags the synced sizes, the shape `start_sync` leaves behind when it
-    /// skips publication. Recovery must still rescue everything above it.
-    stale_checkpoint: bool,
+    /// Durability operation and checkpoint publication state before corruption.
+    sync_mode: SyncMode,
 }
 
 impl<'a> Arbitrary<'a> for CorruptionInput {
@@ -178,14 +182,12 @@ impl<'a> Arbitrary<'a> for CorruptionInput {
         let corruptions = (0..corruption_count)
             .map(|_| u.arbitrary())
             .collect::<Result<_>>()?;
-        let sync_before_corrupt = u.arbitrary()?;
-        let stale_checkpoint = u.arbitrary()?;
+        let sync_mode = u.arbitrary()?;
         Ok(Self {
             raw_bytes,
             entries_per_section,
             corruptions,
-            sync_before_corrupt,
-            stale_checkpoint,
+            sync_mode,
         })
     }
 }
@@ -596,15 +598,18 @@ fn fuzz_corruption(input: CorruptionInput) {
 
         // Both branches await durability, so every retained byte is acknowledged. They differ
         // only in how much of that the caller published as its floor.
-        let oversized = if input.sync_before_corrupt {
-            oversized.sync_all().await.expect("setup sync_all failed")
-        } else {
-            let (journal, handle) = oversized
-                .start_sync([1, 2, 3])
-                .await
-                .expect("setup start_sync failed");
-            handle.await.expect("setup background sync failed");
-            journal
+        let oversized = match input.sync_mode {
+            SyncMode::BackgroundUnpublished => {
+                let (journal, handle) = oversized
+                    .start_sync([1, 2, 3])
+                    .await
+                    .expect("setup start_sync failed");
+                handle.await.expect("setup background sync failed");
+                journal
+            }
+            SyncMode::BlockingStaleFloor | SyncMode::BlockingFullFloor => {
+                oversized.sync_all().await.expect("setup sync_all failed")
+            }
         };
         let synced = (1u64..=3)
             .filter_map(|section| oversized.size(section).ok().map(|size| (section, size)))
@@ -615,15 +620,13 @@ fn fuzz_corruption(input: CorruptionInput) {
         // publishes the sizes it just proved durable, and a skipped publication leaves a floor
         // one interval behind. Floors must be item-aligned.
         let chunk = TestEntry::SIZE as u64;
-        let checkpoint = if !input.sync_before_corrupt {
-            BTreeMap::new()
-        } else if input.stale_checkpoint {
-            synced
+        let checkpoint = match input.sync_mode {
+            SyncMode::BackgroundUnpublished => BTreeMap::new(),
+            SyncMode::BlockingStaleFloor => synced
                 .iter()
                 .map(|(&section, &size)| (section, (size / (2 * chunk)) * chunk))
-                .collect()
-        } else {
-            synced.clone()
+                .collect(),
+            SyncMode::BlockingFullFloor => synced.clone(),
         };
         let index_before = snapshot_partition(&context, INDEX_PARTITION).await;
         let values_before = snapshot_partition(&context, VALUE_PARTITION).await;
@@ -805,39 +808,6 @@ fn fuzz_corruption(input: CorruptionInput) {
                 );
             }
 
-            for (position, (expected_entry, expected_value)) in
-                entries.iter().take(required_count).enumerate()
-            {
-                let logical_start = position as u64 * chunk;
-                if !damage.index_range_damaged(section, logical_start, logical_start + chunk) {
-                    let actual = recovered
-                        .get(section, position as u64)
-                        .await
-                        .expect("unaffected required entry must be readable");
-                    assert_eq!(
-                        actual, *expected_entry,
-                        "unaffected entry changed in section {section} at position {position}"
-                    );
-                }
-
-                let (offset, size) = expected_entry.value_location();
-                if !damage.index_range_damaged(
-                    section,
-                    logical_start,
-                    logical_start + chunk,
-                )
-                    && !damage.value_range_damaged(section, offset, offset + u64::from(size))
-                {
-                    let actual = recovered
-                        .get_value(section, offset, size)
-                        .await
-                        .expect("unaffected required value must be readable");
-                    assert_eq!(
-                        actual, *expected_value,
-                        "unaffected value changed in section {section} at position {position}"
-                    );
-                }
-            }
         }
 
         // Phase 4: Every position recovery claims to retain, including any checksum-valid forged

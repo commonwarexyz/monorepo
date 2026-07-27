@@ -276,7 +276,8 @@ mod tests {
     fn test_interrupted_destroy_reopens() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for (boundary, after_ordinal) in [("metadata", false), ("ordinal", true)] {
+            for (boundary, removals) in [("metadata", 1), ("ordinal", 2)] {
+                let context = context.child(boundary);
                 let cfg = Config {
                     metadata_partition: format!("destroy-{boundary}-metadata"),
                     freezer_table_partition: format!("destroy-{boundary}-freezer-table"),
@@ -301,23 +302,14 @@ mod tests {
                     codec_config: (),
                 };
                 let key = Sha256::hash(&[boundary.as_bytes()]);
-                let first = if after_ordinal {
-                    "destroy_ordinal_first"
-                } else {
-                    "destroy_metadata_first"
-                };
                 let archive: Archive<_, Digest, i32> =
-                    Archive::init(context.child(first), cfg.clone())
+                    Archive::init(context.child("first"), cfg.clone())
                         .await
                         .unwrap();
                 let archive = archive.put(0, key, 7).await.unwrap();
                 let mut archive = archive.sync().await.unwrap();
 
-                if after_ordinal {
-                    archive.halt_destroy_after_ordinal();
-                } else {
-                    archive.halt_destroy_after_metadata();
-                }
+                archive.halt_destroy_after(removals);
                 {
                     let destroy = archive.destroy();
                     futures::pin_mut!(destroy);
@@ -327,12 +319,7 @@ mod tests {
                     );
                 }
 
-                let second = if after_ordinal {
-                    "destroy_ordinal_second"
-                } else {
-                    "destroy_metadata_second"
-                };
-                let archive: Archive<_, Digest, i32> = Archive::init(context.child(second), cfg)
+                let archive: Archive<_, Digest, i32> = Archive::init(context.child("second"), cfg)
                     .await
                     .expect("interrupted destroy must leave openable storage");
                 archive.destroy().await.unwrap();

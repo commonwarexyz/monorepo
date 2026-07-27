@@ -171,6 +171,18 @@ mod tests {
     use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex};
     use std::sync::Arc;
 
+    #[derive(Clone, Copy, PartialEq)]
+    enum ResizeDelay {
+        Before,
+        After,
+    }
+
+    struct ResizePause {
+        delay: ResizeDelay,
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
     #[derive(Default)]
     struct RangeSyncState {
         /// All data currently stored in the blob.
@@ -190,6 +202,9 @@ mod tests {
 
         /// Number of range-scoped write syncs.
         range_syncs: usize,
+
+        /// One-shot pause injected into the next resize.
+        resize_pause: Option<ResizePause>,
     }
 
     /// Test blob with separate visible and durable state.
@@ -222,6 +237,22 @@ mod tests {
 
         pub fn size(&self) -> u64 {
             self.state.lock().data.len() as u64
+        }
+
+        fn pause_resize(&self, delay: ResizeDelay) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let previous = self.state.lock().resize_pause.replace(ResizePause {
+                delay,
+                started: started_tx,
+                release: release_rx,
+            });
+            assert!(previous.is_none(), "resize pause already armed");
+            (started_rx, release_tx)
+        }
+
+        fn resize_data(&self, len: usize) {
+            self.state.lock().data.resize(len, 0);
         }
 
         fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -282,7 +313,21 @@ mod tests {
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
             let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
-            self.state.lock().data.resize(len, 0);
+            let pause = self.state.lock().resize_pause.take();
+            let delay = pause.as_ref().map(|pause| pause.delay);
+            if delay != Some(ResizeDelay::Before) {
+                self.resize_data(len);
+            }
+            if let Some(pause) = pause {
+                pause
+                    .started
+                    .send(())
+                    .expect("resize start receiver dropped");
+                pause.release.await.expect("resize release sender dropped");
+                if delay == Some(ResizeDelay::Before) {
+                    self.resize_data(len);
+                }
+            }
             Ok(())
         }
 
@@ -295,99 +340,6 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum ResizeDelay {
-        Before,
-        After,
-    }
-
-    /// Test blob that parks one resize immediately before or after mutating the inner blob.
-    #[derive(Clone)]
-    struct DelayedResizeBlob<B> {
-        inner: B,
-        delay: ResizeDelay,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    }
-
-    impl<B> DelayedResizeBlob<B> {
-        fn new(inner: B, delay: ResizeDelay) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            (
-                Self {
-                    inner,
-                    delay,
-                    started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
-                },
-                started_rx,
-                release_tx,
-            )
-        }
-
-        async fn delay(&self) {
-            self.started
-                .lock()
-                .take()
-                .expect("resize start signal consumed more than once")
-                .send(())
-                .expect("resize start receiver dropped");
-            let release = self
-                .release
-                .lock()
-                .take()
-                .expect("resize release consumed more than once");
-            release.await.expect("resize release sender dropped");
-        }
-    }
-
-    impl<B: crate::Blob> crate::Blob for DelayedResizeBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            bufs: impl Into<IoBufsMut> + Send,
-        ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, bufs).await
-        }
-
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.inner.write_at_sync(offset, bufs).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            if matches!(self.delay, ResizeDelay::After) {
-                self.inner.resize(len).await?;
-            }
-            self.delay().await;
-            if matches!(self.delay, ResizeDelay::Before) {
-                self.inner.resize(len).await?;
-            }
-            Ok(())
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            self.inner.start_sync().await
         }
     }
 
@@ -1806,8 +1758,9 @@ mod tests {
                 inner.write_at(0, b"old-data").await.unwrap();
                 inner.sync().await.unwrap();
 
-                let (blob, started, _release) = DelayedResizeBlob::new(inner.clone(), delay);
-                let mut writer = Write::from_pooler(&context, blob, inner.size(), NZUsize!(4));
+                let (started, _release) = inner.pause_resize(delay);
+                let mut writer =
+                    Write::from_pooler(&context, inner.clone(), inner.size(), NZUsize!(4));
 
                 let mut resize = Box::pin(writer.resize(0));
                 assert!(

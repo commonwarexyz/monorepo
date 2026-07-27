@@ -1,7 +1,40 @@
 //! Utilities for storage tests and fuzz targets.
 
+#[cfg(test)]
+use commonware_runtime::Blob as _;
 use commonware_utils::bitmap::BitMap;
 use std::{collections::BTreeMap, num::NonZeroU64};
+
+/// Snapshot every blob in a storage partition for side-effect assertions.
+#[cfg(test)]
+pub(crate) async fn snapshot_partition<E: commonware_runtime::Storage>(
+    storage: &E,
+    partition: &str,
+) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let mut snapshot = BTreeMap::new();
+    for name in storage
+        .scan(partition)
+        .await
+        .expect("failed to scan partition")
+    {
+        let (blob, size) = storage
+            .open(partition, &name)
+            .await
+            .expect("failed to open blob");
+        let contents = if size == 0 {
+            Vec::new()
+        } else {
+            blob.read_at(0, usize::try_from(size).expect("blob too large"))
+                .await
+                .expect("failed to read blob")
+                .coalesce()
+                .as_ref()
+                .to_vec()
+        };
+        snapshot.insert(name, contents);
+    }
+    snapshot
+}
 
 /// Build ordinal recovery bitmaps from absolute item indices.
 ///
