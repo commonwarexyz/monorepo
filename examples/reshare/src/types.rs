@@ -28,7 +28,7 @@ use commonware_cryptography::{
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
     dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
-    stateful::db::SyncEngineConfig,
+    stateful::db::{Single, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Buf, BufMut, buffer::paged::CacheRef};
@@ -59,7 +59,7 @@ pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::Publ
 /// QMDB holding the application state.
 pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequential>;
 /// The application database set, the QMDB alone.
-pub type Database<E> = (Qmdb<E>,);
+pub type Database<E> = Single<Qmdb<E>>;
 /// Globally unique namespace for every message signed by this example.
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
 /// Number of blocks in each epoch.

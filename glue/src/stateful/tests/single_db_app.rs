@@ -68,7 +68,7 @@ type SingleSrc<E> = crate::stateful::db::MemberSource<
     <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
 
-pub(crate) type SingleDatabaseSet<E> = (Qmdb<E>,);
+pub(crate) type SingleDatabaseSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,10 +175,10 @@ impl App {
         databases: &SingleDatabaseSet<E>,
         batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
-        let (mut batch,) = batches;
+        let mut batch = batches;
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch
-            .get(&counter, &databases.0)
+            .get(&counter, databases.as_ref())
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
@@ -187,11 +187,9 @@ impl App {
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        (
-            crate::stateful::db::Unmerkleized::merkleize(batch, &databases.0)
-                .await
-                .unwrap(),
-        )
+        crate::stateful::db::Unmerkleized::merkleize(batch, databases.as_ref())
+            .await
+            .unwrap()
     }
 }
 
@@ -219,12 +217,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, databases, batches).await;
-        let bounds = merkleized.0.bounds();
+        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
-            state_root: merkleized.0.root(),
+            state_root: merkleized.root(),
             range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
         };
         Some(Proposed { block, merkleized })
@@ -240,8 +238,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), databases, batches).await;
-        let bounds = merkleized.0.bounds();
-        if merkleized.0.root() != tip.state_root
+        let bounds = merkleized.bounds();
+        if merkleized.root() != tip.state_root
             || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
                 != tip.range
         {
@@ -261,7 +259,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        (Target::new(block.state_root, block.range.clone()),)
+        Target::new(block.state_root, block.range.clone())
     }
 }
 
@@ -437,7 +435,7 @@ impl EngineDefinition for SingleDbEngine {
 
         let initial_target =
             <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
-        let genesis_block = Block::genesis(initial_target.0.root, initial_target.0.range);
+        let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
@@ -518,12 +516,12 @@ impl EngineDefinition for SingleDbEngine {
             context.child("stateful"),
             StatefulConfig {
                 application,
-                db_config: (db_config,),
+                db_config,
                 provider: (),
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: (qmdb_sync_resolver.clone(),),
+                resolvers: qmdb_sync_resolver.clone(),
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     max_pending_acks,

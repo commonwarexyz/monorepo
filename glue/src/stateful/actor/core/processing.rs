@@ -397,14 +397,14 @@ mod tests {
         type SigningScheme = TestScheme;
         type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
         type Block = TestBlock;
-        type Databases = (GatedFlushDb,);
+        type Databases = crate::stateful::db::Single<GatedFlushDb>;
         type Provider = ();
         type Input = ();
 
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            (block.height().get(),)
+            block.height().get()
         }
 
         async fn genesis(&mut self) -> Self::Block {
@@ -441,7 +441,7 @@ mod tests {
             _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            (TestMerkleized::new(),)
+            TestMerkleized::new()
         }
     }
 
@@ -476,7 +476,7 @@ mod tests {
         /// The loop's application; arm its gate to park an execution.
         app: GatedApp,
         control: FlushControl,
-        source: crate::stateful::db::SnapshotSource<((),)>,
+        source: crate::stateful::db::SnapshotSource<()>,
         /// Keeps the (never-started) marshal actor's mailbox open.
         _marshal: Box<dyn std::any::Any>,
     }
@@ -529,9 +529,9 @@ mod tests {
             .await;
 
         let control = FlushControl::default();
-        let databases = (GatedFlushDb {
+        let databases = crate::stateful::db::Single::from(GatedFlushDb {
             control: control.clone(),
-        },);
+        });
         let app = GatedApp::default();
         let processor = Processor::new(
             app.clone(),
@@ -871,7 +871,7 @@ mod tests {
     /// A flush failure must panic the processing loop with the database
     /// identified (the fatal policy), rather than acknowledging the block.
     #[test]
-    #[should_panic(expected = "database finalize flush failed (index 0, type")]
+    #[should_panic(expected = "database finalize flush failed (type")]
     fn flush_failure_panics_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let Spawned {

@@ -1009,7 +1009,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = (Qmdb<E>,);
+    type DbSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1167,19 +1167,17 @@ mod tests {
             batches: <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized
         {
-            let (mut batch,) = batches;
+            let mut batch = batches;
             let current_counter = batch
-                .get(&counter_key(), &databases.0)
+                .get(&counter_key(), databases)
                 .await
                 .expect("counter read should succeed")
                 .map_or(0, |digest| digest_to_u64(&digest));
             batch = batch.write(counter_key(), Some(u64_to_digest(current_counter + 1)));
             batch = batch.write(height_key(height), Some(u64_to_digest(view.get())));
-            (
-                crate::stateful::db::Unmerkleized::merkleize(batch, &databases.0)
-                    .await
-                    .expect("merkleize should succeed"),
-            )
+            crate::stateful::db::Unmerkleized::merkleize(batch, databases)
+                .await
+                .expect("merkleize should succeed")
         }
     }
 
@@ -1213,10 +1211,10 @@ mod tests {
                 context,
                 parent: parent.digest(),
                 height,
-                state_root: merkleized.0.root(),
+                state_root: merkleized.root(),
                 range: non_empty_range!(
-                    merkleized.0.bounds().inactivity_floor,
-                    Location::new(merkleized.0.bounds().total_size)
+                    merkleized.bounds().inactivity_floor,
+                    Location::new(merkleized.bounds().total_size)
                 ),
             };
             Some(Proposed { block, merkleized })
@@ -1238,7 +1236,7 @@ mod tests {
                 batches,
             )
             .await;
-            if merkleized.0.root() != block.state_root {
+            if merkleized.root() != block.state_root {
                 return None;
             }
             Some(merkleized)
@@ -1269,7 +1267,7 @@ mod tests {
             let Some(observer) = self.finalized_observer.clone() else {
                 return;
             };
-            let db = &databases.0;
+            let db = databases;
             let value = db
                 .get(&height_key(block.height()))
                 .await
@@ -1281,7 +1279,7 @@ mod tests {
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            (Target::new(block.state_root, block.range.clone()),)
+            Target::new(block.state_root, block.range.clone())
         }
     }
 
@@ -1403,7 +1401,7 @@ mod tests {
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
-            >>::init(context.child("db_set"), (config.clone(),))
+            >>::init(context.child("db_set"), config.clone())
             .await;
             let (databases, _genesis) = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
@@ -1441,10 +1439,10 @@ mod tests {
                 context,
                 parent: parent.digest(),
                 height,
-                state_root: merkleized.0.root(),
+                state_root: merkleized.root(),
                 range: non_empty_range!(
-                    merkleized.0.bounds().inactivity_floor,
-                    Location::new(merkleized.0.bounds().total_size)
+                    merkleized.bounds().inactivity_floor,
+                    Location::new(merkleized.bounds().total_size)
                 ),
             };
             let round = Round::new(Epoch::zero(), view);
@@ -1591,7 +1589,7 @@ mod tests {
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
-            let db = &self.processor.databases.0;
+            let db: &Qmdb<deterministic::Context> = &self.processor.databases;
             db.get(&height_key(height))
                 .await
                 .expect("database read should succeed")
@@ -1599,7 +1597,7 @@ mod tests {
         }
 
         async fn counter_value(&self) -> Option<u64> {
-            let db = &self.processor.databases.0;
+            let db: &Qmdb<deterministic::Context> = &self.processor.databases;
             db.get(&counter_key())
                 .await
                 .expect("database read should succeed")
@@ -2007,10 +2005,10 @@ mod tests {
                 context: consensus_context(block1.digest(), gap_view),
                 parent: block1.digest(),
                 height: gap_height,
-                state_root: merkleized.0.root(),
+                state_root: merkleized.root(),
                 range: non_empty_range!(
-                    merkleized.0.bounds().inactivity_floor,
-                    Location::new(merkleized.0.bounds().total_size)
+                    merkleized.bounds().inactivity_floor,
+                    Location::new(merkleized.bounds().total_size)
                 ),
             };
 

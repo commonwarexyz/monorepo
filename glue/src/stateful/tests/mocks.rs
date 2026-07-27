@@ -15,7 +15,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Buf, BufMut, Handle};
 use std::{convert::Infallible, marker::PhantomData};
 
-pub(crate) type TestDatabases = (TestDb,);
+pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -222,7 +222,7 @@ impl<
     type Input = ();
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        (block.height().get(),)
+        block.height().get()
     }
 
     async fn genesis(&mut self) -> Self::Block {
@@ -257,12 +257,12 @@ impl<
         _databases: &Self::Databases,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        (TestMerkleized::new(),)
+        TestMerkleized::new()
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    (TestDb,)
+    TestDb.into()
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

@@ -39,12 +39,11 @@ impl App {
         databases: &Database<E>,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
-        let (batch,) = batches;
-        (batch
+        batches
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
-            .merkleize(&databases.0)
+            .merkleize(databases.as_ref())
             .await
-            .expect("height write must merkleize"),)
+            .expect("height write must merkleize")
     }
 }
 
@@ -76,12 +75,12 @@ where
         let parent = ancestry.next().await?;
         let height = parent.height().next();
         let merkleized = Self::execute(height, databases, batches).await;
-        let bounds = merkleized.0.bounds();
+        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
-            state_root: merkleized.0.root(),
+            state_root: merkleized.root(),
             range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
             payload,
         };
@@ -116,6 +115,6 @@ where
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        (Target::new(block.state_root, block.range.clone()),)
+        Target::new(block.state_root, block.range.clone())
     }
 }

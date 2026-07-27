@@ -456,12 +456,12 @@ mod tests {
                 context.child("stateful"),
                 Config {
                     application: TestApp,
-                    db_config: ((),),
+                    db_config: (),
                     provider: (),
                     marshal,
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
-                    resolvers: (NoopResolver,),
+                    resolvers: NoopResolver,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: 1,

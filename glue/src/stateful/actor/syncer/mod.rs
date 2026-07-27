@@ -506,14 +506,14 @@ mod tests {
         type SigningScheme = TestScheme;
         type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
         type Block = TestBlock;
-        type Databases = (RewindDb,);
+        type Databases = crate::stateful::db::Single<RewindDb>;
         type Provider = ();
         type Input = ();
 
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            (block.height().get(),)
+            block.height().get()
         }
 
         async fn genesis(&mut self) -> Self::Block {
@@ -708,7 +708,7 @@ mod tests {
         let result = init_databases_from_marshal::<_, RewindApp, TestScheme, TestVariant>(
             &context,
             &marshal,
-            ((target, stubborn, rewinds.clone()),),
+            (target, stubborn, rewinds.clone()),
             sync_metadata,
         )
         .await;

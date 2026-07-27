@@ -1376,8 +1376,8 @@ mod tests {
         assert_managed_db::<OrderedVariableDb>();
         assert_state_sync_db::<OrderedFixedDb, Arc<OrderedFixedDb>>();
         assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
-        assert_database_set::<(OrderedFixedDb,)>();
-        assert_database_set::<(OrderedVariableDb,)>();
+        assert_database_set::<crate::stateful::db::Single<OrderedFixedDb>>();
+        assert_database_set::<crate::stateful::db::Single<OrderedVariableDb>>();
     }
 
     #[test]

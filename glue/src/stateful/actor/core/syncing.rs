@@ -839,7 +839,7 @@ mod tests {
                 );
                 let (recorded, targets) = update.record();
                 assert_eq!(recorded, anchor(8, 10));
-                assert_eq!(targets, (8,));
+                assert_eq!(targets, 8);
             });
 
             let (acknowledgement, waiter) = Exact::handle();

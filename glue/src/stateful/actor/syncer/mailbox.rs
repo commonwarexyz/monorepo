@@ -146,7 +146,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), (7,)));
+            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
@@ -187,7 +187,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), (7,)));
+            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 

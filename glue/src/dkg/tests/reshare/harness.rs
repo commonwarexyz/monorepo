@@ -86,7 +86,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = (Qmdb<E>,);
+type Database<E> = crate::stateful::db::Single<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
@@ -229,14 +229,12 @@ impl App {
         databases: &Database<E>,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
-        let (mut batch,) = batches;
+        let mut batch = batches;
         let key = Sha256::hash(&[b"height"]);
         batch = batch.write(key, Some(u64_to_digest(height.get())));
-        (
-            crate::stateful::db::Unmerkleized::merkleize(batch, &databases.0)
-                .await
-                .unwrap(),
-        )
+        crate::stateful::db::Unmerkleized::merkleize(batch, databases.as_ref())
+            .await
+            .unwrap()
     }
 }
 
@@ -265,12 +263,12 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
         let merkleized = Self::execute(height, databases, batches).await;
-        let bounds = merkleized.0.bounds();
+        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
-            state_root: merkleized.0.root(),
+            state_root: merkleized.root(),
             range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
             payload,
         };
@@ -320,7 +318,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        (Target::new(block.state_root, block.range.clone()),)
+        Target::new(block.state_root, block.range.clone())
     }
 }
 
@@ -980,12 +978,12 @@ impl EngineDefinition for ReshareEngine {
                     public_key: public_key.clone(),
                     hold: self.processed_hold.clone(),
                 },
-                db_config: (db_config,),
+                db_config,
                 provider: (),
                 marshal: marshal.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: (qmdb_sync_resolver,),
+                resolvers: qmdb_sync_resolver,
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: 64,
