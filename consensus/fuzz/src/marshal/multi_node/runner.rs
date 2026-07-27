@@ -50,8 +50,8 @@
 //! that target number of ordered blocks.
 
 use super::{
-    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED, engine::EndToEndMarshal,
-    input::MarshalLivenessInput, invariants,
+    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED, input::MarshalLivenessInput,
+    invariants, liveness_engines::EndToEndMarshal,
 };
 use crate::{
     BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW, SimplexBls12381MinPk,

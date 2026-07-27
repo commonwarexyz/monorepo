@@ -15,7 +15,7 @@
 //! # Layout
 //!
 //! - `app` is the block-building automaton bridging the engine to marshal.
-//! - `engine` wires the per-variant Simplex engine (standard `Deferred`,
+//! - `liveness_engines` wires the per-variant Simplex engine (standard `Deferred`,
 //!   coding `Marshaled`) reporting to marshal.
 //! - `runner` sets up the cluster, drives the liveness window, and checks
 //!   invariants.
@@ -26,14 +26,14 @@
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
 mod app;
-mod engine;
 mod input;
 pub(super) mod invariants;
+mod liveness_engines;
 mod runner;
 mod twins;
 
-pub use engine::EndToEndMarshal;
 pub use input::{MarshalLivenessInput, MarshalTwinsInput};
+pub use liveness_engines::EndToEndMarshal;
 pub use runner::fuzz_marshal_liveness;
 pub use twins::{
     fuzz_marshal_twins, fuzz_marshal_twins_id_split_header,

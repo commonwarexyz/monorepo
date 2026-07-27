@@ -1,4 +1,4 @@
-//! Per-variant Simplex engine wiring for the end-to-end marshal harness.
+//! Per-variant Simplex engine wiring for the multi-node liveness harness.
 //!
 //! [`EndToEndMarshal`] extends the marshal [`TestHarness`] with the one piece the
 //! harness lacks: standing up a Simplex [`Engine`] whose automaton/relay
