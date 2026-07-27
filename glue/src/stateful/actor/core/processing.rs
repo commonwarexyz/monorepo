@@ -263,7 +263,9 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
-            core::mailbox::Mailbox, metrics::Metrics as StatefulMetrics, processor::Processor,
+            core::mailbox::{Mailbox, Message},
+            metrics::Metrics as StatefulMetrics,
+            processor::Processor,
         },
         db::{DatabaseSet, ManagedDb},
         tests::mocks::{
@@ -272,8 +274,12 @@ mod tests {
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Heightable as _, Reporter as _,
-        marshal::{self, Update, ancestry::Ancestry, core::Actor as MarshalActor},
+        Application as ConsensusApplication, CertifiableBlock as _, Heightable as _, Reporter as _,
+        marshal::{
+            self, Update,
+            ancestry::{self, Ancestry, BoxedAncestry},
+            core::Actor as MarshalActor,
+        },
         simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
         types::{FixedEpocher, Height, ViewDelta},
     };
@@ -366,8 +372,26 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct GatedApp;
+    /// Parks one application execution: the app signals entry on the sender,
+    /// then waits on the receiver while holding the turn's batch.
+    type ExecutionGate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+    /// Application that declines every propose and verify, parking mid-call
+    /// first whenever a test armed the execution gate.
+    #[derive(Clone, Default)]
+    struct GatedApp {
+        execution_gate: Arc<Mutex<Option<ExecutionGate>>>,
+    }
+
+    impl GatedApp {
+        async fn pause(&self) {
+            let gate = self.execution_gate.lock().take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+        }
+    }
 
     impl Application<deterministic::Context> for GatedApp {
         type SigningScheme = TestScheme;
@@ -395,6 +419,7 @@ mod tests {
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
+            self.pause().await;
             None
         }
 
@@ -405,6 +430,7 @@ mod tests {
             _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            self.pause().await;
             None
         }
 
@@ -441,18 +467,26 @@ mod tests {
         }
     }
 
-    /// Spawn a [`Processing`] loop over a [`GatedFlushDb`], returning its
-    /// mailbox, the flush controls, and a guard keeping the (never-started)
-    /// marshal actor's mailbox open.
+    /// A running [`Processing`] loop over a [`GatedFlushDb`] and the handles
+    /// tests observe and steer it through.
+    struct Spawned {
+        mailbox: Mailbox<deterministic::Context, GatedApp>,
+        /// Raw ingress, for tests that must hold or drop a response receiver.
+        sender: actor_mailbox::Sender<Message<deterministic::Context, GatedApp>>,
+        /// The loop's application; arm its gate to park an execution.
+        app: GatedApp,
+        control: FlushControl,
+        source: crate::stateful::db::SnapshotSource<((),)>,
+        /// Keeps the (never-started) marshal actor's mailbox open.
+        _marshal: Box<dyn std::any::Any>,
+    }
+
+    /// Spawn a [`Processing`] loop over a [`GatedFlushDb`].
     async fn spawn_processing(
         context: &deterministic::Context,
         prefix: &str,
         prune_config: Option<PruneConfig>,
-    ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
-        FlushControl,
-        Box<dyn std::any::Any>,
-    ) {
+    ) -> Spawned {
         let mut signing = context.child("signing");
         let fixture = scheme_mocks::fixture(&mut signing, b"gated", 1);
         let provider = ConstantProvider::new(fixture.schemes[0].clone());
@@ -498,25 +532,34 @@ mod tests {
         let databases = (GatedFlushDb {
             control: control.clone(),
         },);
+        let app = GatedApp::default();
         let processor = Processor::new(
-            GatedApp,
+            app.clone(),
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             prune_config,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let (publisher, source) = crate::stateful::db::Publisher::new(context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal,
             processor,
-            publisher: crate::stateful::db::Publisher::new(context).0,
+            publisher,
             skip_finalized_until: None,
         };
         context.child("loop").spawn(move |_| processing.start());
-        (Mailbox::new(sender), control, Box::new(marshal_actor))
+        Spawned {
+            mailbox: Mailbox::new(sender.clone()),
+            sender,
+            app,
+            control,
+            source,
+            _marshal: Box::new(marshal_actor),
+        }
     }
 
     /// The loop keeps applying finalized blocks while earlier flushes are
@@ -528,7 +571,11 @@ mod tests {
     fn acks_wait_for_flushes_while_prune_runs() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
-            let (mut mailbox, control, _marshal) = spawn_processing(
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(
                 &context,
                 "gated-prune",
                 Some(PruneConfig {
@@ -595,8 +642,11 @@ mod tests {
     #[test]
     fn idle_acks_follow_flush_outcome() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) =
-                spawn_processing(&context, "gated-idle", None).await;
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-idle", None).await;
 
             // Park the loop idle with block 1's flush pending.
             let (acknowledgement, mut waiter1) = Exact::handle();
@@ -636,14 +686,199 @@ mod tests {
         });
     }
 
+    /// Publication follows durability under pipelining: applied generations
+    /// stay invisible while their flushes are pending, and each completed
+    /// flush installs exactly the next generation.
+    #[test]
+    fn publication_follows_durability_under_pipelining() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                control,
+                source,
+                ..
+            } = spawn_processing(&context, "gated-publish", None).await;
+
+            // Apply blocks 1 and 2 with both flushes parked.
+            let (acknowledgement, _waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            let (acknowledgement, _waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(2, 2)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().len() < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Both generations are applied but neither is durable, so there
+            // is nothing to serve.
+            assert!(
+                source.latest().is_none(),
+                "no generation may install before its flush completes",
+            );
+
+            // Each release installs exactly the next generation.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            while source.latest().is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(source.latest().unwrap().generation(), 0);
+
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            while source.latest().unwrap().generation() == 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(source.latest().unwrap().generation(), 1);
+        });
+    }
+
+    /// Await a parked finalize flush, release it, and require the block's
+    /// acknowledgement, proving the databases survived whatever came before.
+    async fn assert_set_serviceable(
+        context: &deterministic::Context,
+        mailbox: &mut Mailbox<deterministic::Context, GatedApp>,
+        control: &FlushControl,
+    ) {
+        let (acknowledgement, waiter) = Exact::handle();
+        let _ = mailbox.report(Update::Block(
+            Arc::new(TestBlock::new(1, 1)),
+            acknowledgement,
+        ));
+        while control.flushes.lock().is_empty() {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        let release = control.flushes.lock().remove(0);
+        let _ = release.send(Ok(()));
+        waiter.await.expect("finalize must acknowledge");
+    }
+
+    /// A propose abandoned by consensus mid-execution must cancel the
+    /// application future, dropping only that turn's batches: the databases
+    /// stay with the loop and keep finalizing.
+    #[test]
+    fn cancelled_propose_leaves_the_set_serviceable() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                sender,
+                app,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-cancel-propose", None).await;
+
+            // Park the application mid-propose, holding the turn's batches.
+            let (entered, entered_rx) = oneshot::channel();
+            let (_release, release_rx) = oneshot::channel();
+            *app.execution_gate.lock() = Some((entered, release_rx));
+            let parent = Arc::new(TestBlock::new(0, 0));
+            let (response, receiver) = oneshot::channel();
+            let _ = sender.enqueue(Message::Propose {
+                span: tracing::Span::current(),
+                context: (context.child("propose"), TestBlock::new(1, 1).context()),
+                ancestry: BoxedAncestry::new(ancestry::from_iter([parent])),
+                upstream: (),
+                response,
+            });
+            entered_rx
+                .await
+                .expect("the application must reach propose");
+
+            // Consensus abandons the request: the loop must cancel the parked
+            // propose rather than wait for it.
+            drop(receiver);
+
+            assert_set_serviceable(&context, &mut mailbox, &control).await;
+        });
+    }
+
+    /// A verify abandoned by consensus mid-execution must cancel the
+    /// application future, dropping only that turn's batches: the databases
+    /// stay with the loop and keep finalizing.
+    #[test]
+    fn cancelled_verify_leaves_the_set_serviceable() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                sender,
+                app,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-cancel-verify", None).await;
+
+            // Park the application mid-verify, holding the turn's batches.
+            let (entered, entered_rx) = oneshot::channel();
+            let (_release, release_rx) = oneshot::channel();
+            *app.execution_gate.lock() = Some((entered, release_rx));
+            let block = Arc::new(TestBlock::new(1, 1));
+            let parent = Arc::new(TestBlock::new(0, 0));
+            let (response, receiver) = oneshot::channel();
+            let _ = sender.enqueue(Message::Verify {
+                span: tracing::Span::current(),
+                context: (context.child("verify"), block.context()),
+                ancestry: BoxedAncestry::new(ancestry::from_iter([block, parent])),
+                response,
+            });
+            entered_rx.await.expect("the application must reach verify");
+
+            // Consensus abandons the request: the loop must cancel the parked
+            // verify rather than wait for it.
+            drop(receiver);
+
+            assert_set_serviceable(&context, &mut mailbox, &control).await;
+        });
+    }
+
+    /// Declined turns consume only their batches: propose resolves `None`,
+    /// verify resolves `false`, and the databases keep finalizing.
+    #[test]
+    fn declined_turns_leave_the_set_serviceable() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-decline", None).await;
+
+            let block = Arc::new(TestBlock::new(1, 1));
+            let parent = Arc::new(TestBlock::new(0, 0));
+            let proposed = mailbox
+                .propose(
+                    (context.child("propose"), block.context()),
+                    ancestry::from_iter([parent.clone()]),
+                    (),
+                )
+                .await;
+            assert!(proposed.is_none(), "GatedApp declines every propose");
+
+            let verified = mailbox
+                .verify(
+                    (context.child("verify"), block.context()),
+                    ancestry::from_iter([block, parent]),
+                )
+                .await;
+            assert!(!verified, "GatedApp declines every verify");
+
+            assert_set_serviceable(&context, &mut mailbox, &control).await;
+        });
+    }
+
     /// A flush failure must panic the processing loop with the database
     /// identified (the fatal policy), rather than acknowledging the block.
     #[test]
     #[should_panic(expected = "database finalize flush failed (index 0, type")]
     fn flush_failure_panics_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) =
-                spawn_processing(&context, "gated-failure", None).await;
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-failure", None).await;
 
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(

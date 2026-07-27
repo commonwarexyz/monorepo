@@ -480,20 +480,22 @@ mod tests {
             Self::new_on(context.child("fixture"), context, anchor).await
         }
 
-        /// Build the harness mid-sync: no artifact yet, the provided marshal mailbox, and a
-        /// live syncer receiver for a coordinator mock to service.
+        /// Build the harness mid-sync: no artifact yet, the provided marshal mailbox, a
+        /// live syncer receiver for a coordinator mock to service, and the completion
+        /// sender announced artifacts arrive on.
         async fn new_syncing(
             context: deterministic::Context,
             marshal: MarshalMailbox<TestScheme, TestVariant>,
         ) -> (
             Self,
             actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
+            oneshot::Sender<SyncResult<deterministic::Context, TestApp>>,
         ) {
             let (_mailbox_sender, mailbox) =
                 actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
-            let (_sync_complete, sync_completed) = oneshot::channel();
+            let (sync_complete, sync_completed) = oneshot::channel();
 
             let harness = Self {
                 syncing: Syncing {
@@ -512,7 +514,7 @@ mod tests {
                     publisher: crate::stateful::db::Publisher::new(&context).0,
                 },
             };
-            (harness, syncer_receiver)
+            (harness, syncer_receiver, sync_complete)
         }
     }
 
@@ -820,7 +822,7 @@ mod tests {
                 Some(finalization.clone()),
             )
             .await;
-            let (harness, mut syncer_receiver) =
+            let (harness, mut syncer_receiver, _sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             // Service the single target update like a live sync coordinator: respond that
@@ -872,7 +874,7 @@ mod tests {
                 None,
             )
             .await;
-            let (harness, mut syncer_receiver) =
+            let (harness, mut syncer_receiver, _sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             // Service the single target update like a live sync coordinator.
@@ -902,6 +904,130 @@ mod tests {
                 syncing.sync_metadata.in_progress_floor(),
                 None,
                 "an uncertified ancestor must not move the persisted floor",
+            );
+        });
+    }
+
+    /// A retarget that races sync completion on the syncer's side: the tip-update
+    /// channel closed, so the syncer awaited its task and delivered the artifact
+    /// with the response. The block at the anchor height must hand off.
+    #[test]
+    fn retarget_racing_completion_receives_delivered_artifact() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let block = TestBlock::new(8, 10);
+            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+                context.child("marshal"),
+                fixture.schemes[0].clone(),
+                &block,
+                None,
+            )
+            .await;
+            let (harness, mut syncer_receiver, _sync_complete) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+
+            // The syncer converged before recording this update: it drops the
+            // update and delivers the artifact on the response.
+            let coordinator = context.child("coordinator").spawn(move |_| async move {
+                let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                    syncer_receiver.recv().await
+                else {
+                    panic!("retarget should send a target update to the syncer");
+                };
+                drop(update);
+                let delivered = SyncResult::<deterministic::Context, TestApp> {
+                    databases: test_databases(),
+                    anchor: anchor(8, 10),
+                };
+                assert!(
+                    response
+                        .send(Some(syncer::Artifact::Delivered(delivered)))
+                        .is_ok(),
+                    "response receiver should be alive"
+                );
+            });
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, action) = harness
+                .syncing
+                .process_finalized(Arc::new(block), acknowledgement)
+                .await;
+
+            coordinator.await.expect("coordinator failed");
+            assert!(
+                matches!(action, Some(FinalizedHandoff::Reflected(_, _))),
+                "the anchor-height block must hand off as already reflected",
+            );
+            assert_eq!(
+                syncing.artifact.expect("artifact must be stored").anchor,
+                anchor(8, 10),
+            );
+            assert!(
+                waiter.now_or_never().is_none(),
+                "the handoff acknowledgement fires at transition, not before",
+            );
+        });
+    }
+
+    /// The other side of the race: sync completed and the artifact already went
+    /// out on the completion channel, so the syncer only announces it and the
+    /// retarget collects it from that channel.
+    #[test]
+    fn retarget_racing_completion_collects_announced_artifact() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let block = TestBlock::new(8, 10);
+            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+                context.child("marshal"),
+                fixture.schemes[0].clone(),
+                &block,
+                None,
+            )
+            .await;
+            let (harness, mut syncer_receiver, sync_complete) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+
+            // The artifact already went out on the completion channel; the
+            // syncer only announces it.
+            let coordinator = context.child("coordinator").spawn(move |_| async move {
+                let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                    syncer_receiver.recv().await
+                else {
+                    panic!("retarget should send a target update to the syncer");
+                };
+                drop(update);
+                let completed = SyncResult::<deterministic::Context, TestApp> {
+                    databases: test_databases(),
+                    anchor: anchor(8, 10),
+                };
+                assert!(
+                    sync_complete.send(completed).is_ok(),
+                    "completion receiver should be alive"
+                );
+                assert!(
+                    response.send(Some(syncer::Artifact::Announced)).is_ok(),
+                    "response receiver should be alive"
+                );
+            });
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, action) = harness
+                .syncing
+                .process_finalized(Arc::new(block), acknowledgement)
+                .await;
+
+            coordinator.await.expect("coordinator failed");
+            assert!(
+                matches!(action, Some(FinalizedHandoff::Reflected(_, _))),
+                "the anchor-height block must hand off as already reflected",
+            );
+            assert_eq!(
+                syncing.artifact.expect("artifact must be stored").anchor,
+                anchor(8, 10),
+            );
+            assert!(
+                waiter.now_or_never().is_none(),
+                "the handoff acknowledgement fires at transition, not before",
             );
         });
     }

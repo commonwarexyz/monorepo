@@ -391,8 +391,38 @@ where
     }
 }
 
-#[cfg(all(test, feature = "arbitrary"))]
+#[cfg(test)]
 mod tests {
+    use super::{StateSyncMetadata, init_databases_from_marshal};
+    use crate::stateful::{
+        Application, Input, Proposed,
+        db::{DatabaseSet, ManagedDb},
+        tests::mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant},
+    };
+    use commonware_actor::Feedback;
+    use commonware_consensus::{
+        Heightable as _, Reporter,
+        marshal::{
+            self, Update, ancestry::Ancestry, core::Actor as MarshalActor, resolver::handler,
+        },
+        simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+        types::{FixedEpocher, Height, ViewDelta},
+    };
+    use commonware_cryptography::{
+        certificate::ConstantProvider, ed25519, sha256::Digest as Sha256Digest,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_resolver::{Fetch, Resolver, TargetedResolver};
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_storage::archive::immutable;
+    use commonware_utils::{
+        Acknowledgement as _, NZU16, NZU64, NZUsize, sync::Mutex, vec::NonEmptyVec,
+    };
+    use std::{convert::Infallible, sync::Arc};
+
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use crate::stateful::{actor::syncer::SyncState, tests::mocks::TestScheme};
         use commonware_codec::conformance::CodecConformance;
@@ -401,5 +431,318 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<SyncState<TestScheme, Sha256Digest>>,
         }
+    }
+
+    /// Database whose applied sync target is set by config, recording every
+    /// rewind. A stubborn instance ignores rewinds, modeling state that cannot
+    /// converge on the marshal floor.
+    struct RewindDb {
+        target: u64,
+        stubborn: bool,
+        rewinds: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl ManagedDb<deterministic::Context> for RewindDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = (u64, bool, Arc<Mutex<Vec<u64>>>);
+        type SyncTarget = u64;
+        type Snapshot = ();
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
+        async fn init(
+            _context: deterministic::Context,
+            (target, stubborn, rewinds): Self::Config,
+        ) -> Result<Self, Self::Error> {
+            Ok(Self {
+                target,
+                stubborn,
+                rewinds,
+            })
+        }
+
+        fn new_batch(&self) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            Ok((self, ()))
+        }
+
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Self::Snapshot, commonware_runtime::Handle<()>), Self::Error> {
+            unreachable!("startup reconciliation never finalizes")
+        }
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            self.target
+        }
+
+        async fn rewind_to_target(mut self, target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            self.rewinds.lock().push(target);
+            if !self.stubborn {
+                self.target = target;
+            }
+            Ok(self)
+        }
+    }
+
+    /// Application binding [`RewindDb`] for startup reconciliation; only
+    /// `sync_targets` is ever called.
+    #[derive(Clone)]
+    struct RewindApp;
+
+    impl Application<deterministic::Context> for RewindApp {
+        type SigningScheme = TestScheme;
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+        type Block = TestBlock;
+        type Databases = (RewindDb,);
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(
+            block: &Self::Block,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+            (block.height().get(),)
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            unreachable!("startup reconciliation never proposes")
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            unreachable!("startup reconciliation never proposes")
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            unreachable!("startup reconciliation never verifies")
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _databases: &Self::Databases,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            unreachable!("startup reconciliation never applies")
+        }
+    }
+
+    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
+        immutable::Config {
+            metadata_partition: format!("{partition}-metadata"),
+            freezer_table_partition: format!("{partition}-freezer-table"),
+            freezer_table_initial_size: 4,
+            freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 2,
+            freezer_key_partition: format!("{partition}-freezer-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{partition}-freezer-value"),
+            freezer_value_target_size: 128,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition}-ordinal"),
+            items_per_section: NZU64!(4),
+            codec_config: (),
+            replay_buffer: NZUsize!(64),
+            freezer_key_write_buffer: NZUsize!(64),
+            freezer_value_write_buffer: NZUsize!(64),
+            ordinal_write_buffer: NZUsize!(64),
+        }
+    }
+
+    /// Reporter for the started marshal fixture that acknowledges every dispatched block.
+    #[derive(Clone)]
+    struct NoopReporter;
+
+    impl Reporter for NoopReporter {
+        type Activity = Update<TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            if let Update::Block(_, ack) = activity {
+                ack.acknowledge();
+            }
+            Feedback::Ok
+        }
+    }
+
+    /// Backfill resolver for the started marshal fixture; every fetch is ignored.
+    #[derive(Clone)]
+    struct IgnoreResolver;
+
+    impl Resolver for IgnoreResolver {
+        type Key = handler::Key<Sha256Digest>;
+        type Subscriber = handler::Annotation;
+
+        fn fetch<F>(&mut self, _key: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for IgnoreResolver {
+        type PublicKey = ed25519::PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+    }
+
+    /// Start a fresh marshal whose floor is the genesis block.
+    async fn init_marshal_mailbox(
+        mut context: deterministic::Context,
+    ) -> (
+        commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant>,
+        handler::Handler<Sha256Digest>,
+        commonware_runtime::Handle<()>,
+    ) {
+        let fixture = scheme_mocks::fixture(&mut context, b"syncer-harness", 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(page_cache.clone(), "syncer-finalizations"),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), "syncer-blocks"),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+
+        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+            context.child("marshal_actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            marshal::Config {
+                provider,
+                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                partition_prefix: "syncer-harness".to_string(),
+                mailbox_size: NZUsize!(8),
+                view_retention: ViewDelta::new(1),
+                prunable_items_per_section: NZU64!(4),
+                page_cache,
+                replay_buffer: NZUsize!(64),
+                key_write_buffer: NZUsize!(64),
+                value_write_buffer: NZUsize!(64),
+                block_codec_config: (),
+                max_repair: NZUsize!(1),
+                max_pending_acks: NZUsize!(1),
+                strategy: Sequential,
+            },
+        )
+        .await;
+        let (resolver_receiver, resolver_handler) =
+            handler::init(context.child("resolver_handler"), NZUsize!(8));
+        let handle = actor.start_unbuffered(NoopReporter, (resolver_receiver, IgnoreResolver));
+        (mailbox, resolver_handler, handle)
+    }
+
+    /// Run startup reconciliation for a [`RewindDb`] whose applied target is
+    /// `target`, returning the recorded rewinds and the startup anchor height.
+    async fn reconcile(
+        context: deterministic::Context,
+        target: u64,
+        stubborn: bool,
+    ) -> (Vec<u64>, Height) {
+        let (marshal, _resolver_handler, _marshal_handle) =
+            init_marshal_mailbox(context.child("marshal")).await;
+        let sync_metadata = StateSyncMetadata::init(&context, "syncer-test").await;
+        let rewinds: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let result = init_databases_from_marshal::<_, RewindApp, TestScheme, TestVariant>(
+            &context,
+            &marshal,
+            ((target, stubborn, rewinds.clone()),),
+            sync_metadata,
+        )
+        .await;
+        let recorded = rewinds.lock().clone();
+        (recorded, result.sync.anchor.height)
+    }
+
+    /// Databases ahead of the marshal floor are rewound back to it, repairing
+    /// a crash between a database flush and its marshal acknowledgement.
+    #[test]
+    fn startup_rewinds_databases_ahead_of_the_marshal_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let (rewinds, anchor_height) = reconcile(context, 5, false).await;
+            assert_eq!(rewinds, vec![0], "the set must rewind to the floor");
+            assert_eq!(anchor_height, Height::zero());
+        });
+    }
+
+    /// Databases already consistent with the marshal floor start as-is.
+    #[test]
+    fn startup_leaves_consistent_databases_untouched() {
+        deterministic::Runner::default().start(|context| async move {
+            let (rewinds, anchor_height) = reconcile(context, 0, false).await;
+            assert!(rewinds.is_empty(), "a consistent set must not rewind");
+            assert_eq!(anchor_height, Height::zero());
+        });
+    }
+
+    /// A rewind that fails to converge on the marshal floor is unrecoverable.
+    #[test]
+    #[should_panic(expected = "databases must be consistent with marshal floor after rewind")]
+    fn startup_panics_when_rewind_cannot_reach_the_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let _ = reconcile(context, 5, true).await;
+        });
     }
 }
