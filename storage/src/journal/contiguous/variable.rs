@@ -6,9 +6,9 @@
 //! # Durability
 //!
 //! Data blobs follow the same rollover pipeline as the fixed journal: filling the tail seals it
-//! and starts its fsync after awaiting the previous rollover's fsync, so only the tail and its
+//! and begins syncing it after the previous rollover's sync completes, so only the tail and its
 //! predecessor can ever hold non-durable data. Recovery forward-validates those two blobs for
-//! interior fsync holes. The offsets journal is derived state: entries above the recovery
+//! missing data. The offsets journal is derived state: entries above the recovery
 //! watermark are discarded on reopen and rebuilt by replaying data. See the [`fixed`] module
 //! docs for the full model.
 
