@@ -23,7 +23,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    archive::{self, Identifier as ArchiveIdentifier, prunable},
+    archive::{Identifier as ArchiveIdentifier, prunable},
     translator::EightCap,
 };
 use commonware_utils::{FuzzRng, NZU64, NZUsize};
@@ -241,13 +241,6 @@ fn assert_returned_block(block: &B, returned: B, label: &str) {
     );
 }
 
-fn tolerate_pruned_put(result: Result<(), archive::Error>, label: &str) {
-    match result {
-        Ok(()) | Err(archive::Error::AlreadyPrunedTo(_)) => {}
-        Err(e) => panic!("{label}: {e}"),
-    }
-}
-
 pub fn fuzz_marshal_store(input: MarshalStoreInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -416,13 +409,12 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 }
                 StoreOp::DirectPutBlock { block_idx } => {
                     let block = canonical[block_index(block_idx)].clone();
-                    tolerate_pruned_put(
-                        StoreBlocks::put(&mut direct_blocks, block).await,
-                        "direct block put failed",
-                    );
+                    direct_blocks = StoreBlocks::put(direct_blocks, block)
+                        .await
+                        .expect("direct block put failed");
                 }
                 StoreOp::DirectSyncBlocks => {
-                    StoreBlocks::sync(&mut direct_blocks)
+                    direct_blocks = StoreBlocks::sync(direct_blocks)
                         .await
                         .expect("direct block sync failed");
                 }
@@ -448,7 +440,7 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 }
                 StoreOp::DirectPruneBlocks { block_idx } => {
                     let height = Height::new(block_index(block_idx) as u64 + 1);
-                    StoreBlocks::prune(&mut direct_blocks, height)
+                    direct_blocks = StoreBlocks::prune(direct_blocks, height)
                         .await
                         .expect("direct block prune failed");
                 }
@@ -463,19 +455,17 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 }
                 StoreOp::DirectPutCertificate { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    tolerate_pruned_put(
-                        StoreCertificates::put(
-                            &mut direct_finalizations,
-                            block.height(),
-                            block.digest(),
-                            finalizations[block_index(block_idx)].clone(),
-                        )
-                        .await,
-                        "direct finalization put failed",
-                    );
+                    direct_finalizations = StoreCertificates::put(
+                        direct_finalizations,
+                        block.height(),
+                        block.digest(),
+                        finalizations[block_index(block_idx)].clone(),
+                    )
+                    .await
+                    .expect("direct finalization put failed");
                 }
                 StoreOp::DirectSyncCertificates => {
-                    StoreCertificates::sync(&mut direct_finalizations)
+                    direct_finalizations = StoreCertificates::sync(direct_finalizations)
                         .await
                         .expect("direct finalization sync failed");
                 }
@@ -510,7 +500,7 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 }
                 StoreOp::DirectPruneCertificates { block_idx } => {
                     let height = Height::new(block_index(block_idx) as u64 + 1);
-                    StoreCertificates::prune(&mut direct_finalizations, height)
+                    direct_finalizations = StoreCertificates::prune(direct_finalizations, height)
                         .await
                         .expect("direct finalization prune failed");
                 }
