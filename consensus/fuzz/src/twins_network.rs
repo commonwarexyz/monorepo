@@ -2,6 +2,8 @@
 //!
 //! Both the generic Simplex campaigns and marshal-backed campaigns use these
 //! factories so twin halves are split and routed with identical semantics.
+//! Routing is intentionally type-aware: payloads without a decodable protocol
+//! view are rejected because no Twins partition can be selected for them.
 
 use crate::simplex;
 use commonware_codec::{Decode, DecodeExt, Read};

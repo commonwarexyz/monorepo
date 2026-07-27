@@ -12,7 +12,7 @@
 
 use super::{
     ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
-    app::{BlockBuilderApp, RandomizedBlockBuilderApp, RandomizedConfig},
+    app::{BlockBuilderApp, BlockContextRegistry, RandomizedBlockBuilderApp, RandomizedConfig},
     input::MarshalTwinsInput,
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
 };
@@ -23,7 +23,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, CertifiableBlock, Relay,
+    Automaton, CertifiableAutomaton, Relay,
     marshal::{
         Config, Start,
         core::{Actor, Mailbox},
@@ -64,7 +64,10 @@ use rand::RngExt as _;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -74,12 +77,25 @@ use std::{
 /// the probe forwards the real verdict before performing its diagnostic lookup.
 static VERIFY_PROBE: LazyLock<bool> =
     LazyLock::new(|| std::env::var("MARSHAL_TWINS_PROBE").is_ok());
+static EMPTY_CASE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 const POLL: Duration = Duration::from_millis(50);
 const MAX_CASES: usize = 64;
 const ATTACK_MAX_CASES: usize = 2048;
-const ATTACK_VERIFY_DELAY: Duration = Duration::from_secs(3);
+const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
+const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
+const ATTACK_TIMING_MARGIN_MILLIS: u64 = 250;
+const LEADER_TIMEOUT: Duration = Duration::from_millis(LEADER_TIMEOUT_MILLIS);
+const CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(CERTIFICATION_TIMEOUT_MILLIS);
+// The slow validator must time out in the precursor view, then finish early
+// enough to vote for the good header in the attack view.
+const ATTACK_SLOW_VERIFY_DELAY: Duration =
+    Duration::from_millis(CERTIFICATION_TIMEOUT_MILLIS + ATTACK_TIMING_MARGIN_MILLIS);
+// The victim must remain uncertified while the attack-view header is checked.
+const ATTACK_VICTIM_VERIFY_DELAY: Duration = Duration::from_millis(
+    CERTIFICATION_TIMEOUT_MILLIS + LEADER_TIMEOUT_MILLIS + ATTACK_TIMING_MARGIN_MILLIS,
+);
 
 type SchemeOf<P> = <P as Simplex>::Scheme;
 type PublicKeyOf<P> =
@@ -88,6 +104,12 @@ type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type PrimaryApp<P> = BlockBuilderApp<Ctx<P>, SchemeOf<P>>;
 type BackendMarker<P, A, M> = std::marker::PhantomData<fn() -> (P, A, M)>;
+
+#[derive(Clone, Copy)]
+enum CasePolicy {
+    General,
+    AttackLayout,
+}
 
 trait TwinsBlockBuilder<P: Simplex>:
     commonware_consensus::Application<
@@ -98,17 +120,26 @@ trait TwinsBlockBuilder<P: Simplex>:
         Input = (),
     > + Clone
 {
-    fn create(config: RandomizedConfig, verification_delay: Option<(View, Duration)>) -> Self;
+    fn create(
+        config: RandomizedConfig,
+        verification_delay: Option<(View, Duration)>,
+        block_contexts: BlockContextRegistry<Ctx<P>>,
+    ) -> Self;
 
     fn rejects(config: RandomizedConfig, context: &Ctx<P>) -> bool;
 }
 
 impl<P: Simplex> TwinsBlockBuilder<P> for BlockBuilderApp<Ctx<P>, SchemeOf<P>> {
-    fn create(_config: RandomizedConfig, verification_delay: Option<(View, Duration)>) -> Self {
-        match verification_delay {
+    fn create(
+        _config: RandomizedConfig,
+        verification_delay: Option<(View, Duration)>,
+        block_contexts: BlockContextRegistry<Ctx<P>>,
+    ) -> Self {
+        let application = match verification_delay {
             Some((view, delay)) => Self::with_verification_delay(view, delay),
             None => Self::default(),
-        }
+        };
+        application.with_block_contexts(block_contexts)
     }
 
     fn rejects(_config: RandomizedConfig, _context: &Ctx<P>) -> bool {
@@ -117,8 +148,12 @@ impl<P: Simplex> TwinsBlockBuilder<P> for BlockBuilderApp<Ctx<P>, SchemeOf<P>> {
 }
 
 impl<P: Simplex> TwinsBlockBuilder<P> for RandomizedBlockBuilderApp<Ctx<P>, SchemeOf<P>> {
-    fn create(config: RandomizedConfig, verification_delay: Option<(View, Duration)>) -> Self {
-        Self::new(config, verification_delay)
+    fn create(
+        config: RandomizedConfig,
+        verification_delay: Option<(View, Duration)>,
+        block_contexts: BlockContextRegistry<Ctx<P>>,
+    ) -> Self {
+        Self::new(config, verification_delay).with_block_contexts(block_contexts)
     }
 
     fn rejects(config: RandomizedConfig, context: &Ctx<P>) -> bool {
@@ -183,7 +218,6 @@ struct AttackLayout {
     victim: usize,
     slow: usize,
     fast: usize,
-    delayed_validators: [usize; 2],
 }
 
 fn contains<K: PartialEq>(partition: &[K], participant: &K) -> bool {
@@ -264,7 +298,6 @@ fn attack_layout<P: Simplex>(
                     victim,
                     slow,
                     fast,
-                    delayed_validators: [slow, victim],
                 });
             }
         }
@@ -295,7 +328,9 @@ async fn setup_network<P: Simplex>(
         context,
         NetworkConfig {
             max_size: 1024 * 1024,
-            disconnect_on_block: true,
+            // The Twins scenario owns connectivity; protocol-level blocking
+            // must not rewrite its topology.
+            disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
         },
         participants,
@@ -475,7 +510,6 @@ struct ObservedMarshal<P: Simplex, M> {
     probe_input: Arc<str>,
     context: Arc<Mutex<deterministic::Context>>,
     inner: M,
-    mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
     certification_agreement: CertificationAgreementInvariant,
     header_mismatch: HeaderMismatchInvariant<P, RandomizedConfig>,
 }
@@ -487,7 +521,6 @@ impl<P: Simplex, M: Clone> Clone for ObservedMarshal<P, M> {
             probe_input: self.probe_input.clone(),
             context: self.context.clone(),
             inner: self.inner.clone(),
-            mailbox: self.mailbox.clone(),
             certification_agreement: self.certification_agreement.clone(),
             header_mismatch: self.header_mismatch.clone(),
         }
@@ -515,20 +548,24 @@ where
         if !*VERIFY_PROBE {
             return self.inner.verify(context, digest).await;
         }
-        let inner_rx = self.inner.verify(context.clone(), digest).await;
-        let (tx, rx) = oneshot::channel();
-        let mailbox = self.mailbox.clone();
+        let mut inner_rx = self.inner.verify(context.clone(), digest).await;
+        let (mut tx, rx) = oneshot::channel();
+        let header_mismatch = self.header_mismatch.clone();
         let probe_context = self.context.lock().child("verify_probe");
         let validator = self.validator;
         let probe_input = self.probe_input.clone();
         probe_context.spawn(move |_| async move {
-            let Ok(value) = inner_rx.await else {
+            let value = select! {
+                result = &mut inner_rx => result.ok(),
+                _ = tx.closed() => inner_rx.try_recv().ok(),
+            };
+            let Some(value) = value else {
                 return;
             };
             tx.send_lossy(value);
             if !value
-                && let Some(block) = mailbox.get_block(&digest).await
-                && block.context() != context
+                && let Some(block_context) = header_mismatch.block_context(&digest)
+                && block_context != context
             {
                 eprintln!(
                     "[marshal-twins] mismatch-branch rejection: validator={} round={} \
@@ -547,29 +584,23 @@ where
     M: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        let result = self.inner.certify(round, digest).await;
-        let (tx, rx) = oneshot::channel();
+        let mut result = self.inner.certify(round, digest).await;
+        let (mut tx, rx) = oneshot::channel();
         let header_mismatch = self.header_mismatch.clone();
         let certification_agreement = self.certification_agreement.clone();
-        let mailbox = self.mailbox.clone();
         let context = self.context.lock().child("certify");
         let validator = self.validator;
         context.spawn(move |_| async move {
-            match result.await {
-                Ok(value) => {
-                    certification_agreement
-                        .check_certify_agreement(validator, round, digest, value);
-                    header_mismatch
-                        .check_certification(&mailbox, round, digest, Some(value))
-                        .await;
-                    tx.send_lossy(value);
-                }
-                Err(_) => {
-                    header_mismatch
-                        .check_certification(&mailbox, round, digest, None)
-                        .await;
-                }
-            }
+            let value = select! {
+                result = &mut result => result.ok(),
+                _ = tx.closed() => result.try_recv().ok(),
+            };
+            let Some(value) = value else {
+                return;
+            };
+            certification_agreement.check_certify_agreement(validator, round, digest, value);
+            header_mismatch.check_certification(round, digest, value);
+            tx.send_lossy(value);
         });
         rx
     }
@@ -631,8 +662,8 @@ fn start_engine<P: Simplex, A, R>(
             mailbox_size: NZUsize!(1024),
             epoch: Epoch::zero(),
             floor: Floor::Genesis(genesis),
-            leader_timeout: Duration::from_secs(1),
-            certification_timeout: Duration::from_secs(2),
+            leader_timeout: LEADER_TIMEOUT,
+            certification_timeout: CERTIFICATION_TIMEOUT,
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
@@ -695,6 +726,7 @@ struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
     input: MarshalTwinsInput,
     probe_input: Arc<str>,
     app_config: RandomizedConfig,
+    case_policy: CasePolicy,
     _marker: BackendMarker<P, A, M>,
 }
 
@@ -702,16 +734,13 @@ struct MarshalTwinsState<P: Simplex> {
     validators: Vec<Validator<P>>,
     honest: Vec<(usize, Application<B<P>>)>,
     certification_agreement: CertificationAgreementInvariant,
+    block_contexts: BlockContextRegistry<Ctx<P>>,
     genesis: Sha256Digest,
 }
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
-    fn new(input: MarshalTwinsInput, probe_input: Arc<str>) -> Self {
-        let header_attack = matches!(
-            input.strategy,
-            StrategyChoice::HeaderScope { .. } | StrategyChoice::SplitHeader { .. }
-        );
-        let randomized_rounds = if header_attack {
+    fn new(input: MarshalTwinsInput, probe_input: Arc<str>, case_policy: CasePolicy) -> Self {
+        let randomized_rounds = if matches!(case_policy, CasePolicy::AttackLayout) {
             input.rounds.max(4)
         } else {
             input.rounds
@@ -722,15 +751,27 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
             input,
             probe_input,
             app_config,
+            case_policy,
             _marker: std::marker::PhantomData,
         }
     }
 
-    fn header_attack(&self) -> bool {
-        matches!(
-            self.input.strategy,
-            StrategyChoice::HeaderScope { .. } | StrategyChoice::SplitHeader { .. }
-        )
+    fn uses_attack_layout(&self) -> bool {
+        matches!(self.case_policy, CasePolicy::AttackLayout)
+    }
+
+    fn report_empty_case(&self, reason: &str) {
+        if *VERIFY_PROBE || !EMPTY_CASE_REPORTED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "[marshal-twins] no eligible case: reason={reason} policy={} strategy={:?}",
+                if self.uses_attack_layout() {
+                    "attack-layout"
+                } else {
+                    "general"
+                },
+                self.input.strategy,
+            );
+        }
     }
 }
 
@@ -749,6 +790,8 @@ where
         setup_network_links::<P>(&mut oracle, &participants).await;
         let genesis_block = genesis_block::<P>(participants[0].clone());
         let genesis = genesis_block.digest();
+        let block_contexts = BlockContextRegistry::default();
+        block_contexts.record(genesis, genesis_block.context.clone());
         let mut validators = Vec::with_capacity(participants.len());
         let mut registrations = HashMap::with_capacity(participants.len());
         for (idx, validator) in participants.iter().enumerate() {
@@ -776,6 +819,7 @@ where
                 validators,
                 honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
                 certification_agreement: CertificationAgreementInvariant::new(),
+                block_contexts,
                 genesis,
             },
         }
@@ -790,21 +834,21 @@ where
         _context: &mut deterministic::Context,
         participants: usize,
     ) -> twins::Framework {
-        let header_attack = self.header_attack();
+        let uses_attack_layout = self.uses_attack_layout();
         twins::Framework {
             participants,
             faults: 1,
-            rounds: if header_attack {
+            rounds: if uses_attack_layout {
                 self.input.rounds.max(4).into()
             } else {
                 self.input.rounds.into()
             },
-            mode: if header_attack || !self.input.sustained {
+            mode: if uses_attack_layout || !self.input.sustained {
                 twins::Mode::Sampled
             } else {
                 twins::Mode::Sustained
             },
-            max_cases: if header_attack {
+            max_cases: if uses_attack_layout {
                 ATTACK_MAX_CASES
             } else {
                 MAX_CASES
@@ -822,7 +866,11 @@ where
             .into_iter()
             .filter(|case| case.compromised.as_slice() == [BYZANTINE_IDX])
             .collect::<Vec<_>>();
-        let (case, attack) = if self.header_attack() {
+        if fixed_cases.is_empty() {
+            self.report_empty_case("no case compromises the configured Byzantine validator");
+            return None;
+        }
+        let (case, attack) = if self.uses_attack_layout() {
             let attack_cases = fixed_cases
                 .into_iter()
                 .filter_map(|case| {
@@ -830,21 +878,34 @@ where
                 })
                 .collect::<Vec<_>>();
             let count = attack_cases.len();
+            if count == 0 {
+                self.report_empty_case("no generated scenario matches AttackLayout");
+                return None;
+            }
             let (case, layout) = attack_cases
                 .into_iter()
-                .nth(self.input.case_selector as usize % count.max(1))?;
+                .nth(self.input.case_selector as usize % count)
+                .expect("selected AttackLayout case must exist");
             (case, Some(layout))
         } else {
             let count = fixed_cases.len();
             let case = fixed_cases
                 .into_iter()
-                .nth(self.input.case_selector as usize % count.max(1))?;
+                .nth(self.input.case_selector as usize % count)
+                .expect("selected general case must exist");
             (case, None)
         };
         if *VERIFY_PROBE && let Some(layout) = attack {
             eprintln!(
-                "[marshal-twins] attack layout: precursor={} attack={} victim={} slow={} fast={}",
-                layout.precursor_view, layout.attack_view, layout.victim, layout.slow, layout.fast
+                "[marshal-twins] attack layout: precursor={} attack={} victim={} slow={} fast={} \
+                 slow_delay_ms={} victim_delay_ms={}",
+                layout.precursor_view,
+                layout.attack_view,
+                layout.victim,
+                layout.slow,
+                layout.fast,
+                ATTACK_SLOW_VERIFY_DELAY.as_millis(),
+                ATTACK_VICTIM_VERIFY_DELAY.as_millis(),
             );
         }
         Some(TwinsCase {
@@ -881,7 +942,8 @@ where
         // honest application rejects; honest proposers never reject their own.
         let primary_builder = <M as TwinsMarshal<P, PrimaryApp<P>>>::create(
             &context,
-            BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default(),
+            BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
+                .with_block_contexts(state.block_contexts.clone()),
             state.validators[idx].mailbox.clone(),
         );
         start_engine::<P, _, _>(
@@ -923,12 +985,19 @@ where
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) {
         let verification_delay = match topology.data {
-            Some(layout) if layout.delayed_validators.contains(&idx) => {
-                Some((layout.precursor_view, ATTACK_VERIFY_DELAY))
+            Some(layout) if layout.slow == idx => {
+                Some((layout.precursor_view, ATTACK_SLOW_VERIFY_DELAY))
+            }
+            Some(layout) if layout.victim == idx => {
+                Some((layout.precursor_view, ATTACK_VICTIM_VERIFY_DELAY))
             }
             _ => None,
         };
-        let application = A::create(self.app_config, verification_delay);
+        let application = A::create(
+            self.app_config,
+            verification_delay,
+            state.block_contexts.clone(),
+        );
         let builder = <M as TwinsMarshal<P, A>>::create(
             &context,
             application,
@@ -942,9 +1011,12 @@ where
             probe_input: self.probe_input.clone(),
             context: Arc::new(Mutex::new(context.child("automaton_invariants"))),
             inner: builder.clone(),
-            mailbox: state.validators[idx].mailbox.clone(),
             certification_agreement: state.certification_agreement.clone(),
-            header_mismatch: HeaderMismatchInvariant::new(self.app_config, A::rejects),
+            header_mismatch: HeaderMismatchInvariant::new(
+                self.app_config,
+                A::rejects,
+                state.block_contexts.clone(),
+            ),
         };
         start_engine::<P, _, _>(
             context.child("honest"),
@@ -985,7 +1057,7 @@ where
         state: &mut Self::State,
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
-        invariants::check_all_blocks(self.input.trailing_blocks.into(), &state.honest);
+        invariants::check_all_blocks(&state.honest);
     }
 }
 
@@ -995,7 +1067,7 @@ pub fn fuzz_marshal_twins_deferred(input: MarshalTwinsInput) {
         SimplexCertificateMock,
         BlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
         DeferredMarshal,
-    >(input);
+    >(input, CasePolicy::General);
 }
 
 /// Run standard-marshal Twins with input-derived application behavior.
@@ -1004,7 +1076,7 @@ pub fn fuzz_marshal_twins_randomized_app_deferred(input: MarshalTwinsInput) {
         SimplexCertificateMock,
         RandomizedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
         DeferredMarshal,
-    >(input);
+    >(input, CasePolicy::General);
 }
 
 /// Run the standard-marshal Twins mutator with ID crypto and the focused
@@ -1018,7 +1090,7 @@ pub fn fuzz_marshal_twins_id_split_header(mut input: MarshalTwinsInput) {
         SimplexId,
         BlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
         DeferredMarshal,
-    >(input);
+    >(input, CasePolicy::AttackLayout);
 }
 
 /// Run the Inline standard-marshal Twins mutator with ID crypto and the
@@ -1032,10 +1104,10 @@ pub fn fuzz_marshal_twins_id_split_header_inline(mut input: MarshalTwinsInput) {
         SimplexId,
         BlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
         InlineMarshal,
-    >(input);
+    >(input, CasePolicy::AttackLayout);
 }
 
-fn fuzz_marshal_twins_with<P, A, M>(input: MarshalTwinsInput)
+fn fuzz_marshal_twins_with<P, A, M>(input: MarshalTwinsInput, case_policy: CasePolicy)
 where
     P: Simplex,
     A: TwinsBlockBuilder<P>,
@@ -1051,7 +1123,7 @@ where
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let mut backend = MarshalTwinsBackend::<P, A, M>::new(input, probe_input);
+        let mut backend = MarshalTwinsBackend::<P, A, M>::new(input, probe_input, case_policy);
         run_twins_with_backend::<P, _>(&mut context, &mut backend).await;
     });
 }

@@ -10,14 +10,11 @@
 //! gaps, duplicates, and same-height forks are all observable (a by-height map
 //! would silently overwrite them).
 
+use super::app::BlockContextRegistry;
 use crate::simplex::Simplex;
 use commonware_consensus::{
-    Block, CertifiableBlock,
-    marshal::{
-        core::Mailbox,
-        mocks::{application::Application, block::Block as MockBlock, harness::TestHarness},
-        standard::Standard,
-    },
+    Block,
+    marshal::mocks::{application::Application, harness::TestHarness},
     simplex::types::Context as SimplexContext,
     types::{Height, Round},
 };
@@ -28,11 +25,9 @@ use std::{
     sync::Arc,
 };
 
-type SchemeOf<P> = <P as Simplex>::Scheme;
 type PublicKeyOf<P> =
     <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
-type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
 type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
 
@@ -75,6 +70,7 @@ impl CertificationAgreementInvariant {
 /// certification of the same payload under its embedded header.
 pub(super) struct HeaderMismatchInvariant<P: Simplex, C: Copy> {
     verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
+    block_contexts: BlockContextRegistry<Ctx<P>>,
     app_config: C,
     rejects: fn(C, &Ctx<P>) -> bool,
 }
@@ -83,6 +79,7 @@ impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
     fn clone(&self) -> Self {
         Self {
             verified_contexts: self.verified_contexts.clone(),
+            block_contexts: self.block_contexts.clone(),
             app_config: self.app_config,
             rejects: self.rejects,
         }
@@ -90,9 +87,14 @@ impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
 }
 
 impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
-    pub(super) fn new(app_config: C, rejects: fn(C, &Ctx<P>) -> bool) -> Self {
+    pub(super) fn new(
+        app_config: C,
+        rejects: fn(C, &Ctx<P>) -> bool,
+        block_contexts: BlockContextRegistry<Ctx<P>>,
+    ) -> Self {
         Self {
             verified_contexts: Arc::new(Mutex::new(HashMap::new())),
+            block_contexts,
             app_config,
             rejects,
         }
@@ -106,16 +108,17 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             .push(context);
     }
 
-    async fn observed_mismatch(
-        &self,
-        mailbox: &Mailbox<SchemeOf<P>, Standard<B<P>>>,
-        round: Round,
-        digest: Sha256Digest,
-    ) -> bool {
-        let Some(block) = mailbox.get_block(&digest).await else {
-            return false;
-        };
-        let block_context = block.context();
+    pub(super) fn block_context(&self, digest: &Sha256Digest) -> Option<Ctx<P>> {
+        self.block_contexts.get(digest)
+    }
+
+    fn observed_mismatch(&self, round: Round, digest: Sha256Digest) -> bool {
+        let block_context = self.block_context(&digest).unwrap_or_else(|| {
+            panic!(
+                "marshal fuzz harness could not resolve the embedded context for a completed \
+                 certification: round={round} digest={digest}"
+            )
+        });
         let mismatch = self
             .verified_contexts
             .lock()
@@ -124,48 +127,35 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
         mismatch && !(self.rejects)(self.app_config, &block_context)
     }
 
-    /// Check the certification outcome after a header-mismatching verification.
-    ///
-    /// `None` represents a closed certification channel.
-    pub(super) async fn check_certification(
-        &self,
-        mailbox: &Mailbox<SchemeOf<P>, Standard<B<P>>>,
-        round: Round,
-        digest: Sha256Digest,
-        verdict: Option<bool>,
-    ) {
-        let mismatch = self.observed_mismatch(mailbox, round, digest).await;
-        match verdict {
-            Some(value) => assert!(
-                value || !mismatch,
-                "marshal invariant violated: certification reused a \
-                 header-scoped verification rejection"
-            ),
-            None => assert!(
-                !mismatch,
-                "marshal invariant violated: certification closed after a \
-                 header-scoped verification rejection"
-            ),
+    /// Check a completed certification outcome after a header-mismatching verification.
+    pub(super) fn check_certification(&self, round: Round, digest: Sha256Digest, verdict: bool) {
+        if verdict {
+            return;
         }
+        let mismatch = self.observed_mismatch(round, digest);
+        assert!(
+            !mismatch,
+            "marshal invariant violated: certification reused a \
+             header-scoped verification rejection"
+        );
     }
 }
 
 /// Run every liveness-model invariant.
 pub fn check_all<H: TestHarness>(
-    required: u64,
+    minimum_height: u64,
     honest_apps: &[(usize, Application<H::ApplicationBlock>)],
 ) {
-    check_all_blocks(required, honest_apps);
+    check_all_blocks(honest_apps);
+    for (idx, app) in honest_apps {
+        check_minimum_height(*idx, minimum_height, &app.delivered());
+    }
 }
 
-/// Run every liveness-model invariant for a standard block type whose Simplex
-/// context is selected by the fuzzed signing scheme.
-pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
-    required: u64,
-    honest_apps: &[(usize, Application<B>)],
-) {
+/// Run block-ordering and agreement invariants.
+pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(honest_apps: &[(usize, Application<B>)]) {
     for (idx, app) in honest_apps {
-        check_in_order(*idx, required, &app.delivered());
+        check_in_order(*idx, &app.delivered());
     }
     agreement(honest_apps);
 }
@@ -177,8 +167,7 @@ pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
 /// finalized container (height 1), then every subsequent delivery must advance
 /// by exactly one. Because this is the true arrival sequence, an out-of-order
 /// delivery, a gap, or a duplicate/refinalized height all fail the `+ 1` check.
-/// After liveness the highest delivered height must be at least `required`.
-fn check_in_order<D>(idx: usize, required: u64, delivered: &[(Height, D)]) {
+fn check_in_order<D>(idx: usize, delivered: &[(Height, D)]) {
     let heights: Vec<u64> = delivered.iter().map(|(h, _)| h.get()).collect();
     let first = heights.first().copied().unwrap_or(0);
     assert!(
@@ -194,10 +183,17 @@ fn check_in_order<D>(idx: usize, required: u64, delivered: &[(Height, D)]) {
              sequence={heights:?}",
         );
     }
+}
+
+fn check_minimum_height<D>(idx: usize, minimum_height: u64, delivered: &[(Height, D)]) {
+    let heights = delivered
+        .iter()
+        .map(|(height, _)| height.get())
+        .collect::<Vec<_>>();
     let max = heights.last().copied().unwrap_or(0);
     assert!(
-        max >= required,
-        "node{idx} delivered up to height {max}, fewer than required {required} \
+        max >= minimum_height,
+        "node{idx} delivered up to height {max}, below required height {minimum_height} \
          (sequence={heights:?})",
     );
 }

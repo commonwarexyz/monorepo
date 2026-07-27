@@ -27,12 +27,47 @@ use commonware_cryptography::{
     Digestible, Hasher as _, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Clock as _, deterministic};
+use commonware_utils::sync::Mutex;
 use futures::StreamExt;
-use std::{marker::PhantomData, time::Duration};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
+
+/// Out-of-band registry of blocks constructed by the fuzz applications.
+pub(super) struct BlockContextRegistry<C> {
+    contexts: Arc<Mutex<HashMap<Sha256Digest, C>>>,
+}
+
+impl<C> Default for BlockContextRegistry<C> {
+    fn default() -> Self {
+        Self {
+            contexts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<C> Clone for BlockContextRegistry<C> {
+    fn clone(&self) -> Self {
+        Self {
+            contexts: self.contexts.clone(),
+        }
+    }
+}
+
+impl<C> BlockContextRegistry<C> {
+    pub(super) fn record(&self, digest: Sha256Digest, context: C) {
+        self.contexts.lock().insert(digest, context);
+    }
+}
+
+impl<C: Clone> BlockContextRegistry<C> {
+    pub(super) fn get(&self, digest: &Sha256Digest) -> Option<C> {
+        self.contexts.lock().get(digest).cloned()
+    }
+}
 
 /// Honest block-building application, generic over the consensus context type.
 pub struct BlockBuilderApp<C, S = DefaultSigningScheme> {
     verification_delay: Option<(View, Duration)>,
+    block_contexts: Option<BlockContextRegistry<C>>,
     _marker: PhantomData<fn() -> (C, S)>,
 }
 
@@ -40,6 +75,7 @@ impl<C, S> Default for BlockBuilderApp<C, S> {
     fn default() -> Self {
         Self {
             verification_delay: None,
+            block_contexts: None,
             _marker: PhantomData,
         }
     }
@@ -49,6 +85,7 @@ impl<C, S> Clone for BlockBuilderApp<C, S> {
     fn clone(&self) -> Self {
         Self {
             verification_delay: self.verification_delay,
+            block_contexts: self.block_contexts.clone(),
             _marker: PhantomData,
         }
     }
@@ -59,8 +96,14 @@ impl<C, S> BlockBuilderApp<C, S> {
     pub const fn with_verification_delay(view: View, delay: Duration) -> Self {
         Self {
             verification_delay: Some((view, delay)),
+            block_contexts: None,
             _marker: PhantomData,
         }
+    }
+
+    pub(super) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
+        self.block_contexts = Some(block_contexts);
+        self
     }
 }
 
@@ -85,12 +128,16 @@ where
         // the stream with the parent it already fetched for this round.
         let parent = ancestry.next().await?;
         let height = parent.height().next();
-        Some(Block::<Sha256Digest, C>::new::<Sha256>(
+        let block = Block::<Sha256Digest, C>::new::<Sha256>(
             consensus_context,
             parent.digest(),
             height,
             height.get(),
-        ))
+        );
+        if let Some(block_contexts) = &self.block_contexts {
+            block_contexts.record(block.digest(), block.context.clone());
+        }
+        Some(block)
     }
 
     async fn verify(
@@ -199,6 +246,11 @@ impl<C, S> RandomizedBlockBuilderApp<C, S> {
             None => BlockBuilderApp::default(),
         };
         Self { inner, config }
+    }
+
+    pub(super) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
+        self.inner = self.inner.with_block_contexts(block_contexts);
+        self
     }
 }
 
