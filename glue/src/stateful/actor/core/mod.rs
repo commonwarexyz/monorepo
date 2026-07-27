@@ -117,7 +117,7 @@ where
     /// finalized target. Finalizations received during this window are queued and coalesced when
     /// it expires. A queued target may supersede the current fetch at expiry, so this should cover
     /// the expected duration of a sync attempt.
-    pub retarget_grace: NonZeroDuration,
+    pub retarget_delay: NonZeroDuration,
 
     /// Periodic database and marshal pruning configuration.
     ///
@@ -165,7 +165,7 @@ where
     sync_config: SyncEngineConfig,
 
     /// Duration of the fixed-target state sync window.
-    retarget_grace: NonZeroDuration,
+    retarget_delay: NonZeroDuration,
 
     /// Periodic prune configuration.
     prune_config: Option<PruneConfig>,
@@ -202,7 +202,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                retarget_grace: config.retarget_grace,
+                retarget_delay: config.retarget_delay,
                 prune_config: config.prune_config,
             },
             Mailbox::new(sender),
@@ -255,7 +255,7 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
-            retarget_grace: self.retarget_grace.get(),
+            retarget_delay: self.retarget_delay.get(),
             retarget_frontier: None,
             pending_retarget: None,
             prune_config: self.prune_config,
@@ -465,7 +465,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
-                    retarget_grace: NZDuration!(Duration::from_secs(1)),
+                    retarget_delay: NZDuration!(Duration::from_secs(1)),
                     prune_config: None,
                 },
             );

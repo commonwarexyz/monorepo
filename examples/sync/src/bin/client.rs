@@ -385,7 +385,7 @@ where
             })) => {
                 warn!(
                     sync_iteration = iteration,
-                    "{label} server returned a divergent target: {message}; retrying"
+                    "{label} server rejected the requested target as divergent: {message}; retrying"
                 );
                 continue;
             }

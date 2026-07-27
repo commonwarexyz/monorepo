@@ -528,6 +528,7 @@ where
         if loc <= Location::new(self.journal.bounds().start) {
             return Ok(self);
         }
+
         // Recovery rebuilds the snapshot by replaying the log from the recovered floor,
         // which trails the current floor while its commit is unflushed. Commit first so
         // replay never starts below the pruned boundary.

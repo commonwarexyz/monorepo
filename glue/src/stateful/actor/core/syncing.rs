@@ -49,7 +49,7 @@ enum FinalizedHandoff<B> {
     Apply(B, Exact),
 }
 
-pub(super) struct RetargetGrace<B> {
+pub(super) struct PendingRetarget<B> {
     timeout: BoxFuture<'static, ()>,
     finalized: VecDeque<(Arc<B>, Exact)>,
 }
@@ -100,13 +100,13 @@ where
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
 
     /// Duration of each fixed-target sync window.
-    pub(super) retarget_grace: Duration,
+    pub(super) retarget_delay: Duration,
 
     /// Fixed marshal frontier being drained before the next sync window.
     pub(super) retarget_frontier: Option<Height>,
 
     /// Finalized messages held while the current target receives its sync window.
-    pub(super) pending_retarget: Option<RetargetGrace<A::Block>>,
+    pub(super) pending_retarget: Option<PendingRetarget<A::Block>>,
 
     /// Periodic prune configuration.
     pub(super) prune_config: Option<PruneConfig>,
@@ -133,7 +133,7 @@ where
                 self.database_subscribers
                     .retain(|subscriber| !subscriber.is_closed());
                 let retarget_timeout = match self.pending_retarget.as_mut() {
-                    Some(grace) => Either::Left(grace.timeout.as_mut()),
+                    Some(pending) => Either::Left(pending.timeout.as_mut()),
                     None => Either::Right(pending()),
                 };
             },
@@ -148,7 +148,7 @@ where
                 let finalized = self
                     .pending_retarget
                     .take()
-                    .map(|grace| grace.finalized)
+                    .map(|pending| pending.finalized)
                     .unwrap_or_default();
                 let handoffs = self.prepare_handoffs(finalized);
                 self.transition_many(handoffs).await;
@@ -156,7 +156,7 @@ where
             },
             _ = retarget_timeout => {
                 let handoffs;
-                (self, handoffs) = self.expire_retarget_grace().await;
+                (self, handoffs) = self.handle_retarget_timeout().await;
                 if let Some(handoffs) = handoffs {
                     self.transition_many(handoffs).await;
                     return;
@@ -204,8 +204,8 @@ where
                     block,
                     acknowledgement,
                 } => {
-                    if let Some(grace) = self.pending_retarget.as_mut() {
-                        grace.finalized.push_back((block, acknowledgement));
+                    if let Some(pending) = self.pending_retarget.as_mut() {
+                        pending.finalized.push_back((block, acknowledgement));
                         continue;
                     }
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
@@ -247,7 +247,7 @@ where
                     acknowledgement.acknowledge();
                 } else {
                     assert_eq!(block.height(), frontier);
-                    self.arm_retarget_grace(VecDeque::from([(block, acknowledgement)]));
+                    self.arm_retarget_timer(VecDeque::from([(block, acknowledgement)]));
                 }
                 return (self, None);
             }
@@ -308,32 +308,32 @@ where
     }
 
     /// Start one uninterrupted sync window without blocking the actor loop.
-    fn arm_retarget_grace(&mut self, finalized: VecDeque<(Arc<A::Block>, Exact)>) {
+    fn arm_retarget_timer(&mut self, finalized: VecDeque<(Arc<A::Block>, Exact)>) {
         assert!(self.pending_retarget.is_none());
         assert!(!finalized.is_empty());
 
-        self.pending_retarget = Some(RetargetGrace {
-            timeout: Box::pin(self.context.sleep(self.retarget_grace)),
+        self.pending_retarget = Some(PendingRetarget {
+            timeout: Box::pin(self.context.sleep(self.retarget_delay)),
             finalized,
         });
     }
 
     /// Release an expired target and coalesce any finalized blocks received during its window.
-    async fn expire_retarget_grace(
+    async fn handle_retarget_timeout(
         mut self,
     ) -> (Self, Option<VecDeque<FinalizedHandoff<Arc<A::Block>>>>) {
-        let mut grace = self
+        let mut pending = self
             .pending_retarget
             .take()
-            .expect("retarget grace timer requires pending state");
-        let (_, acknowledgement) = grace
+            .expect("retarget timer requires pending state");
+        let (_, acknowledgement) = pending
             .finalized
             .pop_front()
-            .expect("retarget grace requires a finalized block");
+            .expect("pending retarget requires a finalized block");
         acknowledgement.acknowledge();
         self.retarget_frontier = None;
 
-        let Some((newest, _)) = grace.finalized.back() else {
+        let Some((newest, _)) = pending.finalized.back() else {
             return (self, None);
         };
         let newest = newest.clone();
@@ -343,23 +343,23 @@ where
             return (self, None);
         };
         if self.artifact.is_some() {
-            let handoffs = self.prepare_handoffs(grace.finalized);
+            let handoffs = self.prepare_handoffs(pending.finalized);
             return (self, Some(handoffs));
         }
 
         if newest.height() < frontier {
-            for (_, acknowledgement) in grace.finalized {
+            for (_, acknowledgement) in pending.finalized {
                 acknowledgement.acknowledge();
             }
             return (self, None);
         }
 
         assert_eq!(newest.height(), frontier);
-        while grace.finalized.len() > 1 {
-            let (_, acknowledgement) = grace.finalized.pop_front().expect("length checked above");
+        while pending.finalized.len() > 1 {
+            let (_, acknowledgement) = pending.finalized.pop_front().expect("length checked above");
             acknowledgement.acknowledge();
         }
-        self.arm_retarget_grace(grace.finalized);
+        self.arm_retarget_timer(pending.finalized);
         (self, None)
     }
 
@@ -550,7 +550,7 @@ mod tests {
     use futures::{FutureExt, poll};
     use std::{collections::VecDeque, sync::Arc, time::Duration};
 
-    const TEST_RETARGET_GRACE: Duration = Duration::from_secs(1);
+    const TEST_RETARGET_DELAY: Duration = Duration::from_secs(1);
 
     #[derive(Clone)]
     struct NoopResolver;
@@ -708,7 +708,7 @@ mod tests {
                     artifact: None,
                     resolvers: NoopResolver,
                     sync_completed,
-                    retarget_grace: TEST_RETARGET_GRACE,
+                    retarget_delay: TEST_RETARGET_DELAY,
                     retarget_frontier: None,
                     pending_retarget: None,
                     prune_config: None,
@@ -753,7 +753,7 @@ mod tests {
                     }),
                     resolvers: NoopResolver,
                     sync_completed,
-                    retarget_grace: TEST_RETARGET_GRACE,
+                    retarget_delay: TEST_RETARGET_DELAY,
                     retarget_frontier: None,
                     pending_retarget: None,
                     prune_config: None,
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn current_tip_grace_keeps_actor_responsive_until_sync_completes() {
+    fn current_tip_window_keeps_actor_responsive_until_sync_completes() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let block = TestBlock::new(8, 10);
@@ -1139,10 +1139,10 @@ mod tests {
                     )
                     .await
                     .is_none(),
-                "the syncing actor must reject proposals without waiting for the grace timer",
+                "the syncing actor must reject proposals without waiting for the retarget timer",
             );
 
-            context.sleep(TEST_RETARGET_GRACE).await;
+            context.sleep(TEST_RETARGET_DELAY).await;
             assert!(
                 waiter.await.is_ok(),
                 "the expired target must be acknowledged"
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn retarget_grace_expiry_coalesces_to_newest_target() {
+    fn retarget_timeout_coalesces_to_newest_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let newest = TestBlock::new(10, 12);
@@ -1238,11 +1238,11 @@ mod tests {
                 finalized.push_back((Arc::new(TestBlock::new(height, digest)), acknowledgement));
                 waiters.push_back(waiter);
             }
-            harness.syncing.arm_retarget_grace(finalized);
+            harness.syncing.arm_retarget_timer(finalized);
 
             let expire = context
                 .child("expire")
-                .spawn(move |_| harness.syncing.expire_retarget_grace());
+                .spawn(move |_| harness.syncing.handle_retarget_timeout());
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
             else {
@@ -1267,19 +1267,19 @@ mod tests {
             assert_eq!(recorded, anchor(10, 12));
             assert_eq!(targets, 10);
 
-            let (syncing, handoffs) = expire.await.expect("grace expiry failed");
+            let (syncing, handoffs) = expire.await.expect("retarget timer failed");
             assert!(handoffs.is_none());
             assert!(intermediate_waiter.await.is_ok());
             assert!(
                 poll!(&mut newest_waiter).is_pending(),
                 "the newest target must remain held for the next sync window",
             );
-            let grace = syncing
+            let pending = syncing
                 .pending_retarget
                 .as_ref()
                 .expect("the newest target must receive another sync window");
-            assert_eq!(grace.finalized.len(), 1);
-            assert_eq!(grace.finalized[0].0.height(), Height::new(10));
+            assert_eq!(pending.finalized.len(), 1);
+            assert_eq!(pending.finalized[0].0.height(), Height::new(10));
             assert_eq!(syncing.retarget_frontier, Some(Height::new(10)));
             assert_eq!(
                 syncing.sync_metadata.in_progress_floor(),
@@ -1402,11 +1402,11 @@ mod tests {
                 Some(&finalization),
                 "retargeted floor must be persisted before marshal is acknowledged",
             );
-            let (syncing, handoffs) = syncing.expire_retarget_grace().await;
+            let (syncing, handoffs) = syncing.handle_retarget_timeout().await;
             assert!(handoffs.is_none());
             assert!(waiter.await.is_ok(), "marshal must be acknowledged");
             assert_eq!(
-                syncing.retarget_grace, TEST_RETARGET_GRACE,
+                syncing.retarget_delay, TEST_RETARGET_DELAY,
                 "timing out a target must not change the configured sync window",
             );
             drop(syncing);

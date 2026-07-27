@@ -515,7 +515,7 @@ impl EngineDefinition for SingleDbEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
-                retarget_grace: NZDuration!(Duration::from_secs(1)),
+                retarget_delay: NZDuration!(Duration::from_secs(1)),
                 prune_config: Some(PruneConfig {
                     max_pending_acks,
                     maintenance_interval: NZUsize!(5),

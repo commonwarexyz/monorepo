@@ -409,6 +409,7 @@ where
         if loc <= Location::new(self.journal.bounds().start) {
             return Ok(self);
         }
+
         // Recovery rewinds to the last durable commit, which may sit below the boundary
         // while the floor-declaring commit is unflushed (pruning it away would leave the
         // journal unopenable). Commit first so recovery always lands at or above the
