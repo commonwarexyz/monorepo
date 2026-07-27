@@ -303,6 +303,14 @@ where
         Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
 
+    /// Return the range of locations this db can prove.
+    ///
+    /// This is [`Self::bounds`] narrowed to what the Merkle structure still retains, which a sync
+    /// can leave ahead of the operations log's own pruning boundary.
+    pub fn provable_bounds(&self) -> Range<Location<F>> {
+        self.journal.provable_start()..Location::new(self.journal.bounds().end)
+    }
+
     /// Update state gauges from the current database state.
     fn update_metrics(&self) {
         let bounds = self.journal.bounds();
@@ -447,10 +455,9 @@ where
     /// [crate::merkle::Family::MAX_LEAVES].
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
-    /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`crate::journal::Error::ItemPruned`] if `start_loc` has been pruned.
     /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
-    /// because pruning removed the commit that would have governed `op_count`.
+    /// commit op, meaning the caller passed a non-commit-boundary `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
@@ -517,6 +524,12 @@ where
                 loc,
                 self.inactivity_floor_loc,
             ));
+        }
+        // Recovery rebuilds the snapshot by replaying the log from the recovered floor,
+        // which trails the current floor while its commit is unflushed. Commit first so
+        // replay never starts below the pruned boundary.
+        if self.journal.durable().end <= *self.last_commit_loc {
+            self.journal = self.journal.commit().await?;
         }
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();

@@ -3,7 +3,7 @@ use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
-        processor::{FinalizeStatus, Processor},
+        processor::{Applied, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -169,7 +169,8 @@ where
                     acknowledgement,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
-                    let handoff = self
+                    let handoff;
+                    (self, handoff) = self
                         .process_finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
@@ -191,13 +192,26 @@ where
 
     /// Processes a finalized block during state sync.
     async fn process_finalized(
-        &mut self,
+        mut self,
         block: Arc<A::Block>,
         acknowledgement: Exact,
-    ) -> Option<FinalizedHandoff<Arc<A::Block>>> {
+    ) -> (Self, Option<FinalizedHandoff<Arc<A::Block>>>) {
         if self.artifact.is_none() {
             let anchor = Anchor::from(block.as_ref());
             let targets = A::sync_targets(block.as_ref());
+
+            // Persist the retargeted floor before the live session can record it and before
+            // marshal is acknowledged: the sync engine's durable state advances toward the
+            // new target, and marshal prunes behind acknowledged blocks, so a crash must
+            // resume from a floor at least as new as any target the engine acted on. An
+            // ancestor finalized transitively by a descendant's certificate has no
+            // finalization of its own; the floor then advances when the certificate-carrying
+            // descendant is delivered. A crash inside that window resumes from the lagging
+            // floor, which the sync journal may have durably outrun (recovery then requires
+            // a newer floor).
+            if let Some(finalization) = self.marshal.get_finalization(block.height()).await {
+                self.sync_metadata = self.sync_metadata.begin_sync(finalization).await;
+            }
 
             // Do not acknowledge marshal until the live sync session has recorded this
             // block's tip update. If we ack after merely enqueueing it, sync can still
@@ -207,7 +221,7 @@ where
                 self.artifact = Some(artifact);
             } else {
                 acknowledgement.acknowledge();
-                return None;
+                return (self, None);
             }
         }
 
@@ -222,7 +236,10 @@ where
                 artifact.anchor.digest,
                 "finalized block at sync anchor height must match sync anchor digest",
             );
-            return Some(FinalizedHandoff::Reflected(block, acknowledgement));
+            return (
+                self,
+                Some(FinalizedHandoff::Reflected(block, acknowledgement)),
+            );
         }
 
         assert_eq!(
@@ -230,7 +247,7 @@ where
             artifact.anchor.height.next(),
             "finalized block after sync anchor must be the next finalized block",
         );
-        Some(FinalizedHandoff::Apply(block, acknowledgement))
+        (self, Some(FinalizedHandoff::Apply(block, acknowledgement)))
     }
 
     /// Transitions to [`Processing`] state once the database set has converged
@@ -259,18 +276,26 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (status, prune) = processor
+                    let Applied { barrier, prune } = processor
                         .finalize(self.context.as_present(), block.as_ref())
-                        .await;
+                        .await
+                        .expect("sync handoff block cannot be a duplicate");
+
+                    // The processing loop's flush pool does not exist yet, so
+                    // observe the deferred flush inline. Acknowledging only
+                    // once durable preserves the startup rewind contract.
+                    if !barrier.durable().await {
+                        // Runtime shutdown before the flush completed: marshal
+                        // redelivers the block on the next startup.
+                        return;
+                    }
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }
-                    if let FinalizeStatus::Persisted { height } = status {
-                        debug!(
-                            height = height.get(),
-                            "persisted finalized database batch during sync handoff"
-                        );
-                    }
+                    debug!(
+                        height = block.height().get(),
+                        "persisted finalized database batch during sync handoff"
+                    );
                     acknowledgement.acknowledge();
                 }
             }
@@ -326,24 +351,38 @@ mod tests {
         db::{Anchor, AttachableResolver, Shared},
         tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
     };
-    use commonware_actor::mailbox as actor_mailbox;
+    use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
-        Heightable,
-        marshal::{self, core::Actor as MarshalActor},
-        simplex::mocks::scheme as scheme_mocks,
-        types::{FixedEpocher, Height, ViewDelta},
+        Heightable, Reporter,
+        marshal::{
+            self, Update,
+            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+            resolver::handler,
+        },
+        simplex::{
+            mocks::scheme as scheme_mocks,
+            types::{Finalization, Finalize, Proposal},
+        },
+        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
     };
-    use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        Digestible,
+        certificate::ConstantProvider,
+        ed25519,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
     use commonware_parallel::Sequential;
+    use commonware_resolver::{Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        ContextCell, Runner as _, Spawner as _, Supervisor as _,
+        ContextCell, Handle, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
     };
-    use commonware_storage::archive::immutable;
+    use commonware_storage::archive::{Archive as _, immutable};
     use commonware_utils::{
         Acknowledgement, NZU16, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+        vec::NonEmptyVec,
     };
     use futures::{FutureExt, poll};
     use std::sync::Arc;
@@ -353,6 +392,93 @@ mod tests {
 
     impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
         async fn attach_database(&self, _db: Shared<DB>) {}
+    }
+
+    /// Reporter for the started marshal fixture that acknowledges every dispatched block.
+    #[derive(Clone)]
+    struct NoopReporter;
+
+    impl Reporter for NoopReporter {
+        type Activity = Update<TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            if let Update::Block(_, ack) = activity {
+                ack.acknowledge();
+            }
+            Feedback::Ok
+        }
+    }
+
+    /// Backfill resolver for the started marshal fixture: its archives are pre-seeded, so
+    /// every fetch is ignored.
+    #[derive(Clone)]
+    struct IgnoreResolver;
+
+    impl Resolver for IgnoreResolver {
+        type Key = handler::Key<Sha256Digest>;
+        type Subscriber = handler::Annotation;
+
+        fn fetch<F>(&mut self, _key: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for IgnoreResolver {
+        type PublicKey = ed25519::PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+    }
+
+    /// Builds a finalization for `view` whose payload is the digest `[digest_byte; 32]`.
+    fn finalization(
+        schemes: &[TestScheme],
+        view: u64,
+        digest_byte: u8,
+    ) -> Finalization<TestScheme, Sha256Digest> {
+        let proposal = Proposal {
+            round: Round::new(Epoch::zero(), View::new(view)),
+            parent: View::new(view.saturating_sub(1)),
+            payload: Sha256::fill(digest_byte),
+        };
+        let finalizes = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
+            .collect::<Vec<_>>();
+        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+            .expect("recover finalization")
     }
 
     struct TestHarness<E>
@@ -365,6 +491,42 @@ mod tests {
     impl TestHarness<deterministic::Context> {
         async fn new(context: deterministic::Context, anchor: Anchor<Sha256Digest>) -> Self {
             Self::new_on(context.child("fixture"), context, anchor).await
+        }
+
+        /// Build the harness mid-sync: no artifact yet, the provided marshal mailbox, and a
+        /// live syncer receiver for a coordinator mock to service.
+        async fn new_syncing(
+            context: deterministic::Context,
+            marshal: MarshalMailbox<TestScheme, TestVariant>,
+        ) -> (
+            Self,
+            actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
+        ) {
+            let (_mailbox_sender, mailbox) =
+                actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let (syncer_sender, syncer_receiver) =
+                actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
+            let (_sync_complete, sync_completed) = oneshot::channel();
+
+            let harness = Self {
+                syncing: Syncing {
+                    context: ContextCell::new(context.child("syncing")),
+                    mailbox,
+                    application: TestApp,
+                    provider: (),
+                    marshal,
+                    sync_metadata: StateSyncMetadata::init(&context, "syncing-test").await,
+                    syncer: syncer::Mailbox::new(syncer_sender),
+                    held_verify_requests: Vec::new(),
+                    database_subscribers: Vec::new(),
+                    artifact: None,
+                    resolvers: NoopResolver,
+                    sync_completed,
+                    prune_config: None,
+                    metrics: StatefulMetrics::new(&context),
+                },
+            };
+            (harness, syncer_receiver)
         }
     }
 
@@ -476,16 +638,84 @@ mod tests {
         mailbox
     }
 
+    /// Initializes a marshal actor whose finalization archive is pre-seeded with the given
+    /// block's finalization, then starts it so `get_finalization` serves the finalization
+    /// without any peer fetching. The returned handler and handle must stay alive for the
+    /// marshal to keep running.
+    async fn start_marshal(
+        context: deterministic::Context,
+        scheme: TestScheme,
+        block: &TestBlock,
+        finalization: Option<Finalization<TestScheme, Sha256Digest>>,
+    ) -> (
+        MarshalMailbox<TestScheme, TestVariant>,
+        handler::Handler<Sha256Digest>,
+        Handle<()>,
+    ) {
+        let provider = ConstantProvider::new(scheme);
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let mut finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(page_cache.clone(), "syncing-finalizations"),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        if let Some(finalization) = finalization {
+            finalizations_by_height = finalizations_by_height
+                .put(block.height().get(), block.digest(), finalization)
+                .await
+                .expect("failed to seed finalization")
+                .sync()
+                .await
+                .expect("failed to sync finalizations archive");
+        }
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), "syncing-blocks"),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+
+        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+            context.child("marshal_actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            marshal::Config {
+                provider,
+                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                partition_prefix: "syncing-harness".to_string(),
+                mailbox_size: NZUsize!(8),
+                view_retention: ViewDelta::new(1),
+                prunable_items_per_section: NZU64!(4),
+                page_cache,
+                replay_buffer: NZUsize!(64),
+                key_write_buffer: NZUsize!(64),
+                value_write_buffer: NZUsize!(64),
+                block_codec_config: (),
+                max_repair: NZUsize!(1),
+                max_pending_acks: NZUsize!(1),
+                strategy: Sequential,
+            },
+        )
+        .await;
+        let (resolver_receiver, resolver_handler) =
+            handler::init(context.child("resolver_handler"), NZUsize!(8));
+        let handle = actor.start_unbuffered(NoopReporter, (resolver_receiver, IgnoreResolver));
+        (mailbox, resolver_handler, handle)
+    }
+
     #[test]
     fn anchor_height_block_acknowledges_and_transitions_without_handoff() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let (acknowledgement, mut waiter) = Exact::handle();
 
-            let action = harness
+            let (syncing, action) = harness
                 .syncing
                 .process_finalized(Arc::new(TestBlock::new(7, 9)), acknowledgement)
                 .await;
+            harness.syncing = syncing;
 
             assert!(poll!(&mut waiter).is_pending());
             assert!(matches!(action, Some(FinalizedHandoff::Reflected(_, _))));
@@ -497,10 +727,10 @@ mod tests {
     #[test]
     fn next_height_block_transitions_with_handoff_without_early_ack() {
         deterministic::Runner::default().start(|context| async move {
-            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let harness = TestHarness::new(context, anchor(7, 9)).await;
             let (acknowledgement, waiter) = Exact::handle();
 
-            let action = harness
+            let (_syncing, action) = harness
                 .syncing
                 .process_finalized(Arc::new(TestBlock::new(8, 10)), acknowledgement)
                 .await;
@@ -519,7 +749,7 @@ mod tests {
     #[should_panic(expected = "sync anchor digest")]
     fn anchor_height_block_with_conflicting_digest_panics() {
         deterministic::Runner::default().start(|context| async move {
-            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let harness = TestHarness::new(context, anchor(7, 9)).await;
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = harness
                 .syncing
@@ -532,7 +762,7 @@ mod tests {
     #[should_panic(expected = "next finalized block")]
     fn non_anchor_non_next_block_panics() {
         deterministic::Runner::default().start(|context| async move {
-            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let harness = TestHarness::new(context, anchor(7, 9)).await;
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = harness
                 .syncing
@@ -586,6 +816,108 @@ mod tests {
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(7)));
+        });
+    }
+
+    /// A retargeted finalization persists its floor before marshal is acknowledged: the sync
+    /// engine's durable state advances toward the new target, so a crash after the ack must
+    /// resume from the new floor, not the original one.
+    #[test]
+    fn retarget_persists_floor_before_acknowledgement() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let block = TestBlock::new(8, 10);
+            let finalization = finalization(&fixture.schemes, 8, 10);
+            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+                context.child("marshal"),
+                fixture.schemes[0].clone(),
+                &block,
+                Some(finalization.clone()),
+            )
+            .await;
+            let (harness, mut syncer_receiver) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+
+            // Service the single target update like a live sync coordinator: respond that
+            // sync has not completed, then record the tip update.
+            let coordinator = context.child("coordinator").spawn(move |_| async move {
+                let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                    syncer_receiver.recv().await
+                else {
+                    panic!("retarget should send a target update to the syncer");
+                };
+                assert!(
+                    response.send(None).is_ok(),
+                    "response receiver should be alive"
+                );
+                let (recorded, targets) = update.record();
+                assert_eq!(recorded, anchor(8, 10));
+                assert_eq!(targets, 8);
+            });
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, action) = harness
+                .syncing
+                .process_finalized(Arc::new(block), acknowledgement)
+                .await;
+
+            assert!(action.is_none(), "retarget mid-sync must not hand off");
+            assert!(waiter.await.is_ok(), "marshal must be acknowledged");
+            coordinator.await.expect("coordinator failed");
+            assert_eq!(
+                syncing.sync_metadata.in_progress_floor(),
+                Some(&finalization),
+                "retargeted floor must be persisted before marshal is acknowledged",
+            );
+        });
+    }
+
+    /// An ancestor finalized transitively by a descendant's certificate has no finalization
+    /// of its own: the retarget still records the tip update and acknowledges marshal, and
+    /// the persisted floor is left unchanged.
+    #[test]
+    fn retarget_without_finalization_acknowledges_without_persisting() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let block = TestBlock::new(8, 10);
+            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+                context.child("marshal"),
+                fixture.schemes[0].clone(),
+                &block,
+                None,
+            )
+            .await;
+            let (harness, mut syncer_receiver) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+
+            // Service the single target update like a live sync coordinator.
+            let coordinator = context.child("coordinator").spawn(move |_| async move {
+                let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                    syncer_receiver.recv().await
+                else {
+                    panic!("retarget should send a target update to the syncer");
+                };
+                assert!(
+                    response.send(None).is_ok(),
+                    "response receiver should be alive"
+                );
+                let _ = update.record();
+            });
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let (syncing, action) = harness
+                .syncing
+                .process_finalized(Arc::new(block), acknowledgement)
+                .await;
+
+            assert!(action.is_none(), "retarget mid-sync must not hand off");
+            assert!(waiter.await.is_ok(), "marshal must be acknowledged");
+            coordinator.await.expect("coordinator failed");
+            assert_eq!(
+                syncing.sync_metadata.in_progress_floor(),
+                None,
+                "an uncertified ancestor must not move the persisted floor",
+            );
         });
     }
 }

@@ -262,6 +262,12 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
+    /// Callers must ensure the retained boundary is justified by durable data: after any
+    /// crash, recovery must never need the pruned items to explain the retained ones (e.g.
+    /// a commit record declaring the boundary is already durable, or is made durable by
+    /// committing before pruning). Implementations sync before removing anything only when
+    /// their own barrier has not yet covered the boundary.
+    ///
     /// # Behavior
     ///
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
@@ -277,6 +283,9 @@ pub trait Mutable: Contiguous + Sized {
         self,
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
+
+    /// The positions of durably persisted elements.
+    fn durable(&mut self) -> Range<u64>;
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///

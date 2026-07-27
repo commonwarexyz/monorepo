@@ -1435,6 +1435,97 @@ mod compact_variable_mmr {
         });
     }
 
+    /// A valid payload that authenticates a different root than the client's target fails
+    /// client validation, and sync completes once a payload for the requested root arrives.
+    #[test_traced("WARN")]
+    fn test_compact_sync_recovers_after_divergent_root() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-divergent-{}", context.next_u64());
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&format!("{suffix}-a"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().end,
+            };
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+
+            // A second source with the same shape but different contents commits the same
+            // leaf count under a different root.
+            let divergent = SourceDb::init(
+                context.child("divergent"),
+                source_config(&format!("{suffix}-b"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = divergent
+                .new_batch()
+                .set(sha256::Digest::from([4; 32]), vec![10, 11, 12])
+                .merkleize(&divergent, Some(vec![2]), Location::new(1))
+                .await;
+            let (divergent, _) = divergent.apply_batch(batch).await.unwrap();
+            let divergent = divergent.commit().await.unwrap();
+            let divergent_target = sync::compact::Target {
+                root: divergent.root(),
+                leaf_count: divergent.bounds().end,
+            };
+            assert_eq!(divergent_target.leaf_count, target.leaf_count);
+            assert_ne!(divergent_target.root, target.root);
+            let divergent = Arc::new(divergent);
+            let divergent_state =
+                sync::compact::Resolver::get_compact_state(&divergent, divergent_target)
+                    .await
+                    .unwrap()
+                    .state;
+
+            // The divergent payload fails client validation; the retry completes with the
+            // payload for the requested root.
+            let states = Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                divergent_state.into(),
+                good_state.into(),
+            ])));
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: SequenceResolver {
+                    states: states.clone(),
+                },
+                target: target.clone(),
+                db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert!(
+                states.lock().is_empty(),
+                "the divergent payload must be rejected and retried past"
+            );
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+            let divergent =
+                Arc::try_unwrap(divergent).unwrap_or_else(|_| panic!("single divergent ref"));
+            divergent.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -1620,7 +1711,7 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_full_source_rejects_stale_target() {
+    fn test_compact_full_source_serves_below_tip_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-stale-full-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -1633,7 +1724,7 @@ mod compact_variable_mmr {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let window_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -1649,15 +1740,124 @@ mod compact_variable_mmr {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
-            assert_ne!(stale_target, current_target);
+            assert_ne!(window_target, current_target);
 
+            // A target below the tip stays servable: a syncing client's target trails the
+            // source by its fetch latency, and the payload authenticates against the older
+            // root.
             let source = Arc::new(source);
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
+                resolver: source.clone(),
+                target: window_target.clone(),
+                db_config: window_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.root(), window_target.root);
+            assert_eq!(client.get_metadata(), Some(vec![1]));
+            client.destroy().await.unwrap();
+
+            // A target past the tip is refused so the client refetches once the source
+            // catches up.
+            let ahead_target = sync::compact::Target {
+                root: current_target.root,
+                leaf_count: Location::new(*current_target.leaf_count + 1),
+            };
             let result =
-                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+                sync::compact::Resolver::get_compact_state(&source, ahead_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == stale_target && current == current_target
+                    if requested == ahead_target && current == current_target
+            ));
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    /// A full source declines targets it can no longer authenticate instead of reporting them as
+    /// storage failures: the commit was pruned away, or the leaf count never named a commit.
+    #[test_traced("WARN")]
+    fn test_compact_full_source_declines_unservable_target() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-unservable-{}", context.next_u64());
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+
+            // Commit repeatedly so the log spans more than one section, declaring a floor on the
+            // last batch that lets `prune` drop the section holding the earliest commit.
+            let prune_loc = Location::new(8);
+            let mut early_target = None;
+            let mut late_target = None;
+            for i in 0..8u64 {
+                let floor = if i == 7 { prune_loc } else { Location::new(0) };
+                let batch = source
+                    .new_batch()
+                    .set(sha256::Digest::from([i as u8; 32]), vec![i as u8])
+                    .merkleize(&source, Some(vec![i as u8]), floor)
+                    .await;
+                let (applied, _) = source.apply_batch(batch).await.unwrap();
+                source = applied.commit().await.unwrap();
+                let target = sync::compact::Target {
+                    root: source.root(),
+                    leaf_count: source.bounds().end,
+                };
+                match i {
+                    0 => early_target = Some(target),
+                    6 => late_target = Some(target),
+                    _ => {}
+                }
+            }
+            let early_target = early_target.unwrap();
+            let late_target = late_target.unwrap();
+
+            let source = source.prune(prune_loc).await.unwrap();
+            let retained = source.bounds();
+            assert!(retained.start > Location::new(*early_target.leaf_count - 1));
+            assert!(retained.start <= Location::new(*late_target.leaf_count - 1));
+            let current_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: retained.end,
+            };
+            let source = Arc::new(source);
+
+            // The commit authenticating the earliest target is gone, so the source declines and
+            // the client refetches a target it can still serve.
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, early_target.clone()).await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == early_target && current == current_target
+            ));
+
+            // A below-tip target still inside the retained window keeps serving.
+            let fetched = sync::compact::Resolver::get_compact_state(&source, late_target.clone())
+                .await
+                .expect("retained target should serve");
+            assert_eq!(fetched.state.leaf_count, late_target.leaf_count);
+
+            // A leaf count whose preceding operation is a set rather than a commit does not
+            // describe this source's history, so it is declined rather than reported as an error.
+            let non_commit_target = sync::compact::Target {
+                root: current_target.root,
+                leaf_count: Location::new(*current_target.leaf_count - 1),
+            };
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, non_commit_target.clone())
+                    .await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == non_commit_target && current == current_target
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -1757,7 +1957,6 @@ mod compact_variable_mmr {
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
-
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
@@ -1779,23 +1978,23 @@ mod compact_variable_mmr {
                     .await
                     .unwrap(),
             );
-            let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("stale_client"),
+            // A retained below-tip witness stays servable after the tip advances past it.
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let window: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
                 resolver: source.clone(),
-                target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale"), &context),
+                target: target1.clone(),
+                db_config: window_cfg,
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
             })
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Resolver(sync::compact::ServeError::StaleTarget {
-                    requested,
-                    current
-                })) if requested == target2 && current == target3
-            ));
+            .await
+            .unwrap();
+            assert_eq!(window.root(), target1.root);
+            assert_eq!(window.get_metadata(), Some(metadata1.clone()));
+            assert_eq!(window.inactivity_floor_loc(), floor1);
+            window.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
@@ -2192,6 +2391,97 @@ mod compact_variable_mmb {
         });
     }
 
+    /// A valid payload that authenticates a different root than the client's target fails
+    /// client validation, and sync completes once a payload for the requested root arrives.
+    #[test_traced("WARN")]
+    fn test_compact_sync_recovers_after_divergent_root() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-divergent-{}", context.next_u64());
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&format!("{suffix}-a"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: source.bounds().end,
+            };
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+
+            // A second source with the same shape but different contents commits the same
+            // leaf count under a different root.
+            let divergent = SourceDb::init(
+                context.child("divergent"),
+                source_config(&format!("{suffix}-b"), &context),
+            )
+            .await
+            .unwrap();
+            let batch = divergent
+                .new_batch()
+                .set(sha256::Digest::from([4; 32]), vec![10, 11, 12])
+                .merkleize(&divergent, Some(vec![2]), Location::new(1))
+                .await;
+            let (divergent, _) = divergent.apply_batch(batch).await.unwrap();
+            let divergent = divergent.commit().await.unwrap();
+            let divergent_target = sync::compact::Target {
+                root: divergent.root(),
+                leaf_count: divergent.bounds().end,
+            };
+            assert_eq!(divergent_target.leaf_count, target.leaf_count);
+            assert_ne!(divergent_target.root, target.root);
+            let divergent = Arc::new(divergent);
+            let divergent_state =
+                sync::compact::Resolver::get_compact_state(&divergent, divergent_target)
+                    .await
+                    .unwrap()
+                    .state;
+
+            // The divergent payload fails client validation; the retry completes with the
+            // payload for the requested root.
+            let states = Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                divergent_state.into(),
+                good_state.into(),
+            ])));
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: SequenceResolver {
+                    states: states.clone(),
+                },
+                target: target.clone(),
+                db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert!(
+                states.lock().is_empty(),
+                "the divergent payload must be rejected and retried past"
+            );
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+            let divergent =
+                Arc::try_unwrap(divergent).unwrap_or_else(|_| panic!("single divergent ref"));
+            divergent.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -2380,7 +2670,7 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_full_source_rejects_stale_target() {
+    fn test_compact_full_source_serves_below_tip_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-stale-full-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -2393,7 +2683,7 @@ mod compact_variable_mmb {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let window_target = sync::compact::Target {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -2409,15 +2699,124 @@ mod compact_variable_mmb {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
-            assert_ne!(stale_target, current_target);
+            assert_ne!(window_target, current_target);
 
+            // A target below the tip stays servable: a syncing client's target trails the
+            // source by its fetch latency, and the payload authenticates against the older
+            // root.
             let source = Arc::new(source);
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
+                resolver: source.clone(),
+                target: window_target.clone(),
+                db_config: window_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.root(), window_target.root);
+            assert_eq!(client.get_metadata(), Some(vec![1]));
+            client.destroy().await.unwrap();
+
+            // A target past the tip is refused so the client refetches once the source
+            // catches up.
+            let ahead_target = sync::compact::Target {
+                root: current_target.root,
+                leaf_count: Location::new(*current_target.leaf_count + 1),
+            };
             let result =
-                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+                sync::compact::Resolver::get_compact_state(&source, ahead_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == stale_target && current == current_target
+                    if requested == ahead_target && current == current_target
+            ));
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    /// A full source declines targets it can no longer authenticate instead of reporting them as
+    /// storage failures: the commit was pruned away, or the leaf count never named a commit.
+    #[test_traced("WARN")]
+    fn test_compact_full_source_declines_unservable_target() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-unservable-{}", context.next_u64());
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+
+            // Commit repeatedly so the log spans more than one section, declaring a floor on the
+            // last batch that lets `prune` drop the section holding the earliest commit.
+            let prune_loc = Location::new(8);
+            let mut early_target = None;
+            let mut late_target = None;
+            for i in 0..8u64 {
+                let floor = if i == 7 { prune_loc } else { Location::new(0) };
+                let batch = source
+                    .new_batch()
+                    .set(sha256::Digest::from([i as u8; 32]), vec![i as u8])
+                    .merkleize(&source, Some(vec![i as u8]), floor)
+                    .await;
+                let (applied, _) = source.apply_batch(batch).await.unwrap();
+                source = applied.commit().await.unwrap();
+                let target = sync::compact::Target {
+                    root: source.root(),
+                    leaf_count: source.bounds().end,
+                };
+                match i {
+                    0 => early_target = Some(target),
+                    6 => late_target = Some(target),
+                    _ => {}
+                }
+            }
+            let early_target = early_target.unwrap();
+            let late_target = late_target.unwrap();
+
+            let source = source.prune(prune_loc).await.unwrap();
+            let retained = source.bounds();
+            assert!(retained.start > Location::new(*early_target.leaf_count - 1));
+            assert!(retained.start <= Location::new(*late_target.leaf_count - 1));
+            let current_target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: retained.end,
+            };
+            let source = Arc::new(source);
+
+            // The commit authenticating the earliest target is gone, so the source declines and
+            // the client refetches a target it can still serve.
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, early_target.clone()).await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == early_target && current == current_target
+            ));
+
+            // A below-tip target still inside the retained window keeps serving.
+            let fetched = sync::compact::Resolver::get_compact_state(&source, late_target.clone())
+                .await
+                .expect("retained target should serve");
+            assert_eq!(fetched.state.leaf_count, late_target.leaf_count);
+
+            // A leaf count whose preceding operation is a set rather than a commit does not
+            // describe this source's history, so it is declined rather than reported as an error.
+            let non_commit_target = sync::compact::Target {
+                root: current_target.root,
+                leaf_count: Location::new(*current_target.leaf_count - 1),
+            };
+            let result =
+                sync::compact::Resolver::get_compact_state(&source, non_commit_target.clone())
+                    .await;
+            assert!(matches!(
+                result,
+                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                    if requested == non_commit_target && current == current_target
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -2517,7 +2916,6 @@ mod compact_variable_mmb {
             let target3 = source.target();
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
-
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
@@ -2540,23 +2938,23 @@ mod compact_variable_mmb {
                     .unwrap(),
             );
             assert_eq!(source.target(), target3);
-            let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("stale_client"),
+            // A retained below-tip witness stays servable after the tip advances past it.
+            let window_cfg = client_config(&format!("{suffix}-window"), &context);
+            let window: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("window_client"),
                 resolver: source.clone(),
-                target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale"), &context),
+                target: target1.clone(),
+                db_config: window_cfg,
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
             })
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Resolver(sync::compact::ServeError::StaleTarget {
-                    requested,
-                    current
-                })) if requested == target2 && current == target3
-            ));
+            .await
+            .unwrap();
+            assert_eq!(window.root(), target1.root);
+            assert_eq!(window.get_metadata(), Some(metadata1.clone()));
+            assert_eq!(window.inactivity_floor_loc(), floor1);
+            window.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();

@@ -399,13 +399,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         items_per_blob: NonZeroU64,
         metrics: Metrics<E>,
     ) -> Self {
+        // A prune justified by the in-memory barrier persists no watermark, so a crash can
+        // leave the recovered watermark behind the pruning boundary. Pruned positions were
+        // durably justified before removal, so the boundary is a durable floor.
+        let watermark = checkpoint
+            .watermark()
+            .expect("recovery watermark must exist after init");
         Self {
             blobs,
-            barrier: Barrier::new(
-                checkpoint
-                    .watermark()
-                    .expect("recovery watermark must exist after init"),
-            ),
+            barrier: Barrier::new(watermark.max(bounds.start)),
             checkpoint,
             bounds,
             items_per_blob,
@@ -1098,11 +1100,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // survivors above the boundary: removal may be interrupted, and recovery truncates at
         // the first torn item, so an unsynced survivor could discard every synced blob
         // behind it.
-        let sync = self.blobs.start_sync().await;
-        sync.await?;
-        self.barrier.mark_durable(self.bounds.end);
-
+        //
+        // If the barrier already covers the new boundary, skip the sync. Items below the
+        // barrier are durable and cannot tear, recovery truncates only above it, and the
+        // caller justified the boundary with durable data (see [Mutable::prune]).
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
+        if self.barrier.size() < new_boundary {
+            let sync = self.blobs.start_sync().await;
+            sync.await?;
+            self.barrier.mark_durable(self.bounds.end);
+        }
+
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
@@ -1113,6 +1121,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         );
 
         Ok((self, true))
+    }
+
+    /// The size below which every item is proven durable.
+    pub(crate) fn barrier(&mut self) -> u64 {
+        self.barrier.size()
     }
 
     /// See [Journal::destroy].
@@ -1705,6 +1718,11 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
+    }
+
+    fn durable(&mut self) -> Range<u64> {
+        let start = super::Contiguous::bounds(self).start;
+        start..self.0.barrier()
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -4146,12 +4164,48 @@ mod tests {
         });
     }
 
-    /// A crash right after pruning must not lose retained items that were appended but never
-    /// synced. Blob removal is durable, so prune makes all data durable first: otherwise the
-    /// unsynced tail would vanish with the crash and recovery would truncate the journal to
-    /// empty even though the removal survived.
+    /// A retained flush failure must fail a prune even when the barrier covers the
+    /// boundary and the prune performs no sync of its own: the non-blocking observation
+    /// of completed syncs is then the only place the failure surfaces.
     #[test_traced]
-    fn test_fixed_recovery_prune_crash_retains_unsynced_tail() {
+    fn test_fixed_prune_surfaces_retained_failed_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg)
+                .await
+                .unwrap();
+
+            // Make two full blobs durable, proving the barrier past the boundary.
+            for i in 0..6u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Fail a flush of fresh appends, dropping the returned handle unobserved.
+            for i in 6..8u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(1.0),
+                ..Default::default()
+            };
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            // The barrier covers the boundary, so the prune skips its own sync and must
+            // surface the retained failure instead of removing anything.
+            assert!(matches!(journal.prune(3).await, Err(Error::Runtime(_))));
+        });
+    }
+
+    /// A crash right after pruning must retain every durable item: blob removal is durable,
+    /// and recovery must not truncate below the barrier even though the never-synced tail
+    /// vanishes with the crash. The barrier covered the boundary, so the prune performed no
+    /// sync of its own and the unsealed tail was never guaranteed to survive.
+    #[test_traced]
+    fn test_fixed_recovery_prune_crash_retains_durable_items() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
@@ -4169,7 +4223,8 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
 
-            // Prune away blob 0, then crash before any sync.
+            // Prune away blob 0, then crash before any sync: the sealed blob survives, the
+            // never-synced tail does not.
             let (journal, pruned) = journal.prune(10).await.unwrap();
             assert!(pruned);
             drop(journal);
@@ -4177,8 +4232,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 10..25);
-            for i in 10..25u64 {
+            assert_eq!(journal.bounds(), 10..20);
+            for i in 10..20u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
             journal.destroy().await.unwrap();

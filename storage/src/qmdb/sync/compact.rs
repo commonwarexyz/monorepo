@@ -76,7 +76,7 @@ use commonware_utils::{
     sync::{AsyncRwLock, TracedAsyncRwLock},
 };
 use futures::future::{Either, pending};
-use std::{future::Future, num::NonZeroU64, sync::Arc};
+use std::{future::Future, num::NonZeroU64, ops::Range, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
 ///
@@ -265,7 +265,8 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
-    /// The caller requested a target different from the source's current witness.
+    /// The source cannot serve the requested target: it is past the source's tip, diverges
+    /// from the source's retained state, or fell outside the retained window.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]
     StaleTarget {
         requested: Target<F, D>,
@@ -633,36 +634,52 @@ where
     })
 }
 
-async fn fetch_state_from_full_source<F, Op, D, Current, Hist, HistFut, Pins, PinsFut>(
+async fn fetch_state_from_full_source<F, Op, D, Source, Hist, HistFut, Pins, PinsFut>(
     target: Target<F, D>,
-    current_target: Current,
+    source: Source,
     historical_proof: Hist,
     pinned_nodes_at: Pins,
 ) -> Result<State<F, Op, D>, ServeError<F, D>>
 where
     F: Family,
     D: Digest,
-    Current: FnOnce() -> Target<F, D>,
+    Source: FnOnce() -> (D, Range<Location<F>>),
     Hist: FnOnce(Location<F>, Location<F>) -> HistFut,
     HistFut: Future<Output = Result<(Proof<F, D>, Vec<Op>), qmdb::Error<F>>>,
     Pins: FnOnce(Location<F>) -> PinsFut,
     PinsFut: Future<Output = Result<Vec<D>, qmdb::Error<F>>>,
 {
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
-    // from the current tip commit plus the frontier pins at the requested tree size.
+    // from the historical commit proof plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
-    let current = current_target();
-    if target.root != current.root || target.leaf_count != current.leaf_count {
+    let (root, provable) = source();
+    let current = Target::new(root, provable.end);
+    let leaf_count = target.leaf_count;
+    let last_commit_loc = Location::new(*leaf_count - 1);
+    // Serve any commit the source can still prove: a syncing client's target trails the server by
+    // its fetch latency, and the client verifies every payload against its own target root, so
+    // divergence surfaces as a client-side verification failure and a refetch. Targets past the
+    // tip or below the provable window are declined so the client refetches a servable one.
+    if leaf_count > current.leaf_count || last_commit_loc < provable.start {
         return Err(ServeError::StaleTarget {
             requested: target,
             current,
         });
     }
-    let leaf_count = target.leaf_count;
-    let last_commit_loc = Location::new(*leaf_count - 1);
+    // The window check keeps both the commit and its Merkle nodes provable, so pruning cannot
+    // reach the reads below. `HistoricalFloorPruned` therefore means only that the operation
+    // preceding `leaf_count` is not a commit, which a source reaches honestly after a rewind and
+    // regrow. That target does not describe this source's history, so it is declined rather than
+    // failed.
     let (last_commit_proof, mut operations) = historical_proof(leaf_count, last_commit_loc)
         .await
-        .map_err(ServeError::Database)?;
+        .map_err(|err| match err {
+        qmdb::Error::HistoricalFloorPruned(_) => ServeError::StaleTarget {
+            requested: target.clone(),
+            current: current.clone(),
+        },
+        err => ServeError::Database(err),
+    })?;
     // Compact sync always authenticates exactly the final commit leaf.
     let last_commit_op =
         operations
@@ -704,7 +721,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(self.root(), self.bounds().end),
+                    || (self.root(), self.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -743,7 +760,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -779,7 +796,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -822,7 +839,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(self.root(), self.bounds().end),
+                    || (self.root(), self.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -864,7 +881,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -903,7 +920,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || Target::new(db.root(), db.bounds().end),
+                    || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -920,8 +937,8 @@ macro_rules! impl_compact_resolver_immutable {
     };
 }
 
-// Resolver impls for compact keyless databases. These already persist a compact witness, so serving
-// is just a target check over the current witness rather than reconstructing anything from history.
+// Resolver impls for compact keyless databases. These persist a witness journal, so serving
+// reads a retained witness entry rather than reconstructing anything from history.
 macro_rules! impl_compact_resolver_compact_keyless {
     ($db:ident, $op:ident) => {
         impl<F, E, V, H, C, S> Resolver for Arc<$db<F, E, V, H, C, S>>
@@ -943,7 +960,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target).map(Into::into)
+                self.compact_state(target).await.map(Into::into)
             }
         }
         impl_compact_resolver_compact_keyless!(@locked $db, $op, AsyncRwLock);
@@ -971,7 +988,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
 
@@ -996,7 +1013,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
     };
@@ -1026,7 +1043,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target).map(Into::into)
+                self.compact_state(target).await.map(Into::into)
             }
         }
         impl_compact_resolver_compact_immutable!(@locked $db, $op, AsyncRwLock);
@@ -1055,7 +1072,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
 
@@ -1081,7 +1098,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).map(Into::into)
+                db.compact_state(target).await.map(Into::into)
             }
         }
     };

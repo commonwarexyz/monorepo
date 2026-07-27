@@ -40,7 +40,7 @@ use crate::{
         sync::compact as compact_sync,
     },
 };
-use commonware_codec::{Encode, EncodeShared, Read};
+use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -432,18 +432,62 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// Return the compact-sync state for `target`, or a stale-target error if the source's
-    /// current witness no longer matches.
-    pub(crate) fn compact_state(
+    /// Return the compact-sync state for `target`, or a stale-target error if no retained
+    /// witness commits it.
+    pub(crate) async fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
     ) -> CompactStateResult<F, K, V, H::Digest>
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        // Hold the witness lock only long enough to snapshot the entry. Decode outside it so
-        // concurrent readers do not contend.
-        self.compact_snapshot().compact_state(target)
+        // Hold the witness lock only long enough to snapshot the tip entry; decode outside
+        // it so concurrent readers do not contend. A target below the tip is served from
+        // the retained witness journal: a syncing client's target trails the source by its
+        // fetch latency, and the client verifies the payload against its own target root.
+        // [`witness::Store::prune`] bounds how far back this reaches.
+        let tip = self
+            .witness
+            .with(|w| (target.leaf_count == w.leaf_count()).then(|| w.witness.clone()));
+        let entry = match tip {
+            Some(entry) => entry,
+            // While an import is pending the journal still holds the previous partition's
+            // contents, so only the cached tip is servable.
+            None if self.witness.import_pending() => {
+                return Err(compact_sync::ServeError::StaleTarget {
+                    requested: target,
+                    current: self.target(),
+                });
+            }
+            // A below-tip entry is this db's own durable write: reads are checksummed, so
+            // whatever decodes is what was written, and the client verifies every payload
+            // against its own target root. A divergent target at a retained leaf count
+            // therefore surfaces as client-side rejection, not a serve-time check.
+            None => self
+                .witness
+                .entry_at(target.leaf_count)
+                .await
+                .map_err(compact_sync::ServeError::Database)?
+                .ok_or_else(|| compact_sync::ServeError::StaleTarget {
+                    requested: target.clone(),
+                    current: self.target(),
+                })?,
+        };
+        let Witness {
+            op_bytes,
+            proof: last_commit_proof,
+            pinned_nodes,
+        } = entry;
+        let op = Operation::<F, K, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
+            .map_err(|_| {
+                compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
+            })?;
+        Ok(compact_sync::State {
+            leaf_count: target.leaf_count,
+            pinned_nodes,
+            last_commit_op: op,
+            last_commit_proof,
+        })
     }
 
     /// Capture an owned immutable [StateSnapshot] of the database's durable compact state.
@@ -720,13 +764,10 @@ mod tests {
                 Err(compact_sync::ServeError::StaleTarget { current, .. }) if current == captured
             ));
 
-            // The live serve path (now delegating through a fresh snapshot) serves the new
-            // commit and rejects the old target.
-            assert!(db.compact_state(advanced).is_ok());
-            assert!(matches!(
-                db.compact_state(captured),
-                Err(compact_sync::ServeError::StaleTarget { .. })
-            ));
+            // The live serve path serves the new commit and reaches the captured target
+            // through the retained witness journal.
+            assert!(db.compact_state(advanced).await.is_ok());
+            assert!(db.compact_state(captured).await.is_ok());
         });
     }
 

@@ -1163,8 +1163,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         metrics.update(bounds.end, bounds.start, items_per_blob);
 
         // The offsets watermark is this journal's recovery anchor. Init validated it against
-        // both journals, so it is a proven size to start from.
-        let barrier = Barrier::new(offsets.recovery_watermark());
+        // both journals, so it is a proven size to start from. A prune that collapses the
+        // journal persists no watermark and an empty-aligned reopen skips the offsets sync
+        // that would heal it, so the recovered watermark can trail the pruning boundary.
+        // Pruned positions were durably justified before removal, so the boundary is a
+        // durable floor.
+        let barrier = Barrier::new(offsets.recovery_watermark().max(bounds.start));
         Ok(Self {
             blobs,
             offsets,
@@ -1546,8 +1550,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Ok((self, false));
         }
 
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
-
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
         // durable, so pruning without this sync could leave a recovered journal whose
@@ -1559,10 +1561,17 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // end behind its start are unrecoverable because the data needed to rebuild the missing
         // entries is about to be removed. Data is flushed first, matching the ordering every
         // other durability path maintains.
-        let data_sync = self.blobs.start_sync().await;
-        data_sync.await?;
-        self.offsets = self.offsets.commit().await?;
-        self.barrier.mark_durable(self.bounds.end);
+        //
+        // If the barrier already covers the new boundary, skip the sync. Data and offsets
+        // below the barrier are durable, and the caller justified the boundary with durable
+        // data (see [Mutable::prune]).
+        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        if self.barrier.size() < new_boundary {
+            let data_sync = self.blobs.start_sync().await;
+            data_sync.await?;
+            self.offsets = self.offsets.commit().await?;
+            self.barrier.mark_durable(self.bounds.end);
+        }
 
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
@@ -2445,6 +2454,11 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::prune(self, min_position).await
     }
 
+    fn durable(&mut self) -> Range<u64> {
+        let start = Contiguous::bounds(self).start;
+        start..self.0.barrier.size()
+    }
+
     async fn rewind(self, size: u64) -> Result<Self, Error> {
         Self::rewind(self, size).await
     }
@@ -2625,6 +2639,74 @@ mod tests {
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// With the barrier covering the boundary, a prune completes without starting (or
+    /// waiting on) any sync, including the offsets commit, and the durable prefix
+    /// survives reopen.
+    #[test_traced]
+    fn test_prune_skips_sync_when_barrier_covers_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-prune-fast".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let make = |pending: PendingSyncs| {
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending,
+                    },
+                    cfg.clone(),
+                )
+            };
+
+            // Make two full sections durable, proving the barrier past the boundary.
+            let mut journal = Box::new(
+                drive_pending_syncs(&pending, make(pending.clone()))
+                    .await
+                    .unwrap(),
+            );
+            drive_pending_syncs(
+                &pending,
+                journal.append_many(Many::Flat(&[0, 1, 2, 3, 4, 5])),
+            )
+            .await
+            .unwrap();
+            let mut journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // Park a newer sync covering a fresh append.
+            drive_pending_syncs(&pending, journal.append(&6))
+                .await
+                .unwrap();
+            let (journal, parked) = journal.start_sync().await.unwrap();
+
+            // The barrier covers the boundary, so the prune must neither start a new sync
+            // nor wait on the parked one.
+            let starts_before = pending.starts();
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(pruned);
+            assert_eq!(pending.starts(), starts_before);
+            assert_eq!(journal.bounds().start, 3);
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, parked).await.unwrap();
+            pending.unblock();
+            drop(journal);
+
+            // The pruned boundary and the released append both survive reopen.
+            let journal = make(pending.clone()).await.unwrap();
+            assert_eq!(journal.bounds(), 3..7);
+            for i in 3..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
         });
     }
 

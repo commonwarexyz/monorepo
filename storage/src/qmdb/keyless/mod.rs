@@ -266,6 +266,14 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
+    /// Return the range of locations this db can prove.
+    ///
+    /// This is [`Self::bounds`] narrowed to what the Merkle structure still retains, which a sync
+    /// can leave ahead of the operations log's own pruning boundary.
+    pub fn provable_bounds(&self) -> std::ops::Range<Location<F>> {
+        self.journal.provable_start()..Location::new(self.journal.bounds().end)
+    }
+
     /// Update state gauges from the current database state.
     fn update_metrics(&self) {
         let bounds = self.journal.bounds();
@@ -397,6 +405,13 @@ where
                 loc,
                 self.inactivity_floor_loc,
             ));
+        }
+        // Recovery rewinds to the last durable commit, which may sit below the boundary
+        // while the floor-declaring commit is unflushed (pruning it away would leave the
+        // journal unopenable). Commit first so recovery always lands at or above the
+        // boundary.
+        if self.journal.durable().end <= *self.last_commit_loc {
+            self.journal = self.journal.commit().await?;
         }
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();

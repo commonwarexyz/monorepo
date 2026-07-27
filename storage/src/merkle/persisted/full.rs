@@ -18,7 +18,7 @@ use crate::{
     journal::{
         Error as JError,
         contiguous::{
-            Contiguous, Many,
+            Contiguous, Many, Mutable,
             fixed::{Config as JConfig, Journal},
         },
     },
@@ -199,6 +199,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return the total number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
         self.mem.leaves()
+    }
+
+    /// The positions of durably persisted nodes.
+    pub(crate) fn durable(&mut self) -> std::ops::Range<Position<F>> {
+        let durable = self.journal.durable();
+        Position::new(durable.start)..Position::new(durable.end)
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -687,7 +693,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
     ///
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
-    /// state, requiring it sync the structure to write any potential unsynced updates.
+    /// state, syncing the structure first unless the barrier already covers the prune
+    /// position. Unsynced nodes above the barrier are not guaranteed to survive a crash.
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
@@ -701,7 +708,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self = self.sync().await?;
+        // Once the durable end covers the prune position, the durable journal prefix always
+        // covers the metadata boundary written below, so the flush is skipped. Nodes past
+        // the durable end stay cached and are not guaranteed to survive a crash.
+        if self.durable().end < pos {
+            self = self.sync().await?;
+        }
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.

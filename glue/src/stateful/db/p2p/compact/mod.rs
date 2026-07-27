@@ -11,3 +11,5 @@ mod handler;
 
 mod mailbox;
 pub use mailbox::{Mailbox, ResponseDropped};
+
+mod metrics;

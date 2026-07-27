@@ -6,7 +6,7 @@
 //! bookkeeping:
 //!
 //! 1. Before each `propose` or `verify`, the actor forks unmerkleized batches
-//!    from the parent block's pending state (or from committed database state
+//!    from the parent block's pending state (or from applied database state
 //!    if the parent has been finalized).
 //! 2. The application executes against those batches and returns merkleized
 //!    results, which the actor stores as a new pending tip keyed by the
@@ -280,21 +280,23 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 
-    /// Observe a finalized block after it is reflected in durable state.
+    /// Observe a finalized block after it is reflected in the database set.
     ///
     /// Once the database set is ready, the wrapper calls this for every
     /// finalized block it receives from marshal before releasing that block's
     /// marshal acknowledgement. Blocks applied through normal processing are
-    /// reported after [`DatabaseSet::finalize`] succeeds. Blocks already
-    /// reflected by startup reconciliation or completed state sync are reported
-    /// without reapplying them.
+    /// reported after [`DatabaseSet::finalize`] succeeds: the block's state is
+    /// readable from the databases, but its flush to disk may still be in
+    /// flight. Blocks already reflected by startup reconciliation or completed
+    /// state sync are reported without reapplying them.
     ///
     /// During peer state sync, finalized blocks observed before sync completes
     /// are used to update the sync target and are not reported here.
     ///
     /// Inherited from marshal's reporter stream, this is an at-least-once notification:
-    /// a crash after this hook runs but before the marshal acknowledgement is
-    /// durable may cause the same block to be reported again after restart.
+    /// a crash after this hook runs but before the block's flush and the marshal
+    /// acknowledgement are durable may cause the same block to be reported again
+    /// after restart.
     ///
     /// # Panics
     ///

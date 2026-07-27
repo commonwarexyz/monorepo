@@ -1,7 +1,7 @@
 //! [`ManagedDb`] implementation for QMDB [`current`](commonware_storage::qmdb::current) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to committed state. This module provides wrapper types
+//! read-through to applied state. This module provides wrapper types
 //! that capture a [`Shared`] database handle alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
@@ -13,7 +13,7 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     index::{
@@ -107,13 +107,13 @@ where
         self
     }
 
-    /// Read a value by key, falling back to committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
@@ -359,13 +359,13 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
@@ -529,9 +529,9 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -630,9 +630,9 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -809,9 +809,9 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -915,9 +915,9 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -1190,11 +1190,13 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    /// Finalize `batch` into `db`, boxing the future ([`ManagedDb::finalize`] embeds the
-    /// database in its state machine).
+    /// Finalize `batch` into `db` and wait for the deferred flush, boxing the future
+    /// ([`ManagedDb::finalize`] embeds the database in its state machine).
     #[boxed]
     async fn finalize<D: ManagedDb<deterministic::Context>>(db: D, batch: D::Merkleized) -> D {
-        D::finalize(db, batch).await.unwrap()
+        let (db, sync) = D::finalize(db, batch).await.unwrap();
+        sync.await.expect("finalize flush failed");
+        db
     }
 
     type FixedDb = fixed::Db<
