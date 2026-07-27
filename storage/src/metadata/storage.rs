@@ -1,13 +1,13 @@
 use super::{Config, Error};
-use crate::Context;
+use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, IoBufMut,
+    Blob, BufMut, Error as RError, Handle, IoBufMut,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
-use futures::future::try_join_all;
+use futures::{FutureExt as _, future::try_join_all};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -66,6 +66,11 @@ struct State<B: Blob, K: Span> {
     next_version: u64,
     key_order_changed: u64,
     blobs: [Wrapper<B, K>; 2],
+    /// The completion of the last started sync, until observed.
+    ///
+    /// At most one sync is ever in flight: a new sync always targets the copy the pending sync
+    /// left as last-known-durable, so it must first prove the pending sync completed.
+    pending: Option<SyncCompletion>,
 }
 
 /// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
@@ -126,6 +131,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 next_version,
                 key_order_changed: next_version, // rewrite on startup because we don't have a diff record
                 blobs: [left_wrapper, right_wrapper],
+                pending: None,
             },
 
             sync_rewrites,
@@ -313,8 +319,34 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         }
     }
 
+    /// Wait for an in-flight sync started by [Metadata::start_sync], surfacing its failure.
+    async fn wait_for_pending(&mut self) -> Result<(), RError> {
+        // A failure is surfaced without writing: the failed copy's on-disk state is unknown,
+        // and a write to the other (only durable) copy could destroy both. The consuming
+        // caller destroys the store on the error.
+        let Some(completion) = &self.state.pending else {
+            return Ok(());
+        };
+        completion.clone().await?;
+        self.state.pending = None;
+        Ok(())
+    }
+
     /// See [Metadata::sync].
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), RError> {
+        self.wait_for_pending().await?;
+        self.write_next_version(false).await?;
+        Ok(())
+    }
+
+    /// See [Metadata::start_sync].
+    async fn start_sync(&mut self) -> Result<Handle<()>, RError> {
+        self.wait_for_pending().await?;
+        self.write_next_version(true).await
+    }
+
+    /// Write and persist the next version of the store to the target blob.
+    async fn write_next_version(&mut self, pipelined: bool) -> Result<Handle<()>, RError> {
         // Extract values we need
         let cursor = self.state.cursor;
         let next_version = self.state.next_version;
@@ -336,7 +368,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // cursor already points at a durable copy of the latest state and
         // writing another version would only rotate blobs.
         if key_order_changed < past_version && self.state.blobs[target_cursor].modified.is_empty() {
-            return Ok(());
+            return Ok(Handle::ready(Ok(())));
         }
 
         // Update the state.
@@ -404,7 +436,12 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                     ),
                 ]);
             try_join_all(writes).await?;
-            target.blob.sync().await?;
+            let sync = if pipelined {
+                Some(target.blob.start_sync().await)
+            } else {
+                target.blob.sync().await?;
+                None
+            };
 
             // Clear modified keys to avoid writing the same data
             target.modified.clear();
@@ -413,7 +450,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             target.version = next_version;
             target.data = data.into_mut_with_pool(self.context.storage_buffer_pool());
             self.sync_overwrites.inc();
-            return Ok(());
+            return Ok(self.record_pending(sync));
         }
 
         // Clear modified keys to avoid writing the same data
@@ -455,15 +492,24 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
         // Shrinking rewrites must also persist the resize, so they need a full sync.
         let next_data = next_data.freeze();
-        if next_data.len() < target_data_len {
+        let shrinking = next_data.len() < target_data_len;
+        let sync = if pipelined {
+            target.blob.write_at(0, next_data.clone()).await?;
+            if shrinking {
+                target.blob.resize(next_data.len() as u64).await?;
+            }
+            Some(target.blob.start_sync().await)
+        } else if shrinking {
             target.blob.write_at(0, next_data.clone()).await?;
             target.blob.resize(next_data.len() as u64).await?;
             target.blob.sync().await?;
+            None
         } else {
             // Non-shrinking rewrites are a single write and can use range-scoped
             // durability.
             target.blob.write_at_sync(0, next_data.clone()).await?;
-        }
+            None
+        };
 
         // Update blob state
         target.version = next_version;
@@ -471,11 +517,25 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         target.data = next_data.into_mut_with_pool(self.context.storage_buffer_pool());
 
         self.sync_rewrites.inc();
-        Ok(())
+        Ok(self.record_pending(sync))
+    }
+
+    /// Record a started blob sync (if any) as the pending sync and return its observer handle.
+    fn record_pending(&mut self, sync: Option<Handle<()>>) -> Handle<()> {
+        let Some(sync) = sync else {
+            return Handle::ready(Ok(()));
+        };
+        let completion: SyncCompletion = sync.boxed().shared();
+        let handle = Handle::from_future(completion.clone());
+        self.state.pending = Some(completion);
+        handle
     }
 
     /// See [Metadata::destroy].
-    async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(mut self) -> Result<(), Error> {
+        if let Some(pending) = self.state.pending.take() {
+            let _ = pending.await;
+        }
         let state = self.state;
         for (i, wrapper) in state.blobs.into_iter().enumerate() {
             drop(wrapper.blob);
@@ -587,6 +647,18 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0.sync().await?;
         Ok(self)
+    }
+
+    /// Atomically begin committing the current state of [Metadata], returning a completion handle.
+    ///
+    /// Awaiting the returned [Handle] provides the same guarantee as [Self::sync]. A started
+    /// sync's failure surfaces on the handle and again on the next sync, which fails (destroying
+    /// the store) without writing. At most one sync is in flight: a new call writes nothing
+    /// until the prior sync completes. Dropping the handle neither cancels the sync nor loses a
+    /// failure.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let handle = self.0.start_sync().await?;
+        Ok((self, handle))
     }
 
     /// Remove the underlying blobs for this [Metadata].

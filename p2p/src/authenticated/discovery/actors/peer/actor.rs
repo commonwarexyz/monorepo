@@ -1,9 +1,9 @@
 use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
+    channels::{self, Channels},
     data::EncodedData,
     discovery::{
         actors::tracker,
-        channels::{self, Channels},
         metrics,
         types::{self, InfoVerifier},
     },
@@ -401,10 +401,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::discovery::{
-        actors::{router, tracker},
-        channels::Channels,
-    };
+    use crate::authenticated::{discovery::actors::tracker, router};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,

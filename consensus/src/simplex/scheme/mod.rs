@@ -34,11 +34,13 @@
 //!   vote signatures and per-round seed signatures. The seed can be used for randomness (e.g.,
 //!   leader election, timelock encryption).
 //!
-//! **Security Warning for VRF Usage**: It is **not safe** to use a round's randomness to drive
-//! execution in that same round. A malicious leader can selectively distribute blocks to gain
-//! early visibility of the randomness output, then choose nullification if the outcome is
-//! unfavorable. Applications should employ a "commit-then-reveal" pattern by binding randomness
-//! requests in finalized blocks **before** the reveal occurs (e.g., `draw(view+100)`).
+//! **Security Warning for VRF Usage**: Each round's seed partial signs only the round and is
+//! carried by every vote type, so the `f` Byzantine participants of a `3f+1` committee can recover
+//! the seed once any `f+1` honest participants have voted (even for conflicting proposals), before
+//! the round resolves and without any certificate forming. A malicious leader can use this early
+//! knowledge to front-run the outcome. Applications should employ a "commit-then-reveal" pattern
+//! by binding randomness requests in finalized blocks **before** the reveal occurs (e.g.,
+//! `draw(view+100)`). See [`bls12381_threshold::vrf`] for details.
 
 use crate::simplex::types::Subject;
 use bytes::Bytes;

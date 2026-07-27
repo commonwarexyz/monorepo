@@ -236,23 +236,13 @@
 //! ```
 
 mod actors;
-mod channels;
 mod config;
 mod metrics;
 mod network;
 mod types;
 
-use thiserror::Error;
-
-/// Errors that can occur when interacting with the network.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("network closed")]
-    NetworkClosed,
-}
-
+pub use crate::authenticated::channels::{Error, Receiver, Sender};
 pub use actors::tracker::Oracle;
-pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
@@ -263,8 +253,9 @@ mod tests {
         CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
         Sender,
         authenticated::{
-            discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
+            channels,
             relay::Relay,
+            router::{Actor as RouterActor, Config as RouterConfig},
         },
     };
     use commonware_actor::{Feedback, Unreliable};

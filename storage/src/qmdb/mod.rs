@@ -26,9 +26,11 @@
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
-//! Persistence and cleanup are managed directly on the database: `commit()` and `start_commit()`
-//! make applied state durable, `sync()` additionally eliminates recovery on startup, and
-//! `prune()`/`destroy()` reclaim storage.
+//! # Durability
+//!
+//! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
+//! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
+//! durable and guarantees no recovery is needed on startup after a crash.
 //!
 //! # Ownership
 //!
