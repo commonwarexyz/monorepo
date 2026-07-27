@@ -10,11 +10,12 @@
 //! Entries are strictly increasing in committed leaf count (`proof.leaves`), so a leaf count
 //! uniquely identifies a rewind or prune target. The journal `commit` or `sync` after an append
 //! is the commit point: a crash before it drops the unsynced tail on reopen, recovering the
-//! previous commit. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip
-//! entry is never pruned.
+//! previous commit. For [`Store::start_sync`] the commit point is the completion of the returned
+//! handle. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is
+//! never pruned.
 
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::contiguous::{Contiguous, variable},
     merkle::{
         self, Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, compact,
@@ -24,7 +25,9 @@ use crate::{
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::{Error as RError, Handle};
 use commonware_utils::sync::RwLock;
+use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A single durably persisted witness: a complete snapshot of one synced commit.
@@ -133,6 +136,10 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     /// first persist replaces them with the cached witness and clears this flag. Mutations are
     /// serialized by ownership of the store, so `Relaxed` suffices.
     import_pending: AtomicBool,
+
+    /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
+    /// journal sync.
+    pending_sync: Option<SyncCompletion>,
 }
 
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
@@ -142,6 +149,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(false),
+            pending_sync: None,
         }
     }
 
@@ -157,6 +165,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(true),
+            pending_sync: None,
         }
     }
 
@@ -173,9 +182,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, committing the journal
     /// so the entry survives a crash. Journal recovery may be required on reopen.
     ///
-    /// No-op if the cached witness already matches the Merkle (the witness is already durable).
-    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
-    /// frontier, and refreshes the cache.
+    /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure. If the
+    /// cached witness already matches the Merkle, nothing more is needed. Otherwise appends a
+    /// witness built from the unpruned Merkle, prunes the Merkle to its frontier, and refreshes
+    /// the cache.
     pub(crate) async fn commit<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -186,6 +196,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
+        self.wait_for_sync().await?;
         self.persist::<H, S>(
             merkle,
             inactivity_floor_loc,
@@ -198,9 +209,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, syncing the journal and
     /// all of its metadata to minimize recovery work on reopen.
     ///
-    /// No-op if the cached witness already matches the Merkle (the witness is already durable).
-    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
-    /// frontier, and refreshes the cache.
+    /// If the cached witness already matches the Merkle, this only settles any sync pipelined
+    /// by [`Self::start_sync`], running a full journal sync when one is outstanding. Otherwise
+    /// appends a witness built from the unpruned Merkle, prunes the Merkle to its frontier, and
+    /// refreshes the cache.
     pub(crate) async fn sync<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -241,17 +253,73 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
         let Some(verified) = verified else {
+            // A commit already waited for the pipelined sync. A full sync still runs because
+            // the pipelined sync made only a best-effort attempt to persist all metadata.
+            if matches!(durability, Durability::Sync) && self.pending_sync.take().is_some() {
+                self.journal = self.journal.sync().await?;
+            }
             return Ok(self);
         };
         (self.journal, _) = self.journal.append(&verified.witness).await?;
+
+        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
         self.journal = match durability {
             Durability::Commit => self.journal.commit().await?,
-            Durability::Sync => self.journal.sync().await?,
+            Durability::Sync => {
+                let journal = self.journal.sync().await?;
+                self.pending_sync = None;
+                journal
+            }
         };
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
         self.replace(verified);
         Ok(self)
+    }
+
+    /// Persist the current compact state as a new witness journal entry, starting the journal
+    /// sync instead of awaiting it.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on reopen. When nothing new must
+    /// be appended, the handle still proves the current tip durable and resurfaces any retained
+    /// sync failure.
+    pub(crate) async fn start_sync<H, S>(
+        mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+    ) -> Result<(Self, Handle<()>), Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        let verified;
+        (self, verified) = self
+            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+            .await?;
+        if let Some(verified) = verified {
+            (self.journal, _) = self.journal.append(&verified.witness).await?;
+            self.import_pending.store(false, Ordering::Relaxed);
+            merkle.prune_to_frontier();
+            self.replace(verified);
+        }
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        let completion: SyncCompletion = handle.boxed().shared();
+        self.pending_sync = Some(completion.clone());
+        Ok((self, Handle::from_future(completion)))
+    }
+
+    /// Wait for any sync pipelined by [`Self::start_sync`], surfacing its failure.
+    ///
+    /// A successful completion remains recorded until the next full journal sync, which must
+    /// still guarantee that all metadata is current.
+    pub(crate) async fn wait_for_sync(&self) -> Result<(), RError> {
+        let Some(pending) = self.pending_sync.clone() else {
+            return Ok(());
+        };
+        pending.await
     }
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.
@@ -322,6 +390,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             last_commit_floor,
         )?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
+        self.pending_sync = None;
         self.replace(witness);
         Ok((self, op))
     }
@@ -342,6 +411,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .min(bounds.end - 1);
         (self.journal, _) = self.journal.prune(pos).await?;
         self.journal = self.journal.sync().await?;
+        self.pending_sync = None;
         Ok(self)
     }
 

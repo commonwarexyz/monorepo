@@ -43,6 +43,7 @@ use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use std::sync::{Arc, Weak};
 
 /// Configuration for a compact keyless authenticated db.
@@ -277,9 +278,10 @@ where
     /// Build a compact db handle from already-validated compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
-    /// supplied witness/root pair. The import lives only in memory until the first [`Self::commit`]
-    /// or [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
-    /// handle leaves the previous on-disk state untouched, and rewind/prune are rejected.
+    /// supplied witness/root pair. The import lives only in memory until the first
+    /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`], which replaces the journal's
+    /// contents with it. Until then, dropping the handle leaves the previous on-disk state
+    /// untouched, and rewind/prune are rejected.
     pub(crate) fn init_from_validated_state(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
@@ -411,8 +413,10 @@ where
 
     /// Return the compact-sync target described by the current witness.
     ///
-    /// This reflects the last durably persisted commit, which may lag behind live in-memory
-    /// mutations until [`Self::commit`] or [`Self::sync`] is called.
+    /// This reflects the last commit handed to the witness journal, which may lag behind live
+    /// in-memory mutations until [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] is
+    /// called. A target published by [`Self::start_sync`] is proven durable only when its
+    /// handle completes.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
@@ -559,6 +563,27 @@ where
         Ok((self, start_loc..Location::new(batch.bounds.total_size)))
     }
 
+    /// Begin durably persisting the current db state to disk.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on reopen. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle and the next durability
+    /// operation.
+    #[tracing::instrument(name = "qmdb.keyless.compact.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let last_commit_metadata = self.last_commit_metadata.clone();
+        let inactivity_floor_loc = self.inactivity_floor_loc;
+        let handle;
+        (self.witness, handle) = self
+            .witness
+            .start_sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
+                Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
+            })
+            .await?;
+        Ok((self, handle))
+    }
+
     /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
     /// reopen may need to replay the witness journal's tail to recover.
     #[tracing::instrument(name = "qmdb.keyless.compact.db.commit", level = "info", skip_all)]
@@ -602,11 +627,13 @@ where
     where
         F: Family,
     {
-        // Fast path: already durably at `target` with no uncommitted state.
+        // Fast path: already at `target` with no uncommitted state. Wait for any pipelined sync
+        // to prove the tip durable before returning.
         if self.size() == target
             && self.witness.with(|w| w.leaf_count()) == target
             && !self.witness.import_pending()
         {
+            self.witness.wait_for_sync().await?;
             return Ok(self);
         }
 
@@ -637,8 +664,8 @@ where
     ///
     /// # Errors
     ///
-    /// Fails if a compact-sync import has not yet been persisted by [`Self::commit`] or
-    /// [`Self::sync`].
+    /// Fails if a compact-sync import has not yet been persisted by [`Self::commit`],
+    /// [`Self::sync`], or [`Self::start_sync`].
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.witness = self.witness.prune(pruning_boundary).await?;
         Ok(self)
@@ -663,9 +690,14 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use core::future::Future;
+    use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, (), Sequential>;
@@ -784,6 +816,444 @@ mod tests {
                 resolver.get_compact_state(stale).await,
                 Err(compact_sync::ServeError::StaleTarget { .. })
             ));
+        });
+    }
+
+    /// A compact db over a delayed-sync storage backend.
+    type DelayedDb = Db<
+        mmr::Family,
+        DelayedSyncContext<deterministic::Context>,
+        FixedEncoding<U64>,
+        Sha256,
+        (),
+        Sequential,
+    >;
+
+    /// Open a [DelayedDb] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the bootstrap witness, so while syncs park the returned future
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
+    fn open_delayed_db(
+        context: &deterministic::Context,
+        label: &'static str,
+        partition: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        let witness_cfg = witness_config(partition, context);
+        let merkle = crate::merkle::compact::Merkle::new(Sequential);
+        let context = DelayedSyncContext {
+            inner: context.child(label),
+            pending: pending.clone(),
+        };
+        DelayedDb::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+    }
+
+    /// Apply a single-append batch carrying `seed` as both value and metadata.
+    async fn apply_append(db: DelayedDb, seed: u64) -> DelayedDb {
+        let floor = db.inactivity_floor_loc();
+        let batch = db
+            .new_batch()
+            .append(U64::new(seed))
+            .merkleize(&db, Some(U64::new(seed)), floor)
+            .await;
+        let (db, _) = db.apply_batch(batch).unwrap();
+        db
+    }
+
+    /// State persisted via an awaited start_sync handle is recovered on reopen.
+    #[test_traced]
+    fn test_compact_start_sync_recovery() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "keyless-start-sync-recovery";
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", partition, &pending)
+                .await
+                .unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get_metadata(), Some(U64::new(1)));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation, even when that operation has nothing
+    /// new to persist.
+    #[test_traced]
+    fn test_compact_start_sync_failure_propagates() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-fail", &pending)
+                .await
+                .unwrap();
+            db = apply_append(db, 1).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+            let starts_before = pending.starts();
+
+            // The witness entry was already appended, so this commit has nothing to stage.
+            // It must still observe the retained failure rather than no-op.
+            assert!(
+                db.commit().await.is_err(),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the surfaced error is the retained failure, not a fresh sync's"
+            );
+        });
+    }
+
+    /// A `sync` with nothing new to persist still drains (and proves) the sync started by a
+    /// prior `start_sync`.
+    #[test_traced]
+    fn test_compact_start_sync_then_noop_sync_drains() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "keyless-start-sync-noop-drain";
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let starts_before = pending.starts();
+            let completions_before = pending.completions();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+            assert_eq!(pending.completions(), completions_before);
+            let root = db.root();
+
+            let db = {
+                let mut sync = std::pin::pin!(db.sync());
+                assert!(
+                    sync.as_mut().now_or_never().is_none(),
+                    "sync proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                sync.await.unwrap()
+            };
+            handle.await.unwrap();
+            assert!(pending.completions() > completions_before);
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A `commit` with nothing new to persist still waits for the sync started by a prior
+    /// `start_sync` before reporting the tip durable, and starts no journal work when that
+    /// sync succeeds.
+    #[test_traced]
+    fn test_compact_start_sync_then_noop_commit_waits() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-noop-commit", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            let starts_before = pending.starts();
+
+            let db = {
+                let mut commit = std::pin::pin!(db.commit());
+                assert!(
+                    commit.as_mut().now_or_never().is_none(),
+                    "commit proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                commit.await.unwrap()
+            };
+            handle.await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "a successful pipelined sync still triggered journal work"
+            );
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A `start_sync` with nothing new to persist returns a working handle and appends no
+    /// duplicate witness entry.
+    #[test_traced]
+    fn test_compact_start_sync_noop_second_call() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "keyless-start-sync-noop-second";
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let h1;
+            (db, h1) = db.start_sync().await.unwrap();
+            // Release the parked sync: a second start_sync waits for the prior sync before
+            // starting, so back-to-back calls under a parked mock would deadlock.
+            pending.unblock();
+            h1.await.unwrap();
+
+            let h2;
+            (db, h2) = db.start_sync().await.unwrap();
+            h2.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            // The journal holds exactly the bootstrap entry and the one committed witness.
+            let journal = open_witness_journal(ctx.child("probe"), partition).await;
+            assert_eq!(journal.size(), 2);
+            drop(journal);
+
+            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A rewind to the current size waits for the in-flight sync and adopts its proof of
+    /// durability instead of starting new journal work.
+    #[test_traced]
+    fn test_compact_start_sync_rewind_fast_path_drains() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "keyless-start-sync-rewind-drain";
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            let root = db.root();
+            let size = db.size();
+
+            let starts_before = pending.starts();
+            let db = {
+                let mut rewind = std::pin::pin!(db.rewind(size));
+                assert!(
+                    rewind.as_mut().now_or_never().is_none(),
+                    "rewind proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                rewind.await.unwrap()
+            };
+            handle.await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the fast path started journal work instead of adopting the proven sync"
+            );
+            assert_eq!(db.root(), root);
+            drop(db);
+
+            // The awaited pipelined sync made the witness entry durable.
+            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A rewind to the current size fails when the sync started for the tip witness has
+    /// already failed, rather than reporting the unproven tip as durable.
+    #[test_traced]
+    fn test_compact_start_sync_rewind_fast_path_fails() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db =
+                open_delayed_db(&ctx, "delayed", "keyless-start-sync-rewind-fail", &pending)
+                    .await
+                    .unwrap();
+            db = apply_append(db, 1).await;
+
+            pending.arm_fail();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(handle.await.is_err());
+            let size = db.size();
+            assert!(
+                db.rewind(size).await.is_err(),
+                "rewind reported an unproven tip as durable"
+            );
+        });
+    }
+
+    /// A metadata sync failure from `start_sync` resurfaces on the next `commit`, even when
+    /// that commit has new state to persist.
+    #[test_traced]
+    fn test_compact_start_sync_metadata_failure_resurfaces_on_commit() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-meta-fail", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+
+            // start_sync parks the data sync and then the offsets sync. Complete the data
+            // sync and fail the offsets sync.
+            {
+                let mut parked = pending.lock();
+                assert_eq!(
+                    parked.len(),
+                    2,
+                    "expected the data and offsets syncs parked"
+                );
+                let offsets = parked.pop().unwrap();
+                let data = parked.pop().unwrap();
+                data.release.send(Ok(())).unwrap();
+                offsets
+                    .release
+                    .send(Err(commonware_runtime::Error::Io(
+                        std::io::Error::other("injected sync failure").into(),
+                    )))
+                    .unwrap();
+            }
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+
+            // Later syncs pass; only the retained offsets failure remains.
+            pending.unblock();
+
+            // Apply another batch to prove commit checks the prior sync before persisting a new
+            // witness.
+            let db = apply_append(db, 2).await;
+            assert!(
+                db.commit().await.is_err(),
+                "commit absorbed the retained metadata failure"
+            );
+        });
+    }
+
+    /// Once a start_sync handle completes successfully, a commit and a rewind to the current
+    /// size have nothing left to prove and touch no storage.
+    #[test_traced]
+    fn test_compact_start_sync_proven_skips_journal() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-proven", &pending)
+                .await
+                .unwrap();
+            db = apply_append(db, 1).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+
+            let starts_before = pending.starts();
+            let db = db.commit().await.unwrap();
+            let size = db.size();
+            let db = db.rewind(size).await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "a proven pipelined sync still triggered journal work"
+            );
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// The first persist after a compact-sync import can be pipelined: awaiting the handle
+    /// makes the imported witness durable.
+    #[test_traced("INFO")]
+    fn test_compact_start_sync_persists_import() {
+        deterministic::Runner::default().start(|context| async move {
+            let dst = "keyless-import-start-sync-dst";
+            let src = "keyless-import-start-sync-src";
+            let meta_a = U64::new(11);
+            let meta_b = U64::new(22);
+
+            // Build state B in a separate source partition and capture its validated state.
+            let target_b = {
+                let source = open_db::<mmr::Family>(context.child("src"), src).await;
+                let batch = source
+                    .new_batch()
+                    .append(U64::new(2))
+                    .merkleize(&source, Some(meta_b.clone()), Location::new(0))
+                    .await;
+                let (source, _) = source.apply_batch(batch).unwrap();
+                let source = source.sync().await.unwrap();
+                source.target()
+            };
+            let (_, proof_b, pinned_b) = {
+                let journal = open_witness_journal(context.child("src_tip"), src).await;
+                witness::tests::tip(&journal).await
+            };
+            let validated = compact_sync::ValidatedState {
+                state: compact_sync::State {
+                    leaf_count: target_b.leaf_count,
+                    pinned_nodes: pinned_b,
+                    last_commit_op: Operation::Commit(Some(meta_b.clone()), Location::new(0)),
+                    last_commit_proof: proof_b,
+                },
+                root: target_b.root,
+            };
+
+            // Seed the destination partition with a different committed state A.
+            {
+                let seeded = open_db::<mmr::Family>(context.child("seed"), dst).await;
+                let batch = seeded
+                    .new_batch()
+                    .append(U64::new(1))
+                    .merkleize(&seeded, Some(meta_a), Location::new(0))
+                    .await;
+                let (seeded, _) = seeded.apply_batch(batch).unwrap();
+                let seeded = seeded.sync().await.unwrap();
+                assert_ne!(seeded.target(), target_b);
+            }
+
+            // Import state B over the destination and make it durable through a pipelined sync.
+            {
+                let journal = open_witness_journal(context.child("import"), dst).await;
+                let imported = TestDb::<mmr::Family>::init_from_validated_state(
+                    Sequential,
+                    journal,
+                    (),
+                    validated,
+                )
+                .unwrap();
+                assert_eq!(imported.target(), target_b);
+                let (_imported, handle) = imported.start_sync().await.unwrap();
+                handle.await.unwrap();
+            }
+
+            // Reopen recovers the imported state, replacing state A.
+            let db = open_db::<mmr::Family>(context.child("reopen"), dst).await;
+            assert_eq!(db.target(), target_b);
+            assert_eq!(db.root(), target_b.root);
+            assert_eq!(db.get_metadata(), Some(meta_b));
+            db.destroy().await.unwrap();
         });
     }
 
