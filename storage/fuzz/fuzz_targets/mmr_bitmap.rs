@@ -68,8 +68,8 @@ fn fuzz(input: FuzzInput) {
             Sequential,
             &hasher,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let mut bitmap = Bitmap::Merkleized(init_bitmap);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
@@ -242,8 +242,8 @@ fn fuzz(input: FuzzInput) {
                         Sequential,
                         &hasher,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                     restarts += 1;
                     // Update tracking variables to match restored state
                     bit_count = bitmap.len();

@@ -540,8 +540,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_inline_standard"
-path = "fuzz_targets/marshal_inline_standard.rs"
+name = "marshal_standard_inline"
+path = "fuzz_targets/marshal_standard_inline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_standard_deferred"
+path = "fuzz_targets/marshal_standard_deferred.rs"
 test = false
 doc = false
 bench = false
@@ -554,8 +561,29 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_liveness_standard"
-path = "fuzz_targets/marshal_multi_node_liveness_standard.rs"
+name = "marshal_multi_node_liveness_deferred"
+path = "fuzz_targets/marshal_multi_node_liveness_deferred.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_multi_node_twins"
+path = "fuzz_targets/marshal_multi_node_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_multi_node_twins_id_split_header_deferred"
+path = "fuzz_targets/marshal_multi_node_twins_id_split_header_deferred.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_multi_node_twins_id_split_header_inline"
+path = "fuzz_targets/marshal_multi_node_twins_id_split_header_inline.rs"
 test = false
 doc = false
 bench = false

@@ -310,10 +310,10 @@ fn fuzz(input: FuzzInput) {
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.
                 Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                if index_page_integrity_may_be_invalidated =>
-                    {
-                        return;
-                    }
+                    if index_page_integrity_may_be_invalidated =>
+                {
+                    return;
+                }
                 Err(err) => panic!("Unexpected recovery failure: {err:?}"),
             };
 

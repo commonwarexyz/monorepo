@@ -122,3 +122,33 @@ Reproduce a failure from a crash file:
 ```bash
 cargo fuzz run simplex_ed25519 fuzz/artifacts/simplex_ed25519/<crash_file>
 ```
+
+## Marshal Fuzzing
+
+The standard-wrapper targets exercise proposal, verification, certification,
+broadcast, and application-result transitions using structured libFuzzer input:
+
+```bash
+cargo fuzz run marshal_standard_inline
+cargo fuzz run marshal_standard_deferred
+cargo fuzz run marshal_multi_node_twins
+cargo fuzz run marshal_multi_node_twins_id_split_header_deferred
+cargo fuzz run marshal_multi_node_twins_id_split_header_inline
+```
+
+The inline and deferred targets include split-header equivocation in their
+action space. The multi-node targets are Byzantine Twins mutators over the
+end-to-end standard stack. The general Twins target shares one corpus across
+the Basic and Faulty applications with both Inline and Deferred wrappers.
+Three honest validators each run
+`Simplex -> Inline|Deferred -> Marshal -> Application`; the compromised
+identity runs one full Simplex engine over the same real marshal/application
+data plane and the existing `Disrupter` on its secondary half. The `Disrupter`
+can preserve an observed payload digest while mutating its proposal header.
+
+The shared fuzz-layer Twins helpers sample leaders and recipient partitions for
+an adversarial prefix, then restore full synchrony. The target checks that every
+honest marshal makes post-prefix progress, preserves in-order delivery, and
+agrees on every delivered height. It also passively observes each honest
+marshal wrapper and asserts that certification never reuses a rejection caused
+by verifying the same `(round, digest)` under a different header context.

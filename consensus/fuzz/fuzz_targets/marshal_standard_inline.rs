@@ -1,4 +1,5 @@
 #![no_main]
+//! Inline application adapter over standard Marshal.
 
 #[cfg(feature = "mocks")]
 mod fuzz {

@@ -5,13 +5,15 @@
 
 use super::MAX_REQUIRED;
 use crate::{
-    strategy::StrategyChoice,
+    strategy::{HeaderMutation, StrategyChoice},
     utils::{Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
 use commonware_consensus::simplex::ForwardingPolicy;
 
 const MIN_REQUIRED: u64 = 1;
+pub(super) const MAX_TWINS_ROUNDS: u8 = 6;
+const MAX_TWINS_TRAILING_BLOCKS: u8 = 3;
 
 fn sample_fault_rounds(
     u: &mut arbitrary::Unstructured<'_>,
@@ -80,6 +82,90 @@ impl Arbitrary<'_> for MarshalLivenessInput {
             degraded_network,
             partition,
             strategy,
+            forwarding,
+        })
+    }
+}
+
+/// Input for the end-to-end standard-marshal Twins mutator.
+#[derive(Debug, Clone)]
+pub struct MarshalTwinsInput {
+    /// Byte tape used by the deterministic runtime and scenario sampler.
+    ///
+    /// The general Twins target reserves the final byte as its application and
+    /// wrapper selector. Focused regression targets use the complete tape.
+    pub raw_bytes: Vec<u8>,
+    /// Number of adversarial Twins rounds before the synchronous suffix.
+    pub rounds: u8,
+    /// Selects one case from the sampled Twins scenario set.
+    pub case_selector: u16,
+    /// Repeat one partition pattern across the adversarial prefix.
+    pub sustained: bool,
+    /// Byzantine message mutation strategy used by the secondary twin.
+    pub strategy: StrategyChoice,
+    /// Number of honest blocks required after the adversarial prefix.
+    pub trailing_blocks: u8,
+    /// Simplex forwarding policy used by every engine.
+    pub forwarding: ForwardingPolicy,
+}
+
+impl Arbitrary<'_> for MarshalTwinsInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let rounds = u.int_in_range(1..=MAX_TWINS_ROUNDS)?;
+        let case_selector = u.arbitrary()?;
+        let sustained = u.arbitrary()?;
+        let strategy = match u.int_in_range(0..=9)? {
+            0 => StrategyChoice::AnyScope,
+            1 => {
+                let (fault_rounds, fault_rounds_bound) = sample_fault_rounds(u, rounds.into())?;
+                StrategyChoice::FutureScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                }
+            }
+            2 => {
+                let (fault_rounds, fault_rounds_bound) = sample_fault_rounds(u, rounds.into())?;
+                StrategyChoice::SmallScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                }
+            }
+            // Header-scoped equivocation is this target's primary quarry. Keep
+            // the known previous-parent attack heavily weighted while allowing
+            // the campaign to explore other payload-preserving parent choices.
+            _ => {
+                let (fault_rounds, fault_rounds_bound) = sample_fault_rounds(u, rounds.into())?;
+                let mutation = match u.int_in_range(0..=9)? {
+                    0 => HeaderMutation::LastFinalizedParent,
+                    1 => HeaderMutation::BeforeLastNotarizedParent,
+                    _ => HeaderMutation::PreviousParent,
+                };
+                StrategyChoice::HeaderScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                    mutation,
+                }
+            }
+        };
+        let trailing_blocks = u.int_in_range(1..=MAX_TWINS_TRAILING_BLOCKS)?;
+        let forwarding = match u.int_in_range(0..=2)? {
+            0 => ForwardingPolicy::Disabled,
+            1 => ForwardingPolicy::SilentVoters,
+            _ => ForwardingPolicy::SilentLeader,
+        };
+        let remaining = u.len().min(crate::MAX_RAW_BYTES);
+        let raw_bytes = if remaining == 0 {
+            vec![0]
+        } else {
+            u.bytes(remaining)?.to_vec()
+        };
+        Ok(Self {
+            raw_bytes,
+            rounds,
+            case_selector,
+            sustained,
+            strategy,
+            trailing_blocks,
             forwarding,
         })
     }

@@ -1,5 +1,13 @@
-//! Fuzz driver for the standard inline marshal wrapper.
+//! Fuzz driver for the standard inline and deferred marshal wrappers.
+//!
+//! The split-header invariant is armed only when the candidate, its embedded
+//! parent, and an older conflicting parent are all locally available and the
+//! application accepts the candidate. A rejection from verifying the
+//! conflicting header is proposal-scoped; certification of the same
+//! `(round, digest)` models an honest notarization and must therefore recover
+//! through the candidate's embedded context.
 
+use super::multi_node::invariants::CertificationAgreementInvariant;
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_broadcast::Broadcaster as _;
@@ -13,7 +21,7 @@ use commonware_consensus::{
             B, BLOCKS_PER_EPOCH, D, K, NAMESPACE, NUM_VALIDATORS, S, StandardHarness, TestHarness,
             V, setup_network_with_participants,
         },
-        standard::Inline,
+        standard::{Deferred, Inline},
     },
     simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
     types::{Epoch, FixedEpocher, Height, Round, View},
@@ -75,15 +83,25 @@ pub enum InlineContext {
     Reproposal,
     CrossEpoch,
     WrongParent,
+    /// Reuse the block payload under a header naming an older, locally valid
+    /// parent. This models proposal-layer equivocation: the payload is honest,
+    /// but the header shown to this validator conflicts with the block's
+    /// embedded context.
+    CertifiedAncestor {
+        parent_idx: u8,
+    },
 }
 
 impl Arbitrary<'_> for InlineContext {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=3)? {
+        Ok(match u.int_in_range(0..=7)? {
             0 => Self::Stored,
             1 => Self::Reproposal,
             2 => Self::CrossEpoch,
-            _ => Self::WrongParent,
+            3 => Self::WrongParent,
+            _ => Self::CertifiedAncestor {
+                parent_idx: block_idx(u)?,
+            },
         })
     }
 }
@@ -172,6 +190,31 @@ impl Arbitrary<'_> for MarshalInlineInput {
         let mut events = Vec::with_capacity(event_count);
         let boundary_idx = (BLOCKS_PER_EPOCH.get() - 2) as u8;
         events.extend([
+            // Exercise split-header equivocation before the general event
+            // stream. The fields around this sequence remain fuzz-controlled,
+            // including the application verdict, runtime byte tape, and all
+            // trailing actions.
+            InlineEvent::Seed {
+                block_idx: 0,
+                seed: InlineSeed::Verified,
+            },
+            InlineEvent::Seed {
+                block_idx: 1,
+                seed: InlineSeed::Verified,
+            },
+            InlineEvent::Seed {
+                block_idx: 2,
+                seed: InlineSeed::Variant,
+            },
+            InlineEvent::Verify {
+                block_idx: 2,
+                context: InlineContext::CertifiedAncestor { parent_idx: 0 },
+                await_result: true,
+            },
+            InlineEvent::Certify {
+                block_idx: 2,
+                await_result: true,
+            },
             InlineEvent::Seed {
                 block_idx: 0,
                 seed: InlineSeed::Verified,
@@ -262,6 +305,13 @@ impl ConsensusApplication<deterministic::Context> for InlineApp {
         let _ = ancestry.peek();
         let _ = ancestry.next().await;
         let (_, consensus_context) = context;
+        // A proposer commits to accepting its own proposal under this context.
+        // When this deliberately faulty mock rejects verification, it must not
+        // manufacture a proposal that would make the harness violate the
+        // Application contract by construction.
+        if !self.verify_result {
+            return None;
+        }
         let expected_parent = consensus_context.parent.1;
         let expected_height = Height::new(consensus_context.round.view().get());
         match self.propose_result.clone() {
@@ -314,7 +364,7 @@ fn make_chain() -> (B, Vec<B>) {
     (genesis, blocks)
 }
 
-fn context_for(kind: InlineContext, block: &B, me: &K) -> Context<D, K> {
+fn context_for(kind: InlineContext, block: &B, canonical: &[B], me: &K) -> Context<D, K> {
     match kind {
         InlineContext::Stored => block.context.clone(),
         InlineContext::Reproposal => Context {
@@ -335,10 +385,93 @@ fn context_for(kind: InlineContext, block: &B, me: &K) -> Context<D, K> {
                 Sha256::hash(&[&block.height().get().to_be_bytes()]),
             ),
         },
+        InlineContext::CertifiedAncestor { parent_idx } => {
+            let oldest_parent_height = block.height().get().saturating_sub(2);
+            let parent = &canonical[(parent_idx as u64 % oldest_parent_height.max(1)) as usize];
+            Context {
+                round: block.context.round,
+                leader: block.context.leader.clone(),
+                parent: (View::new(parent.height().get()), parent.digest()),
+            }
+        }
     }
 }
 
-pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
+#[derive(Clone, Copy, Debug)]
+enum WrapperKind {
+    Inline,
+    Deferred,
+}
+
+#[derive(Clone)]
+enum Wrapper {
+    Inline(Inline<deterministic::Context, S, InlineApp, B, FixedEpocher>),
+    Deferred(Deferred<deterministic::Context, S, InlineApp, B, FixedEpocher>),
+}
+
+impl Wrapper {
+    fn new(
+        kind: WrapperKind,
+        context: deterministic::Context,
+        application: InlineApp,
+        marshal: commonware_consensus::marshal::core::Mailbox<
+            S,
+            commonware_consensus::marshal::standard::Standard<B>,
+        >,
+    ) -> Self {
+        match kind {
+            WrapperKind::Inline => Self::Inline(Inline::new(
+                context,
+                application,
+                marshal,
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            )),
+            WrapperKind::Deferred => Self::Deferred(Deferred::new(
+                context,
+                application,
+                marshal,
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            )),
+        }
+    }
+
+    async fn propose(&mut self, context: Context<D, K>) -> oneshot::Receiver<D> {
+        match self {
+            Self::Inline(wrapper) => wrapper.propose(context).await,
+            Self::Deferred(wrapper) => wrapper.propose(context).await,
+        }
+    }
+
+    async fn verify(&mut self, context: Context<D, K>, digest: D) -> oneshot::Receiver<bool> {
+        match self {
+            Self::Inline(wrapper) => wrapper.verify(context, digest).await,
+            Self::Deferred(wrapper) => wrapper.verify(context, digest).await,
+        }
+    }
+
+    async fn certify(&mut self, round: Round, digest: D) -> oneshot::Receiver<bool> {
+        match self {
+            Self::Inline(wrapper) => wrapper.certify(round, digest).await,
+            Self::Deferred(wrapper) => wrapper.certify(round, digest).await,
+        }
+    }
+
+    fn broadcast(&mut self, digest: D, plan: Plan<K>) -> Feedback {
+        match self {
+            Self::Inline(wrapper) => wrapper.broadcast(digest, plan),
+            Self::Deferred(wrapper) => wrapper.broadcast(digest, plan),
+        }
+    }
+
+    fn report(&mut self, update: Update<B>) -> Feedback {
+        match self {
+            Self::Inline(wrapper) => wrapper.report(update),
+            Self::Deferred(wrapper) => wrapper.report(update),
+        }
+    }
+}
+
+fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -372,12 +505,13 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
             .app_propose_idx
             .map(|idx| canonical[block_index(idx)].clone());
         let app = InlineApp::new(propose_result, input.app_verify_result);
-        let mut inline = Inline::new(
-            context.child("inline"),
-            app,
-            marshal.clone(),
-            FixedEpocher::new(BLOCKS_PER_EPOCH),
+        let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
+        let certification_invariant = CertificationAgreementInvariant::new(
+            format!("application=inline-app wrapper={kind:?}").into(),
         );
+        let mut available = std::collections::HashSet::new();
+        let mut poisoned = std::collections::HashSet::new();
+        let mut certification_requests = std::collections::HashSet::new();
 
         for event in input.events {
             match event {
@@ -390,16 +524,23 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                             let _ = marshal.proposed(round, block, Recipients::All, ack);
                             if let Ok(sync) = rx.await {
                                 let _ = sync.await;
+                                available.insert(canonical[block_index(block_idx)].digest());
                             }
                         }
                         InlineSeed::Verified => {
-                            let _ = marshal.verified(round, block).await;
+                            if marshal.verified(round, block).await {
+                                available.insert(canonical[block_index(block_idx)].digest());
+                            }
                         }
                         InlineSeed::Certified => {
-                            let _ = marshal.certified(round, block).await;
+                            if marshal.certified(round, block).await {
+                                available.insert(canonical[block_index(block_idx)].digest());
+                            }
                         }
                         InlineSeed::Variant => {
-                            let _ = buffer.broadcast(Recipients::All, block);
+                            if buffer.broadcast(Recipients::All, block).accepted() {
+                                available.insert(canonical[block_index(block_idx)].digest());
+                            }
                         }
                     }
                 }
@@ -414,18 +555,20 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                         parent: (View::new(parent.height().get()), parent.digest()),
                     };
                     let round = propose_context.round;
-                    let rx = inline.propose(propose_context).await;
+                    let rx = wrapper.propose(propose_context).await;
                     if await_result {
                         let result = select! {
                             result = rx => result.ok(),
                             _ = context.sleep(EVENT_SETTLE) => None,
                         };
                         if let Some(digest) = result {
-                            let _ = inline.broadcast(digest, Plan::Propose { round });
+                            certification_invariant.record_proposal(0, round, digest);
+                            let _ = wrapper.broadcast(digest, Plan::Propose { round });
                             assert!(
                                 marshal.get_block(&digest).await.is_some(),
                                 "inline proposal is unavailable after relay"
                             );
+                            available.insert(digest);
                         }
                     }
                 }
@@ -436,8 +579,16 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                 } => {
                     let block = &canonical[block_index(block_idx)];
                     let digest = block.digest();
-                    let verify_context = context_for(context_kind, block, &me);
-                    let rx = inline.verify(verify_context, digest).await;
+                    let verify_context = context_for(context_kind, block, &canonical, &me);
+                    let split_header =
+                        matches!(context_kind, InlineContext::CertifiedAncestor { .. })
+                            && verify_context.round == block.context.round
+                            && verify_context.parent != block.context.parent
+                            && available.contains(&digest)
+                            && available.contains(&verify_context.parent.1)
+                            && available.contains(&block.context.parent.1)
+                            && input.app_verify_result;
+                    let rx = wrapper.verify(verify_context, digest).await;
                     if await_result {
                         let result = select! {
                             result = rx => result.ok(),
@@ -449,6 +600,9 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                                 "inline verify accepted a block that marshal cannot serve"
                             );
                         }
+                        if split_header && result == Some(false) {
+                            poisoned.insert((block.context.round, digest));
+                        }
                     }
                 }
                 InlineEvent::Certify {
@@ -457,12 +611,34 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                 } => {
                     let block = &canonical[block_index(block_idx)];
                     let digest = block.digest();
-                    let rx = inline.certify(block.context.round, digest).await;
+                    let round = block.context.round;
+                    // Certification is single-shot for each `(round, digest)`.
+                    if !certification_requests.insert((round, digest)) {
+                        continue;
+                    }
+                    let must_recover = poisoned.remove(&(round, digest));
+                    let rx = wrapper.certify(round, digest).await;
                     if await_result {
                         let result = select! {
                             result = rx => result.ok(),
-                            _ = context.sleep(EVENT_SETTLE) => None,
+                            _ = context.sleep(if must_recover {
+                                Duration::from_secs(5)
+                            } else {
+                                EVENT_SETTLE
+                            }) => None,
                         };
+                        if let Some(verdict) = result {
+                            certification_invariant
+                                .check_certify_agreement(0, round, digest, verdict);
+                        }
+                        if must_recover {
+                            assert_eq!(
+                                result,
+                                Some(true),
+                                "certification adopted a rejection scoped only to an \
+                                 equivocating proposal header"
+                            );
+                        }
                         if result == Some(true) {
                             assert!(
                                 marshal.get_block(&digest).await.is_some(),
@@ -483,22 +659,30 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
                             round: block.context.round,
                         }
                     };
-                    let _ = inline.broadcast(block.digest(), plan);
+                    let _ = wrapper.broadcast(block.digest(), plan);
                 }
                 InlineEvent::ReportTip { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    let _ = inline.report(Update::Tip(
+                    let _ = wrapper.report(Update::Tip(
                         block.context.round,
                         block.height(),
                         block.digest(),
                     ));
                 }
                 InlineEvent::CloneWrapper => {
-                    let _ = inline.clone();
+                    let _ = wrapper.clone();
                 }
                 InlineEvent::Idle => {}
             }
             context.sleep(EVENT_SETTLE).await;
         }
     });
+}
+
+pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
+    fuzz_marshal_standard(input, WrapperKind::Inline);
+}
+
+pub fn fuzz_marshal_deferred(input: MarshalInlineInput) {
+    fuzz_marshal_standard(input, WrapperKind::Deferred);
 }
