@@ -75,7 +75,7 @@ use std::{
 };
 
 mod task;
-use self::task::Tasks;
+use self::task::{Erased, Tasks};
 
 cfg_if::cfg_if! {
     if #[cfg(test)] {
@@ -709,6 +709,11 @@ impl Worker {
         // Build the root task's waker (the root starts ready).
         let root_waker = Tasks::root_waker(&executor.tasks);
 
+        // Reusable drain buffer, local to this frame: a busy executor swaps
+        // it with the live queue instead of allocating per iteration, and by
+        // the time teardown clears the arena no task is parked in it.
+        let mut scratch: Vec<Arc<dyn Erased>> = Vec::new();
+
         // Process tasks until the root task completes.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -720,7 +725,8 @@ impl Worker {
                 // Tasks run before the root so a task registered ahead of the
                 // root's poll (e.g. the process-metrics collector) is polled
                 // even if the root never yields.
-                for task in executor.tasks.drain() {
+                executor.tasks.drain_into(&mut scratch);
+                for task in scratch.drain(..) {
                     let slot = task.slot();
                     if task.poll() {
                         executor.tasks.remove(slot);

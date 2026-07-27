@@ -23,7 +23,7 @@ use futures::task::{ArcWake, waker};
 use std::{
     cell::RefCell,
     future::Future,
-    mem::{ManuallyDrop, replace, take},
+    mem::{ManuallyDrop, swap, take},
     pin::Pin,
     sync::{
         Arc, Weak,
@@ -335,11 +335,12 @@ impl Tasks {
         self.root_ready.swap(false, Ordering::Acquire)
     }
 
-    /// Drain all ready tasks.
-    pub(super) fn drain(&self) -> Vec<Arc<dyn Erased>> {
+    /// Drain all ready tasks into `scratch`, an empty buffer the caller
+    /// reuses across iterations so a busy executor drains without
+    /// allocating.
+    pub(super) fn drain_into(&self, scratch: &mut Vec<Arc<dyn Erased>>) {
         let mut queue = self.ready.lock();
-        let len = queue.len();
-        replace(&mut *queue, Vec::with_capacity(len))
+        swap(&mut *queue, scratch);
     }
 
     /// Whether any task (including the root) is ready to be polled.
