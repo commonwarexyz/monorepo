@@ -4,7 +4,7 @@
 //! harness lacks: standing up a live simplex [`Engine`] whose automaton/relay
 //! produce fetchable blocks and whose `reporter` is the marshal mailbox. The
 //! two implementations differ only in the wrapper: standard wraps
-//! [`BlockBuilderApp`] in [`Deferred`]; coding wraps it in [`Marshaled`] and
+//! [`AlwaysAcceptBlockBuilderApp`] in [`Deferred`]; coding wraps it in [`Marshaled`] and
 //! threads the shards mailbox and coding scheme provider. The engine's
 //! consensus payload type follows the variant (`Digest` for standard,
 //! `Commitment` for coding).
@@ -12,7 +12,7 @@
 //! Engine p2p channels live at ids 3/4/5 because marshal hardcodes backfill=1
 //! and broadcast=2 in `setup_validator_with`.
 
-use super::{ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, app::BlockBuilderApp};
+use super::{ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, app::AlwaysAcceptBlockBuilderApp};
 use commonware_consensus::{
     marshal::{
         coding::{Marshaled, MarshaledConfig},
@@ -75,7 +75,7 @@ impl LiveMarshal for StandardHarness {
 
             let deferred = Deferred::new(
                 context.child("deferred"),
-                BlockBuilderApp::<Ctx>::default(),
+                AlwaysAcceptBlockBuilderApp::<Ctx>::default(),
                 marshal_mailbox.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
@@ -134,7 +134,7 @@ impl LiveMarshal for CodingHarness {
             let marshaled = Marshaled::new(
                 context.child("marshaled"),
                 MarshaledConfig {
-                    application: BlockBuilderApp::<CodingCtx>::default(),
+                    application: AlwaysAcceptBlockBuilderApp::<CodingCtx>::default(),
                     marshal: marshal_mailbox.clone(),
                     shards: extra,
                     scheme_provider: provider,

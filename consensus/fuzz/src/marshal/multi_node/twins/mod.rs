@@ -12,8 +12,8 @@ mod stack;
 
 use super::{
     app::{
-        ApplicationChoice, BlockBuilderApp, BlockContextRegistry, DeliveryReporter, FaultyConfig,
-        SelectedBlockBuilderApp,
+        AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
+        FaultyConfig, SelectedBlockBuilderApp,
     },
     input::MarshalTwinsInput,
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
@@ -67,7 +67,7 @@ type PublicKeyOf<P> =
     <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
-type PrimaryApp<P> = BlockBuilderApp<Ctx<P>, SchemeOf<P>>;
+type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
 type BackendMarker<P, A, M> = std::marker::PhantomData<fn() -> (P, A, M)>;
 
 #[derive(Clone, Copy)]
@@ -318,7 +318,7 @@ where
         let primary_builder = <M as TwinsMarshal<P, PrimaryApp<P>>>::create(
             self.marshal_choice,
             &context,
-            BlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
+            AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
                 .with_block_contexts(state.block_contexts.clone())
                 .with_reporter(DeliveryReporter::new(
                     idx,
@@ -475,13 +475,13 @@ pub fn fuzz_marshal_twins_id_split_header(mut input: MarshalTwinsInput) {
     };
     fuzz_marshal_twins_with::<
         SimplexId,
-        BlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
+        AlwaysAcceptBlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
         DeferredMarshal,
     >(
         input.clone(),
         CasePolicy::AttackLayout,
         StackSelection {
-            application: ApplicationChoice::Basic,
+            application: ApplicationChoice::AlwaysAccept,
             marshal: MarshalChoice::Deferred,
             max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
         },
@@ -498,13 +498,13 @@ pub fn fuzz_marshal_twins_id_split_header_inline(mut input: MarshalTwinsInput) {
     };
     fuzz_marshal_twins_with::<
         SimplexId,
-        BlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
+        AlwaysAcceptBlockBuilderApp<Ctx<SimplexId>, SchemeOf<SimplexId>>,
         InlineMarshal,
     >(
         input.clone(),
         CasePolicy::AttackLayout,
         StackSelection {
-            application: ApplicationChoice::Basic,
+            application: ApplicationChoice::AlwaysAccept,
             marshal: MarshalChoice::Inline,
             max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
         },
@@ -516,7 +516,7 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
     let Some((&selector, entropy)) = raw_bytes.split_last() else {
         return (
             StackSelection {
-                application: ApplicationChoice::Basic,
+                application: ApplicationChoice::AlwaysAccept,
                 marshal: MarshalChoice::Deferred,
                 max_pending_acks: NZUsize!(1),
             },

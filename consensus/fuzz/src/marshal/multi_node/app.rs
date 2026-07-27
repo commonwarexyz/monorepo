@@ -1,8 +1,9 @@
-//! Block-building automaton for the multi-node marshal liveness model.
+//! Block-building automaton for the multi-node end-to-end marshal model.
 //!
 //! Plays the simplex [`Automaton`](commonware_consensus::Automaton) /
 //! [`Relay`](commonware_consensus::Relay) role (via the marshal
-//! [`Deferred`](commonware_consensus::marshal::standard::Deferred) or
+//! [`Deferred`](commonware_consensus::marshal::standard::Deferred),
+//! [`Inline`](commonware_consensus::marshal::standard::Inline), or
 //! [`Marshaled`](commonware_consensus::marshal::coding::Marshaled) wrapper) for
 //! a live engine whose `reporter` is marshal. On `propose` it reads the parent
 //! from the supplied ancestry and emits a contiguous child block
@@ -102,7 +103,7 @@ impl<C: Clone> BlockContextRegistry<C> {
 }
 
 /// Honest block-building application, generic over the consensus context type.
-pub struct BlockBuilderApp<C, S = DefaultSigningScheme>
+pub struct AlwaysAcceptBlockBuilderApp<C, S = DefaultSigningScheme>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -112,7 +113,7 @@ where
     _marker: PhantomData<fn() -> (C, S)>,
 }
 
-impl<C, S> Default for BlockBuilderApp<C, S>
+impl<C, S> Default for AlwaysAcceptBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -126,7 +127,7 @@ where
     }
 }
 
-impl<C, S> Clone for BlockBuilderApp<C, S>
+impl<C, S> Clone for AlwaysAcceptBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -140,7 +141,7 @@ where
     }
 }
 
-impl<C, S> BlockBuilderApp<C, S>
+impl<C, S> AlwaysAcceptBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -165,7 +166,7 @@ where
     }
 }
 
-impl<C, S> Application<deterministic::Context> for BlockBuilderApp<C, S>
+impl<C, S> Application<deterministic::Context> for AlwaysAcceptBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
     S: Scheme,
@@ -213,7 +214,7 @@ where
     }
 }
 
-impl<C, S> Reporter for BlockBuilderApp<C, S>
+impl<C, S> Reporter for AlwaysAcceptBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     S: Send + 'static,
@@ -245,7 +246,7 @@ const VERIFY_REJECT_BUCKET: u8 = 2;
 /// Honest application selected by the final byte of the general Twins input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ApplicationChoice {
-    Basic,
+    AlwaysAccept,
     /// May temporarily omit proposals, delay verification, or reject blocks.
     /// These behaviors are deterministic and shared by all honest validators.
     /// After the fault-injection prefix, proposals and verifications succeed normally.
@@ -255,7 +256,7 @@ pub(super) enum ApplicationChoice {
 impl ApplicationChoice {
     pub(super) const fn from_selector(selector: u8) -> Self {
         match selector % 2 {
-            0 => Self::Basic,
+            0 => Self::AlwaysAccept,
             _ => Self::Faulty,
         }
     }
@@ -264,7 +265,7 @@ impl ApplicationChoice {
 impl fmt::Display for ApplicationChoice {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Basic => formatter.write_str("basic"),
+            Self::AlwaysAccept => formatter.write_str("always-accept"),
             Self::Faulty => formatter.write_str("faulty"),
         }
     }
@@ -345,7 +346,7 @@ pub(super) struct FaultyBlockBuilderApp<C, S = DefaultSigningScheme>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
-    inner: BlockBuilderApp<C, S>,
+    inner: AlwaysAcceptBlockBuilderApp<C, S>,
     config: FaultyConfig,
 }
 
@@ -355,8 +356,10 @@ where
 {
     pub(super) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
         let inner = match verification_delay {
-            Some((view, delay)) => BlockBuilderApp::with_verification_delay(view, delay),
-            None => BlockBuilderApp::default(),
+            Some((view, delay)) => {
+                AlwaysAcceptBlockBuilderApp::with_verification_delay(view, delay)
+            }
+            None => AlwaysAcceptBlockBuilderApp::default(),
         };
         Self { inner, config }
     }
@@ -441,7 +444,7 @@ pub(super) enum SelectedBlockBuilderApp<C, S = DefaultSigningScheme>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
-    Basic(BlockBuilderApp<C, S>),
+    AlwaysAccept(AlwaysAcceptBlockBuilderApp<C, S>),
     Faulty(FaultyBlockBuilderApp<C, S>),
 }
 
@@ -455,12 +458,14 @@ where
         verification_delay: Option<(View, Duration)>,
     ) -> Self {
         match choice {
-            ApplicationChoice::Basic => {
+            ApplicationChoice::AlwaysAccept => {
                 let application = match verification_delay {
-                    Some((view, delay)) => BlockBuilderApp::with_verification_delay(view, delay),
-                    None => BlockBuilderApp::default(),
+                    Some((view, delay)) => {
+                        AlwaysAcceptBlockBuilderApp::with_verification_delay(view, delay)
+                    }
+                    None => AlwaysAcceptBlockBuilderApp::default(),
                 };
-                Self::Basic(application)
+                Self::AlwaysAccept(application)
             }
             ApplicationChoice::Faulty => {
                 Self::Faulty(FaultyBlockBuilderApp::new(config, verification_delay))
@@ -470,8 +475,8 @@ where
 
     pub(super) fn with_block_contexts(self, block_contexts: BlockContextRegistry<C>) -> Self {
         match self {
-            Self::Basic(application) => {
-                Self::Basic(application.with_block_contexts(block_contexts))
+            Self::AlwaysAccept(application) => {
+                Self::AlwaysAccept(application.with_block_contexts(block_contexts))
             }
             Self::Faulty(application) => {
                 Self::Faulty(application.with_block_contexts(block_contexts))
@@ -481,7 +486,7 @@ where
 
     pub(super) fn with_reporter(self, reporter: DeliveryReporter<C>) -> Self {
         match self {
-            Self::Basic(inner) => Self::Basic(inner.with_reporter(reporter)),
+            Self::AlwaysAccept(inner) => Self::AlwaysAccept(inner.with_reporter(reporter)),
             Self::Faulty(inner) => Self::Faulty(inner.with_reporter(reporter)),
         }
     }
@@ -491,7 +496,7 @@ where
         C: Codec<Cfg = ()> + Viewable,
     {
         match choice {
-            ApplicationChoice::Basic => false,
+            ApplicationChoice::AlwaysAccept => false,
             ApplicationChoice::Faulty => config.rejects(context),
         }
     }
@@ -503,7 +508,7 @@ where
 {
     fn clone(&self) -> Self {
         match self {
-            Self::Basic(application) => Self::Basic(application.clone()),
+            Self::AlwaysAccept(application) => Self::AlwaysAccept(application.clone()),
             Self::Faulty(application) => Self::Faulty(application.clone()),
         }
     }
@@ -518,7 +523,7 @@ where
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match self {
-            Self::Basic(application) => application.report(activity),
+            Self::AlwaysAccept(application) => application.report(activity),
             Self::Faulty(application) => application.report(activity),
         }
     }
@@ -541,7 +546,7 @@ where
         input: Self::Input,
     ) -> Option<Self::Block> {
         match self {
-            Self::Basic(application) => application.propose(context, ancestry, input).await,
+            Self::AlwaysAccept(application) => application.propose(context, ancestry, input).await,
             Self::Faulty(application) => application.propose(context, ancestry, input).await,
         }
     }
@@ -552,7 +557,7 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         match self {
-            Self::Basic(application) => application.verify(context, ancestry).await,
+            Self::AlwaysAccept(application) => application.verify(context, ancestry).await,
             Self::Faulty(application) => application.verify(context, ancestry).await,
         }
     }

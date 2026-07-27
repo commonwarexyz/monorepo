@@ -5,7 +5,7 @@ use super::{
     super::{
         ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
         app::{
-            ApplicationChoice, BlockBuilderApp, BlockContextRegistry, DeliveryReporter,
+            AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
             FaultyConfig, SelectedBlockBuilderApp,
         },
     },
@@ -84,7 +84,7 @@ pub(super) trait TwinsBlockBuilder<P: Simplex>:
     fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &Ctx<P>) -> bool;
 }
 
-impl<P: Simplex> TwinsBlockBuilder<P> for BlockBuilderApp<Ctx<P>, SchemeOf<P>> {
+impl<P: Simplex> TwinsBlockBuilder<P> for AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>> {
     fn create(
         _choice: ApplicationChoice,
         _config: FaultyConfig,

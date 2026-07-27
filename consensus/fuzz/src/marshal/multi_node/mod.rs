@@ -1,10 +1,12 @@
-//! Multi-node marshal liveness fuzzing model.
+//! Multi-node end-to-end marshal fuzzing model.
 //!
-//! This fuzzing harness runs three honest validators plus one byzantine `Disrupter`,
+//! This fuzzing harness runs three honest validators plus one byzantine validator,
 //! reusing the shared fuzz infrastructure. The honest validators are parametrized by
 //! the *marshal sink* instead of the reporter sink: marshal is the consensus
 //! engine's reporter and delivers ordered finalized blocks to a downstream
 //! application.
+//!
+//! Safety is checked through the live and end-of-run invariants in `invariants.rs`.
 //!
 //! The liveness check injects byzantine faults, then asserts that honest nodes keep making progress:
 //! every honest marshal delivers a target number of ordered finalized blocks
@@ -19,7 +21,7 @@
 //!   invariants.
 //! - `twins` runs the standard marshal stack under sampled Simplex Twins
 //!   scenarios and checks post-prefix recovery.
-//! - `invariants` holds the end-of-run and live automaton assertions.
+//! - `invariants` holds the safety invariants and live automaton assertions.
 
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
