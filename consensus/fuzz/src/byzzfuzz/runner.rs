@@ -28,7 +28,7 @@ use commonware_codec::Encode;
 use commonware_consensus::{
     Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
-    types::{Epoch, TermLength, View},
+    types::{Epoch, View},
 };
 use commonware_cryptography::{
     Hasher, Sha256, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -298,7 +298,7 @@ where
                 &participants,
                 schemes[i].clone(),
                 validator,
-                P::elector(TermLength::ONE),
+                P::elector(P::effective_term_length(input.term_length)),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -492,6 +492,7 @@ where
         let config = input.configuration;
         let n = config.n as usize;
         let required_containers = input.required_containers;
+        let term_length = P::effective_term_length(input.term_length);
 
         // Liveness is only meaningful for correct processes; the byzantine
         // identity at `BYZANTINE_IDX` is excluded.
@@ -546,9 +547,9 @@ where
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
-            P::elector(TermLength::ONE),
+            P::elector(term_length),
             Epoch::new(EPOCH),
-            TermLength::ONE,
+            term_length,
             &reporters,
         );
 
@@ -562,7 +563,7 @@ where
             .collect();
 
         let states = invariants::extract(correct_reporters);
-        invariants::check::<P>(TermLength::ONE, states);
+        invariants::check::<P>(term_length, states);
     });
 }
 
@@ -573,7 +574,7 @@ mod tests {
         CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
         strategy::StrategyChoice, utils::Partition,
     };
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
     use std::num::NonZeroUsize;
 
     fn baseline_input(seed: u64) -> FuzzInput {

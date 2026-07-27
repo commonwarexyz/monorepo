@@ -48,7 +48,11 @@ pub(crate) fn amnesia_partition<PK: Display>(validator: &PK, generation: u32) ->
 /// runner keeps perturbing the surviving quorum until the episode budget ends.
 /// The node's Arc-backed reporter is retained, so its pre-crash history still
 /// feeds the episode-end safety oracle.
-pub(crate) async fn crash_stop<P: Simplex>(mv: &mut ManagedValidator<P>) {
+pub(crate) async fn crash_stop<P, R>(mv: &mut ManagedValidator<P, R>)
+where
+    P: Simplex,
+    R: Clone,
+{
     abort_tasks(mv).await;
     mv.mark_crashed();
 }
@@ -61,7 +65,11 @@ pub(crate) async fn crash_stop<P: Simplex>(mv: &mut ManagedValidator<P>) {
 /// incarnation is still schedulable. The runner calls this FIRST on a durable
 /// restart, before re-registration, so a second incarnation never coexists with
 /// the first.
-pub(crate) async fn abort_tasks<P: Simplex>(mv: &mut ManagedValidator<P>) {
+pub(crate) async fn abort_tasks<P, R>(mv: &mut ManagedValidator<P, R>)
+where
+    P: Simplex,
+    R: Clone,
+{
     if let Some(handle) = mv.take_engine_handle() {
         handle.abort();
         let _ = handle.await;
