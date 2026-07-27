@@ -137,8 +137,8 @@ pub enum WaiterState {
     /// Cancellation was requested.
     ///
     /// If the request still has an operation SQE in flight, the loop stages an
-    /// async cancel. If the request is only parked in the staged queue, the
-    /// loop completes it locally with the reason's error when that entry is
+    /// async cancel. If the request is only parked in the backlog, the loop
+    /// completes it locally with the reason's error when that entry is
     /// revisited.
     CancelRequested {
         /// Why cancellation was requested (selects the observer's error).
@@ -179,9 +179,11 @@ struct Waiter {
 
 /// Outcome produced when staging the next SQE for a waiter.
 pub enum StageOutcome {
-    /// The waiter was canceled while parked in the staged queue and completed
-    /// locally with timeout.
-    Timeout {
+    /// The waiter was canceled while parked in the backlog and completed
+    /// locally without emitting an SQE. This covers local deadline expiry
+    /// (the observer sees timeout), local shutdown (the observer sees
+    /// closed), and orphan retirement (no observer, the slot is freed).
+    Complete {
         /// Waker to invoke outside any state borrow, when a ticket still
         /// observes the parked result.
         waker: Option<Waker>,
@@ -197,7 +199,7 @@ pub enum CompletionOutcome {
     /// The CQE belonged to an async cancel SQE and was handled internally.
     Cancel,
     /// The logical request needs another SQE and should be placed back in the
-    /// staged queue.
+    /// backlog.
     Requeue(WaiterId),
     /// The logical request reached a terminal state.
     ///
@@ -435,7 +437,8 @@ impl Waiters {
     /// locally:
     ///
     /// - [`StageOutcome::Submit`] leaves the waiter tracked and yields the next SQE.
-    /// - [`StageOutcome::Timeout`] completes the waiter locally with timeout.
+    /// - [`StageOutcome::Complete`] completes the waiter locally (deadline
+    ///   expiry, shutdown, or orphan retirement) without emitting an SQE.
     ///
     /// When this returns [`StageOutcome::Submit`], the waiter is marked as having an
     /// operation SQE outstanding immediately, so [`Waiters::is_in_flight`] will return
@@ -458,11 +461,10 @@ impl Waiters {
 
         match slot.state {
             WaiterState::CancelRequested { reason } => {
-                // Cancellation marked while the request sat in the staged
-                // queue: an in-flight request is never restaged (its CQE
-                // requeues it with `in_flight` already cleared), and freeing
-                // an in-flight slot below would release kernel-referenced
-                // buffers.
+                // Cancellation marked while the request sat in the backlog:
+                // an in-flight request is never restaged (its CQE requeues it
+                // with `in_flight` already cleared), and freeing an in-flight
+                // slot below would release kernel-referenced buffers.
                 assert!(
                     !slot.in_flight,
                     "stage called for cancelled waiter with op in flight"
@@ -470,7 +472,7 @@ impl Waiters {
                 if slot.orphaned {
                     // Nobody can take the parked result, so free the slot.
                     let _ = self.take(index);
-                    StageOutcome::Timeout {
+                    StageOutcome::Complete {
                         waker: None,
                         freed: true,
                     }
@@ -481,7 +483,7 @@ impl Waiters {
                     // timeout, a shutdown as closed.
                     let output = request.interrupt(reason.into_error());
                     let waker = self.park_output_at(index, output);
-                    StageOutcome::Timeout {
+                    StageOutcome::Complete {
                         waker,
                         freed: false,
                     }
@@ -991,7 +993,7 @@ mod tests {
     fn test_waiters_cancel_stage_only_when_in_flight() {
         // Verify timeout processing can distinguish between:
         // - a waiter whose current SQE is still in flight
-        // - a waiter that is only parked in the staged queue
+        // - a waiter that is only parked in the backlog
         let mut waiters = Waiters::new(2);
 
         // First build a waiter that still has an operation SQE outstanding.
@@ -1026,7 +1028,7 @@ mod tests {
             ));
 
             match waiters.stage(waiter_id) {
-                StageOutcome::Timeout {
+                StageOutcome::Complete {
                     waker: None,
                     freed: true,
                 } => {}

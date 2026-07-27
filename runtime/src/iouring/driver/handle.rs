@@ -1,7 +1,7 @@
 //! Thread-affine op submission for the io_uring runtime.
 //!
 //! The [Handle] is the shared half of the driver: the waiter slab, the
-//! staged/cancel queues, and the capacity wait list reached by op futures
+//! backlog and cancel queues, and the capacity wait list reached by op futures
 //! and by the event loop that services them (see [super::Driver]). The
 //! runtime traits force [crate::Blob], [crate::Sink], and [crate::Stream] to
 //! be `Send + Sync` and op futures to be `Send`, so they reach this state
@@ -11,14 +11,14 @@
 //! thread assert.
 //!
 //! Op futures ([Op]) stage requests by inserting into the slab and pushing
-//! onto the staged queue during `poll`. The loop builds and submits SQEs in
+//! onto the backlog during `poll`. The loop builds and submits SQEs in
 //! its own turn, parks terminal results in the slot, and wakes the stored
 //! task waker. Dropping an op future orphans its slot: cancelable kinds are
 //! async-cancelled eagerly, while storage writes and syncs detach and keep
 //! running for durability parity with the tokio backend. Dropping an admitted
 //! op future or a [Ticket] (including one held inside a front-end object such
 //! as a listener) on a foreign thread cannot touch the table directly (drop
-//! must not panic, so the affinity check cannot reject it); it is routed
+//! must not panic, so the affinity check cannot reject it), so it is routed
 //! through the [OrphanMailbox] and wound down by the loop on its next turn.
 //! Ring-bound resources may therefore be dropped from any thread, even
 //! though they must only be used on their owning worker.
@@ -108,7 +108,7 @@ pub(crate) struct Ops {
     pub(super) waiters: Waiters,
     /// Waiter ids whose next SQE the loop must build, in FIFO order. Fresh
     /// admissions and requeued partial operations share this queue.
-    pub(super) staged: VecDeque<WaiterId>,
+    pub(super) backlog: VecDeque<WaiterId>,
     /// Waiter ids needing an async-cancel SQE.
     pub(super) pending_cancels: VecDeque<WaiterId>,
     /// Wheel ticks released by dropped tickets, awaiting removal by the loop
@@ -334,7 +334,7 @@ impl Handle {
         Self {
             ops: Arc::new(Affine::new(RefCell::new(Ops {
                 waiters: Waiters::new(capacity),
-                staged: VecDeque::with_capacity(capacity),
+                backlog: VecDeque::with_capacity(capacity),
                 pending_cancels: VecDeque::with_capacity(capacity),
                 released_deadlines: Vec::new(),
                 capacity: CapacityWaiters::new(),
@@ -545,7 +545,7 @@ impl Handle {
 /// wait list through `registration` (one slot per attempt, refreshed on
 /// re-polls and released here once the attempt resolves). Otherwise the
 /// request is admitted: the slab owns it (along with the task waker) and its
-/// id is pushed onto the staged queue for the loop.
+/// id is pushed onto the backlog for the loop.
 fn poll_admission(
     handle: &Handle,
     request: &mut Option<Request>,
@@ -568,7 +568,7 @@ fn poll_admission(
         }
         let request = request.take().expect("request consumed before admission");
         let id = ops.waiters.insert(request, cx.waker().clone());
-        ops.staged.push_back(id);
+        ops.backlog.push_back(id);
         Admission::Admitted(id)
     });
     match outcome {

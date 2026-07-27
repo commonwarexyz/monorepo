@@ -142,7 +142,8 @@ impl FillResult {
     /// completions must free capacity before admissions resume.
     #[inline]
     fn from_fill_state(ops: &Ops, submission_queue: &SubmissionQueue<'_>) -> Self {
-        if submission_queue.is_full() && (!ops.staged.is_empty() || !ops.pending_cancels.is_empty())
+        if submission_queue.is_full()
+            && (!ops.backlog.is_empty() || !ops.pending_cancels.is_empty())
         {
             return Self::AtSubmissionQueueCapacity;
         }
@@ -331,7 +332,7 @@ impl IoUringLoop {
         let (fully_idle, waiters_full) = self.handle.with(|ops| {
             (
                 ops.waiters.pending() == 0
-                    && ops.staged.is_empty()
+                    && ops.backlog.is_empty()
                     && ops.pending_cancels.is_empty(),
                 ops.waiters.is_full(),
             )
@@ -376,10 +377,11 @@ impl IoUringLoop {
 
     /// Build and push the SQE for a request in the waiter table.
     ///
-    /// If the request was marked for cancellation while sitting in the staged
-    /// queue (timeout or ticket drop between requeue and staging), it is
-    /// completed with a timeout error or retired instead of issuing a
-    /// follow-up SQE.
+    /// If the request was marked for cancellation while sitting in the
+    /// backlog (deadline expiry, runtime shutdown, or ticket drop between
+    /// requeue and staging), it is completed with the reason's error
+    /// (timeout for a deadline, closed for shutdown) or retired for a
+    /// dropped ticket instead of issuing a follow-up SQE.
     fn stage_request(
         &mut self,
         ops: &mut Ops,
@@ -387,7 +389,7 @@ impl IoUringLoop {
         submission_queue: &mut SubmissionQueue<'_>,
     ) {
         match ops.waiters.stage(waiter_id) {
-            StageOutcome::Timeout { waker, freed } => {
+            StageOutcome::Complete { waker, freed } => {
                 self.pending_wakers.extend(waker);
                 if freed {
                     self.notify_capacity(ops);
@@ -407,19 +409,19 @@ impl IoUringLoop {
         }
     }
 
-    /// Stage admitted requests from the staged queue in FIFO order.
+    /// Stage admitted requests from the backlog in FIFO order.
     ///
     /// The first staging of a request that carries a deadline converts it to
-    /// a wheel tick (aligning the wheel when it was previously idle);
+    /// a wheel tick (aligning the wheel when it was previously idle), and
     /// already-expired deadlines complete immediately with timeout before any
     /// SQE is issued.
     ///
     /// Stops when all queued requests are staged or the SQ reaches capacity.
-    /// Returns `true` when SQ capacity is hit and at least one staged request
-    /// remains queued.
-    fn stage_staged(&mut self, ops: &mut Ops, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+    /// Returns `true` when SQ capacity is hit and at least one backlog
+    /// request remains queued.
+    fn stage_backlog(&mut self, ops: &mut Ops, submission_queue: &mut SubmissionQueue<'_>) -> bool {
         while !submission_queue.is_full() {
-            let Some(waiter_id) = ops.staged.pop_front() else {
+            let Some(waiter_id) = ops.backlog.pop_front() else {
                 return false;
             };
 
@@ -444,7 +446,7 @@ impl IoUringLoop {
             self.stage_request(ops, waiter_id, submission_queue);
         }
 
-        !ops.staged.is_empty()
+        !ops.backlog.is_empty()
     }
 
     /// Stage pending submission work into the SQ.
@@ -484,7 +486,7 @@ impl IoUringLoop {
         }
 
         // Stage admitted requests in FIFO order.
-        if self.stage_staged(ops, &mut submission_queue) {
+        if self.stage_backlog(ops, &mut submission_queue) {
             return FillResult::from_fill_state(ops, &submission_queue);
         }
 
@@ -554,12 +556,12 @@ impl IoUringLoop {
 
         match ops.waiters.on_completion(user_data, cqe.result()) {
             CompletionOutcome::Cancel => {
-                // Async-cancel CQEs are handled entirely inside `Waiters` they do
+                // Async-cancel CQEs are handled entirely inside `Waiters`. They do
                 // not directly complete or requeue a logical request here.
             }
             CompletionOutcome::Requeue(waiter_id) => {
-                // Request needs another SQE. Add it back to the staged queue.
-                ops.staged.push_back(waiter_id);
+                // Request needs another SQE. Add it back to the backlog.
+                ops.backlog.push_back(waiter_id);
             }
             CompletionOutcome::Complete {
                 waker,
@@ -609,8 +611,8 @@ impl IoUringLoop {
                 // Once cancel is requested, this waiter is no longer deadline-active.
                 self.timeout_wheel.remove(entry.target_tick);
                 // Only timed-out waiters with an outstanding op SQE need
-                // AsyncCancel. Waiters parked in the staged queue have no
-                // kernel op to cancel and will time out locally when restaged.
+                // AsyncCancel. Waiters parked in the backlog have no kernel
+                // op to cancel and will time out locally when restaged.
                 if ops.waiters.is_in_flight(entry.waiter_id) {
                     ops.pending_cancels.push_back(entry.waiter_id);
                 }
@@ -621,7 +623,7 @@ impl IoUringLoop {
     /// Request cancellation of every progressing waiter.
     ///
     /// Cancelled waiters leave the timeout wheel, in-flight waiters get an
-    /// async-cancel SQE queued, and waiters parked in the staged queue retire
+    /// async-cancel SQE queued, and waiters parked in the backlog retire
     /// locally when restaged.
     fn cancel_all(&mut self, ops: &mut Ops) {
         for (waiter_id, target_tick, in_flight) in ops.waiters.cancel_active() {
@@ -689,7 +691,7 @@ impl IoUringLoop {
                 {
                     let mut submission_queue = ring.submission();
                     self.stage_cancellations(ops, &mut submission_queue);
-                    self.stage_staged(ops, &mut submission_queue);
+                    self.stage_backlog(ops, &mut submission_queue);
                     // Keep the eventfd wake path live during shutdown: a
                     // foreign-thread drop pushes into the orphan mailbox and
                     // must be able to wake a drain blocked in
@@ -1364,7 +1366,7 @@ mod tests {
         assert_eq!(harness.tracked(), 1);
         drop(recv);
 
-        // The staged entry is retired locally on the next turn.
+        // The backlog entry is retired locally on the next turn.
         harness.driver().turn();
         assert_eq!(harness.tracked(), 0);
     }
@@ -1967,7 +1969,7 @@ mod tests {
     #[test]
     fn test_fill_reports_sq_pressure_over_waiter_pressure() {
         // Verify the staging-pressure dominance rule directly: a full SQ with
-        // staged work remaining must report submission-queue pressure (so the
+        // backlog work remaining must report submission-queue pressure (so the
         // turn loop flushes and restages) even when the slab is also full,
         // and only a full slab with nothing left to stage reports waiter
         // pressure.
@@ -1999,7 +2001,7 @@ mod tests {
         assert!(poll_once(&harness, &mut recv_b).is_pending());
 
         // First pass: the wake-poll rearm plus one op fill the two-slot SQ
-        // while the second op stays staged, so SQ pressure must dominate the
+        // while the second op stays in the backlog, so SQ pressure must dominate the
         // (also true) waiter-capacity pressure.
         let driver_state = harness.handle.clone();
         let driver = harness.driver();
@@ -2040,7 +2042,7 @@ mod tests {
             Instant::now() + Duration::from_secs(60),
         ));
         // Admit without turning the loop, then drop: the entry stays in the
-        // staged queue in cancel-requested state.
+        // backlog in cancel-requested state.
         assert!(poll_once(&harness, &mut recv).is_pending());
         drop(recv);
 

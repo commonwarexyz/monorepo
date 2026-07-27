@@ -15,7 +15,7 @@
 //! that manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
 //!
 //! Work is submitted thread-locally: op futures stage requests directly into the loop's
-//! shared state (a waiter slab plus a staged FIFO) while they are polled on the runtime
+//! shared state (a waiter slab plus a backlog FIFO) while they are polled on the runtime
 //! thread, and completions are parked in the waiter slot until the owning future takes
 //! them. There are no channels and no per-op allocations on this path. The event loop
 //! blocks either in userspace futex wait (when the ring is truly idle) or in
@@ -64,7 +64,7 @@
 //! Each pass of the event loop (driven by the executor's `turn`/`park` cycle):
 //! 1. Processes io_uring completion queue entries (CQEs), including internal wake CQEs
 //! 2. Advances userspace deadlines
-//! 3. Builds and submits SQEs for requests admitted into the staged queue by op futures
+//! 3. Builds and submits SQEs for requests admitted into the backlog by op futures
 //! 4. Handles partial progress and retryable errors by requeuing requests
 //! 5. Parks terminal results in the waiter slot and wakes the awaiting task
 //!
@@ -72,7 +72,7 @@
 //!
 //! ```text
 //! Data path:
-//!   Op future poll -> Driver (slab insert + staged FIFO) -> IoUringLoop -> SQE -> io_uring
+//!   Op future poll -> Driver (slab insert + backlog FIFO) -> IoUringLoop -> SQE -> io_uring
 //!   Op future poll <- parked Output in slot <- IoUringLoop <- CQE <- io_uring
 //!
 //! Wake paths (cross-thread task wakes only):
@@ -82,7 +82,7 @@
 //! Loop behavior:
 //!   1) Drain CQEs.
 //!   2) Advance timeouts.
-//!   3) Rarely rearm wake polling, then stage cancels and staged-queue requests
+//!   3) Rarely rearm wake polling, then stage cancels and backlog requests
 //!      into SQ (scheduling deadlines at first staging).
 //!   4) If work is pending or active waiters remain, submit and possibly block in
 //!      io_uring_enter until a CQE (data or wake) arrives.
@@ -106,7 +106,7 @@
 //! - Requests whose deadline already expired at first staging complete immediately
 //!   with timeout before any SQE is issued
 //! - Requests that still have an SQE in flight submit an async-cancel SQE on expiry
-//! - Requests parked only in the staged queue time out locally without cancel SQEs
+//! - Requests parked only in the backlog time out locally without cancel SQEs
 //! - Timeouts apply to the whole logical request, not individual SQEs
 //! - If the original op CQE completes the whole request, the caller sees success
 //! - If the original op CQE only makes partial/retryable progress after timeout, the caller
@@ -115,7 +115,8 @@
 //! ## Submission Policy
 //!
 //! A logical request may need multiple SQEs before it completes. Fresh admissions and
-//! requeued requests share one FIFO staged queue, and the loop stages work in this order:
+//! requeued requests share one backlog (the FIFO of admitted requests whose next SQE the
+//! loop must build), and the loop stages work in this order:
 //! 1. Rarely, a wake poll rearm SQE when a prior multishot wake CQE ended the
 //!    existing poll registration.
 //! 2. Cancellation SQEs for timed-out or drop-cancelled requests.
