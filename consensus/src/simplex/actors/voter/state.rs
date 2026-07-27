@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::{super::AncestryRequirement, round::Round};
 use crate::{
     Viewable,
     simplex::{
@@ -86,11 +86,18 @@ impl ParentPayloadError {
 pub enum Verify<S: Scheme<D>, D: Digest> {
     /// The proposal is ready for verification by the automaton.
     Ready(Context<D, S::PublicKey>, Proposal<D>),
-    /// The proposal was refused because its ancestry conflicts with a
-    /// certificate we hold, returned for broadcast so the proposer's side
-    /// of a certificate split converges on ours (see [State::object]).
-    Objection(Certificate<S, D>),
-    /// No proposal is ready to verify and no conflict was found.
+    /// The proposal needs an ancestry certificate from its leader.
+    Resolve {
+        /// Round containing the proposal that needs the certificate.
+        round: Rnd,
+        /// View whose certificate is needed.
+        view: View,
+        /// Evidence needed for the proposal's ancestry.
+        requirement: AncestryRequirement,
+        /// Leader that must hold the certificate to have built the proposal.
+        target: S::PublicKey,
+    },
+    /// No proposal is ready to verify and no new request is needed.
     Wait,
 }
 
@@ -735,9 +742,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Attempt to verify a proposed block.
     ///
-    /// Unlike during proposal, we don't use a verification opportunity
-    /// to backfill missing certificates (a malicious proposer could
-    /// ask us to fetch junk).
+    /// When ancestry is missing, requests the exact certificate from the
+    /// elected leader. An honest leader must hold evidence for every view its
+    /// proposal skips and for the parent it names. The proposal alone can
+    /// therefore induce work only toward that leader.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         let view = self.view;
         let Some((leader, proposal)) = self
@@ -761,9 +769,31 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                return self
-                    .object(view, err)
-                    .map_or(Verify::Wait, Verify::Objection);
+                let (requested, requirement) = match err {
+                    ParentPayloadError::MissingNullification { missing_view, .. } => {
+                        (missing_view, AncestryRequirement::Nullification)
+                    }
+                    ParentPayloadError::ParentNotCertified { parent_view, .. } => {
+                        (parent_view, AncestryRequirement::Parent)
+                    }
+                    ParentPayloadError::ParentNotBeforeProposal { .. }
+                    | ParentPayloadError::IntraTermProposalSkipsViews { .. }
+                    | ParentPayloadError::ParentBeforeFinalized { .. } => return Verify::Wait,
+                };
+                if !self
+                    .views
+                    .get_mut(&view)
+                    .expect("current round must exist")
+                    .request(requested, requirement)
+                {
+                    return Verify::Wait;
+                }
+                return Verify::Resolve {
+                    round: proposal.round,
+                    view: requested,
+                    requirement,
+                    target: leader.key,
+                };
             }
         };
         if !self
@@ -1001,105 +1031,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // - notarized and certified
         // - finalized
         //
-        // We do not request the parent's notarization from the resolver
-        // (a nullification covering the parent satisfies its term anchor).
-        // Until it arrives via gossip or buffered votes, we cannot vote for
-        // this proposal, but we still advance on later certificates.
+        // A nullification covering the parent satisfies background repair,
+        // so proposal verification requests current ancestry evidence for the
+        // parent directly from the leader that named it.
         self.is_certified(parent)
             .copied()
             .ok_or(ParentPayloadError::ParentNotCertified {
                 proposal_view: view,
                 parent_view: parent,
             })
-    }
-
-    /// Returns the certificate that justifies refusing the current view's
-    /// proposal, if the refusal stems from a conflict with evidence we hold
-    /// rather than evidence we merely lack.
-    ///
-    /// After a certificate split (say a notarization certified by some
-    /// participants and a nullification held by the rest for the same view),
-    /// each side refuses the other's proposals, and when neither side holds
-    /// a quorum on its own, no proposal can pass. Only the evidence holder
-    /// can detect the split, so it broadcasts the conflicting certificate
-    /// to converge the proposer's side. Refusals caused by evidence we
-    /// merely lack stay silent: there is no certificate to share, and the
-    /// resolver already fetches nullification gaps above the floor.
-    ///
-    /// A malicious leader can elicit an objection by naming a conflicting
-    /// parent, but gains little: each round objects at most once, the
-    /// certificate is one we already verified and hold, recipients discard
-    /// redundant copies before verifying them, and objecting alters no
-    /// timer (see the module documentation on fetching missing
-    /// certificates).
-    fn object(&mut self, view: View, err: ParentPayloadError) -> Option<Certificate<S, D>> {
-        // The current round must exist (try_verify just consulted it). Skip
-        // the certificate lookup once it has already objected.
-        if self
-            .views
-            .get(&view)
-            .expect("current round must exist")
-            .objected()
-        {
-            return None;
-        }
-        let certificate = match err {
-            // The proposal skips views among which we certified a
-            // notarization: the proposer holds covering nullifications we
-            // lack and may not know our certification exists. Share the
-            // highest such view so the network can converge on it as a
-            // parent (subsuming any certified views below it).
-            ParentPayloadError::MissingNullification {
-                proposal_view,
-                parent_view,
-                ..
-            } => {
-                let notarization = self.certified_conflict(parent_view, proposal_view)?;
-                Certificate::Notarization(notarization.clone())
-            }
-            // The proposal builds on a view we hold a covering nullification
-            // for: the proposer certified that view and may not know the
-            // nullification exists.
-            ParentPayloadError::ParentNotCertified { parent_view, .. } => {
-                let covering = self.highest_nullification_in_term(parent_view)?;
-                let nullification = self.nullification(covering)?;
-                Certificate::Nullification(nullification.clone())
-            }
-            // The proposal builds below our finalization floor: the proposer
-            // lacks our finalization.
-            ParentPayloadError::ParentBeforeFinalized { .. } => {
-                let finalization = self.finalization(self.last_finalized)?;
-                Certificate::Finalization(finalization.clone())
-            }
-            // Structurally invalid proposals need no evidence.
-            ParentPayloadError::ParentNotBeforeProposal { .. }
-            | ParentPayloadError::IntraTermProposalSkipsViews { .. } => return None,
-        };
-        // Consume the round's one-shot objection.
-        let objected = self
-            .views
-            .get_mut(&view)
-            .expect("current round must exist")
-            .try_object();
-        assert!(objected, "round already objected");
-        Some(certificate)
-    }
-
-    /// Returns the notarization of the highest certified view strictly
-    /// between `parent` and `view` without a covering nullification, if any.
-    ///
-    /// No view in the interval can be finalized (the caller checked that
-    /// `parent` is at or above the last finalized view), so a certified view
-    /// always carries a notarization.
-    fn certified_conflict(&self, parent: View, view: View) -> Option<&Notarization<S, D>> {
-        self.views
-            .range(parent.next()..view)
-            .rev()
-            .find(|(candidate, round)| {
-                round.certified_payload().is_some()
-                    && self.highest_nullification_in_term(**candidate).is_none()
-            })
-            .and_then(|(_, round)| round.notarization())
     }
 }
 
@@ -2762,11 +2702,9 @@ mod tests {
             assert!(initial_deadline.0 > context.current());
 
             // Permanent ancestry errors should immediately expire the timeout
-            // (and object with the finalization the proposer lacks).
-            assert!(matches!(
-                state.try_verify(),
-                Verify::Objection(Certificate::Finalization(_))
-            ));
+            // and stay silent (an honest proposer cannot name a parent below
+            // our finalized view within the fault bound).
+            assert!(matches!(state.try_verify(), Verify::Wait));
             assert!(state.next_timeout().0 <= context.current());
         });
     }
@@ -3525,11 +3463,19 @@ mod tests {
             );
             assert!(state.set_proposal(child_view, child_proposal.clone()));
 
-            // Before late certification of parent, the follower cannot verify
-            // this child proposal (and objects with the covering nullification).
+            // Before late certification of the parent, ask the leader for the
+            // parent certificate it must hold.
             assert!(matches!(
                 state.try_verify(),
-                Verify::Objection(Certificate::Nullification(_))
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == parent_view
+                        && requirement == AncestryRequirement::Parent
             ));
 
             // Late certification after nullification should unblock parent check for verification.
@@ -3699,10 +3645,22 @@ mod tests {
             );
             assert!(state.set_proposal(child_view, child_proposal.clone()));
 
-            // Missing nullification should stall verification without expiring the timeout.
+            // Missing nullification should trigger an exact request to the
+            // leader without expiring the timeout.
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
-            assert!(matches!(state.try_verify(), Verify::Wait));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == blocked_view
+                        && requirement == AncestryRequirement::Nullification
+            ));
             assert_eq!(state.next_timeout(), initial_deadline);
 
             // Once the intermediate nullification arrives, the same proposal should become verifiable.
@@ -3720,7 +3678,7 @@ mod tests {
     }
 
     /// Builds a follower state at view 3 (RoundRobin with epoch 1 elects
-    /// index 0, so signer index 1 follows) for the objection tests.
+    /// index 0, so signer index 1 follows) for ancestry-resolution tests.
     fn setup_follower_state(
         context: &mut deterministic::Context,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
@@ -3742,10 +3700,11 @@ mod tests {
     }
 
     #[test]
-    fn objection_shares_certified_notarization_for_skipped_view() {
+    fn resolution_requests_first_missing_view() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
+            let expected_leader = fixture.participants[0].clone();
             let (schemes, verifier) = (fixture.schemes, fixture.verifier);
 
             // Certify view 2, entering view 3.
@@ -3763,27 +3722,40 @@ mod tests {
             state.set_leader(child_view, None);
             assert_eq!(state.current_view(), child_view);
 
-            // A proposal that skips the certified view cannot be verified
-            // (Nullification(2) is missing), and the refusal stages the
-            // certified notarization as the objection.
+            // A proposal that skips the certified view requires its leader's
+            // Nullification(2).
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 View::new(1),
                 Sha256Digest::from([89u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged");
-            };
-            assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    target,
+                }
+                    if round.view() == child_view
+                        && view == skipped_view
+                        && requirement == AncestryRequirement::Nullification
+                        && target == expected_leader
+            ));
 
-            // The refusal objects at most once per round.
+            // A kindless response can validly contain the leader's preferred
+            // notarization, which is already known and does not provide the
+            // nullification this proposal needs. It must neither permit a
+            // vote nor create a request loop in the same round.
+            let (added, _) = state.add_notarization(notarization);
+            assert!(!added);
             assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
     #[test]
-    fn objection_shares_covering_nullification_for_uncertified_parent() {
+    fn resolution_requests_uncertified_parent() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
@@ -3800,24 +3772,37 @@ mod tests {
             let child_view = View::new(3);
             assert_eq!(state.current_view(), child_view);
 
-            // A proposal built on the nullified, uncertified view 1 cannot
-            // be verified, and the refusal stages the covering nullification
-            // as the objection.
+            // The leader must hold a certificate for the parent it named.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 parent_view,
                 Sha256Digest::from([90u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged");
-            };
-            assert!(matches!(objection, Certificate::Nullification(n) if n == nullification_1));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == parent_view
+                        && requirement == AncestryRequirement::Parent
+            ));
+
+            // A kindless response can instead contain the leader's preferred
+            // covering nullification. It is valid evidence for the key but
+            // does not certify the named parent, so it must neither permit a
+            // vote nor create a same-round request loop.
+            assert!(!state.add_nullification(nullification_1));
+            assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
     #[test]
-    fn objection_shares_finalization_for_parent_below_floor() {
+    fn resolution_silent_for_parent_below_floor() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
@@ -3831,28 +3816,28 @@ mod tests {
                 Sha256Digest::from([91u8; 32]),
             );
             let finalization = build_finalization(&verifier, &schemes, &finalized_proposal);
-            let (added, _) = state.add_finalization(finalization.clone());
+            let (added, _) = state.add_finalization(finalization);
             assert!(added);
             let child_view = View::new(3);
             assert_eq!(state.current_view(), child_view);
 
-            // A proposal built below the finalization floor is invalid, and
-            // the refusal stages the finalization as the objection.
+            // A proposal built below the finalization floor is invalid and
+            // draws no request: an honest proposer reaches this state only
+            // while holding a nullification that same-term vote safety rules
+            // out alongside our finalization, so there is no honest peer to
+            // converge with.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 View::new(1),
                 Sha256Digest::from([92u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged");
-            };
-            assert!(matches!(objection, Certificate::Finalization(f) if f == finalization));
+            assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
     #[test]
-    fn objection_shares_displaced_certified_notarization() {
+    fn resolution_starts_at_first_gap_before_displaced_certificate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
@@ -3869,7 +3854,7 @@ mod tests {
                 Sha256Digest::from([95u8; 32]),
             );
             let notarization = build_notarization(&verifier, &schemes, &displaced_proposal);
-            let (added, _) = state.add_notarization(notarization.clone());
+            let (added, _) = state.add_notarization(notarization);
             assert!(added);
             assert!(state.certified(displaced_view, true).is_some());
             let nullification_4 =
@@ -3878,30 +3863,37 @@ mod tests {
             let child_view = View::new(5);
             assert_eq!(state.current_view(), child_view);
 
-            // A proposal whose skipped range holds our certified view above
-            // its first non-nullified view (view 2) must still object with
-            // the certified notarization.
+            // Repair starts at the first missing view, independently of the
+            // displaced certificate above it.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 View::new(1),
                 Sha256Digest::from([96u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged");
-            };
-            assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == View::new(2)
+                        && requirement == AncestryRequirement::Nullification
+            ));
         });
     }
 
     #[test]
-    fn objection_fires_again_in_next_round() {
+    fn resolution_rearms_in_next_round() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
             let (schemes, verifier) = (fixture.schemes, fixture.verifier);
 
-            // Certify view 2 and object to a skipping proposal at view 3.
+            // Certify view 2 and request its missing nullification at view 3.
             let skipped_view = View::new(2);
             let skipped_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), skipped_view),
@@ -3909,7 +3901,7 @@ mod tests {
                 Sha256Digest::from([97u8; 32]),
             );
             let notarization = build_notarization(&verifier, &schemes, &skipped_proposal);
-            let (added, _) = state.add_notarization(notarization.clone());
+            let (added, _) = state.add_notarization(notarization);
             assert!(added);
             assert!(state.certified(skipped_view, true).is_some());
             state.set_leader(View::new(3), None);
@@ -3919,12 +3911,18 @@ mod tests {
                 Sha256Digest::from([98u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), child_proposal));
-            assert!(matches!(state.try_verify(), Verify::Objection(_)));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    view,
+                    requirement: AncestryRequirement::Nullification,
+                    ..
+                } if view == skipped_view
+            ));
 
             // Advance two views (we lead view 4, so a proposal there would
-            // not be verified) and refuse the same conflict again: the new
-            // round must object afresh, since the first broadcast may have
-            // been lost.
+            // not be verified) and encounter the same gap again. The new
+            // round must emit the request afresh.
             for view in 3..=4 {
                 let nullification = build_nullification(
                     &verifier,
@@ -3941,15 +3939,23 @@ mod tests {
                 Sha256Digest::from([99u8; 32]),
             );
             assert!(state.set_proposal(retry_view, retry_proposal));
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged again");
-            };
-            assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == retry_view
+                        && view == skipped_view
+                        && requirement == AncestryRequirement::Nullification
+            ));
         });
     }
 
     #[test]
-    fn objection_waits_for_certification() {
+    fn resolution_does_not_wait_for_local_conflict() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
@@ -3963,34 +3969,41 @@ mod tests {
                 Sha256Digest::from([100u8; 32]),
             );
             let notarization = build_notarization(&verifier, &schemes, &skipped_proposal);
-            let (added, _) = state.add_notarization(notarization.clone());
+            let (added, _) = state.add_notarization(notarization);
             assert!(added);
             let child_view = View::new(3);
             assert!(state.enter_view(child_view));
             state.set_leader(child_view, None);
 
-            // An uncertified notarization is not a conflict: we may yet fail
-            // to certify it, so the refusal stays silent.
+            // The leader's proposal is enough evidence to request the missing
+            // view; no conflicting local certificate is required.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 View::new(1),
                 Sha256Digest::from([101u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(matches!(state.try_verify(), Verify::Wait));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == skipped_view
+                        && requirement == AncestryRequirement::Nullification
+            ));
 
-            // Once certification completes, the same round objects (the
-            // silent refusal must not have consumed its objection).
+            // Certification does not duplicate the still-active request.
             assert!(state.certified(skipped_view, true).is_some());
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged");
-            };
-            assert!(matches!(objection, Certificate::Notarization(n) if n == notarization));
+            assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
     #[test]
-    fn objection_shares_term_covering_nullification() {
+    fn resolution_requests_named_parent_with_term_cover() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             // Stable leaders with three-view terms: a nullification covers
@@ -4003,28 +4016,35 @@ mod tests {
             // the next term start (view 4).
             let nullification_1 =
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), View::new(1)));
-            assert!(state.add_nullification(nullification_1.clone()));
+            assert!(state.add_nullification(nullification_1));
             let child_view = View::new(4);
             assert_eq!(state.current_view(), child_view);
 
-            // A proposal built on the covered, uncertified view 2 must
-            // object with the covering nullification from view 1 (not one at
-            // the parent view itself).
+            // A proposal built on covered, uncertified view 2 asks its leader
+            // for that named parent.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 View::new(2),
                 Sha256Digest::from([102u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            let Verify::Objection(objection) = state.try_verify() else {
-                panic!("objection must be staged");
-            };
-            assert!(matches!(objection, Certificate::Nullification(n) if n == nullification_1));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == View::new(2)
+                        && requirement == AncestryRequirement::Parent
+            ));
         });
     }
 
     #[test]
-    fn objection_silent_without_conflicting_certificate() {
+    fn resolution_requests_absent_certificate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (fixture, mut state) = setup_follower_state(&mut context);
@@ -4045,16 +4065,26 @@ mod tests {
             assert!(state.enter_view(child_view));
             state.set_leader(child_view, None);
 
-            // The refusal stems from evidence we merely lack (neither a
-            // certificate for view 2 nor a nullification covering it), so
-            // no objection is staged.
+            // The proposal identifies the leader that must hold the missing
+            // certificate even when we hold no conflicting evidence.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 parent_view,
                 Sha256Digest::from([94u8; 32]),
             );
             assert!(state.set_proposal(child_view, child_proposal));
-            assert!(matches!(state.try_verify(), Verify::Wait));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    round,
+                    view,
+                    requirement,
+                    ..
+                }
+                    if round.view() == child_view
+                        && view == View::new(2)
+                        && requirement == AncestryRequirement::Nullification
+            ));
         });
     }
 

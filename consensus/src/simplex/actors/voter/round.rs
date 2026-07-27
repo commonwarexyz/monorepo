@@ -1,11 +1,14 @@
-use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
+use super::{
+    super::AncestryRequirement,
+    slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus},
+};
 use crate::{
     simplex::{
         actors::span::ViewSpan,
         metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
-    types::{Participant, Round as Rnd},
+    types::{Participant, Round as Rnd, View},
 };
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -69,9 +72,10 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalize: bool,
     broadcast_finalization: bool,
     certify: CertifyState,
-    // Whether we already broadcast a certificate justifying a refusal to
-    // verify this round's proposal (see [super::state::State::try_verify]).
-    objected: bool,
+    // Last ancestry requirement requested from this round's leader. Ancestry
+    // only grows as certificates arrive, so a different request always
+    // advances the proposal toward verification.
+    requested: Option<(View, AncestryRequirement)>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -98,7 +102,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_finalize: false,
             broadcast_finalization: false,
             certify: CertifyState::Ready,
-            objected: false,
+            requested: None,
         }
     }
 
@@ -148,16 +152,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
-    /// Returns whether this round already broadcast a certificate justifying
-    /// a refusal to verify its proposal.
-    pub const fn objected(&self) -> bool {
-        self.objected
-    }
-
-    /// Marks that we broadcast a certificate justifying a refusal to verify
-    /// this round's proposal. Returns `false` if one was already recorded.
-    pub const fn try_object(&mut self) -> bool {
-        !replace(&mut self.objected, true)
+    /// Records an ancestry view requested from the leader. Returns `false`
+    /// when the same request is already active.
+    pub fn request(&mut self, view: View, requirement: AncestryRequirement) -> bool {
+        let request = (view, requirement);
+        if self.requested == Some(request) {
+            return false;
+        }
+        self.requested = Some(request);
+        true
     }
 
     /// Attempt to certify this round's proposal.
@@ -702,6 +705,21 @@ mod tests {
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_utils::{futures::AbortablePool, test_rng};
+
+    #[test]
+    fn ancestry_request_deduplicates_exact_requirement() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(10));
+        let mut round =
+            Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        let requested = View::new(3);
+
+        assert!(round.request(requested, AncestryRequirement::Nullification));
+        assert!(!round.request(requested, AncestryRequirement::Nullification));
+        assert!(round.request(requested, AncestryRequirement::Parent));
+        assert!(!round.request(requested, AncestryRequirement::Parent));
+    }
 
     #[test]
     fn equivocation_detected_on_proposal_notarization_conflict() {

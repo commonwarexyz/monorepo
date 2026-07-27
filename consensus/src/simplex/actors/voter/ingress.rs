@@ -12,6 +12,27 @@ use commonware_runtime::telemetry::traces::TracedExt as _;
 use std::collections::VecDeque;
 use tracing::{Span, info_span};
 
+/// How a verified certificate reached the voter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CertificateSource {
+    /// Received through the batcher's certificate pipeline.
+    Batcher,
+    /// Received through background resolver repair.
+    Resolver,
+    /// Requested directly from the leader of a proposal that needs it.
+    TargetedResolver,
+}
+
+impl CertificateSource {
+    pub(super) const fn is_resolver(self) -> bool {
+        !matches!(self, Self::Batcher)
+    }
+
+    pub(super) const fn rebroadcast(self) -> bool {
+        !matches!(self, Self::TargetedResolver)
+    }
+}
+
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
@@ -36,9 +57,8 @@ pub enum Message<S: Scheme, D: Digest> {
         span: Span,
         /// The verified certificate.
         certificate: Certificate<S, D>,
-        /// Whether the certificate came from the resolver. When true, the voter
-        /// will not send it back to the resolver (to avoid "boomerang").
-        from_resolver: bool,
+        /// How the certificate reached the voter.
+        source: CertificateSource,
     },
 }
 
@@ -240,7 +260,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 certificate = %certificate.kind()
             ),
             certificate,
-            from_resolver: false,
+            source: CertificateSource::Batcher,
         });
     }
 
@@ -254,7 +274,22 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 certificate = %certificate.kind()
             ),
             certificate,
-            from_resolver: true,
+            source: CertificateSource::Resolver,
+        });
+    }
+
+    /// Send a certificate resolved directly from a proposal's leader without
+    /// requesting an immediate re-gossip to the other participants.
+    pub(crate) fn resolved_targeted(&mut self, certificate: Certificate<S, D>) {
+        let _ = self.sender.enqueue(Message::Verified {
+            span: info_span!(
+                "simplex.voter.mailbox.resolved_targeted",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced(),
+                certificate = %certificate.kind()
+            ),
+            certificate,
+            source: CertificateSource::TargetedResolver,
         });
     }
 }
@@ -269,10 +304,11 @@ mod tests {
         },
         types::{Epoch, Round},
     };
-    use commonware_actor::mailbox::Policy;
+    use commonware_actor::mailbox::{self, Policy};
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_runtime::{Runner, deterministic};
+    use commonware_utils::{NZUsize, test_rng};
     use std::collections::VecDeque;
 
     type TestScheme = ed25519::Scheme;
@@ -340,7 +376,11 @@ mod tests {
         Message::Verified {
             span: Span::none(),
             certificate,
-            from_resolver,
+            source: if from_resolver {
+                CertificateSource::Resolver
+            } else {
+                CertificateSource::Batcher
+            },
         }
     }
 
@@ -353,6 +393,31 @@ mod tests {
             None
         });
         messages
+    }
+
+    #[test]
+    fn targeted_resolution_controls_immediate_rebroadcast() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|context| async move {
+            let (sender, mut receiver) = mailbox::new(context, NZUsize!(1));
+            let mut mailbox = Mailbox::new(sender);
+            mailbox.resolved_targeted(finalization(View::new(2)));
+
+            let Some(Message::Verified { source, .. }) = receiver.recv().await else {
+                panic!("expected targeted resolver certificate");
+            };
+            assert_eq!(source, CertificateSource::TargetedResolver);
+            assert!(source.is_resolver());
+            assert!(!source.rebroadcast());
+
+            mailbox.resolved(finalization(View::new(3)));
+            let Some(Message::Verified { source, .. }) = receiver.recv().await else {
+                panic!("expected background resolver certificate");
+            };
+            assert_eq!(source, CertificateSource::Resolver);
+            assert!(source.is_resolver());
+            assert!(source.rebroadcast());
+        });
     }
 
     #[test]
@@ -377,7 +442,7 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), source: CertificateSource::Batcher, .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
@@ -397,7 +462,7 @@ mod tests {
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Nullification(n), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Nullification(n), source: CertificateSource::Batcher, .. })
                 if n.view() == View::new(5)
         ));
     }
@@ -429,7 +494,7 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), source: CertificateSource::Batcher, .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
@@ -454,7 +519,7 @@ mod tests {
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), source: CertificateSource::Batcher, .. })
                 if f.view() == View::new(3)
         ));
     }
@@ -476,7 +541,7 @@ mod tests {
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), source: CertificateSource::Batcher, .. })
                 if f.view() == View::new(5)
         ));
     }

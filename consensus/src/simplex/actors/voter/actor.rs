@@ -46,7 +46,8 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 
-/// Tracks which certificate type was received from the resolver in the current iteration.
+/// Tracks which certificate type was received from the resolver in the current iteration and
+/// whether it should be re-gossiped immediately.
 ///
 /// Used to prevent "boomerang" where we send a certificate back to the resolver
 /// that we just received from it.
@@ -54,16 +55,49 @@ use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 enum Resolved {
     #[default]
     None,
-    Notarization,
-    Nullification,
-    Finalization,
+    Notarization {
+        rebroadcast: bool,
+    },
+    Nullification {
+        rebroadcast: bool,
+    },
+    Finalization {
+        rebroadcast: bool,
+    },
+}
+
+impl Resolved {
+    const fn is_notarization(self) -> bool {
+        matches!(self, Self::Notarization { .. })
+    }
+
+    const fn is_nullification(self) -> bool {
+        matches!(self, Self::Nullification { .. })
+    }
+
+    const fn is_finalization(self) -> bool {
+        matches!(self, Self::Finalization { .. })
+    }
+
+    const fn rebroadcast_notarization(self) -> bool {
+        !matches!(self, Self::Notarization { rebroadcast: false })
+    }
+
+    const fn rebroadcast_nullification(self) -> bool {
+        !matches!(self, Self::Nullification { rebroadcast: false })
+    }
+
+    const fn rebroadcast_finalization(self) -> bool {
+        !matches!(self, Self::Finalization { rebroadcast: false })
+    }
 }
 
 /// Messages built and recorded during an event loop iteration, staged for
-/// broadcast after the journal sync barrier (see [Actor::construct] and
+/// publication after the journal sync barrier (see [Actor::construct] and
 /// [Actor::notify]).
 #[allow(clippy::type_complexity)]
 struct Staged<S: Scheme<D>, D: Digest> {
+    resolved: Resolved,
     notarize: Option<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     nullification: Option<Nullification<S>>,
@@ -365,21 +399,27 @@ impl<
 
     /// Attempt to verify a proposed block.
     ///
-    /// Returns the pending verification request when the proposal is ready,
-    /// or the certificate justifying a refusal (see [State::try_verify]).
+    /// Returns the pending verification request when the proposal is ready.
+    /// Missing ancestry is requested from the proposal's leader through the
+    /// resolver (see [State::try_verify]).
     #[allow(clippy::async_yields_async)]
-    #[allow(clippy::type_complexity)]
     async fn try_verify(
         &mut self,
-    ) -> (
-        Option<Request<Context<D, S::PublicKey>, bool>>,
-        Option<Certificate<S, D>>,
-    ) {
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<Request<Context<D, S::PublicKey>, bool>> {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
-            Verify::Objection(certificate) => return (None, Some(certificate)),
-            Verify::Wait => return (None, None),
+            Verify::Resolve {
+                round,
+                view,
+                requirement,
+                target,
+            } => {
+                resolver.resolve(round, view, requirement, target);
+                return None;
+            }
+            Verify::Wait => return None,
         };
 
         // Request verification
@@ -397,7 +437,7 @@ impl<
         }
         .instrument(span.clone())
         .await;
-        (Some(Request(context, span, receiver)), None)
+        Some(Request(context, span, receiver))
     }
 
     /// Persists our nullify vote to the journal for crash recovery.
@@ -557,7 +597,7 @@ impl<
 
         // Tell the resolver this view is complete so it can stop requesting it.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Notarization {
+        if !resolved.is_notarization() {
             resolver.updated(Certificate::Notarization(notarization.clone()));
         }
         // Update our local round with the certificate.
@@ -579,7 +619,7 @@ impl<
 
         // Notify resolver so dependent parents can progress.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Nullification {
+        if !resolved.is_nullification() {
             resolver.updated(Certificate::Nullification(nullification.clone()));
         }
         // Track the certificate locally to avoid rebuilding it.
@@ -624,7 +664,7 @@ impl<
 
         // Tell the resolver this view is complete so it can stop requesting it.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Finalization {
+        if !resolved.is_finalization() {
             resolver.updated(Certificate::Finalization(finalization.clone()));
         }
         // Advance the consensus core with the finalization proof.
@@ -766,7 +806,7 @@ impl<
             }
             Message::Verified {
                 certificate,
-                from_resolver,
+                source,
                 ..
             } => {
                 // Certificates can come from future views (they advance our view)
@@ -778,26 +818,28 @@ impl<
 
                 // Track resolved status to avoid sending back to resolver
                 let mut resolved = Resolved::None;
+                let from_resolver = source.is_resolver();
+                let rebroadcast = source.rebroadcast();
                 match certificate {
                     Certificate::Notarization(notarization) => {
-                        trace!(%view, from_resolver, "received notarization");
+                        trace!(%view, ?source, "received notarization");
                         self = self.handle_notarization(notarization).await;
                         if from_resolver {
-                            resolved = Resolved::Notarization;
+                            resolved = Resolved::Notarization { rebroadcast };
                         }
                     }
                     Certificate::Nullification(nullification) => {
-                        trace!(%view, from_resolver, "received nullification");
+                        trace!(%view, ?source, "received nullification");
                         self = self.handle_nullification(nullification).await;
                         if from_resolver {
-                            resolved = Resolved::Nullification;
+                            resolved = Resolved::Nullification { rebroadcast };
                         }
                     }
                     Certificate::Finalization(finalization) => {
-                        trace!(%view, from_resolver, "received finalization");
+                        trace!(%view, ?source, "received finalization");
                         self = self.handle_finalization(finalization).await;
                         if from_resolver {
-                            resolved = Resolved::Finalization;
+                            resolved = Resolved::Finalization { rebroadcast };
                         }
                     }
                 }
@@ -838,6 +880,7 @@ impl<
         (
             self,
             Staged {
+                resolved,
                 notarize,
                 notarization,
                 nullification,
@@ -847,7 +890,7 @@ impl<
         )
     }
 
-    /// Broadcasts everything constructed this iteration and reports it to the application.
+    /// Publishes everything constructed this iteration and reports it to the application.
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal])
     /// so no vote or certificate reaches the network before it is durable.
@@ -888,19 +931,23 @@ impl<
             self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
         }
         if let Some(notarization) = staged.notarization {
-            debug!(proposal=?notarization.proposal, "broadcasting notarization");
-            self.broadcast_certificate(
-                certificate_sender,
-                Certificate::Notarization(notarization.clone()),
-            );
+            if staged.resolved.rebroadcast_notarization() {
+                debug!(proposal=?notarization.proposal, "broadcasting notarization");
+                self.broadcast_certificate(
+                    certificate_sender,
+                    Certificate::Notarization(notarization.clone()),
+                );
+            }
             self.reporter.report(Activity::Notarization(notarization));
         }
         if let Some(nullification) = staged.nullification {
-            debug!(round=?nullification.round(), "broadcasting nullification");
-            self.broadcast_certificate(
-                certificate_sender,
-                Certificate::Nullification(nullification.clone()),
-            );
+            if staged.resolved.rebroadcast_nullification() {
+                debug!(round=?nullification.round(), "broadcasting nullification");
+                self.broadcast_certificate(
+                    certificate_sender,
+                    Certificate::Nullification(nullification.clone()),
+                );
+            }
             self.reporter.report(Activity::Nullification(nullification));
         }
         if let Some(finalize) = staged.finalize {
@@ -908,11 +955,13 @@ impl<
             self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
         }
         if let Some(finalization) = staged.finalization {
-            debug!(proposal=?finalization.proposal, "broadcasting finalization");
-            self.broadcast_certificate(
-                certificate_sender,
-                Certificate::Finalization(finalization.clone()),
-            );
+            if staged.resolved.rebroadcast_finalization() {
+                debug!(proposal=?finalization.proposal, "broadcasting finalization");
+                self.broadcast_certificate(
+                    certificate_sender,
+                    Certificate::Finalization(finalization.clone()),
+                );
+            }
             self.reporter.report(Activity::Finalization(finalization));
         }
     }
@@ -1103,20 +1152,10 @@ impl<
                     pending_propose = self.try_propose().await;
                 }
 
-                // If needed, verify current view. A refusal caused by a
-                // conflict with a certificate we hold returns that
-                // certificate, broadcast so the proposer's side of a
-                // certificate split converges on ours. We don't worry about
-                // recording it because it must've already existed (in our
-                // journal or the configured floor).
+                // If needed, verify current view. When ancestry is missing,
+                // ask the proposal's leader for its current ancestry evidence.
                 if pending_verify.is_none() {
-                    let objection;
-                    (pending_verify, objection) = self.try_verify().await;
-                    if let Some(objection) = objection {
-                        assert!(!self.dirty, "journal must be synced before broadcast");
-                        debug!(view = %objection.view(), "broadcasting objection");
-                        self.broadcast_certificate(&mut certificate_sender, objection);
-                    }
+                    pending_verify = self.try_verify(&mut resolver).await;
                 }
 
                 // Attempt to certify any views that we have notarizations for.
@@ -1303,5 +1342,31 @@ impl<
             .sync_all()
             .await
             .expect("unable to sync journal");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Resolved;
+
+    #[test]
+    fn targeted_resolution_suppresses_only_matching_immediate_broadcast() {
+        let notarization = Resolved::Notarization { rebroadcast: false };
+        assert!(!notarization.rebroadcast_notarization());
+        assert!(notarization.rebroadcast_nullification());
+        assert!(notarization.rebroadcast_finalization());
+
+        let nullification = Resolved::Nullification { rebroadcast: false };
+        assert!(nullification.rebroadcast_notarization());
+        assert!(!nullification.rebroadcast_nullification());
+        assert!(nullification.rebroadcast_finalization());
+
+        let finalization = Resolved::Finalization { rebroadcast: false };
+        assert!(finalization.rebroadcast_notarization());
+        assert!(finalization.rebroadcast_nullification());
+        assert!(!finalization.rebroadcast_finalization());
+
+        let background = Resolved::Notarization { rebroadcast: true };
+        assert!(background.rebroadcast_notarization());
     }
 }

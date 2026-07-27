@@ -6118,6 +6118,7 @@ mod tests {
                         break;
                     }
                     MailboxMessage::Certificate { .. } => continue,
+                    MailboxMessage::Resolve { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
                     }
@@ -6287,7 +6288,9 @@ mod tests {
                         {
                             break Some(success);
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
+                        MailboxMessage::Certified { .. }
+                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -6400,7 +6403,9 @@ mod tests {
                         {
                             break Some(success);
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
+                        MailboxMessage::Certified { .. }
+                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -7337,7 +7342,9 @@ mod tests {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
+                        MailboxMessage::Certified { .. }
+                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
