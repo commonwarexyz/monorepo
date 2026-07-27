@@ -1473,6 +1473,17 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // A spawn can race its origin worker's full teardown (e.g. issued
+        // from another worker through a moved context, after the tree-abort
+        // cascade but also after the worker dropped its executor). Hold the
+        // executor strong for the duration of the spawn; when it is already
+        // gone, resolve with [Error::Closed] — the same outcome the
+        // tree-aborted check below gives while the worker is still winding
+        // down — instead of panicking on the dead reference.
+        let Some(executor) = self.executor.upgrade() else {
+            return Handle::ready(Err(Error::Closed));
+        };
+
         // Get metrics
         let (_, metric) = spawn_metrics!(self);
 
@@ -1495,7 +1506,6 @@ impl crate::Spawner for Context {
         }
 
         // Wrap the future with panic catching, abort support, and cleanup.
-        let executor = self.executor();
         let future = f(self);
         let (task, handle) = Handle::init(
             future,
@@ -2830,6 +2840,31 @@ mod tests {
             // refresh the alarm to wake the new task at the deadline.
             let handle = context.child("mover").spawn(move |_| sleep);
             handle.await.unwrap();
+        });
+    }
+
+    /// Spawning through a context whose worker fully tore down (executor
+    /// dropped, not merely tree-aborted) resolves [Error::Closed] instead of
+    /// panicking: the outcome must not depend on which side of the teardown
+    /// race the spawn lands.
+    #[test]
+    fn test_spawn_on_dead_worker_resolves_closed() {
+        Runner::default().start(|context| async move {
+            let (send, recv) = oneshot::channel();
+            let origin = context
+                .child("origin")
+                .dedicated()
+                .spawn(move |context| async move {
+                    let _ = send.send(context.child("spawner"));
+                });
+            let spawner = recv.await.unwrap();
+            origin.await.unwrap();
+            // Give the origin worker time to finish its teardown and drop
+            // its executor (the handle resolves before either happens).
+            context.sleep(Duration::from_millis(200)).await;
+
+            let handle = spawner.spawn(|_| async move { 7 });
+            assert!(matches!(handle.await, Err(Error::Closed)));
         });
     }
 
