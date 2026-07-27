@@ -58,6 +58,8 @@ pub(crate) struct RoleMultiplexer<P: Simplex> {
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     /// The disrupter's finalization target (ignored by the other profiles).
     required_containers: u64,
+    /// Elector term length, the same config the honest validators build with.
+    term_length: TermLength,
     /// The currently active Byzantine profile.
     role: AdversaryRole,
     /// The live actor's task handle; aborted and awaited before each switch.
@@ -80,6 +82,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
         oracle: Oracle<PublicKeyOf<P>, deterministic::Context>,
         relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
         required_containers: u64,
+        term_length: TermLength,
         role: AdversaryRole,
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) -> Self {
@@ -96,7 +99,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             scheme.clone(),
             required_containers,
             relay.clone(),
-            P::elector(TermLength::ONE),
+            P::elector(term_length),
             channels,
         );
         Self {
@@ -105,6 +108,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             oracle,
             relay,
             required_containers,
+            term_length,
             role,
             handle: Some(handle),
             switches: 0,
@@ -153,7 +157,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             self.scheme.clone(),
             self.required_containers,
             self.relay.clone(),
-            P::elector(TermLength::ONE),
+            P::elector(self.term_length),
             channels,
         ));
         self.role = new_role;

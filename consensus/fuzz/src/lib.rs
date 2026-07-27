@@ -6,6 +6,7 @@ pub mod aggregation_certificate_mock;
 pub mod aggregation_decode;
 pub mod bounds;
 pub mod byzzfuzz;
+pub(crate) mod chaos;
 pub mod disrupter;
 pub mod happens_before;
 pub mod id_mock;
@@ -39,12 +40,12 @@ use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
-    Monitor, Reporter, Reporters, Viewable,
+    CertifiableAutomaton, Monitor, Reporter, Reporters, Viewable,
     simplex::{
         Engine, Floor, ForwardingPolicy, config,
         elector::Config as ElectorConfig,
         mocks::{application, relay, reporter, twins},
-        types::{Certificate, Vote},
+        types::{Activity, Certificate, Context as SimplexContext, Vote},
     },
     types::{Delta, Epoch, TermLength, View},
 };
@@ -774,10 +775,16 @@ pub(crate) enum ValidatorLifecycle {
 /// `EC` defaults to the backend's own elector so most callers write
 /// `ManagedValidator<P>`; the generic form exists only so the general
 /// [`build_validator`] can carry whatever elector its caller passed.
-pub(crate) struct ManagedValidator<P, EC = <P as simplex::Simplex>::Elector>
-where
+pub(crate) struct ManagedValidator<
+    P,
+    R = reporter::Reporter<
+        deterministic::Context,
+        <P as simplex::Simplex>::Scheme,
+        <P as simplex::Simplex>::Elector,
+        Sha256Digest,
+    >,
+> where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme>,
 {
     /// Index of this validator in the participant set (its faultable identity).
     idx: usize,
@@ -793,7 +800,7 @@ where
     generation: u32,
     /// Arc-backed reporter; a restart reuses this instance to retain pre-crash
     /// safety history.
-    reporter: reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+    reporter: R,
     /// Application actor handle, retained so a crash can abort it. `None` once
     /// taken by a crash/restart.
     app_handle: Option<Handle<()>>,
@@ -804,15 +811,13 @@ where
     lifecycle: ValidatorLifecycle,
 }
 
-impl<P, EC> ManagedValidator<P, EC>
+impl<P, R> ManagedValidator<P, R>
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme>,
+    R: Clone,
 {
     /// A clone of the Arc-backed reporter (shares live state with this validator).
-    pub(crate) fn reporter(
-        &self,
-    ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest> {
+    pub(crate) fn reporter(&self) -> R {
         self.reporter.clone()
     }
 
@@ -859,7 +864,7 @@ where
     /// Adopt a freshly rebuilt incarnation: take over its engine/application
     /// handles, bump the generation, and return to `Running`. The reporter is
     /// unchanged (a durable restart reuses the same instance).
-    pub(crate) fn adopt(&mut self, rebuilt: ManagedValidator<P, EC>) {
+    pub(crate) fn adopt(&mut self, rebuilt: ManagedValidator<P, R>) {
         self.app_handle = rebuilt.app_handle;
         self.engine_handle = rebuilt.engine_handle;
         self.generation = self.generation.wrapping_add(1);
@@ -872,7 +877,7 @@ where
     /// the node [`Amnesiac`](ValidatorLifecycle::Amnesiac). Unlike [`adopt`](Self::adopt)
     /// this replaces the partition and reporter, because the node forgot its durable
     /// state and its new incarnation owns a distinct storage and history.
-    pub(crate) fn adopt_amnesiac(&mut self, rebuilt: ManagedValidator<P, EC>) {
+    pub(crate) fn adopt_amnesiac(&mut self, rebuilt: ManagedValidator<P, R>) {
         self.app_handle = rebuilt.app_handle;
         self.engine_handle = rebuilt.engine_handle;
         self.partition = rebuilt.partition;
@@ -952,12 +957,9 @@ where
 }
 
 /// Spawn an honest validator instrumented with the fuzz-only append-only
-/// reporter and automaton history.
-///
-/// This is intentionally separate from [`spawn_honest_validator`]. Non-audit
-/// fuzz targets continue to instantiate the consensus mock reporter and mock
-/// application automaton directly; only dedicated audit targets call this
-/// constructor.
+/// reporter and automaton history, dropping the task handles. A thin wrapper
+/// over [`build_validator_with_reporter`] with the [`RecordingReporter`] family,
+/// which owns the recording instrumentation.
 #[allow(clippy::too_many_arguments)]
 fn spawn_audited_validator<
     P,
@@ -997,72 +999,39 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
-    let reporter_cfg = reporter::Config {
-        participants: participants.try_into().expect("public keys are unique"),
-        scheme: scheme.clone(),
-        elector: elector.clone(),
-    };
-    let reporter = RecordingReporter::new(
-        context.child("reporter"),
-        validator.clone(),
-        0,
-        reporter_cfg,
-    );
-
-    let validator_idx = participants
-        .iter()
-        .position(|participant| participant == &validator)
-        .expect("validator must be in participants");
-    let app_cfg = application::Config::<Sha256, _> {
-        relay,
-        me: validator.clone(),
-        propose_latency: (10.0, 5.0),
-        verify_latency: (10.0, 5.0),
-        certify_latency: (10.0, 5.0),
-        should_certify: certify.into_certifier(validator_idx),
-    };
-    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
-    actor.start();
-    let automaton = RecordingAutomaton::new(
-        context.child("automaton_recorder"),
-        application.clone(),
-        reporter.audit(),
-    );
-
-    let (vote_sender, vote_receiver) = pending;
-    let (certificate_sender, certificate_receiver) = recovered;
-    let (resolver_sender, resolver_receiver) = resolver;
-    let engine_cfg = config::Config {
-        blocker: oracle.control(validator.clone()),
+    let partition = validator.to_string();
+    build_validator_with_reporter::<
+        P,
+        EC,
+        RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+    >(
+        None,
+        context,
+        oracle,
+        participants,
         scheme,
+        validator,
         elector,
-        automaton,
-        relay: application,
-        reporter: wiring.wire(reporter.clone()),
-        partition: validator.to_string(),
-        mailbox_size,
-        epoch: Epoch::new(EPOCH),
-        floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
+        relay,
         leader_timeout,
         certification_timeout,
-        timeout_retry: Duration::from_secs(10),
-        fetch_timeout: Duration::from_secs(1),
-        view_retention: Delta::new(10),
-        skip_timeout: Duration::from_secs(11),
+        mailbox_size,
         fetch_concurrent,
-        replay_buffer: NZUsize!(1024 * 1024),
-        write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-        strategy: Sequential,
         forwarding,
-    };
-    Engine::new(context.child("engine"), engine_cfg).start(
-        (vote_sender, vote_receiver),
-        (certificate_sender, certificate_receiver),
-        (resolver_sender, resolver_receiver),
-    );
-
-    reporter
+        partition,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+    .reporter
 }
 
 /// Build an honest validator (application, reporter, engine) and RETAIN its task
@@ -1097,7 +1066,7 @@ pub(crate) fn build_validator<
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
     wiring: ReporterWiring,
-) -> ManagedValidator<P, EC>
+) -> ManagedValidator<P, reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>
 where
     P: simplex::Simplex,
     EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
@@ -1109,7 +1078,7 @@ where
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
 {
     let partition = validator.to_string();
-    build_validator_with_reporter::<P, EC, _, _, _, _, _, _>(
+    build_validator_with_reporter::<P, EC, _, _, _, _, _, _, _>(
         None,
         context,
         oracle,
@@ -1132,16 +1101,107 @@ where
     )
 }
 
-/// [`build_validator`] with an explicit reporter and storage partition. When
-/// `existing` is `Some`, that reporter instance is reused (rather than a fresh
-/// one created) so a durable restart RETAINS the pre-crash safety history whose
-/// Arc-backed maps survived the abort. The public build paths pass `None` and the
-/// default `validator.to_string()` partition; a durable restart passes the
-/// crashed validator's reporter and its unchanged partition.
+/// A reporter family the managed-validator builder can instantiate: how a
+/// fresh instance is constructed and which automaton the engine drives. The
+/// mock family runs the application directly; the recording family wraps it
+/// in its audit-history recorder.
+pub(crate) trait HarnessReporter<P, EC>:
+    Reporter<Activity = Activity<P::Scheme, Sha256Digest>> + Clone
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton: CertifiableAutomaton<
+            Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>,
+            Digest = Sha256Digest,
+        > + Send
+        + 'static;
+
+    fn create(
+        context: deterministic::Context,
+        observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self;
+
+    fn automaton(
+        &self,
+        context: &deterministic::Context,
+        application: application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+    ) -> Self::Automaton;
+}
+
+impl<P, EC> HarnessReporter<P, EC>
+    for reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton = application::Mailbox<Sha256Digest, PublicKeyOf<P>>;
+
+    fn create(
+        context: deterministic::Context,
+        _observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self {
+        Self::new(context, config)
+    }
+
+    fn automaton(
+        &self,
+        _context: &deterministic::Context,
+        application: application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+    ) -> Self::Automaton {
+        application
+    }
+}
+
+impl<P, EC> HarnessReporter<P, EC>
+    for RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton = RecordingAutomaton<
+        deterministic::Context,
+        application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+        P::Scheme,
+        Sha256Digest,
+    >;
+
+    fn create(
+        context: deterministic::Context,
+        observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self {
+        Self::new(context, observer, 0, config)
+    }
+
+    fn automaton(
+        &self,
+        context: &deterministic::Context,
+        application: application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+    ) -> Self::Automaton {
+        RecordingAutomaton::new(
+            context.child("automaton_recorder"),
+            application,
+            self.audit(),
+        )
+    }
+}
+
+/// [`build_validator`] with an explicit reporter and storage partition. The
+/// reporter family `R` decides construction and the engine automaton (see
+/// [`HarnessReporter`]). When `existing` is `Some`, that reporter instance is
+/// reused (rather than a fresh one created) so a durable restart RETAINS the
+/// pre-crash safety history whose Arc-backed maps survived the abort. The
+/// public build paths pass `None` and the default `validator.to_string()`
+/// partition; a durable restart passes the crashed validator's reporter and
+/// its unchanged partition.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_validator_with_reporter<
     P,
     EC,
+    R,
     PendingSender,
     PendingReceiver,
     RecoveredSender,
@@ -1149,7 +1209,7 @@ pub(crate) fn build_validator_with_reporter<
     ResolverSender,
     ResolverReceiver,
 >(
-    existing: Option<reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>,
+    existing: Option<R>,
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -1168,10 +1228,11 @@ pub(crate) fn build_validator_with_reporter<
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
     wiring: ReporterWiring,
-) -> ManagedValidator<P, EC>
+) -> ManagedValidator<P, R>
 where
     P: simplex::Simplex,
     EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    R: HarnessReporter<P, EC>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -1187,7 +1248,7 @@ where
                 scheme: scheme.clone(),
                 elector: elector.clone(),
             };
-            reporter::Reporter::new(context.child("reporter"), reporter_cfg)
+            R::create(context.child("reporter"), validator.clone(), reporter_cfg)
         }
     };
 
@@ -1209,6 +1270,7 @@ where
     };
     let (actor, application) = application::Application::new(context.child("application"), app_cfg);
     let app_handle = actor.start();
+    let automaton = reporter.automaton(&context, application.clone());
 
     let blocker = oracle.control(validator.clone());
     let stored_scheme = scheme.clone();
@@ -1216,7 +1278,7 @@ where
         blocker,
         scheme,
         elector,
-        automaton: application.clone(),
+        automaton,
         relay: application.clone(),
         reporter: wiring.wire(reporter.clone()),
         partition: partition.clone(),
@@ -3040,6 +3102,8 @@ pub enum Mode {
     FaultyNet,
     Byzzfuzz,
     MalloryContainer,
+    Chaos,
+    ChaosTwins,
 }
 
 pub trait FuzzMode {
@@ -3237,6 +3301,40 @@ impl FuzzMode for MalloryContainer {
     const MODE: Mode = Mode::MalloryContainer;
 }
 
+/// **Chaos** - an all-honest committee under a fuzzer-driven crash/network
+/// fault schedule, adapted from the zksync-os-server chaos rig.
+///
+/// Each episode runs four honest validators (N4F0C4, quorum three) and drives a
+/// reactive loop: each step draws one action (kill, durable restart, bounded
+/// reload, per-node disconnect, reconnect) from a pure quorum-aware schedule
+/// seeded entirely by the fuzzer input. The schedule never takes the healthy
+/// set below quorum except through a rare, deliberately sanctioned and bounded
+/// outage window, and every fault is scheduled together with its own heal, so
+/// it never permanently wedges the cluster. Chaos checks SAFETY only: the
+/// `invariants` suite runs at EVERY step boundary with an EMPTY Byzantine set
+/// (everyone is honest, so any conflicting finalization, equivocation, fault
+/// evidence, or invalid report is a finding the moment it appears), plus a
+/// step-level finalized-payload-uniqueness check over the reporters'
+/// append-only finalize-vote maps. It asserts no liveness. Chaos keeps no
+/// cross-input state, so replaying a saved input reproduces the run exactly.
+/// See `chaos`.
+pub struct Chaos;
+impl FuzzMode for Chaos {
+    const MODE: Mode = Mode::Chaos;
+}
+
+/// **ChaosTwins** - a real N4F1C3 cluster with one Byzantine twin leader and
+/// three honest engines, one of which crash-stops and durably replays while the
+/// twin equivocates. Checks SAFETY throughout (the twin excluded as the
+/// Byzantine signer) and a bounded POST-RECOVERY LIVENESS target once the
+/// scripted prefix ends and the node rejoins. Reuses the twins split model,
+/// chaos's crash/restart, and byzzfuzz's liveness wait. Seeded solely from the
+/// input, so a saved input replays exactly. See `chaos::twins`.
+pub struct ChaosTwins;
+impl FuzzMode for ChaosTwins {
+    const MODE: Mode = Mode::ChaosTwins;
+}
+
 /// Install (once per process) a panic-hook chain that drains and prints the
 /// ByzzFuzz decision log when the `CONSENSUS_FUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
@@ -3261,6 +3359,31 @@ fn install_byzzfuzz_panic_hook() {
                         eprintln!("{line}");
                     }
                     eprintln!("---- end of ByzzFuzz decision log ----");
+                }
+            }
+            prev(info);
+        }));
+    });
+}
+
+/// Install (once per process) a panic-hook chain that drains and prints the
+/// chaos decision log when `CONSENSUS_FUZZ_LOG` is set (any value). Mirrors
+/// [`install_byzzfuzz_panic_hook`] over the separate chaos log; the same
+/// ordering (log -> default message -> libfuzzer trace) applies.
+fn install_chaos_panic_hook() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let dump = std::env::var_os(FUZZ_LOG_ENV).is_some();
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if dump {
+                let log = chaos::log::take();
+                if !log.is_empty() {
+                    eprintln!("---- Chaos decision log ({} entries) ----", log.len());
+                    for line in &log {
+                        eprintln!("{line}");
+                    }
+                    eprintln!("---- end of Chaos decision log ----");
                 }
             }
             prev(info);
@@ -3298,6 +3421,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         install_byzzfuzz_panic_hook();
     } else if matches!(M::MODE, Mode::MalloryContainer) {
         install_mallory_panic_hook();
+    } else if matches!(M::MODE, Mode::Chaos | Mode::ChaosTwins) {
+        install_chaos_panic_hook();
     } else {
         if matches!(M::MODE, Mode::FaultyNet) {
             // We run only fuzzing with network faults, populated later by the
@@ -3330,6 +3455,12 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
         Mode::MalloryContainer => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
         })),
+        Mode::Chaos => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| chaos::runner::run::<P>(input)))
+        }
+        Mode::ChaosTwins => {
+            panic::catch_unwind(panic::AssertUnwindSafe(|| chaos::twins::run::<P>(input)))
+        }
     };
     match run_result {
         Ok(()) => {
@@ -3341,6 +3472,10 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             // Same for the separate Mallory log.
             if matches!(M::MODE, Mode::MalloryContainer) {
                 let _ = mallory::log::take();
+            }
+            // And the separate chaos log (shared by chaos and chaos-twins).
+            if matches!(M::MODE, Mode::Chaos | Mode::ChaosTwins) {
+                let _ = chaos::log::take();
             }
         }
         Err(payload) => {
