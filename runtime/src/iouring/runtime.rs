@@ -180,92 +180,157 @@ impl Config {
     }
 
     // Setters
-    /// See [Config]
+    /// Sets the configuration for each worker's io_uring instance.
+    ///
+    /// The ring `size` bounds the number of concurrently in-flight logical
+    /// operations per worker. Defaults to a 1024-entry ring. Regardless of
+    /// the provided value, the runtime always enables `single_issuer` and
+    /// raises `max_request_timeout` to cover both network timeouts.
     pub const fn with_ring(mut self, ring: RingConfig) -> Self {
         self.ring = ring;
         self
     }
-    /// See [Config]
+    /// Sets whether a task panic is caught and reported through the task's
+    /// handle as [Error::Exited].
+    ///
+    /// With the default `false`, a task panic is forwarded to the root and
+    /// unwinds [crate::Runner::start].
     pub const fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
         self
     }
-    /// See [Config]
+    /// Sets the base directory for all storage operations.
+    ///
+    /// Defaults to a uniquely named directory under the system temporary
+    /// directory. The directory's filesystem is flushed once at startup so
+    /// data recovered from a prior process is crash-durable before it is
+    /// read.
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
     }
-    /// See [Config]
+    /// Sets the stack size in bytes for runtime-owned threads (dedicated and
+    /// blocking workers).
+    ///
+    /// Defaults to the system stack size when the current platform exposes
+    /// it, and otherwise to Rust's default spawned-thread stack size.
     pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
         self.thread_stack_size = n;
         self
     }
-    /// See [Config]
+    /// Sets the timeout applied to each network dial attempt.
+    ///
+    /// Defaults to 10 seconds. Values above 30 years panic in
+    /// [crate::Runner::start], a policy bound kept consistent with the
+    /// runtime's sleep clamp. The runtime raises the ring's timeout wheel
+    /// horizon to cover both network timeouts, so at the default
+    /// [RingConfig::timeout_wheel_tick] the wheel's 1,048,576-slot cap
+    /// (about 87 minutes of horizon) is what rejects oversized network
+    /// timeouts at startup.
     pub const fn with_connect_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.connect_timeout = d;
         self
     }
-    /// See [Config]
+    /// Sets the timeout applied to each network send and receive operation
+    /// and to each in-flight accept (which is transparently reissued on
+    /// expiry).
+    ///
+    /// Defaults to 60 seconds. Values above 30 years panic in
+    /// [crate::Runner::start], a policy bound kept consistent with the
+    /// runtime's sleep clamp. The runtime raises the ring's timeout wheel
+    /// horizon to cover both network timeouts, so at the default
+    /// [RingConfig::timeout_wheel_tick] the wheel's 1,048,576-slot cap
+    /// (about 87 minutes of horizon) is what rejects oversized network
+    /// timeouts at startup.
     pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
     }
-    /// See [Config]
+    /// Sets whether `TCP_NODELAY` is explicitly enabled or disabled on
+    /// created sockets.
+    ///
+    /// `None` keeps the system default. Defaults to `Some(true)`.
     pub const fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
         self.network_cfg.tcp_nodelay = n;
         self
     }
-    /// See [Config]
+    /// Sets whether `SO_LINGER` is zeroed on created sockets, causing an
+    /// immediate RST on close and skipping `TIME_WAIT`.
+    ///
+    /// Useful in adversarial environments to reclaim socket resources
+    /// immediately when closing connections to misbehaving peers. Defaults
+    /// to true.
     pub const fn with_zero_linger(mut self, l: bool) -> Self {
         self.network_cfg.zero_linger = l;
         self
     }
-    /// See [Config]
+    /// Sets the per-connection read buffer size in bytes used to batch
+    /// network reads.
+    ///
+    /// A larger buffer reduces syscall overhead by reading more data per
+    /// call but uses more memory per connection. Defaults to 64 KiB.
     pub const fn with_read_buffer_size(mut self, n: usize) -> Self {
         self.network_cfg.read_buffer_size = n;
         self
     }
-    /// See [Config]
+    /// Sets an explicit buffer pool configuration for network I/O.
+    ///
+    /// Defaults to [BufferPoolConfig::for_network] when unset.
     pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
     }
-    /// See [Config]
+    /// Sets an explicit buffer pool configuration for storage I/O.
+    ///
+    /// Defaults to [BufferPoolConfig::for_storage] when unset.
     pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
 
     // Getters
-    /// See [Config]
+    /// Returns the configuration for each worker's io_uring instance (see
+    /// [Self::with_ring]).
     pub const fn ring(&self) -> &RingConfig {
         &self.ring
     }
-    /// See [Config]
+    /// Returns whether task panics are caught and reported through task
+    /// handles (see [Self::with_catch_panics]).
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
-    /// See [Config]
+    /// Returns the base directory for all storage operations (see
+    /// [Self::with_storage_directory]).
     pub const fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
-    /// See [Config]
+    /// Returns the stack size in bytes for runtime-owned threads (see
+    /// [Self::with_thread_stack_size]).
     pub const fn thread_stack_size(&self) -> usize {
         self.thread_stack_size
     }
-    /// See [Config]
+    /// Returns the timeout applied to each network dial attempt (see
+    /// [Self::with_connect_timeout]).
+    pub const fn connect_timeout(&self) -> Duration {
+        self.network_cfg.connect_timeout
+    }
+    /// Returns the timeout applied to each network send, receive, and
+    /// in-flight accept (see [Self::with_read_write_timeout]).
     pub const fn read_write_timeout(&self) -> Duration {
         self.network_cfg.read_write_timeout
     }
-    /// See [Config]
+    /// Returns the explicit `TCP_NODELAY` setting for created sockets, or
+    /// `None` for the system default (see [Self::with_tcp_nodelay]).
     pub const fn tcp_nodelay(&self) -> Option<bool> {
         self.network_cfg.tcp_nodelay
     }
-    /// See [Config]
+    /// Returns whether `SO_LINGER` is zeroed on created sockets (see
+    /// [Self::with_zero_linger]).
     pub const fn zero_linger(&self) -> bool {
         self.network_cfg.zero_linger
     }
-    /// See [Config]
+    /// Returns the per-connection read buffer size in bytes (see
+    /// [Self::with_read_buffer_size]).
     pub const fn read_buffer_size(&self) -> usize {
         self.network_cfg.read_buffer_size
     }

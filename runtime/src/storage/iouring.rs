@@ -86,6 +86,14 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
+/// io_uring implementation of [crate::Storage].
+///
+/// Bound to the worker whose ring services it: blobs it opens must be used
+/// on that worker (see the [worker affinity](crate::iouring#worker-affinity)
+/// rules). Metadata operations (`open`, `remove`, `scan`) run synchronously
+/// on the calling worker under a runtime-wide lock and therefore block its
+/// event loop (see the [module docs](self) for the blocking rules and
+/// lifecycle).
 #[derive(Clone)]
 pub struct Storage {
     lock: Arc<Mutex<()>>,
@@ -249,6 +257,13 @@ impl crate::Storage for Storage {
     }
 }
 
+/// io_uring implementation of [crate::Blob].
+///
+/// Bound to the worker whose ring services it: using it from another worker
+/// panics (see the [worker affinity](crate::iouring#worker-affinity) rules).
+/// Reads, writes, and syncs go through the ring, while [crate::Blob::resize]
+/// runs a synchronous `set_len` that blocks the calling worker (see the
+/// [module docs](self) for the blocking rules and lifecycle).
 pub struct Blob {
     /// The partition this blob lives in
     partition: String,
