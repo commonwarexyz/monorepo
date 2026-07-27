@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, SyncEngineConfig,
             p2p::{compact as compact_resolver, standard as qmdb_resolver},
         },
         probe::{Config as ProbeConfig, Probe},
@@ -72,12 +72,8 @@ type QmdbA<E> =
 type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
-/// A single QMDB database behind a lock.
-type DbA<E> = Shared<QmdbA<E>>;
-type DbB<E> = Shared<QmdbB<E>>;
-
-/// A full and a compact QMDB as a tuple.
-pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);
+/// A full and a compact QMDB as a tuple, owned by value.
+pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
 /// Serving sources projected from the set's published snapshots, one per member.
 type SetSnapshot<E> = <MultiDatabaseSet<E> as DatabaseSet<E>>::Snapshot;
@@ -210,21 +206,16 @@ impl App {
     /// Execute a block against two databases.
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        batches: (
-            <DbA<E> as DatabaseSet<E>>::Unmerkleized,
-            <DbB<E> as DatabaseSet<E>>::Unmerkleized,
-        ),
-    ) -> (
-        <DbA<E> as DatabaseSet<E>>::Merkleized,
-        <DbB<E> as DatabaseSet<E>>::Merkleized,
-    ) {
+        databases: &MultiDatabaseSet<E>,
+        batches: <MultiDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+    ) -> <MultiDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
         let (mut batch_a, batch_b) = batches;
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
         // per-block operation count so its state sync spans the same crash windows.
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch_a
-            .get(&counter)
+            .get(&counter, &databases.0)
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
@@ -240,8 +231,12 @@ impl App {
             u64_to_digest(height.get()),
         );
 
-        let merkleized_a = batch_a.merkleize().await.unwrap();
-        let merkleized_b = batch_b.merkleize().await.unwrap();
+        let merkleized_a = crate::stateful::db::Unmerkleized::merkleize(batch_a, &databases.0)
+            .await
+            .unwrap();
+        let merkleized_b = crate::stateful::db::Unmerkleized::merkleize(batch_b, &databases.1)
+            .await
+            .unwrap();
         (merkleized_a, merkleized_b)
     }
 }
@@ -262,14 +257,14 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
-        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(height, databases, batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = Block {
@@ -297,12 +292,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), databases, batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
@@ -325,10 +320,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+        Self::execute(block.height(), databases, batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
@@ -641,6 +636,8 @@ impl EngineDefinition for MultiDbEngine {
                 priority_responses: false,
             },
         );
+        let qmdb_sync_resolver_a = CapturingResolver::new(qmdb_sync_resolver_a);
+        let qmdb_sync_resolver_b = CapturingResolver::new(qmdb_sync_resolver_b);
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
@@ -654,7 +651,7 @@ impl EngineDefinition for MultiDbEngine {
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
+                resolvers: (qmdb_sync_resolver_a.clone(), qmdb_sync_resolver_b.clone()),
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     max_pending_acks,
@@ -667,13 +664,36 @@ impl EngineDefinition for MultiDbEngine {
 
         // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
         // The compact db keeps no operation history to observe.
-        let prune_observer = stateful_mailbox.clone();
+        let prune_observer = qmdb_sync_resolver_a.source.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let mailbox = prune_observer.clone();
+            let sources = prune_observer.clone();
             Box::pin(async move {
-                let (a, _b) = mailbox.subscribe_databases().await;
+                let source = sources.lock().clone().expect("source must be attached");
+                let snapshot = crate::stateful::db::ServeSource::serve(&source)
+                    .expect("a published generation must exist");
+                *snapshot.bounds().start
+            })
+        });
 
-                *a.read().await.bounds().start
+        // Observe both committed storage roots, to assert cross-validator agreement.
+        let root_observer = (
+            qmdb_sync_resolver_a.source.clone(),
+            qmdb_sync_resolver_b.source.clone(),
+        );
+        let storage_roots: StorageRoots = Arc::new(move || {
+            let sources = root_observer.clone();
+            Box::pin(async move {
+                let source_a = sources.0.lock().clone().expect("source must be attached");
+                let source_b = sources.1.lock().clone().expect("source must be attached");
+                let a = crate::stateful::db::ServeSource::serve(&source_a)
+                    .expect("a published generation must exist");
+                let b = crate::stateful::db::ServeSource::serve(&source_b)
+                    .expect("a published generation must exist");
+                let b_target = b.target();
+                vec![
+                    (*a.bounds().end, a.root()),
+                    (*b_target.leaf_count, b_target.root),
+                ]
             })
         });
 
@@ -757,6 +777,7 @@ impl EngineDefinition for MultiDbEngine {
                     .unwrap_or(0),
                 state_sync_height,
                 oldest_retained,
+                storage_roots,
             },
         )
     }

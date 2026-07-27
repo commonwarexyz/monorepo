@@ -1,13 +1,12 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. This module provides wrapper types
-//! that capture a [`Shared`] database handle alongside the raw batch so the
-//! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
-//! traits can be implemented without a DB parameter.
+//! read-through to applied state. The wrapper types here keep that shape: reads and
+//! merkleization borrow the owning database at each call, so batches hold no database
+//! handle and dropping one never drops the database.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
@@ -63,8 +62,8 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
     metadata: Option<U::Value>,
+    _db: std::marker::PhantomData<fn(E, C, I)>,
 }
 
 /// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
@@ -85,8 +84,8 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
-    db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
     metadata: Option<U::Value>,
+    _db: std::marker::PhantomData<fn(E, C, I)>,
 }
 
 /// Key-value operations shared by both `any` update kinds.
@@ -108,18 +107,24 @@ where
         self
     }
 
-    /// Read a value by key, falling back to applied state.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get(key, &db).await
+    /// Read a value by key, falling back to `db`'s applied state.
+    pub async fn get(
+        &self,
+        key: &U::Key,
+        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
+    ) -> Result<Option<U::Value>, Error<F>> {
+        self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to `db`'s applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get_many(keys, &db).await
+    pub async fn get_many(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        self.batch.get_many(keys, db).await
     }
 
     /// Read multiple values and return a staged batch for the same keys.
@@ -128,22 +133,15 @@ where
     pub async fn stage(
         self,
         keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
     ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
-        let Self {
-            batch,
-            db,
-            metadata,
-        } = self;
-        let (values, staged) = {
-            let guard = db.read().await;
-            batch.stage(keys, &guard).await?
-        };
+        let (values, staged) = self.batch.stage(keys, db).await?;
         Ok((
             values,
             AnyStaged {
                 staged,
-                db,
-                metadata,
+                metadata: self.metadata,
+                _db: std::marker::PhantomData,
             },
         ))
     }
@@ -169,7 +167,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
+    _db: std::marker::PhantomData<fn(E, C, I)>,
 }
 
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
@@ -236,23 +234,16 @@ where
     pub async fn expand(
         self,
         keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
-        let (range, values, staged) = {
-            let guard = db.read().await;
-            staged.expand(keys, &guard).await?
-        };
+        let (range, values, staged) = self.staged.expand(keys, db).await?;
         Ok((
             range,
             values,
             Self {
                 staged,
-                db,
-                metadata,
+                metadata: self.metadata,
+                _db: std::marker::PhantomData,
             },
         ))
     }
@@ -288,17 +279,16 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
+        db: &Db<F, E, C, I, H, unordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
-        let inner = {
-            let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
-        };
-        Ok(AnyMerkleized { inner, db })
+        let inner = self
+            .staged
+            .merkleize(updates, upserts, self.metadata, db)
+            .await?;
+        Ok(AnyMerkleized {
+            inner,
+            _db: std::marker::PhantomData,
+        })
     }
 }
 
@@ -332,17 +322,16 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
+        db: &Db<F, E, C, I, H, ordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
-        let inner = {
-            let guard = db.read().await;
-            staged.merkleize(updates, upserts, metadata, &guard).await?
-        };
-        Ok(AnyMerkleized { inner, db })
+        let inner = self
+            .staged
+            .merkleize(updates, upserts, self.metadata, db)
+            .await?;
+        Ok(AnyMerkleized {
+            inner,
+            _db: std::marker::PhantomData,
+        })
     }
 }
 
@@ -358,18 +347,24 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to applied state.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.inner.get(key, &db).await
+    /// Read a value by key, falling back to `db`'s applied state.
+    pub async fn get(
+        &self,
+        key: &U::Key,
+        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
+    ) -> Result<Option<U::Value>, Error<F>> {
+        self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to `db`'s applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.inner.get_many(keys, &db).await
+    pub async fn get_many(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        self.inner.get_many(keys, db).await
     }
 }
 
@@ -388,14 +383,14 @@ where
     Operation<F, unordered::Update<K, V>>: Codec,
 {
     type Merkleized = AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>;
+    type Db = Db<F, E, C, I, H, unordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+        let merkleized = self.batch.merkleize(db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
-            db: self.db.clone(),
+            _db: std::marker::PhantomData,
         })
     }
 }
@@ -415,14 +410,14 @@ where
     Operation<F, ordered::Update<K, V>>: Codec,
 {
     type Merkleized = AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>;
+    type Db = Db<F, E, C, I, H, ordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db, self.metadata).await?;
+    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+        let merkleized = self.batch.merkleize(db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
-            db: self.db.clone(),
+            _db: std::marker::PhantomData,
         })
     }
 }
@@ -450,17 +445,13 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         AnyUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            db: self.db.clone(),
             metadata: None,
+            _db: std::marker::PhantomData,
         }
     }
 }
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
-///
-/// `new_batch` captures the [`Shared`] database handle in the returned
-/// wrapper so that `get()` and `merkleize()` can read through to
-/// applied state.
 ///
 /// `finalize` applies the merkleized batch's changeset and starts syncing
 /// it to disk, reporting durability on the returned handle.
@@ -526,12 +517,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         AnyUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: Db::new_batch(self),
             metadata: None,
+            _db: std::marker::PhantomData,
         }
     }
 
@@ -544,12 +534,12 @@ where
     async fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         // Capture before starting the sync so the handle covers exactly the captured state.
         let (db, snapshot) = db.proof_snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        Ok((db, handle, Arc::new(snapshot)))
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -650,12 +640,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         AnyUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: Db::new_batch(self),
             metadata: None,
+            _db: std::marker::PhantomData,
         }
     }
 
@@ -668,12 +657,12 @@ where
     async fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         // Capture before starting the sync so the handle covers exactly the captured state.
         let (db, snapshot) = db.proof_snapshot().await?;
         let (db, handle) = db.start_sync().await?;
-        Ok((db, handle, Arc::new(snapshot)))
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -878,29 +867,26 @@ mod tests {
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
-
             let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
-            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db);
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed, &db)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let (database, durability, _) =
-                    <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+            let db = {
+                let (db, _, durability) =
+                    <UnorderedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
                         .await
                         .unwrap();
-                slot.put(database);
                 durability.await.expect("finalize flush failed");
-            }
+                db
+            };
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let read_keys = [key(1), key(2), key(999)];
@@ -909,8 +895,8 @@ mod tests {
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
-            let explicit_values = explicit.get_many(&keys).await.unwrap();
+            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db);
+            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
             for (slot, value) in &indexed_updates {
                 explicit = explicit.write(read_keys[*slot], *value);
             }
@@ -918,21 +904,22 @@ mod tests {
                 explicit = explicit.write(*k, *v);
             }
             let explicit_root =
-                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata), &db)
                     .await
                     .unwrap()
                     .root();
 
             // Staged path, with metadata set on the staged handle.
-            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db);
             let split = 2;
-            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
-            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            let (mut staged_values, staged) =
+                staged_batch.stage(&keys[..split], &db).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..], &db).await.unwrap();
             assert_eq!(range, split..keys.len());
             staged_values.extend(suffix_values);
             let staged_root = staged
                 .with_metadata(metadata)
-                .merkleize(indexed_updates.clone(), upserts.clone())
+                .merkleize(indexed_updates.clone(), upserts.clone(), &db)
                 .await
                 .unwrap()
                 .root();
@@ -941,12 +928,11 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .with_metadata(metadata);
-            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let carried_batch =
+                <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).with_metadata(metadata);
+            let (carried_values, staged) = carried_batch.stage(&keys, &db).await.unwrap();
             let carried_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone())
+                .merkleize(indexed_updates.clone(), upserts.clone(), &db)
                 .await
                 .unwrap()
                 .root();
@@ -983,33 +969,23 @@ mod tests {
             )
             .await
             .unwrap();
-            let db = Shared::new("test", db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
-            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .write(key, Some(value));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db).write(key, Some(value));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
                 .await
                 .unwrap();
-
-            let (slot, database) = db.write().await;
-            let (database, sync, _) =
-                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
-            slot.put(database);
+            let (db, _, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
 
             // The flush is parked, yet the batch is already readable.
             assert!(
                 pending.starts() > pending.completions(),
                 "finalize must leave its flush parked",
             );
-            {
-                let guard = db.read().await;
-                assert_eq!(guard.get(&key).await.unwrap(), Some(value));
-            }
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
 
             release_pending_syncs(&pending);
             drive_pending_syncs(&pending, sync)
@@ -1035,45 +1011,37 @@ mod tests {
             )
             .await
             .unwrap();
-            let db = Shared::new("test", db);
 
             // Finalize batch A and complete its flush: A's target is durably justified.
             let key = Sha256::hash(&[b"key"]);
             let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
                 .write(key, Some(Sha256::hash(&[b"a"])));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
                 .await
                 .unwrap();
-            let (slot, database) = db.write().await;
-            let (database, sync_a, _) =
-                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+            let (db, _, sync_a) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
             release_pending_syncs(&pending);
             drive_pending_syncs(&pending, sync_a)
                 .await
                 .expect("flush must succeed once released");
-            let target_a = <DelayedFixedDb as ManagedDb<_>>::sync_target(&database);
-            slot.put(database);
+            let target_a = <DelayedFixedDb as ManagedDb<_>>::sync_target(&db);
 
             // Finalize batch B with its flush parked.
             let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
                 .write(key, Some(Sha256::hash(&[b"b"])));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
                 .await
                 .unwrap();
-            let (slot, database) = db.write().await;
-            let (database, sync_b, _) =
-                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+            let (db, _, sync_b) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
 
             // Prune to A's durably justified target: must complete without
             // starting a sync or waiting on B's parked flush.
             let starts_before = pending.starts();
-            let database = <DelayedFixedDb as ManagedDb<_>>::prune(database, &target_a)
+            let _db = <DelayedFixedDb as ManagedDb<_>>::prune(db, &target_a)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1081,7 +1049,6 @@ mod tests {
                 starts_before,
                 "durably justified prune must not start a sync",
             );
-            slot.put(database);
 
             release_pending_syncs(&pending);
             drive_pending_syncs(&pending, sync_b)
@@ -1111,21 +1078,16 @@ mod tests {
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
-            let db = Shared::new("test", db);
-            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .write(key, Some(value));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db).write(key, Some(value));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
                 .await
                 .unwrap();
-            let (slot, database) = db.write().await;
-            let (database, sync, _) =
-                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+            let (db, _, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
 
-            let target = <DelayedFixedDb as ManagedDb<_>>::sync_target(&database);
-            let prune = <DelayedFixedDb as ManagedDb<_>>::prune(database, &target);
+            let target = <DelayedFixedDb as ManagedDb<_>>::sync_target(&db);
+            let prune = <DelayedFixedDb as ManagedDb<_>>::prune(db, &target);
             pin_mut!(prune);
             assert!(
                 prune.as_mut().now_or_never().is_none(),
@@ -1133,8 +1095,7 @@ mod tests {
             );
 
             release_pending_syncs(&pending);
-            let database = drive_pending_syncs(&pending, prune).await.unwrap();
-            slot.put(database);
+            let _db = drive_pending_syncs(&pending, prune).await.unwrap();
             drive_pending_syncs(&pending, sync)
                 .await
                 .expect("flush must succeed once released");

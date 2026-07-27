@@ -27,8 +27,7 @@ where
 
 /// How a completed sync's artifact reaches the stateful actor.
 ///
-/// The database set travels on exactly one channel, so a completed sync either delivers
-/// it with the response or announces that it already went out on the completion channel.
+/// The database set is owned by value, so exactly one channel carries it.
 pub(crate) enum Artifact<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -147,7 +146,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), (7,)));
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
@@ -162,11 +161,11 @@ mod tests {
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
+            let expected_anchor = anchor(8, 10);
             let expected = SyncResult::<deterministic::Context, TestApp> {
                 databases: test_databases(),
-                anchor: anchor(8, 10),
+                anchor: expected_anchor,
             };
-            let expected_anchor = expected.anchor;
             let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
                 panic!("dropped observation should trigger a retry");
             };
@@ -176,10 +175,10 @@ mod tests {
             );
 
             let result = update_targets.await;
-            let Some(Artifact::Delivered(delivered)) = result else {
-                panic!("retry should deliver the artifact");
+            let Some(Artifact::Delivered(result)) = result else {
+                panic!("retry should return the delivered artifact");
             };
-            assert_eq!(delivered.anchor, expected_anchor);
+            assert_eq!(result.anchor, expected_anchor);
         });
     }
 
@@ -188,7 +187,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
-            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), (7,)));
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 

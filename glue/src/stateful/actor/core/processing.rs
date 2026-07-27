@@ -18,7 +18,7 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt, futures::Pool};
+use commonware_utils::{Acknowledgement, futures::Pool};
 use futures::{
     future::{Either, ready},
     poll,
@@ -177,62 +177,65 @@ where
                     acknowledgement,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
-                    async {
-                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                            self.processor
-                                .notify_finalized(self.context.as_present(), block.as_ref())
-                                .await;
-                            acknowledgement.acknowledge();
-                            return;
-                        }
-                        let Some(Applied {
+                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        self.processor
+                            .notify_finalized(self.context.as_present(), block.as_ref())
+                            .instrument(process)
+                            .await;
+                        acknowledgement.acknowledge();
+                    } else {
+                        // The processor owns the databases, so finalize consumes it and
+                        // hands it back alongside the applied artifacts.
+                        let (processor, applied) = self
+                            .processor
+                            .finalize(&self.context, block.as_ref())
+                            .instrument(process)
+                            .await;
+                        self.processor = processor;
+                        if let Some(Applied {
                             snapshot,
                             barrier,
                             prune,
-                        }) = self.processor.finalize(&self.context, block.as_ref()).await
-                        else {
+                        }) = applied
+                        {
+                            debug!(
+                                height = block.height().get(),
+                                "applied finalized database batch"
+                            );
+
+                            // Acknowledge marshal only once the batch's flush
+                            // completes, so marshal's processed floor never runs
+                            // ahead of flushed database state (the startup rewind
+                            // contract), without blocking the loop on the flush.
+                            // Marshal's ack window bounds the flush backlog. On
+                            // runtime teardown the acknowledgement is dropped
+                            // instead: marshal redelivers the block after restart.
+                            let staged = self.publisher.stage(snapshot);
+                            syncs.push(async move {
+                                if barrier.durable().await {
+                                    staged.install();
+                                    acknowledgement.acknowledge();
+                                }
+                            });
+                            if let Some(prune) = prune {
+                                pending_prune = Some(prune);
+                            }
+                        } else {
                             // Duplicate report: marshal redelivers a processed
                             // height only after a restart, where startup aligned
                             // the databases to durable state.
                             acknowledgement.acknowledge();
-                            return;
-                        };
-                        debug!(
-                            height = block.height().get(),
-                            "applied finalized database batch"
-                        );
-
-                        // Acknowledge marshal only once the batch's flush
-                        // completes, so marshal's processed floor never runs
-                        // ahead of flushed database state (the startup rewind
-                        // contract), without blocking the loop on the flush.
-                        // Marshal's ack window bounds the flush backlog. On
-                        // runtime teardown the acknowledgement is dropped
-                        // instead: marshal redelivers the block after restart.
-                        let staged = self.publisher.stage(snapshot);
-                        syncs.push(async move {
-                            if barrier.durable().await {
-                                staged.install();
-                                acknowledgement.acknowledge();
-                            }
-                        });
-                        if let Some(prune) = prune {
-                            pending_prune = Some(prune);
                         }
                     }
-                    .instrument(process)
-                    .await;
-                }
-                Step::Message(Message::SubscribeDatabases { response }) => {
-                    response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
                     // Flushes may still be pending: database pruning waits on
                     // them only when the prune target is not yet durably
                     // justified (see `DatabaseSet::prune`), and marshal
                     // pruning follows it.
-                    prune
-                        .run(self.processor.databases_mut(), &self.marshal)
+                    self.processor = self
+                        .processor
+                        .prune_databases(prune, &self.marshal)
                         .await;
                 }
             },
@@ -262,7 +265,7 @@ mod tests {
         actor::{
             core::mailbox::Mailbox, metrics::Metrics as StatefulMetrics, processor::Processor,
         },
-        db::{DatabaseSet, ManagedDb, Shared},
+        db::{DatabaseSet, ManagedDb},
         tests::mocks::{
             TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor,
         },
@@ -332,7 +335,7 @@ mod tests {
             unreachable!("GatedFlushDb is constructed directly in tests")
         }
 
-        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(&self) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -343,10 +346,10 @@ mod tests {
         async fn finalize(
             self,
             _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>, Self::Snapshot), Self::Error> {
+        ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
             let (release, released) = oneshot::channel();
             self.control.flushes.lock().push(release);
-            Ok((self, Handle::from_receiver(released), ()))
+            Ok((self, (), Handle::from_receiver(released)))
         }
 
         async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
@@ -370,14 +373,14 @@ mod tests {
         type SigningScheme = TestScheme;
         type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
         type Block = TestBlock;
-        type Databases = Shared<GatedFlushDb>;
+        type Databases = (GatedFlushDb,);
         type Provider = ();
         type Input = ();
 
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            block.height().get()
+            (block.height().get(),)
         }
 
         async fn genesis(&mut self) -> Self::Block {
@@ -412,7 +415,7 @@ mod tests {
             _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            TestMerkleized
+            (TestMerkleized,)
         }
     }
 
@@ -492,12 +495,9 @@ mod tests {
             .await;
 
         let control = FlushControl::default();
-        let databases = Shared::new(
-            "test",
-            GatedFlushDb {
-                control: control.clone(),
-            },
-        );
+        let databases = (GatedFlushDb {
+            control: control.clone(),
+        },);
         let processor = Processor::new(
             GatedApp,
             databases,
@@ -639,7 +639,7 @@ mod tests {
     /// A flush failure must panic the processing loop with the database
     /// identified (the fatal policy), rather than acknowledging the block.
     #[test]
-    #[should_panic(expected = "database finalize flush failed (type")]
+    #[should_panic(expected = "database finalize flush failed (index 0, type")]
     fn flush_failure_panics_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, _marshal) =

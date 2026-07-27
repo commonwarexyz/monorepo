@@ -7,10 +7,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
-        db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::standard as qmdb_resolver,
-        },
+        db::{DatabaseSet, Merkleized as _, SyncEngineConfig, p2p::standard as qmdb_resolver},
         probe::{Config as ProbeConfig, Probe},
     },
 };
@@ -65,13 +62,13 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// Serving source projected from the database's published snapshots.
+/// Serving source projected from the set's published snapshots.
 type SingleSrc<E> = crate::stateful::db::MemberSource<
-    <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
+    <SingleDatabaseSet<E> as DatabaseSet<E>>::Snapshot,
     <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
 
-pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
+pub(crate) type SingleDatabaseSet<E> = (Qmdb<E>,);
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,20 +172,26 @@ impl App {
     /// Execute a block: increment "counter" and write `height -> height_val`.
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+        databases: &SingleDatabaseSet<E>,
+        batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
+        let (mut batch,) = batches;
         let counter = Sha256::hash(&[b"counter"]);
-        let current: u64 = batches
-            .get(&counter)
+        let current: u64 = batch
+            .get(&counter, &databases.0)
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
-        batches = batches.write(counter, Some(u64_to_digest(current + 1)));
-        batches = batches.write(
+        batch = batch.write(counter, Some(u64_to_digest(current + 1)));
+        batch = batch.write(
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        batches.merkleize().await.unwrap()
+        (
+            crate::stateful::db::Unmerkleized::merkleize(batch, &databases.0)
+                .await
+                .unwrap(),
+        )
     }
 }
 
@@ -208,20 +211,20 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
-        let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
+        let merkleized = Self::execute(height, databases, batches).await;
+        let bounds = merkleized.0.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
-            state_root: merkleized.root(),
+            state_root: merkleized.0.root(),
             range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
         };
         Some(Proposed { block, merkleized })
@@ -231,14 +234,14 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
-        let merkleized = Self::execute(tip.height(), batches).await;
-        let bounds = merkleized.bounds();
-        if merkleized.root() != tip.state_root
+        let merkleized = Self::execute(tip.height(), databases, batches).await;
+        let bounds = merkleized.0.bounds();
+        if merkleized.0.root() != tip.state_root
             || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
                 != tip.range
         {
@@ -251,14 +254,14 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+        Self::execute(block.height(), databases, batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        (Target::new(block.state_root, block.range.clone()),)
     }
 }
 
@@ -434,7 +437,7 @@ impl EngineDefinition for SingleDbEngine {
 
         let initial_target =
             <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
-        let genesis_block = Block::genesis(initial_target.root, initial_target.range);
+        let genesis_block = Block::genesis(initial_target.0.root, initial_target.0.range);
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
@@ -506,6 +509,7 @@ impl EngineDefinition for SingleDbEngine {
                     priority_responses: false,
                 },
             );
+        let qmdb_sync_resolver = CapturingResolver::new(qmdb_sync_resolver);
         let _qmdb_resolver_handle = qmdb_resolver_actor.start(qmdb_resolver_network);
 
         // Stateful actor
@@ -514,12 +518,12 @@ impl EngineDefinition for SingleDbEngine {
             context.child("stateful"),
             StatefulConfig {
                 application,
-                db_config,
+                db_config: (db_config,),
                 provider: (),
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: qmdb_sync_resolver,
+                resolvers: (qmdb_sync_resolver.clone(),),
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     max_pending_acks,
@@ -531,14 +535,26 @@ impl EngineDefinition for SingleDbEngine {
         );
 
         // Observe the oldest operation QMDB still retains, to assert pruning ran.
-        let prune_observer = stateful_mailbox.clone();
+        let prune_observer = qmdb_sync_resolver.source.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let mailbox = prune_observer.clone();
+            let sources = prune_observer.clone();
             Box::pin(async move {
-                let databases = mailbox.subscribe_databases().await;
-                let guard = databases.read().await;
-                let bounds = guard.bounds();
-                *bounds.start
+                let source = sources.lock().clone().expect("source must be attached");
+                let snapshot = crate::stateful::db::ServeSource::serve(&source)
+                    .expect("a published generation must exist");
+                *snapshot.bounds().start
+            })
+        });
+
+        // Observe the committed storage root, to assert cross-validator agreement.
+        let root_observer = qmdb_sync_resolver.source.clone();
+        let storage_roots: StorageRoots = Arc::new(move || {
+            let sources = root_observer.clone();
+            Box::pin(async move {
+                let source = sources.lock().clone().expect("source must be attached");
+                let member = crate::stateful::db::ServeSource::serve(&source)
+                    .expect("a published generation must exist");
+                vec![(*member.bounds().end, member.root())]
             })
         });
 
@@ -622,6 +638,7 @@ impl EngineDefinition for SingleDbEngine {
                     .unwrap_or(0),
                 state_sync_height,
                 oldest_retained,
+                storage_roots,
             },
         )
     }

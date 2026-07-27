@@ -76,9 +76,6 @@ where
     /// Verify requests held while syncing.
     pub(super) held_verify_requests: Vec<HeldVerifyRequest<E, A>>,
 
-    /// Open subscriptions to the synced databases.
-    pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
-
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
@@ -110,8 +107,6 @@ where
             on_start => {
                 self.held_verify_requests
                     .retain(|request| !request.response.is_closed());
-                self.database_subscribers
-                    .retain(|subscriber| !subscriber.is_closed());
             },
             on_stopped => {
                 debug!("processor received shutdown signal");
@@ -175,13 +170,6 @@ where
                     if let Some(handoff) = handoff {
                         self.transition(Some(handoff)).await;
                         return;
-                    }
-                }
-                Message::SubscribeDatabases { response } => {
-                    self.database_subscribers
-                        .retain(|subscriber| !subscriber.is_closed());
-                    if !response.is_closed() {
-                        self.database_subscribers.push(response);
                     }
                 }
             },
@@ -265,10 +253,11 @@ where
         // Install the synced committed state as generation zero so serving can begin
         // before the first finalization; synced state is durable by definition.
         let mut publisher = self.publisher;
-        publisher.install_durable(artifact.databases.capture_snapshots().await);
+        let (databases, synced) = artifact.databases.snapshot().await;
+        publisher.install_durable(synced);
         let mut processor = Processor::new(
             self.application,
-            artifact.databases,
+            databases,
             artifact.anchor,
             self.metrics,
             self.prune_config,
@@ -285,14 +274,15 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
+                    let (returned, applied) = processor
+                        .finalize(self.context.as_present(), block.as_ref())
+                        .await;
+                    processor = returned;
                     let Applied {
                         snapshot,
                         barrier,
                         prune,
-                    } = processor
-                        .finalize(self.context.as_present(), block.as_ref())
-                        .await
-                        .expect("sync handoff block cannot be a duplicate");
+                    } = applied.expect("sync handoff block cannot be a duplicate");
 
                     // The processing loop's flush pool does not exist yet, so
                     // observe the deferred flush inline. Acknowledging only
@@ -305,7 +295,7 @@ where
                     }
                     staged.install();
                     if let Some(prune) = prune {
-                        prune.run(processor.databases_mut(), &self.marshal).await;
+                        processor = processor.prune_databases(prune, &self.marshal).await;
                     }
                     debug!(
                         height = block.height().get(),
@@ -314,12 +304,6 @@ where
                     acknowledgement.acknowledge();
                 }
             }
-        }
-
-        // `subscribe_databases` promises a database set that is already attached to the
-        // serving actor, so keep subscribers waiting until the resolver handoff is complete.
-        for subscriber in self.database_subscribers.drain(..) {
-            subscriber.send_lossy(processor.databases().clone());
         }
 
         for request in self.held_verify_requests.drain(..) {
@@ -521,7 +505,6 @@ mod tests {
                     sync_metadata: StateSyncMetadata::init(&context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
-                    database_subscribers: Vec::new(),
                     artifact: None,
                     sync_completed,
                     prune_config: None,
@@ -560,7 +543,6 @@ mod tests {
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
-                    database_subscribers: Vec::new(),
                     artifact: Some(SyncResult {
                         databases: test_databases(),
                         anchor,
@@ -855,7 +837,7 @@ mod tests {
                 );
                 let (recorded, targets) = update.record();
                 assert_eq!(recorded, anchor(8, 10));
-                assert_eq!(targets, 8);
+                assert_eq!(targets, (8,));
             });
 
             let (acknowledgement, waiter) = Exact::handle();

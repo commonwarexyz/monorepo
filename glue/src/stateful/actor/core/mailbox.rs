@@ -48,14 +48,6 @@ where
         block: Arc<A::Block>,
         acknowledgement: Exact,
     },
-
-    /// Requests the attached database set.
-    ///
-    /// The actor replies once the database set has been attached to the
-    /// serving stateful actor, or immediately if that has already happened.
-    SubscribeDatabases {
-        response: oneshot::Sender<A::Databases>,
-    },
 }
 
 impl<E, A> Message<E, A>
@@ -67,7 +59,6 @@ where
         match self {
             Self::Propose { response, .. } => response.is_closed(),
             Self::Verify { response, .. } => response.is_closed(),
-            Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
@@ -169,29 +160,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Wait for the attached database set.
-    ///
-    /// This resolves once startup handoff has attached the database set to the
-    /// serving actor. Late callers receive the current database set
-    /// immediately.
-    ///
-    /// ## Safety
-    ///
-    /// Holders must never manually prune these databases. Stateful uses
-    /// [`Config::prune_config`](crate::stateful::Config::prune_config) to
-    /// schedule safe pruning without pruning past the rewind window needed for
-    /// crash reconciliation. With pruning enabled, glue keeps a
-    /// `max_pending_acks + 1` finalized-target window plus the configured
-    /// extra block windows before pruning.
-    pub async fn subscribe_databases(&self) -> A::Databases {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::SubscribeDatabases { response });
-        receiver
-            .await
-            .expect("stateful actor dropped during subscribe_databases")
-    }
 }
 
 impl<E, A> ConsensusApplication<E> for Mailbox<E, A>

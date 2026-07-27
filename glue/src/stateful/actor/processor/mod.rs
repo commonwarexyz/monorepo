@@ -111,15 +111,20 @@ impl<T> Prune<T> {
     /// [`DatabaseSet::prune`]), and the durable commit justifying its target
     /// sits at or above the oldest retained block, so the marshal prune that
     /// follows retains every block a restart could replay.
-    pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
+    pub(super) async fn run<E, DBs, S, V>(
+        self,
+        databases: DBs,
+        marshal: &MarshalMailbox<S, V>,
+    ) -> DBs
     where
         E: Rng + Spawner + Metrics + Clock,
         DBs: DatabaseSet<E, SyncTargets = T>,
         S: Scheme,
         V: MarshalVariant,
     {
-        databases.prune(&self.qmdb_target).await;
+        let databases = databases.prune(&self.qmdb_target).await;
         marshal.prune(self.marshal_height);
+        databases
     }
 }
 
@@ -240,14 +245,18 @@ where
         }
     }
 
-    /// Returns a reference to the database set.
-    pub(super) const fn databases(&self) -> &A::Databases {
-        &self.databases
-    }
-
-    /// Returns a mutable reference to the database set.
-    pub(super) const fn databases_mut(&mut self) -> &mut A::Databases {
-        &mut self.databases
+    /// Run a due prune against the owned database set.
+    pub(super) async fn prune_databases<S, V>(
+        mut self,
+        prune: Prune<PendingSyncTargets<A, E>>,
+        marshal: &MarshalMailbox<S, V>,
+    ) -> Self
+    where
+        S: Scheme,
+        V: MarshalVariant,
+    {
+        self.databases = prune.run(self.databases, marshal).await;
+        self
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -566,13 +575,11 @@ where
                 .await?;
         }
 
-        await_or_cancel(response, self.fork_batches(&parent_digest))
-            .await
-            .unwrap_or(Err(PrepareBatchesError::Cancelled))
+        self.fork_batches(&parent_digest)
     }
 
     /// Fork unmerkleized batches from known parent state.
-    pub(super) async fn fork_batches(
+    pub(super) fn fork_batches(
         &mut self,
         parent: &<A::Block as Digestible>::Digest,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
@@ -582,7 +589,7 @@ where
             ));
         }
         if &self.last_processed.digest == parent {
-            return Ok(self.databases.new_batches().await);
+            return Ok(self.databases.new_batches());
         }
         Err(PrepareBatchesError::Invalid)
     }
@@ -673,11 +680,9 @@ where
             let consensus_context = block.context();
             let round = consensus_context.round();
 
-            let Some(batches) = await_or_cancel(response, self.fork_batches(&parent_digest)).await
-            else {
-                return Err(PrepareBatchesError::Cancelled);
-            };
-            let batches = batches.expect("rebuild replay parent must be available");
+            let batches = self
+                .fork_batches(&parent_digest)
+                .expect("rebuild replay parent must be available");
 
             let Some(merkleized) = await_or_cancel(
                 response,
@@ -716,10 +721,13 @@ where
     /// Returns [`None`] when the block was already processed (a duplicate
     /// report).
     pub(super) async fn finalize(
-        &mut self,
+        mut self,
         context: &E,
         block: &A::Block,
-    ) -> Option<Applied<PendingSyncTargets<A, E>, SetSnapshots<A, E>>> {
+    ) -> (
+        Self,
+        Option<Applied<PendingSyncTargets<A, E>, SetSnapshots<A, E>>>,
+    ) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -733,7 +741,7 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return None;
+            return (self, None);
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
@@ -749,7 +757,7 @@ where
         let batch = match self.pending.remove(&digest) {
             Some(entry) => entry.merkleized,
             None => {
-                let batches = self.databases.new_batches().await;
+                let batches = self.databases.new_batches();
                 let batch = self
                     .app
                     .apply(
@@ -770,7 +778,9 @@ where
         // Publication rides the barrier. The processing loop publishes this generation's
         // captured snapshot only after the barrier proves every member flush durable, so
         // a published snapshot can never expose state a crash could roll back.
-        let (snapshot, barrier) = self.databases.finalize(batch).await;
+        let databases = self.databases;
+        let (databases, snapshot, barrier) = databases.finalize(batch).await;
+        self.databases = databases;
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -784,11 +794,14 @@ where
         };
         timer.observe(context);
 
-        Some(Applied {
-            snapshot,
-            barrier,
-            prune,
-        })
+        (
+            self,
+            Some(Applied {
+                snapshot,
+                barrier,
+                prune,
+            }),
+        )
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -951,7 +964,7 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
+        db::{Anchor, DatabaseSet, Merkleized as _},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -996,7 +1009,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Shared<Qmdb<E>>;
+    type DbSet<E> = (Qmdb<E>,);
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1150,17 +1163,23 @@ mod tests {
         async fn execute(
             height: Height,
             view: View,
-            mut batches: <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            databases: &DbSet<deterministic::Context>,
+            batches: <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized
         {
-            let current_counter = batches
-                .get(&counter_key())
+            let (mut batch,) = batches;
+            let current_counter = batch
+                .get(&counter_key(), &databases.0)
                 .await
                 .expect("counter read should succeed")
                 .map_or(0, |digest| digest_to_u64(&digest));
-            batches = batches.write(counter_key(), Some(u64_to_digest(current_counter + 1)));
-            batches = batches.write(height_key(height), Some(u64_to_digest(view.get())));
-            batches.merkleize().await.expect("merkleize should succeed")
+            batch = batch.write(counter_key(), Some(u64_to_digest(current_counter + 1)));
+            batch = batch.write(height_key(height), Some(u64_to_digest(view.get())));
+            (
+                crate::stateful::db::Unmerkleized::merkleize(batch, &databases.0)
+                    .await
+                    .expect("merkleize should succeed"),
+            )
         }
     }
 
@@ -1180,7 +1199,7 @@ mod tests {
             &mut self,
             context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
+            databases: &Self::Databases,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1189,15 +1208,15 @@ mod tests {
             let context = context.1.clone();
             let view = context.round.view();
             let height = parent.height().next();
-            let merkleized = Self::execute(height, view, batches).await;
+            let merkleized = Self::execute(height, view, databases, batches).await;
             let block = Block {
                 context,
                 parent: parent.digest(),
                 height,
-                state_root: merkleized.root(),
+                state_root: merkleized.0.root(),
                 range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.0.bounds().inactivity_floor,
+                    Location::new(merkleized.0.bounds().total_size)
                 ),
             };
             Some(Proposed { block, merkleized })
@@ -1207,14 +1226,19 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
+            databases: &Self::Databases,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             let mut ancestry = Box::pin(ancestry);
             let block = ancestry.next().await?;
-            let merkleized =
-                Self::execute(block.height(), block.context.round.view(), batches).await;
-            if merkleized.root() != block.state_root {
+            let merkleized = Self::execute(
+                block.height(),
+                block.context.round.view(),
+                databases,
+                batches,
+            )
+            .await;
+            if merkleized.0.root() != block.state_root {
                 return None;
             }
             Some(merkleized)
@@ -1224,10 +1248,16 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            _databases: &Self::Databases,
+            databases: &Self::Databases,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            Self::execute(block.height(), block.context.round.view(), batches).await
+            Self::execute(
+                block.height(),
+                block.context.round.view(),
+                databases,
+                batches,
+            )
+            .await
         }
 
         async fn finalized(
@@ -1239,7 +1269,7 @@ mod tests {
             let Some(observer) = self.finalized_observer.clone() else {
                 return;
             };
-            let db = databases.read().await;
+            let db = &databases.0;
             let value = db
                 .get(&height_key(block.height()))
                 .await
@@ -1251,7 +1281,7 @@ mod tests {
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            Target::new(block.state_root, block.range.clone())
+            (Target::new(block.state_root, block.range.clone()),)
         }
     }
 
@@ -1361,9 +1391,23 @@ mod tests {
             config: any::FixedConfig<TwoCap, Sequential>,
             app: ExecutionApp,
         ) -> Self {
+            Self::with_app_pruned(context, provider, config, app, None).await
+        }
+
+        async fn with_app_pruned(
+            context: deterministic::Context,
+            provider: MapProvider,
+            config: any::FixedConfig<TwoCap, Sequential>,
+            app: ExecutionApp,
+            prune_config: Option<PruneConfig>,
+        ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
-            >>::init(context.child("db_set"), config.clone())
+            >>::init(context.child("db_set"), (config.clone(),))
+            .await;
+            let (databases, _genesis) = <DbSet<deterministic::Context> as DatabaseSet<
+                deterministic::Context,
+            >>::snapshot(databases)
             .await;
             let metrics = StatefulMetrics::new(&context);
             Self {
@@ -1377,7 +1421,7 @@ mod tests {
                         digest: Block::genesis().digest(),
                     },
                     metrics,
-                    None,
+                    prune_config,
                 ),
                 provider,
                 db_config: config,
@@ -1390,17 +1434,17 @@ mod tests {
             let batches = self
                 .processor
                 .fork_batches(&parent.digest())
-                .await
                 .expect("parent should be available");
-            let merkleized = ExecutionApp::execute(height, view, batches).await;
+            let merkleized =
+                ExecutionApp::execute(height, view, &self.processor.databases, batches).await;
             let block = Block {
                 context,
                 parent: parent.digest(),
                 height,
-                state_root: merkleized.root(),
+                state_root: merkleized.0.root(),
                 range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.0.bounds().inactivity_floor,
+                    Location::new(merkleized.0.bounds().total_size)
                 ),
             };
             let round = Round::new(Epoch::zero(), view);
@@ -1447,7 +1491,6 @@ mod tests {
                 let batches = self
                     .processor
                     .fork_batches(&parent_digest)
-                    .await
                     .expect("rebuild replay parent must be available");
                 let merkleized = self
                     .processor
@@ -1506,42 +1549,49 @@ mod tests {
         /// Returns whether the block was newly applied (`false` for a
         /// duplicate report).
         #[boxed]
-        async fn finalize(&mut self, block: Block) -> bool {
-            let Some(Applied { barrier, .. }) = self
+        async fn finalize(mut self, block: Block) -> (Self, bool) {
+            let (processor, applied) = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
-                .await
-            else {
-                return false;
+                .await;
+            self.processor = processor;
+            let Some(Applied { barrier, .. }) = applied else {
+                return (self, false);
             };
             assert!(barrier.durable().await, "finalize flush must complete");
-            true
+            (self, true)
         }
 
         #[boxed]
         async fn finalize_with_prune(
-            &mut self,
+            mut self,
             block: Block,
-        ) -> Option<
-            Prune<
-                <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
+        ) -> (
+            Self,
+            Option<
+                Prune<
+                    <DbSet<deterministic::Context> as DatabaseSet<
+                        deterministic::Context,
+                    >>::SyncTargets,
+                >,
             >,
-        > {
+        ){
+            let (processor, applied) = self
+                .processor
+                .finalize(self.context_cell.as_present(), &block)
+                .await;
+            self.processor = processor;
             let Applied {
                 snapshot: _,
                 barrier,
                 prune,
-            } = self
-                .processor
-                .finalize(self.context_cell.as_present(), &block)
-                .await
-                .expect("finalized block must apply");
+            } = applied.expect("finalized block must apply");
             assert!(barrier.durable().await, "finalize flush must complete");
-            prune
+            (self, prune)
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
-            let db = self.processor.databases.read().await;
+            let db = &self.processor.databases.0;
             db.get(&height_key(height))
                 .await
                 .expect("database read should succeed")
@@ -1549,7 +1599,7 @@ mod tests {
         }
 
         async fn counter_value(&self) -> Option<u64> {
-            let db = self.processor.databases.read().await;
+            let db = &self.processor.databases.0;
             db.get(&counter_key())
                 .await
                 .expect("database read should succeed")
@@ -1745,28 +1795,24 @@ mod tests {
             let provider = MapProvider::default();
             let config = qmdb_config("db_config", &context);
             let app = ExecutionApp::new();
-            let mut harness = Harness::with_app(context, provider, config, app).await;
-            harness.processor = Processor::new(
-                ExecutionApp::new(),
-                harness.processor.databases().clone(),
-                Anchor {
-                    height: Height::zero(),
-                    round: Block::genesis().context().round,
-                    digest: Block::genesis().digest(),
-                },
-                StatefulMetrics::new(harness.context_cell.as_present()),
+            let mut harness = Harness::with_app_pruned(
+                context,
+                provider,
+                config,
+                app,
                 Some(PruneConfig {
                     max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 1,
                     retained_qmdb_blocks: 1,
                 }),
-            );
+            )
+            .await;
 
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let prune = harness.finalize_with_prune(block1).await;
+            let (_, prune) = harness.finalize_with_prune(block1).await;
             assert_eq!(
                 prune, None,
                 "pruning should wait for the full retention window",
@@ -1786,10 +1832,9 @@ mod tests {
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
 
-            assert!(
-                harness.finalize(winner.clone()).await,
-                "finalization should persist winner state",
-            );
+            let (h, applied) = harness.finalize(winner.clone()).await;
+            harness = h;
+            assert!(applied, "finalization should persist winner state");
             assert!(
                 !harness.processor.pending.contains_key(&loser.digest()),
                 "losing fork at finalized round should be pruned",
@@ -1818,10 +1863,9 @@ mod tests {
                     .contains_key(&loser_child.digest())
             );
 
-            assert!(
-                harness.finalize(winner.clone()).await,
-                "finalization should persist winner state",
-            );
+            let (h, applied) = harness.finalize(winner.clone()).await;
+            harness = h;
+            assert!(applied, "finalization should persist winner state");
             assert!(
                 !harness.processor.pending.contains_key(&loser.digest()),
                 "losing fork at finalized round should be pruned",
@@ -1842,7 +1886,9 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(block1.clone()).await);
+            let (h, applied) = harness.finalize(block1.clone()).await;
+            harness = h;
+            assert!(applied);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
@@ -1876,7 +1922,9 @@ mod tests {
             let mut parent = genesis;
             for view in 1..=5 {
                 let block = harness.stage_pending_child(&parent, View::new(view)).await;
-                assert!(harness.finalize(block.clone()).await);
+                let (h, applied) = harness.finalize(block.clone()).await;
+                harness = h;
+                assert!(applied);
                 parent = block.clone();
                 chain.push(block);
             }
@@ -1909,7 +1957,9 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(block1.clone()).await);
+            let (h, applied) = harness.finalize(block1.clone()).await;
+            harness = h;
+            assert!(applied);
 
             let mut block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -1940,24 +1990,27 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(block1.clone()).await);
+            let (h, applied) = harness.finalize(block1.clone()).await;
+            harness = h;
+            assert!(applied);
 
             let gap_height = Height::new(3);
             let gap_view = View::new(3);
             let batches = harness
                 .processor
                 .fork_batches(&block1.digest())
-                .await
                 .expect("processed anchor should be available");
-            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
+            let merkleized =
+                ExecutionApp::execute(gap_height, gap_view, &harness.processor.databases, batches)
+                    .await;
             let gap_block = Block {
                 context: consensus_context(block1.digest(), gap_view),
                 parent: block1.digest(),
                 height: gap_height,
-                state_root: merkleized.root(),
+                state_root: merkleized.0.root(),
                 range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.0.bounds().inactivity_floor,
+                    Location::new(merkleized.0.bounds().total_size)
                 ),
             };
 
@@ -1996,7 +2049,9 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            assert!(harness.finalize(canonical).await);
+            let (h, applied) = harness.finalize(canonical).await;
+            harness = h;
+            assert!(applied);
 
             assert!(
                 !harness.is_canonical_processed(&conflicting),
@@ -2015,7 +2070,9 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            assert!(harness.finalize(canonical).await);
+            let (h, applied) = harness.finalize(canonical).await;
+            harness = h;
+            assert!(applied);
 
             let _ = harness.finalize(conflicting).await;
         });
@@ -2028,7 +2085,9 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            assert!(harness.finalize(block1).await);
+            let (h, applied) = harness.finalize(block1).await;
+            harness = h;
+            assert!(applied);
             assert_eq!(harness.counter_value().await, Some(1));
             assert_eq!(
                 harness
@@ -2049,8 +2108,11 @@ mod tests {
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
 
-            assert!(harness.finalize(block1).await);
-            assert!(harness.finalize(block2).await);
+            let (h, applied) = harness.finalize(block1).await;
+            harness = h;
+            assert!(applied);
+            let (_, applied) = harness.finalize(block2).await;
+            assert!(applied);
             assert_eq!(
                 finalized_values.lock().clone(),
                 vec![1, 2],
@@ -2067,7 +2129,9 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            assert!(harness.finalize(block1.clone()).await);
+            let (h, applied) = harness.finalize(block1.clone()).await;
+            harness = h;
+            assert!(applied);
 
             finalized_values.lock().clear();
             harness
@@ -2113,7 +2177,9 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(block1.clone()).await);
+            let (h, applied) = harness.finalize(block1.clone()).await;
+            harness = h;
+            assert!(applied);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -2142,7 +2208,9 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(block1.clone()).await);
+            let (h, applied) = harness.finalize(block1.clone()).await;
+            harness = h;
+            assert!(applied);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();

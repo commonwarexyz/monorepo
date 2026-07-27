@@ -19,10 +19,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
-        db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::standard as qmdb_resolver,
-        },
+        db::{DatabaseSet, Merkleized as _, SyncEngineConfig, p2p::standard as qmdb_resolver},
     },
 };
 use commonware_broadcast::buffered;
@@ -89,7 +86,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = Shared<Qmdb<E>>;
+type Database<E> = (Qmdb<E>,);
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
@@ -229,11 +226,17 @@ struct App {
 impl App {
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
-        mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
+        databases: &Database<E>,
+        batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
+        let (mut batch,) = batches;
         let key = Sha256::hash(&[b"height"]);
-        batches = batches.write(key, Some(u64_to_digest(height.get())));
-        batches.merkleize().await.unwrap()
+        batch = batch.write(key, Some(u64_to_digest(height.get())));
+        (
+            crate::stateful::db::Unmerkleized::merkleize(batch, &databases.0)
+                .await
+                .unwrap(),
+        )
     }
 }
 
@@ -253,7 +256,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -261,13 +264,13 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
+        let merkleized = Self::execute(height, databases, batches).await;
+        let bounds = merkleized.0.bounds();
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
-            state_root: merkleized.root(),
+            state_root: merkleized.0.root(),
             range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
             payload,
         };
@@ -278,13 +281,13 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Reshare final-block payload validation is enforced by the surrounding
         // reshare::Application wrapper; this inner app only executes state.
         let tip = ancestry.peek()?.clone();
-        let merkleized = Self::execute(tip.height(), batches).await;
+        let merkleized = Self::execute(tip.height(), databases, batches).await;
         Some(merkleized)
     }
 
@@ -292,10 +295,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+        Self::execute(block.height(), databases, batches).await
     }
 
     async fn finalized(
@@ -317,7 +320,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        (Target::new(block.state_root, block.range.clone()),)
     }
 }
 
@@ -977,12 +980,12 @@ impl EngineDefinition for ReshareEngine {
                     public_key: public_key.clone(),
                     hold: self.processed_hold.clone(),
                 },
-                db_config,
+                db_config: (db_config,),
                 provider: (),
                 marshal: marshal.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: qmdb_sync_resolver,
+                resolvers: (qmdb_sync_resolver,),
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: 64,

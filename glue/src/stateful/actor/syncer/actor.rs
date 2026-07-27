@@ -70,7 +70,7 @@ where
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
 
-    /// Whether the completed artifact already went out on the completion channel.
+    /// Set once the completed artifact has been handed to the stateful actor.
     delivered: bool,
 
     /// Database configuration for the managed set.
@@ -162,7 +162,7 @@ where
             } => match message {
                 Message::UpdateTargets { update, response } => {
                     if self.delivered {
-                        // The artifact already went out on the completion channel, so
+                        // The artifact already went out on the completion channel;
                         // the caller collects it from there.
                         response.send_lossy(Some(Artifact::Announced));
                         continue;
@@ -196,5 +196,4 @@ where
             },
         }
     }
-
 }

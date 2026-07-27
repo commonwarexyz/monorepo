@@ -358,17 +358,17 @@ where
         V::into_inner(marshal_block)
     };
 
-    let databases = A::Databases::init(context.child("db_set"), db_config).await;
+    let mut databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
 
-    // In the case that the applied targets do not match the marshal floor, we may
+    // In the case that the committed targets do not match the marshal floor, we may
     // have suffered a crash that left the set in an inconsistent state. In this case,
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
     // if the databases were corrupted or pruned too aggressively.
-    if databases.applied_targets().await != processed_targets {
-        databases.rewind_to_targets(processed_targets.clone()).await;
-        let rewound_targets = databases.applied_targets().await;
+    if databases.applied_targets() != processed_targets {
+        databases = databases.rewind_to_targets(processed_targets.clone()).await;
+        let rewound_targets = databases.applied_targets();
         assert!(
             rewound_targets == processed_targets,
             "databases must be consistent with marshal floor after rewind"

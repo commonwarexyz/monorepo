@@ -256,7 +256,6 @@ where
             sync_metadata,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
-            database_subscribers: Vec::new(),
             artifact: None,
             sync_completed,
             prune_config: self.prune_config,
@@ -284,7 +283,8 @@ where
 
         // Install the recovered committed state as generation zero so serving can begin
         // before the first finalization; committed state is durable by definition.
-        publisher.install_durable(databases.capture_snapshots().await);
+        let (databases, genesis) = databases.snapshot().await;
+        publisher.install_durable(genesis);
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
@@ -456,12 +456,12 @@ mod tests {
                 context.child("stateful"),
                 Config {
                     application: TestApp,
-                    db_config: (),
+                    db_config: ((),),
                     provider: (),
                     marshal,
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
-                    resolvers: NoopResolver,
+                    resolvers: (NoopResolver,),
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: 1,

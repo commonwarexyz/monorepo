@@ -23,6 +23,97 @@ use std::{
 pub(crate) type OldestRetained =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;
 
+/// Type-erased accessor returning `(committed op count, root)` for every
+/// database in a validator's set, in set order.
+///
+/// Used by the root-agreement property: the root is a pure function of the
+/// committed operation history, so validators whose databases committed the
+/// same number of operations must report identical roots.
+pub(crate) type StorageRoots =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<(u64, sha256::Digest)>> + Send>> + Send + Sync>;
+
+/// Wraps one sync resolver and captures the serving source the stateful actor attaches,
+/// so tests can observe published durable snapshots without a production read API.
+#[derive(Clone)]
+pub(crate) struct CapturingResolver<R, Src> {
+    inner: R,
+    pub(crate) source: Arc<commonware_utils::sync::Mutex<Option<Src>>>,
+}
+
+impl<R, Src> CapturingResolver<R, Src> {
+    pub(crate) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            source: Arc::new(commonware_utils::sync::Mutex::new(None)),
+        }
+    }
+}
+
+impl<R, Src> crate::stateful::db::AttachableResolver<Src> for CapturingResolver<R, Src>
+where
+    R: crate::stateful::db::AttachableResolver<Src>,
+    Src: crate::stateful::db::ServeSource,
+{
+    async fn attach_source(&self, source: Src) {
+        *self.source.lock() = Some(source.clone());
+        self.inner.attach_source(source).await;
+    }
+}
+
+impl<R, Src> commonware_storage::qmdb::sync::resolver::Resolver for CapturingResolver<R, Src>
+where
+    R: commonware_storage::qmdb::sync::resolver::Resolver,
+    Src: Clone + Send + Sync + 'static,
+{
+    type Family = R::Family;
+    type Digest = R::Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: commonware_storage::merkle::Location<Self::Family>,
+        start_loc: commonware_storage::merkle::Location<Self::Family>,
+        max_ops: std::num::NonZeroU64,
+        include_pinned_nodes: bool,
+        cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+    ) -> Result<
+        commonware_storage::qmdb::sync::resolver::FetchResult<Self::Family, Self::Op, Self::Digest>,
+        Self::Error,
+    > {
+        self.inner
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
+            .await
+    }
+}
+
+impl<R, Src> commonware_storage::qmdb::sync::compact::Resolver for CapturingResolver<R, Src>
+where
+    R: commonware_storage::qmdb::sync::compact::Resolver,
+    Src: Clone + Send + Sync + 'static,
+{
+    type Family = R::Family;
+    type Digest = R::Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn get_compact_state(
+        &self,
+        target: commonware_storage::qmdb::sync::compact::Target<Self::Family, Self::Digest>,
+    ) -> Result<
+        commonware_storage::qmdb::sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>,
+        Self::Error,
+    > {
+        self.inner.get_compact_state(target).await
+    }
+}
+
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
 pub(super) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -76,6 +167,7 @@ pub(crate) struct MockValidatorState<V: Variant> {
     pub(super) state_sync_entries: u64,
     pub(super) state_sync_height: Option<u64>,
     pub(super) oldest_retained: OldestRetained,
+    pub(super) storage_roots: StorageRoots,
 }
 
 impl<V: Variant> PartialEq for MockValidatorState<V> {
@@ -107,6 +199,10 @@ where
 
     pub(crate) async fn oldest_retained(&self) -> u64 {
         (self.oldest_retained)().await
+    }
+
+    pub(crate) async fn storage_roots(&self) -> Vec<(u64, sha256::Digest)> {
+        (self.storage_roots)().await
     }
 }
 

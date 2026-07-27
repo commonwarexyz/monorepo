@@ -36,13 +36,15 @@ impl App {
 
     async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
+        databases: &Database<E>,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
-        batches
+        let (batch,) = batches;
+        (batch
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
-            .merkleize()
+            .merkleize(&databases.0)
             .await
-            .expect("height write must merkleize")
+            .expect("height write must merkleize"),)
     }
 }
 
@@ -65,7 +67,7 @@ where
         &mut self,
         context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -73,13 +75,13 @@ where
         let payload = input.upstream.payload;
         let parent = ancestry.next().await?;
         let height = parent.height().next();
-        let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
+        let merkleized = Self::execute(height, databases, batches).await;
+        let bounds = merkleized.0.bounds();
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
-            state_root: merkleized.root(),
+            state_root: merkleized.0.root(),
             range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
             payload,
         };
@@ -90,7 +92,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Validation from higher layers:
@@ -99,7 +101,7 @@ where
         // - Reshare `Payload` validation is handled by `reshare::Application`
 
         let block = ancestry.next().await?;
-        let merkleized = Self::execute(block.height(), batches).await;
+        let merkleized = Self::execute(block.height(), databases, batches).await;
         Some(merkleized)
     }
 
@@ -107,13 +109,13 @@ where
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        _databases: &Self::Databases,
+        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+        Self::execute(block.height(), databases, batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        (Target::new(block.state_root, block.range.clone()),)
     }
 }

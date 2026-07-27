@@ -2,11 +2,11 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture a [`Shared`] database handle
-//! so the batch API can read through to applied state.
+//! deletions. Keyed batch reads borrow the owning database because the
+//! immutable proof snapshot carries no keyed index.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -36,11 +36,8 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Shared handle to an immutable database.
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
-
-/// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// Wraps an immutable [`UnmerkleizedBatch`], implementing the
+/// [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -54,7 +51,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
-    db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+    marker: std::marker::PhantomData<(E, C, T)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -105,18 +102,24 @@ where
         self
     }
 
-    /// Read a value by key, falling back to applied state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get(key, &db).await
+    /// Read a value by key, falling back to the owning database's committed state.
+    pub async fn get(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+        key: &K,
+    ) -> Result<Option<V::Value>, Error<F>> {
+        self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to the owning database's committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get_many(keys, &db).await
+    pub async fn get_many(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+        keys: &[&K],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.batch.get_many(keys, db).await
     }
 
     /// Set `key` to `value` in the speculative batch.
@@ -126,8 +129,8 @@ where
     }
 }
 
-/// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// Wraps an immutable [`MerkleizedBatch`], implementing the
+/// [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -141,7 +144,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+    marker: std::marker::PhantomData<(E, C, T)>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -175,18 +178,24 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.inner.get(key, &db).await
+    /// Read a value by key, falling back to the owning database's committed state.
+    pub async fn get(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+        key: &K,
+    ) -> Result<Option<V::Value>, Error<F>> {
+        self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to the owning database's committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.inner.get_many(keys, &db).await
+    pub async fn get_many(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+        keys: &[&K],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.inner.get_many(keys, db).await
     }
 }
 
@@ -203,21 +212,17 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     type Merkleized = ImmutableMerkleized<F, E, K, V, C, H, T, S>;
+    type Db = Immutable<F, E, K, V, C, H, T, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
+    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
+            .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
             .await;
         Ok(ImmutableMerkleized {
             inner: merkleized,
-            db: self.db.clone(),
+            marker: std::marker::PhantomData,
         })
     }
 }
@@ -244,7 +249,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            db: self.db.clone(),
+            marker: std::marker::PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -306,11 +311,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: self.new_batch(),
+            marker: std::marker::PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -325,14 +329,12 @@ where
     async fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        // This database flushes before returning, so the state captured after the sync is
-        // already durable and the ready handle proves it. When start_sync arrives for this
-        // database the capture moves before it so the deferred handle covers the capture.
-        let db = db.sync().await?;
+        // Capture before starting the sync so the handle covers exactly the captured state.
         let (db, snapshot) = db.proof_snapshot().await?;
-        Ok((db, Handle::ready(Ok(())), Arc::new(snapshot)))
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -421,11 +423,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: self.new_batch(),
+            marker: std::marker::PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -440,14 +441,12 @@ where
     async fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        // This database flushes before returning, so the state captured after the sync is
-        // already durable and the ready handle proves it. When start_sync arrives for this
-        // database the capture moves before it so the deferred handle covers the capture.
-        let db = db.sync().await?;
+        // Capture before starting the sync so the handle covers exactly the captured state.
         let (db, snapshot) = db.proof_snapshot().await?;
-        Ok((db, Handle::ready(Ok(())), Arc::new(snapshot)))
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {

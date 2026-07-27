@@ -185,7 +185,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .await
     .expect("blocks archive");
 
-    let genesis_target =
+    let (genesis_target,) =
         <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
     let genesis = Block::genesis(
         network.participants[0].clone(),
@@ -324,12 +324,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         context.child("stateful"),
         StatefulConfig {
             application: App::new(genesis.clone()),
-            db_config: types::db_config(partition_prefix, page_cache.clone()),
+            db_config: (types::db_config(partition_prefix, page_cache.clone()),),
             provider: (),
             marshal: marshal.clone(),
             mailbox_size: MAILBOX_SIZE,
             plan,
-            resolvers: qmdb_sync_resolver,
+            resolvers: (qmdb_sync_resolver,),
             sync_config: types::sync_config(),
             prune_config: None,
         },

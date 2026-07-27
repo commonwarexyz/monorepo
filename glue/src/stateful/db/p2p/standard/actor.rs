@@ -762,7 +762,7 @@ mod tests {
 #[cfg(test)]
 mod serve_lifecycle_tests {
     use super::*;
-    use crate::stateful::db::{MemberSource, Publisher, Shared};
+    use crate::stateful::db::{MemberSource, Publisher};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_storage::{
         mmr::{self, Location, Proof},
@@ -930,12 +930,8 @@ mod serve_lifecycle_tests {
             assert!(futures::poll!(serve.as_mut()).is_pending());
             started_rx.try_recv().expect("serve should have started");
 
-            // The writer's cell is fully available while the serve is parked mid-"I/O".
-            let writer_cell = Shared::new("writer", 0u64);
-            let (slot, value) = writer_cell.write().await;
-            slot.put(value + 1);
-            drop(writer_cell);
-
+            // The serve holds only its captured source, so it shares nothing a
+            // writer could block on.
             gate_tx.send(()).expect("gate should open");
             serve.await;
             assert!(

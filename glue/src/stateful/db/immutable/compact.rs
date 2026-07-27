@@ -5,7 +5,7 @@
 //! adapters expose set and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -43,7 +43,7 @@ where
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
+    marker: std::marker::PhantomData<(E, C)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -112,7 +112,7 @@ where
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
+    marker: std::marker::PhantomData<(E, C)>,
 }
 
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
@@ -148,21 +148,17 @@ where
     S: Strategy,
 {
     type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>;
+    type Db = CompactDb<F, E, K, V, H, C, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
+    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
+            .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
             .await;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
-            db: self.db.clone(),
+            marker: std::marker::PhantomData,
         })
     }
 }
@@ -189,7 +185,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            db: self.db.clone(),
+            marker: std::marker::PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -224,11 +220,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: self.new_batch(),
+            marker: std::marker::PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -241,15 +236,13 @@ where
     async fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        // This database flushes before returning, so the tip witness captured after the
-        // sync is already durable and the ready handle proves it. When start_sync arrives
-        // for this database the capture stays after the flush call and the handle gates
-        // publication of the then unproven tip.
-        let db = db.sync().await?;
+        // Start the sync before capturing so the tip witness in the capture is the one
+        // the handle proves durable. Publication of the unproven tip waits on the handle.
+        let (db, handle) = db.start_sync().await?;
         let snapshot = Arc::new(db.compact_snapshot());
-        Ok((db, Handle::ready(Ok(())), snapshot))
+        Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -306,11 +299,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: self.new_batch(),
+            marker: std::marker::PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -323,15 +315,13 @@ where
     async fn finalize(
         self,
         batch: Self::Merkleized,
-    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        // This database flushes before returning, so the tip witness captured after the
-        // sync is already durable and the ready handle proves it. When start_sync arrives
-        // for this database the capture stays after the flush call and the handle gates
-        // publication of the then unproven tip.
-        let db = db.sync().await?;
+        // Start the sync before capturing so the tip witness in the capture is the one
+        // the handle proves durable. Publication of the unproven tip waits on the handle.
+        let (db, handle) = db.start_sync().await?;
         let snapshot = Arc::new(db.compact_snapshot());
-        Ok((db, Handle::ready(Ok(())), snapshot))
+        Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -572,37 +562,29 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Shared::new("test", db);
             let key = Sha256::hash(&[&[1]]);
             let value = Sha256::hash(&[&[2]]);
             let metadata = Sha256::hash(&[&[3]]);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
                 .set(key, value)
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
                 .await
                 .unwrap();
             let expected_root = merkleized.root();
 
-            {
-                let (slot, database) = db.write().await;
-                let (database, durability, _) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
-                slot.put(database);
-                durability.await.expect("finalize flush failed");
-            }
+            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
+            durability.await.expect("finalize flush failed");
 
-            let guard = db.read().await;
-            assert_eq!(guard.root(), expected_root);
-            assert_eq!(guard.get_metadata(), Some(metadata));
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.get_metadata(), Some(metadata));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
-            assert_eq!(target.root, guard.root());
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target.root, db.root());
             assert_eq!(target.leaf_count, mmr::Location::new(3));
         });
     }
