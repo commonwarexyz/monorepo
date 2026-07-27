@@ -58,6 +58,7 @@ type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+type SetSnapshots<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Snapshot;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -83,7 +84,11 @@ pub(super) enum PrepareBatchesError {
 }
 
 /// State applied for a newly finalized block.
-pub(super) struct Applied<T> {
+pub(super) struct Applied<T, S> {
+    /// The generation's captured snapshot, installed for serving once its barrier
+    /// proves durable.
+    pub(super) snapshot: S,
+
     /// Deferred flush for the applied batch, which must be observed
     /// (see [`Barrier`]).
     pub(super) barrier: Barrier,
@@ -708,7 +713,7 @@ where
         &mut self,
         context: &E,
         block: &A::Block,
-    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
+    ) -> Option<Applied<PendingSyncTargets<A, E>, SetSnapshots<A, E>>> {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -755,7 +760,10 @@ where
             }
         };
 
-        let barrier = self.databases.finalize(batch).await;
+        // Publication rides the barrier. The processing loop publishes this generation's
+        // captured snapshot only after the barrier proves every member flush durable, so
+        // a published snapshot can never expose state a crash could roll back.
+        let (snapshot, barrier) = self.databases.finalize(batch).await;
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -769,7 +777,11 @@ where
         };
         timer.observe(context);
 
-        Some(Applied { barrier, prune })
+        Some(Applied {
+            snapshot,
+            barrier,
+            prune,
+        })
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -1504,7 +1516,11 @@ mod tests {
                 <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
         > {
-            let Applied { barrier, prune } = self
+            let Applied {
+                snapshot: _,
+                barrier,
+                prune,
+            } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
                 .await

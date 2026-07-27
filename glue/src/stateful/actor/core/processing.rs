@@ -4,6 +4,7 @@ use crate::stateful::{
         core::mailbox::Message,
         processor::{Applied, Processor},
     },
+    db::{DatabaseSet, Publisher},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -54,6 +55,10 @@ where
 
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
+
+    /// Installs each finalized generation's snapshot for serving once its barrier
+    /// proves durable; dropping it detaches snapshot serving.
+    pub(super) publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
 
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
@@ -180,8 +185,11 @@ where
                             acknowledgement.acknowledge();
                             return;
                         }
-                        let Some(Applied { barrier, prune }) =
-                            self.processor.finalize(&self.context, block.as_ref()).await
+                        let Some(Applied {
+                            snapshot,
+                            barrier,
+                            prune,
+                        }) = self.processor.finalize(&self.context, block.as_ref()).await
                         else {
                             // Duplicate report: marshal redelivers a processed
                             // height only after a restart, where startup aligned
@@ -201,8 +209,10 @@ where
                         // Marshal's ack window bounds the flush backlog. On
                         // runtime teardown the acknowledgement is dropped
                         // instead: marshal redelivers the block after restart.
+                        let staged = self.publisher.stage(snapshot);
                         syncs.push(async move {
                             if barrier.durable().await {
+                                staged.install();
                                 acknowledgement.acknowledge();
                             }
                         });
@@ -308,6 +318,11 @@ mod tests {
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
+        type Snapshot = ();
+
+        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            Ok((self, ()))
+        }
 
         fn initial_sync_target() -> Self::SyncTarget {
             unreachable!("GatedFlushDb is constructed directly in tests")
@@ -328,10 +343,10 @@ mod tests {
         async fn finalize(
             self,
             _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
+        ) -> Result<(Self, Handle<()>, Self::Snapshot), Self::Error> {
             let (release, released) = oneshot::channel();
             self.control.flushes.lock().push(release);
-            Ok((self, Handle::from_receiver(released)))
+            Ok((self, Handle::from_receiver(released), ()))
         }
 
         async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
@@ -494,6 +509,7 @@ mod tests {
             provider: (),
             marshal,
             processor,
+            publisher: crate::stateful::db::Publisher::new(context).0,
             skip_finalized_until: None,
         };
         context.child("loop").spawn(move |_| processing.start());

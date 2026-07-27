@@ -16,14 +16,15 @@ use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
     journal::contiguous::{
-        Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
+        Mutable, Snapshot as JournalSnapshot, fixed::Journal as FixedJournal,
+        variable::Journal as VariableJournal,
     },
     merkle::{Family, Location},
     qmdb::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
-            Immutable, Operation,
+            Immutable, Operation, ProofSnapshot,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
@@ -283,6 +284,16 @@ where
     type Error = Error<F>;
     type Config = fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = Arc<
+        ProofSnapshot<
+            F,
+            E,
+            K,
+            FixedEncoding<V>,
+            <FixedJournal<E, fixed::Operation<F, K, V>> as JournalSnapshot>::Reader,
+            H,
+        >,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -311,10 +322,22 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        // This database flushes before returning, so the state captured after the sync is
+        // already durable and the ready handle proves it. When start_sync arrives for this
+        // database the capture moves before it so the deferred handle covers the capture.
         let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+        let (db, snapshot) = db.proof_snapshot().await?;
+        Ok((db, Handle::ready(Ok(())), Arc::new(snapshot)))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.proof_snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -376,6 +399,16 @@ where
     type Error = Error<F>;
     type Config = variable::Config<T, <variable::Operation<F, K, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = Arc<
+        ProofSnapshot<
+            F,
+            E,
+            K,
+            VariableEncoding<V>,
+            <VariableJournal<E, variable::Operation<F, K, V>> as JournalSnapshot>::Reader,
+            H,
+        >,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -404,10 +437,22 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
+        // This database flushes before returning, so the state captured after the sync is
+        // already durable and the ready handle proves it. When start_sync arrives for this
+        // database the capture moves before it so the deferred handle covers the capture.
         let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+        let (db, snapshot) = db.proof_snapshot().await?;
+        Ok((db, Handle::ready(Ok(())), Arc::new(snapshot)))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.proof_snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {

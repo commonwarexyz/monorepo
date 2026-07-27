@@ -16,7 +16,7 @@ use commonware_storage::{
     Context,
     merkle::{Family, Location},
     qmdb::{
-        Error,
+        Error, StateSnapshot,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
@@ -211,6 +211,7 @@ where
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::compact::Target<F, H::Digest>;
+    type Snapshot = Arc<StateSnapshot<F, H::Digest, Operation<F, K, FixedEncoding<V>>, ()>>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -237,10 +238,23 @@ where
         batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
+        // This database flushes before returning, so the tip witness captured after the
+        // sync is already durable and the ready handle proves it. When start_sync arrives
+        // for this database the capture stays after the flush call and the handle gates
+        // publication of the then unproven tip.
         let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+        let snapshot = Arc::new(db.compact_snapshot());
+        Ok((db, Handle::ready(Ok(())), snapshot))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = Arc::new(self.compact_snapshot());
+        Ok((self, snapshot))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -279,6 +293,7 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::compact::Target<F, H::Digest>;
+    type Snapshot = Arc<StateSnapshot<F, H::Digest, Operation<F, K, VariableEncoding<V>>, C>>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -305,10 +320,23 @@ where
         batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
+        // This database flushes before returning, so the tip witness captured after the
+        // sync is already durable and the ready handle proves it. When start_sync arrives
+        // for this database the capture stays after the flush call and the handle gates
+        // publication of the then unproven tip.
         let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+        let snapshot = Arc::new(db.compact_snapshot());
+        Ok((db, Handle::ready(Ok(())), snapshot))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = Arc::new(self.compact_snapshot());
+        Ok((self, snapshot))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -561,11 +589,12 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+                let (database, durability, _) =
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                durability.await.expect("finalize flush failed");
             }
 
             let guard = db.read().await;

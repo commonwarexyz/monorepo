@@ -56,6 +56,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Error = Infallible;
     type Config = ();
     type SyncTarget = u64;
+    type Snapshot = ();
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        Ok((self, ()))
+    }
 
     fn initial_sync_target() -> Self::SyncTarget {
         unreachable!("TestDb is constructed directly in tests")
@@ -73,8 +78,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
-        Ok((self, Handle::ready(Ok(()))))
+    async fn finalize(
+        self,
+        _batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Self::Error> {
+        Ok((self, Handle::ready(Ok(())), ()))
     }
 
     fn sync_target(&self) -> Self::SyncTarget {

@@ -20,7 +20,8 @@ use commonware_storage::{
         Ordered as OrderedIndex, Unordered as UnorderedIndex, unordered::Index as UnorderedIdx,
     },
     journal::contiguous::{
-        Contiguous, Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
+        Contiguous, Mutable, Snapshot as JournalSnapshot, fixed::Journal as FixedJournal,
+        variable::Journal as VariableJournal,
     },
     merkle::{Family, Location},
     qmdb::{
@@ -28,7 +29,7 @@ use commonware_storage::{
         any::{
             FixedConfig, VariableConfig,
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
-            db::Db,
+            db::{Db, ProofSnapshot},
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
@@ -504,6 +505,15 @@ where
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = Arc<
+        ProofSnapshot<
+            F,
+            E,
+            unordered::Update<K, FixedEncoding<V>>,
+            <FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>> as JournalSnapshot>::Reader,
+            H,
+        >,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -531,9 +541,20 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        // Capture before starting the sync so the handle covers exactly the captured state.
+        let (db, snapshot) = db.proof_snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, handle, Arc::new(snapshot)))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.proof_snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -608,6 +629,15 @@ where
         S,
     >;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = Arc<
+        ProofSnapshot<
+            F,
+            E,
+            unordered::Update<K, VariableEncoding<V>>,
+            <VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>> as JournalSnapshot>::Reader,
+            H,
+        >,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -635,9 +665,20 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Handle<()>, Self::Snapshot), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        // Capture before starting the sync so the handle covers exactly the captured state.
+        let (db, snapshot) = db.proof_snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, handle, Arc::new(snapshot)))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.proof_snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -853,12 +894,12 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) =
+                let (database, durability, _) =
                     <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
                         .await
                         .unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                durability.await.expect("finalize flush failed");
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
@@ -954,9 +995,10 @@ mod tests {
                 .unwrap();
 
             let (slot, database) = db.write().await;
-            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                .await
-                .unwrap();
+            let (database, sync, _) =
+                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
             slot.put(database);
 
             // The flush is parked, yet the batch is already readable.
@@ -1004,7 +1046,7 @@ mod tests {
                 .await
                 .unwrap();
             let (slot, database) = db.write().await;
-            let (database, sync_a) =
+            let (database, sync_a, _) =
                 <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
                     .await
                     .unwrap();
@@ -1023,7 +1065,7 @@ mod tests {
                 .await
                 .unwrap();
             let (slot, database) = db.write().await;
-            let (database, sync_b) =
+            let (database, sync_b, _) =
                 <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
                     .await
                     .unwrap();
@@ -1077,9 +1119,10 @@ mod tests {
                 .await
                 .unwrap();
             let (slot, database) = db.write().await;
-            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                .await
-                .unwrap();
+            let (database, sync, _) =
+                <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
 
             let target = <DelayedFixedDb as ManagedDb<_>>::sync_target(&database);
             let prune = <DelayedFixedDb as ManagedDb<_>>::prune(database, &target);

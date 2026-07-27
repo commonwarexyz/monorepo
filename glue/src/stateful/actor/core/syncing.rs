@@ -6,7 +6,7 @@ use crate::stateful::{
         processor::{Applied, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, AttachableResolverSet},
+    db::{Anchor, DatabaseSet, Publisher},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -45,13 +45,12 @@ enum FinalizedHandoff<B> {
     Apply(B, Exact),
 }
 
-pub(super) struct Syncing<E, A, S, V, R>
+pub(super) struct Syncing<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -83,10 +82,6 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// The state sync resolvers used for state sync fetching and post-bootstrap
-    /// serving.
-    pub(super) resolvers: R,
-
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
 
@@ -95,15 +90,18 @@ where
 
     /// Metrics shared across syncing and processing.
     pub(super) metrics: StatefulMetrics,
+
+    /// The actor's one publication handle; the synced initial snapshot installs here at
+    /// transition, and it moves into [`Processing`] afterward.
+    pub(super) publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
 }
 
-impl<E, A, S, V, R> Syncing<E, A, S, V, R>
+impl<E, A, S, V> Syncing<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
@@ -257,6 +255,10 @@ where
         let synced_height = artifact.anchor.height;
 
         let _ = self.metrics.sync_done.try_set(1);
+        // Install the synced committed state as generation zero so serving can begin
+        // before the first finalization; synced state is durable by definition.
+        let mut publisher = self.publisher;
+        publisher.install_durable(artifact.databases.capture_snapshots().await);
         let mut processor = Processor::new(
             self.application,
             artifact.databases,
@@ -276,7 +278,11 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let Applied { barrier, prune } = processor
+                    let Applied {
+                        snapshot,
+                        barrier,
+                        prune,
+                    } = processor
                         .finalize(self.context.as_present(), block.as_ref())
                         .await
                         .expect("sync handoff block cannot be a duplicate");
@@ -284,11 +290,13 @@ where
                     // The processing loop's flush pool does not exist yet, so
                     // observe the deferred flush inline. Acknowledging only
                     // once durable preserves the startup rewind contract.
+                    let staged = publisher.stage(snapshot);
                     if !barrier.durable().await {
                         // Runtime shutdown before the flush completed: marshal
                         // redelivers the block on the next startup.
                         return;
                     }
+                    staged.install();
                     if let Some(prune) = prune {
                         prune.run(processor.databases_mut(), &self.marshal).await;
                     }
@@ -300,12 +308,6 @@ where
                 }
             }
         }
-
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs.
-        self.resolvers
-            .attach_databases(processor.databases().clone())
-            .await;
 
         // `subscribe_databases` promises a database set that is already attached to the
         // serving actor, so keep subscribers waiting until the resolver handoff is complete.
@@ -333,6 +335,7 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            publisher,
             skip_finalized_until: Some(synced_height),
         }
         .start()
@@ -348,7 +351,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, AttachableResolver, Shared},
+        db::Anchor,
         tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
     };
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
@@ -386,13 +389,6 @@ mod tests {
     };
     use futures::{FutureExt, poll};
     use std::sync::Arc;
-
-    #[derive(Clone)]
-    struct NoopResolver;
-
-    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<DB>) {}
-    }
 
     /// Reporter for the started marshal fixture that acknowledges every dispatched block.
     #[derive(Clone)]
@@ -485,7 +481,7 @@ mod tests {
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver>,
+        syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -520,10 +516,10 @@ mod tests {
                     held_verify_requests: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: None,
-                    resolvers: NoopResolver,
                     sync_completed,
                     prune_config: None,
                     metrics: StatefulMetrics::new(&context),
+                    publisher: crate::stateful::db::Publisher::new(&context).0,
                 },
             };
             (harness, syncer_receiver)
@@ -562,10 +558,10 @@ mod tests {
                         databases: test_databases(),
                         anchor,
                     }),
-                    resolvers: NoopResolver,
                     sync_completed,
                     prune_config: None,
                     metrics: StatefulMetrics::new(&context),
+                    publisher: crate::stateful::db::Publisher::new(&context).0,
                 },
             }
         }

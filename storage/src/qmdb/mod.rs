@@ -96,6 +96,7 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 
+pub use compact::snapshot::StateSnapshot;
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
