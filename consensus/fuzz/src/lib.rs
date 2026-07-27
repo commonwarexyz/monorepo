@@ -2427,6 +2427,7 @@ pub(crate) struct TwinsTopology<P: simplex::Simplex, C> {
     pub(crate) compromised: HashSet<usize>,
     pub(crate) elector: TwinsElector<P>,
     pub(crate) term_length: TermLength,
+    #[cfg_attr(not(feature = "mocks"), allow(dead_code))]
     pub(crate) data: C,
 }
 
