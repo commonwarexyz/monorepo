@@ -38,10 +38,7 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
-use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
-    iouring::{self},
-};
+use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, iouring};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{

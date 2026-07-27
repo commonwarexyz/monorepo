@@ -1097,8 +1097,8 @@ mod tests {
     #[cfg_attr(
         all(target_os = "linux", feature = "iouring"),
         case::iouring_caught(iouring::Runner::new(
-            iouring::Config::default().with_catch_panics(true))
-        )
+            iouring::Config::default().with_catch_panics(true)
+        ))
     )]
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_root<R: Runner>(#[case] runner: R) {
@@ -1137,13 +1137,13 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::new(
-        tokio::Config::default().with_catch_panics(true))
-    )]
+        tokio::Config::default().with_catch_panics(true)
+    ))]
     #[cfg_attr(
         all(target_os = "linux", feature = "iouring"),
         case::iouring(iouring::Runner::new(
-            iouring::Config::default().with_catch_panics(true))
-        )
+            iouring::Config::default().with_catch_panics(true)
+        ))
     )]
     fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
@@ -1193,13 +1193,13 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::new(
-        tokio::Config::default().with_catch_panics(true))
-    )]
+        tokio::Config::default().with_catch_panics(true)
+    ))]
     #[cfg_attr(
         all(target_os = "linux", feature = "iouring"),
         case::iouring(iouring::Runner::new(
-            iouring::Config::default().with_catch_panics(true))
-        )
+            iouring::Config::default().with_catch_panics(true)
+        ))
     )]
     fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
@@ -2370,8 +2370,8 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::new(
-        tokio::Config::default().with_catch_panics(true))
-    )]
+        tokio::Config::default().with_catch_panics(true)
+    ))]
     #[cfg_attr(
         all(target_os = "linux", feature = "iouring"),
         case::iouring(iouring::Runner::new(

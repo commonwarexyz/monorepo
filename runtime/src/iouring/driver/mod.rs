@@ -1133,9 +1133,9 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[42]).unwrap();
 
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let (mut buf, read) = harness
-            .block_on(driver.recv(
+            .block_on(handle.recv(
                 Arc::new(left.into()),
                 IoBufMut::with_capacity(1),
                 0,
@@ -1160,9 +1160,9 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let start = Instant::now();
-        let result = harness.block_on(driver.recv(
+        let result = harness.block_on(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1195,9 +1195,9 @@ mod tests {
         // after slot reuse.
         let (left1, right1) = UnixStream::pair().unwrap();
         (&right1).write_all(&[42]).unwrap();
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let (_buf1, read1) = harness
-            .block_on(driver.recv(
+            .block_on(handle.recv(
                 Arc::new(left1.into()),
                 IoBufMut::with_capacity(1),
                 0,
@@ -1211,7 +1211,7 @@ mod tests {
         // Second request reuses the slot and blocks until timeout.
         let (left2, _right2) = UnixStream::pair().unwrap();
         let start = Instant::now();
-        let result2 = harness.block_on(driver.recv(
+        let result2 = harness.block_on(handle.recv(
             Arc::new(left2.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1234,8 +1234,8 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[1, 2, 3]).unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(5),
             0,
@@ -1269,9 +1269,9 @@ mod tests {
         let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let start = Instant::now();
-        let result = harness.block_on(driver.recv(
+        let result = harness.block_on(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1292,8 +1292,8 @@ mod tests {
     fn test_recv_panics_on_invalid_buffer_bounds() {
         let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
-        let driver = harness.handle.clone();
-        let _ = harness.block_on(driver.recv(
+        let handle = harness.handle.clone();
+        let _ = harness.block_on(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(4),
             0,
@@ -1314,8 +1314,8 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
         let fd = Arc::new(OwnedFd::from(left));
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(fd.try_clone().unwrap()),
             IoBufMut::with_capacity(8),
             0,
@@ -1351,8 +1351,8 @@ mod tests {
         let mut harness = TestLoop::new(RingConfig::default());
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1390,9 +1390,9 @@ mod tests {
             .unwrap();
 
         let mut harness = TestLoop::new(RingConfig::default());
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let payload = vec![7u8; 1 << 20];
-        let mut write = Box::pin(driver.write_at_sync(
+        let mut write = Box::pin(handle.write_at_sync(
             Arc::new(file),
             0,
             IoBufs::from(IoBuf::from(payload.clone())),
@@ -1420,8 +1420,8 @@ mod tests {
         let (left_a, right_a) = UnixStream::pair().unwrap();
         let (left_b, right_b) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let recv_a = driver.recv(
+        let handle = harness.handle.clone();
+        let recv_a = handle.recv(
             Arc::new(left_a.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1429,7 +1429,7 @@ mod tests {
             false,
             Instant::now() + Duration::from_secs(5),
         );
-        let recv_b = driver.recv(
+        let recv_b = handle.recv(
             Arc::new(left_b.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1519,9 +1519,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let fd: Arc<OwnedFd> = Arc::new(OwnedFd::from(listener));
 
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let mut admit =
-            Box::pin(driver.start_accept(fd, Instant::now() + Duration::from_secs(3600)));
+            Box::pin(handle.start_accept(fd, Instant::now() + Duration::from_secs(3600)));
         let noop = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&noop);
         let Poll::Ready(ticket) = admit.as_mut().poll(&mut cx) else {
@@ -1561,14 +1561,14 @@ mod tests {
             max_request_timeout: Duration::from_secs(3600),
             ..Default::default()
         });
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
 
         // Admit a recv but never turn: at drain entry the request is still
-        // in the staged queue and the wake poll was never installed, so the
+        // in the backlog and the wake poll was never installed, so the
         // drain's first staging pass fills the single-entry SQ before the
         // rearm can land.
         let (left, _right) = UnixStream::pair().unwrap();
-        let mut recv = Box::pin(driver.recv(
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1609,10 +1609,10 @@ mod tests {
             size: 1,
             ..Default::default()
         });
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
 
         let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
-        let mut blocker = Box::pin(driver.recv(
+        let mut blocker = Box::pin(handle.recv(
             Arc::new(blocker_left.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1623,7 +1623,7 @@ mod tests {
         assert!(poll_once(&harness, &mut blocker).is_pending());
 
         let (left, _right) = UnixStream::pair().unwrap();
-        let mut parked = Box::pin(driver.recv(
+        let mut parked = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1656,11 +1656,11 @@ mod tests {
             size: 1,
             ..Default::default()
         });
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
 
         // Fill the single waiter slot with a recv that stays in flight.
         let (blocker_left, _blocker_right) = UnixStream::pair().unwrap();
-        let mut blocker = Box::pin(driver.recv(
+        let mut blocker = Box::pin(handle.recv(
             Arc::new(blocker_left.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1675,7 +1675,7 @@ mod tests {
         // recycles that slot instead of growing.
         for _ in 0..64 {
             let (left, _right) = UnixStream::pair().unwrap();
-            let mut parked = Box::pin(driver.recv(
+            let mut parked = Box::pin(handle.recv(
                 Arc::new(left.into()),
                 IoBufMut::with_capacity(1),
                 0,
@@ -1701,7 +1701,7 @@ mod tests {
         // A registration invalidated by a drain is ignored by a later cancel
         // (stale epoch) instead of corrupting another attempt's slot.
         let (left, _right) = UnixStream::pair().unwrap();
-        let mut parked = Box::pin(driver.recv(
+        let mut parked = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1729,8 +1729,8 @@ mod tests {
         }
 
         let (left, _right) = UnixStream::pair().unwrap();
-        let driver = harness.handle.clone();
-        let result = harness.block_on(driver.recv(
+        let handle = harness.handle.clone();
+        let result = harness.block_on(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1743,7 +1743,7 @@ mod tests {
         let (sock, _keep) = UnixStream::pair().unwrap();
         // SAFETY: sock is a valid fd that we own.
         let file = unsafe { std::fs::File::from_raw_fd(sock.into_raw_fd()) };
-        let ticket = harness.block_on(driver.start_sync(Arc::new(file)));
+        let ticket = harness.block_on(handle.start_sync(Arc::new(file)));
         let result = harness.block_on(ticket);
         assert!(matches!(result, Err(Error::Closed)));
     }
@@ -1770,16 +1770,16 @@ mod tests {
             shutdown_timeout: None,
             ..Default::default()
         });
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let payload = vec![9u8; 1 << 20];
-        let mut write = Box::pin(driver.write_at_sync(
+        let mut write = Box::pin(handle.write_at_sync(
             Arc::new(file),
             0,
             IoBufs::from(IoBuf::from(payload.clone())),
         ));
         assert!(poll_once(&harness, &mut write).is_pending());
 
-        // Shutdown drains the write; the future then observes success.
+        // Shutdown drains the write, and the future then observes success.
         harness.shutdown();
         match poll_once(&harness, &mut write) {
             Poll::Ready(Ok(())) => {}
@@ -1801,8 +1801,8 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1843,8 +1843,8 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1882,8 +1882,8 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -1934,8 +1934,8 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
 
         // Keep a recv in flight so park blocks in the eventfd-backed path.
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1980,8 +1980,8 @@ mod tests {
         let (left_a, _right_a) = UnixStream::pair().unwrap();
         let (left_b, _right_b) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv_a = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv_a = Box::pin(handle.recv(
             Arc::new(left_a.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -1989,7 +1989,7 @@ mod tests {
             false,
             Instant::now() + Duration::from_secs(60),
         ));
-        let mut recv_b = Box::pin(driver.recv(
+        let mut recv_b = Box::pin(handle.recv(
             Arc::new(left_b.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -2032,8 +2032,8 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -2069,8 +2069,8 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[1]).unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(2),
             0,
@@ -2110,8 +2110,8 @@ mod tests {
         });
         let (left, _right) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(8),
             0,
@@ -2156,8 +2156,8 @@ mod tests {
         let (left_a, _right_a) = UnixStream::pair().unwrap();
         let (left_b, _right_b) = UnixStream::pair().unwrap();
 
-        let driver = harness.handle.clone();
-        let mut recv_a = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let mut recv_a = Box::pin(handle.recv(
             Arc::new(left_a.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -2165,7 +2165,7 @@ mod tests {
             false,
             Instant::now() + Duration::from_secs(60),
         ));
-        let mut recv_b = Box::pin(driver.recv(
+        let mut recv_b = Box::pin(handle.recv(
             Arc::new(left_b.into()),
             IoBufMut::with_capacity(1),
             0,
@@ -2202,13 +2202,13 @@ mod tests {
             ..Default::default()
         });
 
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         let mut sockets = Vec::new();
         let mut recvs = Vec::new();
         for _ in 0..8 {
             let (left, right) = UnixStream::pair().unwrap();
             sockets.push(right);
-            recvs.push(Box::pin(driver.recv(
+            recvs.push(Box::pin(handle.recv(
                 Arc::new(left.into()),
                 IoBufMut::with_capacity(1),
                 0,
@@ -2287,8 +2287,8 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         (&right).write_all(&[1, 2]).unwrap();
 
-        let driver = harness.handle.clone();
-        let recv = Box::pin(driver.recv(
+        let handle = harness.handle.clone();
+        let recv = Box::pin(handle.recv(
             Arc::new(left.into()),
             IoBufMut::with_capacity(4),
             0,
