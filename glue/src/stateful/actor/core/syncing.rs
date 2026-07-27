@@ -269,7 +269,10 @@ where
 
     /// Ensure restart can recover every finalized block through `height`.
     async fn ensure_recovery_frontier(mut self, height: Height) -> (Self, bool) {
-        if self.recovery_frontier.is_some_and(|frontier| frontier >= height) {
+        if self
+            .recovery_frontier
+            .is_some_and(|frontier| frontier >= height)
+        {
             return (self, true);
         }
 
@@ -1234,10 +1237,7 @@ mod tests {
                 let (acknowledgement, waiter) = Exact::handle();
                 let (syncing, handoff) = harness
                     .syncing
-                    .process_finalized(
-                        Arc::new(TestBlock::new(height, digest)),
-                        acknowledgement,
-                    )
+                    .process_finalized(Arc::new(TestBlock::new(height, digest)), acknowledgement)
                     .await;
                 assert!(handoff.is_none());
                 assert!(
