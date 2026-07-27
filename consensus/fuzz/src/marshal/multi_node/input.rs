@@ -91,6 +91,9 @@ impl Arbitrary<'_> for MarshalLivenessInput {
 #[derive(Debug, Clone)]
 pub struct MarshalTwinsInput {
     /// Byte tape used by the deterministic runtime and scenario sampler.
+    ///
+    /// The general Twins target reserves the final byte as its application and
+    /// wrapper selector. Focused regression targets use the complete tape.
     pub raw_bytes: Vec<u8>,
     /// Number of adversarial Twins rounds before the synchronous suffix.
     pub rounds: u8,

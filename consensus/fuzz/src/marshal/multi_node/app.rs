@@ -29,7 +29,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Clock as _, deterministic};
 use commonware_utils::sync::Mutex;
 use futures::StreamExt;
-use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, marker::PhantomData, sync::Arc, time::Duration};
 
 /// Out-of-band registry of blocks constructed by the fuzz applications.
 pub(super) struct BlockContextRegistry<C> {
@@ -160,14 +160,42 @@ const PROPOSE_NONE_BUCKET: u8 = 0;
 const VERIFY_DELAY_BUCKETS: [u8; 2] = [0, 1];
 const VERIFY_REJECT_BUCKET: u8 = 2;
 
-/// Input-derived behavior shared by every randomized honest application.
+/// Honest application selected by the final byte of the general Twins input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ApplicationChoice {
+    Basic,
+    /// May temporarily omit proposals, delay verification, or reject blocks.
+    /// These behaviors are deterministic and shared by all honest validators.
+    /// After the fault-injection prefix, proposals and verifications succeed normally.
+    Faulty,
+}
+
+impl ApplicationChoice {
+    pub(super) const fn from_selector(selector: u8) -> Self {
+        match selector % 2 {
+            0 => Self::Basic,
+            _ => Self::Faulty,
+        }
+    }
+}
+
+impl fmt::Display for ApplicationChoice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Basic => formatter.write_str("basic"),
+            Self::Faulty => formatter.write_str("faulty"),
+        }
+    }
+}
+
+/// Input-derived behavior shared by every faulty honest application.
 ///
 /// Outcomes are keyed by consensus context rather than call order so honest
 /// validators make the same validity decision for the same proposal.
 #[derive(Clone, Copy)]
-pub(super) struct RandomizedConfig {
+pub(super) struct FaultyConfig {
     seed: u64,
-    randomized_through: View,
+    fault_injection_through: View,
 }
 
 enum VerificationBehavior {
@@ -176,11 +204,11 @@ enum VerificationBehavior {
     Accept,
 }
 
-impl RandomizedConfig {
-    pub(super) const fn new(seed: u64, randomized_through: View) -> Self {
+impl FaultyConfig {
+    pub(super) const fn new(seed: u64, fault_injection_through: View) -> Self {
         Self {
             seed,
-            randomized_through,
+            fault_injection_through,
         }
     }
 
@@ -189,7 +217,7 @@ impl RandomizedConfig {
     }
 
     fn enabled<C: Viewable>(&self, context: &C) -> bool {
-        context.view() <= self.randomized_through
+        context.view() <= self.fault_injection_through
     }
 
     fn omit_proposal<C>(&self, context: &C) -> bool
@@ -231,16 +259,13 @@ impl RandomizedConfig {
 
 /// Block-building application that explores transient construction failures,
 /// verification latency, and deterministic application rejection.
-pub(super) struct RandomizedBlockBuilderApp<C, S = DefaultSigningScheme> {
+pub(super) struct FaultyBlockBuilderApp<C, S = DefaultSigningScheme> {
     inner: BlockBuilderApp<C, S>,
-    config: RandomizedConfig,
+    config: FaultyConfig,
 }
 
-impl<C, S> RandomizedBlockBuilderApp<C, S> {
-    pub(super) fn new(
-        config: RandomizedConfig,
-        verification_delay: Option<(View, Duration)>,
-    ) -> Self {
+impl<C, S> FaultyBlockBuilderApp<C, S> {
+    pub(super) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
         let inner = match verification_delay {
             Some((view, delay)) => BlockBuilderApp::with_verification_delay(view, delay),
             None => BlockBuilderApp::default(),
@@ -254,7 +279,7 @@ impl<C, S> RandomizedBlockBuilderApp<C, S> {
     }
 }
 
-impl<C, S> Clone for RandomizedBlockBuilderApp<C, S> {
+impl<C, S> Clone for FaultyBlockBuilderApp<C, S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -263,7 +288,7 @@ impl<C, S> Clone for RandomizedBlockBuilderApp<C, S> {
     }
 }
 
-impl<C, S> Application<deterministic::Context> for RandomizedBlockBuilderApp<C, S>
+impl<C, S> Application<deterministic::Context> for FaultyBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
     S: Scheme,
@@ -293,10 +318,103 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         match self.config.verification(&context.1) {
-            VerificationBehavior::Delay(delay) => context.0.sleep(delay).await,
-            VerificationBehavior::Reject => return false,
-            VerificationBehavior::Accept => {}
+            VerificationBehavior::Delay(delay) => {
+                context.0.sleep(delay).await;
+                self.inner.verify(context, ancestry).await
+            }
+            VerificationBehavior::Reject => false,
+            VerificationBehavior::Accept => self.inner.verify(context, ancestry).await,
         }
-        self.inner.verify(context, ancestry).await
+    }
+}
+
+/// Runtime-selected application for the shared general Twins corpus.
+pub(super) enum SelectedBlockBuilderApp<C, S = DefaultSigningScheme> {
+    Basic(BlockBuilderApp<C, S>),
+    Faulty(FaultyBlockBuilderApp<C, S>),
+}
+
+impl<C, S> SelectedBlockBuilderApp<C, S> {
+    pub(super) fn new(
+        choice: ApplicationChoice,
+        config: FaultyConfig,
+        verification_delay: Option<(View, Duration)>,
+    ) -> Self {
+        match choice {
+            ApplicationChoice::Basic => {
+                let application = match verification_delay {
+                    Some((view, delay)) => BlockBuilderApp::with_verification_delay(view, delay),
+                    None => BlockBuilderApp::default(),
+                };
+                Self::Basic(application)
+            }
+            ApplicationChoice::Faulty => {
+                Self::Faulty(FaultyBlockBuilderApp::new(config, verification_delay))
+            }
+        }
+    }
+
+    pub(super) fn with_block_contexts(self, block_contexts: BlockContextRegistry<C>) -> Self {
+        match self {
+            Self::Basic(application) => {
+                Self::Basic(application.with_block_contexts(block_contexts))
+            }
+            Self::Faulty(application) => {
+                Self::Faulty(application.with_block_contexts(block_contexts))
+            }
+        }
+    }
+
+    pub(super) fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &C) -> bool
+    where
+        C: Codec<Cfg = ()> + Viewable,
+    {
+        match choice {
+            ApplicationChoice::Basic => false,
+            ApplicationChoice::Faulty => config.rejects(context),
+        }
+    }
+}
+
+impl<C, S> Clone for SelectedBlockBuilderApp<C, S> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Basic(application) => Self::Basic(application.clone()),
+            Self::Faulty(application) => Self::Faulty(application.clone()),
+        }
+    }
+}
+
+impl<C, S> Application<deterministic::Context> for SelectedBlockBuilderApp<C, S>
+where
+    C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
+    S: Scheme,
+{
+    type SigningScheme = S;
+    type Context = C;
+    type Block = Block<Sha256Digest, C>;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Option<Self::Block> {
+        match self {
+            Self::Basic(application) => application.propose(context, ancestry, input).await,
+            Self::Faulty(application) => application.propose(context, ancestry, input).await,
+        }
+    }
+
+    async fn verify(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        match self {
+            Self::Basic(application) => application.verify(context, ancestry).await,
+            Self::Faulty(application) => application.verify(context, ancestry).await,
+        }
     }
 }

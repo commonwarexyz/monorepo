@@ -34,8 +34,8 @@ pub use engine::LiveMarshal;
 pub use input::{MarshalLivenessInput, MarshalTwinsInput};
 pub use runner::fuzz_marshal_liveness;
 pub use twins::{
-    fuzz_marshal_twins_deferred, fuzz_marshal_twins_id_split_header,
-    fuzz_marshal_twins_id_split_header_inline, fuzz_marshal_twins_randomized_app_deferred,
+    fuzz_marshal_twins, fuzz_marshal_twins_id_split_header,
+    fuzz_marshal_twins_id_split_header_inline,
 };
 
 /// Engine p2p channel ids, shared by the honest engines and Byzantine twins.

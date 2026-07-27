@@ -1,8 +1,8 @@
 //! Fuzz harnesses for the marshal mechanism.
 //!
-//! Each driver is its own libFuzzer target so a single mode's input format
-//! owns its whole byte tape and its own corpus (no top-level enum splitting
-//! bytes across modes). The drivers:
+//! Each protocol driver is its own libFuzzer target. The general Twins driver
+//! shares one corpus across its application and wrapper variants by reserving
+//! the final byte of its raw entropy tape as a selector. The drivers:
 //!
 //! - [`single_node`]: drives one marshal actor in isolation by synthesizing
 //!   every input it would receive (blocks, notarizations, finalizations,
@@ -15,9 +15,8 @@
 //!   Twins mutator splits one compromised identity between a full engine and a
 //!   `Disrupter`.
 //!   Targets: `marshal_multi_node_liveness_deferred`,
-//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins_deferred`,
-//!   `marshal_multi_node_twins_randomized_app_deferred`,
-//!   `marshal_multi_node_twins_id_split_header`,
+//!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins`,
+//!   `marshal_multi_node_twins_id_split_header_deferred`,
 //!   `marshal_multi_node_twins_id_split_header_inline`.
 //! - [`inline`]: drives the standard inline and deferred block paths, including
 //!   split-header equivocation. Targets: `marshal_standard_inline`,
@@ -45,9 +44,8 @@ pub mod store;
 
 pub use inline::{MarshalInlineInput, fuzz_marshal_deferred, fuzz_marshal_inline};
 pub use multi_node::{
-    MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins_deferred,
+    MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins,
     fuzz_marshal_twins_id_split_header, fuzz_marshal_twins_id_split_header_inline,
-    fuzz_marshal_twins_randomized_app_deferred,
 };
 pub use single_node::{MarshalEvent, MarshalFuzzInput, VariantPublish, fuzz_marshal_single_node};
 pub use store::{MarshalStoreInput, fuzz_marshal_store};

@@ -10,7 +10,7 @@
 //! gaps, duplicates, and same-height forks are all observable (a by-height map
 //! would silently overwrite them).
 
-use super::app::BlockContextRegistry;
+use super::app::{ApplicationChoice, BlockContextRegistry};
 use crate::simplex::Simplex;
 use commonware_consensus::{
     Block,
@@ -36,12 +36,14 @@ type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
 #[derive(Clone)]
 pub(super) struct CertificationAgreementInvariant {
     verdicts: Arc<Mutex<CertifyVerdicts>>,
+    stack: Arc<str>,
 }
 
 impl CertificationAgreementInvariant {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(stack: Arc<str>) -> Self {
         Self {
             verdicts: Arc::new(Mutex::new(HashMap::new())),
+            stack,
         }
     }
 
@@ -58,7 +60,8 @@ impl CertificationAgreementInvariant {
                 *first_verdict, verdict,
                 "marshal automaton certify agreement violated: honest node{first_validator} \
                  returned {first_verdict} but honest node{validator} returned {verdict} for \
-                 round={round} digest={digest}",
+                 round={round} digest={digest}; stack={}",
+                self.stack,
             );
             return;
         }
@@ -71,8 +74,10 @@ impl CertificationAgreementInvariant {
 pub(super) struct HeaderMismatchInvariant<P: Simplex, C: Copy> {
     verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
     block_contexts: BlockContextRegistry<Ctx<P>>,
+    app_choice: ApplicationChoice,
     app_config: C,
-    rejects: fn(C, &Ctx<P>) -> bool,
+    rejects: fn(ApplicationChoice, C, &Ctx<P>) -> bool,
+    stack: Arc<str>,
 }
 
 impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
@@ -80,23 +85,29 @@ impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
         Self {
             verified_contexts: self.verified_contexts.clone(),
             block_contexts: self.block_contexts.clone(),
+            app_choice: self.app_choice,
             app_config: self.app_config,
             rejects: self.rejects,
+            stack: self.stack.clone(),
         }
     }
 }
 
 impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
     pub(super) fn new(
+        app_choice: ApplicationChoice,
         app_config: C,
-        rejects: fn(C, &Ctx<P>) -> bool,
+        rejects: fn(ApplicationChoice, C, &Ctx<P>) -> bool,
         block_contexts: BlockContextRegistry<Ctx<P>>,
+        stack: Arc<str>,
     ) -> Self {
         Self {
             verified_contexts: Arc::new(Mutex::new(HashMap::new())),
             block_contexts,
+            app_choice,
             app_config,
             rejects,
+            stack,
         }
     }
 
@@ -116,7 +127,8 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
         let block_context = self.block_context(&digest).unwrap_or_else(|| {
             panic!(
                 "marshal fuzz harness could not resolve the embedded context for a completed \
-                 certification: round={round} digest={digest}"
+                 certification: round={round} digest={digest}; stack={}",
+                self.stack,
             )
         });
         let mismatch = self
@@ -124,7 +136,7 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             .lock()
             .get(&(round, digest))
             .is_some_and(|contexts| contexts.iter().any(|context| context != &block_context));
-        mismatch && !(self.rejects)(self.app_config, &block_context)
+        mismatch && !(self.rejects)(self.app_choice, self.app_config, &block_context)
     }
 
     /// Check a completed certification outcome after a header-mismatching verification.
@@ -136,7 +148,8 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
         assert!(
             !mismatch,
             "marshal invariant violated: certification reused a \
-             header-scoped verification rejection"
+             header-scoped verification rejection; stack={}",
+            self.stack,
         );
     }
 }
@@ -146,18 +159,22 @@ pub fn check_all<H: TestHarness>(
     minimum_height: u64,
     honest_apps: &[(usize, Application<H::ApplicationBlock>)],
 ) {
-    check_all_blocks(honest_apps);
+    check_all_blocks(honest_apps, None);
     for (idx, app) in honest_apps {
         check_minimum_height(*idx, minimum_height, &app.delivered());
     }
 }
 
 /// Run block-ordering and agreement invariants.
-pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(honest_apps: &[(usize, Application<B>)]) {
+pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
+    honest_apps: &[(usize, Application<B>)],
+    stack: Option<&str>,
+) {
+    let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
-        check_in_order(*idx, &app.delivered());
+        check_in_order(*idx, &app.delivered(), stack);
     }
-    agreement(honest_apps);
+    agreement(honest_apps, stack);
 }
 
 /// Invariant: per-node in-order, gap-free delivery.
@@ -167,20 +184,20 @@ pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(honest_apps: &[(usize, 
 /// finalized container (height 1), then every subsequent delivery must advance
 /// by exactly one. Because this is the true arrival sequence, an out-of-order
 /// delivery, a gap, or a duplicate/refinalized height all fail the `+ 1` check.
-fn check_in_order<D>(idx: usize, delivered: &[(Height, D)]) {
+fn check_in_order<D>(idx: usize, delivered: &[(Height, D)], stack: &str) {
     let heights: Vec<u64> = delivered.iter().map(|(h, _)| h.get()).collect();
     let first = heights.first().copied().unwrap_or(0);
     assert!(
         first <= 1,
         "node{idx} first delivery at height {first} is above the genesis floor + 1 \
-         (sequence={heights:?})",
+         (sequence={heights:?}); stack={stack}",
     );
     for window in heights.windows(2) {
         assert_eq!(
             window[1],
             window[0] + 1,
             "node{idx} violated in-order delivery (out-of-order, gap, or duplicate); \
-             sequence={heights:?}",
+             sequence={heights:?}; stack={stack}",
         );
     }
 }
@@ -214,7 +231,10 @@ fn check_minimum_height<D>(idx: usize, minimum_height: u64, delivered: &[(Height
 ///
 /// This detects conflicting finalization, fork divergence, and recovery that
 /// delivers a different block at an already observed height.
-fn agreement<B: Block<Digest = Sha256Digest>>(honest_apps: &[(usize, Application<B>)]) {
+fn agreement<B: Block<Digest = Sha256Digest>>(
+    honest_apps: &[(usize, Application<B>)],
+    stack: &str,
+) {
     let mut seen: BTreeMap<Height, (usize, Sha256Digest)> = BTreeMap::new();
     for (idx, app) in honest_apps {
         for (height, digest) in app.delivered() {
@@ -223,7 +243,7 @@ fn agreement<B: Block<Digest = Sha256Digest>>(honest_apps: &[(usize, Application
                     *first_digest,
                     digest,
                     "honest fork at height {}: node{first_idx} delivered {first_digest:?} \
-                     but node{idx} delivered {digest:?}",
+                     but node{idx} delivered {digest:?}; stack={stack}",
                     height.get(),
                 );
             } else {

@@ -540,15 +540,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_twins_deferred"
-path = "fuzz_targets/marshal_multi_node_twins_deferred.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_multi_node_twins_randomized_app_deferred"
-path = "fuzz_targets/marshal_multi_node_twins_randomized_app_deferred.rs"
+name = "marshal_multi_node_twins"
+path = "fuzz_targets/marshal_multi_node_twins.rs"
 test = false
 doc = false
 bench = false
