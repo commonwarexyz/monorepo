@@ -798,6 +798,52 @@ mod tests {
     }
 
     #[test]
+    fn test_ipv6_end_to_end() {
+        // Property: the AF_INET6 socket arm and the full v6 sockaddr path
+        // work end to end through bind, dial, accept, and a bidirectional
+        // exchange.
+        // Setup: preflight host IPv6 loopback with the standard library, so
+        // the skip can never hide an io_uring regression (a backend
+        // BindFailed discards errno and must fail the test, not skip it).
+        // Action: bind on [::1]:0 through the io_uring front end, dial the
+        // bound address, accept, and exchange one payload in each direction.
+        // Expected: both payloads round-trip byte for byte.
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            // This host has no IPv6 loopback, so the io_uring path cannot be
+            // exercised in this environment.
+            return;
+        }
+
+        let (mut harness, network) = test_network(Config::default());
+        harness.block_on(async move {
+            let mut listener = network.bind("[::1]:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            assert!(addr.is_ipv6(), "listener must bind a v6 address");
+
+            let ping = b"ping".to_vec();
+            let pong = b"pong".to_vec();
+
+            let server = async {
+                let (remote, mut sink, mut stream) = listener.accept().await.unwrap();
+                assert!(remote.is_ipv6(), "accepted peer must decode as v6");
+                let received = stream.recv(4).await.unwrap();
+                sink.send(b"pong".to_vec()).await.unwrap();
+                received
+            };
+
+            let client = async {
+                let (mut sink, mut stream) = network.dial(addr).await.unwrap();
+                sink.send(b"ping".to_vec()).await.unwrap();
+                stream.recv(4).await.unwrap()
+            };
+
+            let (received_ping, received_pong) = futures::join!(server, client);
+            assert_eq!(received_ping.coalesce(), ping.as_slice());
+            assert_eq!(received_pong.coalesce(), pong.as_slice());
+        });
+    }
+
+    #[test]
     fn test_read_timeout_with_partial_data() {
         // Verify a top-level recv returns timeout after partial progress stalls.
         let op_timeout = Duration::from_millis(100);
@@ -1213,6 +1259,45 @@ mod tests {
         assert!(matches!(
             harness.block_on(stream.recv(1)),
             Err(Error::RecvFailed)
+        ));
+    }
+
+    #[test]
+    fn test_closed_driver_public_dial_and_accept() {
+        // Property: the public wrappers pin two deliberately different
+        // closed-driver error surfaces. `Listener::accept` maps every
+        // non-timeout ticket error to Closed for tokio parity, while
+        // `Network::dial` propagates the internal ConnectionFailed fallback
+        // unmapped.
+        // Setup: bind a listener (synchronous socket setup that needs no
+        // driver), then close the driver.
+        // Action: await the public accept and dial wrappers.
+        // Expected: accept yields Closed and retains no pending ticket, and
+        // dial yields ConnectionFailed.
+        let (mut harness, network) = test_network(Config::default());
+        let mut listener = harness
+            .block_on(network.bind("127.0.0.1:0".parse().unwrap()))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        for waker in harness.driver().close() {
+            waker.wake();
+        }
+
+        // The public accept surface is Closed, not the internal fallback.
+        assert!(matches!(
+            harness.block_on(listener.accept()),
+            Err(Error::Closed)
+        ));
+        assert!(
+            listener.pending.is_none(),
+            "a failed accept must not retain a pending ticket"
+        );
+
+        // The public dial surface keeps the internal fallback unmapped.
+        assert!(matches!(
+            harness.block_on(network.dial(addr)),
+            Err(Error::ConnectionFailed)
         ));
     }
 }

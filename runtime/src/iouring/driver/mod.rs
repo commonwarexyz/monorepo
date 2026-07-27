@@ -1051,16 +1051,22 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::{testing::*, *};
+    use super::{handle::SyncTicket, testing::*, *};
     use crate::{Error, IoBuf, IoBufMut, IoBufs, telemetry::metrics::Registry};
+    use futures::task::{ArcWake, waker as arc_waker};
     use std::{
+        fs::File,
+        future::Future,
         io::Write,
         os::{
             fd::{FromRawFd, IntoRawFd, OwnedFd},
             unix::net::UnixStream,
         },
-        sync::Arc,
-        task::Poll,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll},
         time::{Duration, Instant},
     };
 
@@ -1642,6 +1648,185 @@ mod tests {
             scope.spawn(move || drop(parked)).join().unwrap();
         });
         harness.driver().turn();
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+    }
+
+    /// Waker flag recording whether a capacity-parked admission was woken.
+    struct WokenFlag(AtomicBool);
+
+    impl ArcWake for WokenFlag {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.store(true, Ordering::Release);
+        }
+    }
+
+    /// Park a completed sync ticket's terminal result in the only waiter
+    /// slot of a one-slot ring, retaining the ticket.
+    ///
+    /// fsync on a socket-backed file fails fast, so the terminal (error)
+    /// output parks in the slot while the returned ticket is held.
+    fn park_sync_ticket(harness: &mut TestLoop, handle: &Handle) -> SyncTicket {
+        let (left, _right) = UnixStream::pair().unwrap();
+        // SAFETY: `left` is a valid owned fd and is transferred into `File`.
+        let file = unsafe { File::from_raw_fd(left.into_raw_fd()) };
+        let ticket = harness.block_on(handle.start_sync(Arc::new(file)));
+
+        // Bounded turn loop: drive the fsync CQE so the result parks.
+        let start = Instant::now();
+        while harness.pending() != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "sync result did not park: {:?}",
+                start.elapsed()
+            );
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
+        }
+        assert_eq!(harness.tracked(), 1, "parked result must hold the slot");
+        ticket
+    }
+
+    #[test]
+    fn test_parked_ticket_drop_on_owner_thread_releases_capacity() {
+        // Property: dropping a ticket whose terminal result is already
+        // parked frees the size-one waiter slot and wakes a queued
+        // admission through the owner-thread route (inline wind-down plus
+        // immediate capacity drain in `orphan`).
+        // Setup: park a sync ticket's result in the only slot, then register
+        // a second admission on the capacity wait list with a flag waker.
+        // Action: drop the parked ticket on the owner thread.
+        // Expected: the flag waker fires, the admission proceeds, and waiter
+        // and capacity counts drain to zero.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let ticket = park_sync_ticket(&mut harness, &handle);
+
+        // Register a second admission on the capacity wait list.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut second = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let flag = Arc::new(WokenFlag(AtomicBool::new(false)));
+        let waker = arc_waker(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 1));
+
+        // Owner-thread drop of the parked ticket: `orphan` winds the slot
+        // down inline and drains the capacity list immediately.
+        drop(ticket);
+        assert!(
+            flag.0.load(Ordering::Acquire),
+            "queued admission must be woken by the slot release"
+        );
+        assert_eq!(harness.tracked(), 0, "parked result must free its slot");
+
+        // The woken admission wins the freed slot on its next poll.
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(harness.tracked(), 1, "admission must proceed");
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+
+        // Wind the admitted recv down and drain everything to zero.
+        drop(second);
+        let start = Instant::now();
+        while harness.tracked() != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "admitted recv did not wind down: {:?}",
+                start.elapsed()
+            );
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
+        }
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+    }
+
+    #[test]
+    fn test_parked_ticket_drop_on_foreign_thread_releases_capacity() {
+        // Property: dropping a ticket whose terminal result is already
+        // parked frees the size-one waiter slot and wakes a queued admission
+        // through the foreign-thread route (mailbox deferral, drained on the
+        // next turn).
+        // Setup: park a sync ticket's result in the only slot, then register
+        // a second admission on the capacity wait list with a flag waker.
+        // Action: drop the parked ticket on a scoped foreign thread, then
+        // run one loop turn to drain the mailbox.
+        // Expected: the flag waker fires, the admission proceeds, and waiter
+        // and capacity counts drain to zero.
+        let mut harness = TestLoop::new(RingConfig {
+            size: 1,
+            max_request_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let handle = harness.handle.clone();
+        let ticket = park_sync_ticket(&mut harness, &handle);
+
+        // Register a second admission on the capacity wait list.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut second = Box::pin(handle.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(1),
+            0,
+            1,
+            false,
+            Instant::now() + Duration::from_secs(60),
+        ));
+        let flag = Arc::new(WokenFlag(AtomicBool::new(false)));
+        let waker = arc_waker(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 1));
+
+        // Foreign-thread drop: the wind-down defers through the mailbox
+        // (the join is the handshake) and the next turn drains it.
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(ticket)).join().unwrap();
+        });
+        harness.driver().turn();
+        assert!(
+            flag.0.load(Ordering::Acquire),
+            "queued admission must be woken by the slot release"
+        );
+        assert_eq!(harness.tracked(), 0, "parked result must free its slot");
+
+        // The woken admission wins the freed slot on its next poll.
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(harness.tracked(), 1, "admission must proceed");
+        harness
+            .handle
+            .with(|ops| assert_eq!(ops.capacity.registered(), 0));
+
+        // Wind the admitted recv down and drain everything to zero.
+        drop(second);
+        let start = Instant::now();
+        while harness.tracked() != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "admitted recv did not wind down: {:?}",
+                start.elapsed()
+            );
+            harness.driver().turn();
+            harness.driver().park(Some(Duration::from_millis(10)));
+        }
         harness
             .handle
             .with(|ops| assert_eq!(ops.capacity.registered(), 0));

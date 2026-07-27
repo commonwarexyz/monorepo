@@ -957,6 +957,20 @@ mod tests {
         }
     }
 
+    fn unwrap_accept(output: Output) -> Result<(OwnedFd, SocketAddr), Error> {
+        match output {
+            Output::Accept(result) => result.map_err(|e| *e),
+            _ => panic!("expected accept output"),
+        }
+    }
+
+    fn unwrap_connect(output: Output) -> Result<(), Error> {
+        match output {
+            Output::Connect(result) => result.map_err(|e| *e),
+            _ => panic!("expected connect output"),
+        }
+    }
+
     fn unwrap_read_at(output: Output) -> Result<IoBufMut, (IoBufMut, Error)> {
         match output {
             Output::ReadAt(result) => result.map_err(|e| *e),
@@ -1662,8 +1676,10 @@ mod tests {
 
     #[test]
     fn test_fail_uses_fallback_results() {
-        // Verify closed-driver staging failures deliver each kind's fallback result.
-        // Network and storage requests each have their own fallback error surface.
+        // Property: closed-driver staging failures deliver each kind's
+        // fallback result. Setup: one request of every variant. Action: fail
+        // each without staging. Expected: each kind's own fallback error
+        // surface (accepts and connects share ConnectionFailed).
 
         // Network sends and recvs should preserve their wrapper-specific fallback errors.
         let request = Request::Send(SendRequest {
@@ -1687,6 +1703,28 @@ mod tests {
         assert!(matches!(
             unwrap_recv(request.fail()),
             Err((_, Error::RecvFailed))
+        ));
+
+        // Accepts and connects both collapse to the connection fallback.
+        let request = Request::Accept(AcceptRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::zeroed(),
+            deadline: None,
+        });
+        assert!(matches!(
+            unwrap_accept(request.fail()),
+            Err(Error::ConnectionFailed)
+        ));
+
+        let target: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let request = Request::Connect(ConnectRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::boxed_from_socket_addr(&target),
+            deadline: None,
+        });
+        assert!(matches!(
+            unwrap_connect(request.fail()),
+            Err(Error::ConnectionFailed)
         ));
 
         // Storage reads and writes should surface the corresponding storage wrapper errors.
@@ -1723,9 +1761,10 @@ mod tests {
 
     #[test]
     fn test_finish_timeout_delivers_timeout_results() {
-        // Verify the loop's immediate-timeout path delivers timeout to each request variant.
-        // Network and storage requests should each receive their type-specific
-        // timeout surface when no CQE was processed yet.
+        // Property: the loop's immediate-timeout path delivers timeout to
+        // each request variant. Setup: one request of every variant with no
+        // CQE processed yet. Action: time each out locally. Expected: every
+        // kind surfaces the shared logical Error::Timeout.
 
         // Network operations should map directly to the shared logical timeout.
         let mut request = Request::Send(SendRequest {
@@ -1749,6 +1788,28 @@ mod tests {
         assert!(matches!(
             unwrap_recv(request.timeout()),
             Err((_, Error::Timeout))
+        ));
+
+        // Accepts and connects also surface the shared logical timeout.
+        let mut request = Request::Accept(AcceptRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::zeroed(),
+            deadline: None,
+        });
+        assert!(matches!(
+            unwrap_accept(request.timeout()),
+            Err(Error::Timeout)
+        ));
+
+        let target: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let mut request = Request::Connect(ConnectRequest {
+            fd: make_socket_fd(),
+            addr: RawSocketAddr::boxed_from_socket_addr(&target),
+            deadline: None,
+        });
+        assert!(matches!(
+            unwrap_connect(request.timeout()),
+            Err(Error::Timeout)
         ));
 
         // Storage reads and writes also use the common logical timeout surface.
@@ -1785,9 +1846,23 @@ mod tests {
 
     #[test]
     fn test_raw_socket_addr_round_trip() {
-        // Verify encode/decode preserves v4 and v6 addresses end to end.
+        // Property: encode/decode preserves v4 and v6 addresses end to end,
+        // and adversarial kernel-written lengths shorter than the family's
+        // sockaddr are rejected instead of decoded from truncated storage.
+        // Setup: valid encoded v4 and v6 addresses. Action: decode each with
+        // its valid length and with a length one byte below the family's
+        // sockaddr size. Expected: valid lengths round-trip and short
+        // lengths decode to None, with the valid decode restored after.
         let v4: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let raw = RawSocketAddr::from_socket_addr(&v4);
+        let mut raw = RawSocketAddr::from_socket_addr(&v4);
+        assert_eq!(raw.to_socket_addr(), Some(v4));
+
+        // A length one byte below sockaddr_in must be rejected, and restoring
+        // the valid length must decode again.
+        let valid_len = raw.len();
+        *raw.len_mut() = (size_of::<libc::sockaddr_in>() - 1) as libc::socklen_t;
+        assert_eq!(raw.to_socket_addr(), None);
+        *raw.len_mut() = valid_len;
         assert_eq!(raw.to_socket_addr(), Some(v4));
 
         let v6 = SocketAddr::V6(SocketAddrV6::new(
@@ -1796,7 +1871,14 @@ mod tests {
             7,
             9,
         ));
-        let raw = RawSocketAddr::from_socket_addr(&v6);
+        let mut raw = RawSocketAddr::from_socket_addr(&v6);
+        assert_eq!(raw.to_socket_addr(), Some(v6));
+
+        // Same boundary for sockaddr_in6.
+        let valid_len = raw.len();
+        *raw.len_mut() = (size_of::<libc::sockaddr_in6>() - 1) as libc::socklen_t;
+        assert_eq!(raw.to_socket_addr(), None);
+        *raw.len_mut() = valid_len;
         assert_eq!(raw.to_socket_addr(), Some(v6));
 
         // Zeroed scratch (family AF_UNSPEC) has no decodable address.
@@ -1805,9 +1887,13 @@ mod tests {
 
     #[test]
     fn test_shutdown_cancellation_resolves_retry_and_partial_races() {
-        // A retryable or partial-progress CQE racing a shutdown cancellation
-        // must resolve with the shutdown's error (Closed), not the deadline
-        // path's Timeout: only the reason distinguishes them.
+        // Property: a CQE racing a shutdown cancellation resolves with the
+        // shutdown's error (Closed), not the deadline path's Timeout, and
+        // only the reason distinguishes them. Setup: every kind placed in
+        // shutdown cancel-requested state. Action (interleaving): feed each
+        // a retryable, partial-progress, or ECANCELED CQE. Expected: network
+        // kinds map retry and partial CQEs to Closed, while storage kinds
+        // map ECANCELED to Closed and requeue retry CQEs (None).
         let shutdown = WaiterState::CancelRequested {
             reason: CancelReason::Shutdown,
         };
@@ -1875,6 +1961,73 @@ mod tests {
             deadline: None,
         };
         assert!(matches!(recv.on_cqe(shutdown, 2), Some(Err(Error::Closed))));
+
+        // Storage kinds under the same shutdown state carry two distinct
+        // expectations. First, ECANCELED (classified as a cancellation only
+        // because the waiter already requested one) resolves to Closed. The
+        // owned buffer stays inside the request for the waiter layer to
+        // return with the parked output.
+        let mut read_at = ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+        };
+        assert!(matches!(
+            read_at.on_cqe(shutdown, -libc::ECANCELED),
+            Some(Err(Error::Closed))
+        ));
+        assert_eq!(read_at.buf.capacity(), 5, "read buffer must stay owned");
+
+        let mut write_at = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
+        };
+        assert!(matches!(
+            write_at.on_cqe(shutdown, -libc::ECANCELED),
+            Some(Err(Error::Closed))
+        ));
+
+        let mut sync = SyncRequest {
+            file: make_file_fd(),
+        };
+        assert!(matches!(
+            sync.on_cqe(shutdown, -libc::ECANCELED),
+            Some(Err(Error::Closed))
+        ));
+
+        // Second, a retry errno under the same shutdown state yields None:
+        // unlike the four network kinds above, the storage on_cqe arms map
+        // CqeResult::Retry to None unconditionally (CqeResult::from_raw
+        // classifies retry errnos before cancellation state), and the
+        // pending cancellation is resolved later by the staging layer when
+        // the requeued request is restaged.
+        let mut read_at = ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+        };
+        assert!(read_at.on_cqe(shutdown, -libc::EAGAIN).is_none());
+
+        let mut write_at = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
+        };
+        assert!(write_at.on_cqe(shutdown, -libc::EAGAIN).is_none());
+
+        let mut sync = SyncRequest {
+            file: make_file_fd(),
+        };
+        assert!(sync.on_cqe(shutdown, -libc::EAGAIN).is_none());
     }
 
     fn make_accept() -> AcceptRequest {

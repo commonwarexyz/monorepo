@@ -1651,6 +1651,55 @@ mod tests {
             .validate();
     }
 
+    /// Property: every public Config builder round-trips through its getter
+    /// (including the new connect_timeout getter and the buffer-pool
+    /// resolvers), so builder regressions are immediately diagnosable.
+    /// Setup: set every builder to a nondefault value. Action: read every
+    /// getter. Expected: each returns the value that was set, with no
+    /// runtime constructed.
+    #[test]
+    fn test_config_builder_getter_round_trip() {
+        let ring = RingConfig {
+            size: 64,
+            ..RingConfig::default()
+        };
+        let network_pool = BufferPoolConfig::for_network().with_pool_min_size(111);
+        let storage_pool = BufferPoolConfig::for_storage().with_pool_min_size(222);
+        let cfg = Config::default()
+            .with_ring(ring)
+            .with_catch_panics(true)
+            .with_storage_directory("/tmp/iouring-config-round-trip")
+            .with_thread_stack_size(1 << 21)
+            .with_connect_timeout(Duration::from_secs(7))
+            .with_read_write_timeout(Duration::from_secs(33))
+            .with_tcp_nodelay(None)
+            .with_zero_linger(false)
+            .with_read_buffer_size(4096)
+            .with_network_buffer_pool_config(network_pool)
+            .with_storage_buffer_pool_config(storage_pool);
+
+        assert_eq!(cfg.ring().size, 64);
+        assert!(cfg.catch_panics());
+        assert_eq!(
+            cfg.storage_directory(),
+            &PathBuf::from("/tmp/iouring-config-round-trip")
+        );
+        assert_eq!(cfg.thread_stack_size(), 1 << 21);
+        assert_eq!(cfg.connect_timeout(), Duration::from_secs(7));
+        assert_eq!(cfg.read_write_timeout(), Duration::from_secs(33));
+        assert_eq!(cfg.tcp_nodelay(), None);
+        assert!(!cfg.zero_linger());
+        assert_eq!(cfg.read_buffer_size(), 4096);
+        assert_eq!(
+            cfg.resolved_network_buffer_pool_config().pool_min_size(),
+            111
+        );
+        assert_eq!(
+            cfg.resolved_storage_buffer_pool_config().pool_min_size(),
+            222
+        );
+    }
+
     /// A dedicated task runs on its own worker with its own ring: storage
     /// and network operations issued from it must work end to end, including
     /// against a listener owned by another worker.

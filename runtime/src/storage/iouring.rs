@@ -1216,6 +1216,46 @@ mod tests {
     }
 
     #[test]
+    fn test_blob_start_sync_reports_kernel_error() {
+        // Property: the detached start_sync wrapper maps a live kernel errno
+        // exactly like the awaited sync path, so both public sync surfaces
+        // share one error contract.
+        // Setup: a blob backed by a socket fd (fsync on a socket fails in
+        // the kernel), submitted through a live loop, with a fresh
+        // descriptor rather than one shared with the awaited-path test.
+        // Action: call start_sync, then await the returned handle.
+        // Expected: the handle resolves with the wrapped BlobSyncFailed
+        // context carrying the partition and blob identifiers.
+        let storage_directory = create_test_directory();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        // SAFETY: `into_raw_fd` transfers ownership of the socket fd into `File`.
+        let file = unsafe { File::from_raw_fd(socket.into_raw_fd()) };
+
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let mut harness = TestLoop::new(iouring::RingConfig::default());
+
+        let blob = Blob::new(
+            "partition".into(),
+            b"blob",
+            file,
+            harness.handle.clone(),
+            pool,
+            Layout::V0.data_offset(),
+        );
+        let err = harness
+            .block_on(async { blob.start_sync().await.await })
+            .expect_err("detached sync should fail on a socket fd");
+        let message = err.to_string();
+        assert!(message.starts_with(&format!(
+            "blob sync failed: partition/{} error:",
+            hex(b"blob")
+        )));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[test]
     fn test_blob_torn_creation_recovers() {
         let (mut harness, storage, storage_directory) = create_test_storage();
         harness.block_on(async move {

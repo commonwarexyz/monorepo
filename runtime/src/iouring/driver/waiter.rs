@@ -921,6 +921,50 @@ mod tests {
     }
 
     #[test]
+    fn test_waiters_stale_cancel_after_slot_reuse() {
+        // Property: a cancel-tagged CQE carrying a stale generation is
+        // tolerated after its slot index was reused by a new waiter, leaving
+        // the new waiter untouched. This is the documented late-cancel race
+        // the generation field exists for (only the empty-slot half was
+        // covered before).
+        // Setup: complete and take a waiter so its slot frees, then insert a
+        // new waiter that reuses the same index with a new generation and
+        // stage it.
+        // Action: feed the old generation's cancel user_data with ECANCELED.
+        // Expected: CompletionOutcome::Cancel, and the new waiter keeps its
+        // identity, active state, and in-flight marker.
+        let mut waiters = Waiters::new(1);
+
+        // Insert, stage, complete, and take the first waiter.
+        let old = insert(&mut waiters, make_sync_request(), None);
+        assert!(matches!(waiters.stage(old), StageOutcome::Submit(_)));
+        assert!(matches!(
+            waiters.on_completion(old.user_data(), 0),
+            CompletionOutcome::Complete { .. }
+        ));
+        assert!(waiters.poll_take(old, &noop_waker()).is_some());
+        assert!(waiters.is_empty());
+
+        // Reuse the slot index under a new generation and stage the waiter.
+        let new = insert(&mut waiters, make_sync_request(), None);
+        assert_eq!(new.index(), old.index(), "slot index must be reused");
+        assert_ne!(new, old, "reused slot must carry a new generation");
+        assert!(matches!(waiters.stage(new), StageOutcome::Submit(_)));
+
+        // The old generation's late cancel CQE is tolerated and changes
+        // nothing about the new waiter.
+        assert!(matches!(
+            waiters.on_completion(old.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Cancel
+        ));
+        assert!(matches!(
+            waiter_state(&waiters, new),
+            Some(WaiterState::Active { .. })
+        ));
+        assert!(waiters.is_in_flight(new), "in-flight marker must survive");
+    }
+
+    #[test]
     fn test_waiters_track_in_flight_state() {
         // Verify `stage` tracks a staged operation and that the bit is
         // cleared again when the matching op CQE is processed.
