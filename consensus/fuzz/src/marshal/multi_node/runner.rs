@@ -5,7 +5,7 @@
 //! (`setup_network`-style helpers, the byzantine `Disrupter`, strategy
 //! sampling) with [`MarshalLivenessInput`]. The honest validators are
 //! parametrized by the *marshal sink* instead of the reporter
-//! sink (see [`LiveMarshal`]): each runs a live simplex engine whose `reporter`
+//! sink (see [`EndToEndMarshal`]): each runs a Simplex engine whose `reporter`
 //! is a marshal mailbox, and marshal delivers ordered finalized blocks to a
 //! downstream [`Application`] sink.
 //!
@@ -50,7 +50,7 @@
 //! that target number of ordered blocks.
 
 use super::{
-    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED, engine::LiveMarshal,
+    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED, engine::EndToEndMarshal,
     input::MarshalLivenessInput, invariants,
 };
 use crate::{
@@ -149,7 +149,7 @@ async fn wait_for_targets<B: Block>(
 }
 
 /// Run a single multi-node marshal liveness iteration for variant `H`.
-pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
+pub fn fuzz_marshal_liveness<H: EndToEndMarshal>(input: MarshalLivenessInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -217,7 +217,7 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
                 continue;
             }
 
-            // Honest validator: marshal stack (channels 1, 2) + live engine.
+            // Honest validator: end-to-end marshal stack plus Simplex engine.
             let validator_ctx = context
                 .child("validator")
                 .with_attribute("public_key", validator);

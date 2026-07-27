@@ -10,7 +10,7 @@
 //!   marshal variant (`StandardHarness` / `CodingHarness`), mirroring how
 //!   marshal itself splits into `standard` and `coding`. Targets:
 //!   `marshal_single_node_standard`, `marshal_single_node_coding`.
-//! - [`multi_node`]: runs live `N4F1C3` clusters wired to real Simplex
+//! - [`multi_node`]: runs end-to-end `N4F1C3` clusters wired to real Simplex
 //!   consensus. The liveness targets use a Byzantine `Disrupter`; the standard
 //!   Twins mutator splits one compromised identity between a full engine and a
 //!   `Disrupter`.
@@ -31,7 +31,7 @@
 //!     durability-ack contracts, precise gap-repair; cheap and fast.
 //!   - Con: single validator, so coding's peer-shard dissemination,
 //!     reconstruction, and validation are unreachable.
-//! - [`multi_node`] -- fuzz the live integration with one byzantine node.
+//! - [`multi_node`] -- fuzz the end-to-end integration with one byzantine node.
 //!   - Pro: real consensus plus shard dissemination/reconstruction/validation,
 //!     cross-node agreement, and liveness check.
 //!   - Con: heavier (fewer iterations) and only valid

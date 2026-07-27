@@ -6,7 +6,7 @@
 //! engine's reporter and delivers ordered finalized blocks to a downstream
 //! application.
 //!
-//! Safety is checked through the live and end-of-run invariants in `invariants.rs`.
+//! Safety invariants are checked during execution and after the run completes.
 //!
 //! The liveness check injects byzantine faults, then asserts that honest nodes keep making progress:
 //! every honest marshal delivers a target number of ordered finalized blocks
@@ -15,13 +15,13 @@
 //! # Layout
 //!
 //! - `app` is the block-building automaton bridging the engine to marshal.
-//! - `engine` wires the per-variant live simplex engine (standard `Deferred`,
+//! - `engine` wires the per-variant Simplex engine (standard `Deferred`,
 //!   coding `Marshaled`) reporting to marshal.
 //! - `runner` sets up the cluster, drives the liveness window, and checks
 //!   invariants.
 //! - `twins` runs the standard marshal stack under sampled Simplex Twins
 //!   scenarios and checks post-prefix recovery.
-//! - `invariants` holds the safety invariants and live automaton assertions.
+//! - `invariants` holds the safety invariants and automaton assertions.
 
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
@@ -32,7 +32,7 @@ pub(super) mod invariants;
 mod runner;
 mod twins;
 
-pub use engine::LiveMarshal;
+pub use engine::EndToEndMarshal;
 pub use input::{MarshalLivenessInput, MarshalTwinsInput};
 pub use runner::fuzz_marshal_liveness;
 pub use twins::{

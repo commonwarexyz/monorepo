@@ -5,7 +5,7 @@
 //! [`Deferred`](commonware_consensus::marshal::standard::Deferred),
 //! [`Inline`](commonware_consensus::marshal::standard::Inline), or
 //! [`Marshaled`](commonware_consensus::marshal::coding::Marshaled) wrapper) for
-//! a live engine whose `reporter` is marshal. On `propose` it reads the parent
+//! an end-to-end engine whose `reporter` is marshal. On `propose` it reads the parent
 //! from the supplied ancestry and emits a contiguous child block
 //! (`height = parent + 1`) that embeds the consensus context verbatim. `verify`
 //! eventually accepts, with an optional per-view delay used to exercise

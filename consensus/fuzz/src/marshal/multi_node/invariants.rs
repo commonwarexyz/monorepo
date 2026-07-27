@@ -1,4 +1,4 @@
-//! Live and end-of-run invariants for the multi-node marshal model.
+//! During-execution and end-of-run invariants for the multi-node marshal model.
 //!
 //! These checks cover both the marshal/application boundary and observations
 //! made while Simplex drives marshal. They panic on violation with the
