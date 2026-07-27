@@ -253,6 +253,7 @@ const fn parallel_min_items(parallelism: usize, per_item_ns: usize) -> usize {
 fn decompress_phase<F>(
     count: usize,
     resolve: F,
+    width: u32,
     strategy: &impl Strategy,
 ) -> Option<(Vec<[Term; LANES]>, Vec<Term>)>
 where
@@ -280,9 +281,9 @@ where
             points[k].as_ref().map_or_else(
                 || {
                     failed.store(true, Ordering::Relaxed);
-                    Term::new(MixedPoint::new(&EdwardsPoint::IDENTITY), &Scalar::ZERO)
+                    Term::new(MixedPoint::new(&EdwardsPoint::IDENTITY), &Scalar::ZERO, width)
                 },
-                |point| Term::new(MixedPoint::new(point), &resolved[k].1),
+                |point| Term::new(MixedPoint::new(point), &resolved[k].1, width),
             )
         })
     };
@@ -303,7 +304,7 @@ where
     for i in units * LANES..count {
         let (bytes, scalar) = resolve(i);
         let point = EdwardsPoint::decompress(&bytes)?;
-        tail.push(Term::new(MixedPoint::new(&point), &scalar));
+        tail.push(Term::new(MixedPoint::new(&point), &scalar, width));
     }
     Some((full, tail))
 }
@@ -381,6 +382,10 @@ fn verify_batch_inner(
     };
 
     let groups = group_ranges(&order);
+    // The MSM window width is a per-batch choice (see [`msm::width_for`]) and every term must
+    // be recoded at the same width, so it is fixed here, before any term is built: the term
+    // count is every `R`, every distinct `A`, and the basepoint.
+    let width = msm::width_for(n + groups.len() + 1, strategy.parallelism());
     let resolve_r = |i: usize| {
         let (_, sig, _) = items[order[i].1 as usize];
         (sig.r, zr(i))
@@ -391,10 +396,11 @@ fn verify_batch_inner(
     let basepoint = [Term::new(
         MixedPoint::new(&EdwardsPoint::basepoint().negate()),
         &s_sum,
+        width,
     )];
 
     let result = if let Some(points) = a_points {
-        let Some((full, tail)) = decompress_phase(n, resolve_r, strategy) else {
+        let Some((full, tail)) = decompress_phase(n, resolve_r, width, strategy) else {
             return false;
         };
         // `A` needs no decompression here, so its coalesced terms are built directly -- a term
@@ -402,7 +408,7 @@ fn verify_batch_inner(
         // phases.
         let a_body = |&(start, end): &(u32, u32)| {
             let point = points[order[start as usize].1 as usize];
-            Term::new(MixedPoint::new(point), &group_scalar((start, end)))
+            Term::new(MixedPoint::new(point), &group_scalar((start, end)), width)
         };
         let a_terms: Vec<Term> =
             if groups.len() < parallel_min_items(strategy.parallelism(), 300) {
@@ -412,6 +418,7 @@ fn verify_batch_inner(
             };
         msm::multiscalar_mul_terms_parallel(
             &[full.as_flattened(), &tail, &a_terms, &basepoint],
+            width,
             strategy,
         )
     } else {
@@ -423,10 +430,15 @@ fn verify_batch_inner(
                 (order[group.0 as usize].0, group_scalar(group))
             }
         };
-        let Some((full, tail)) = decompress_phase(n + groups.len(), resolve, strategy) else {
+        let Some((full, tail)) = decompress_phase(n + groups.len(), resolve, width, strategy)
+        else {
             return false;
         };
-        msm::multiscalar_mul_terms_parallel(&[full.as_flattened(), &tail, &basepoint], strategy)
+        msm::multiscalar_mul_terms_parallel(
+            &[full.as_flattened(), &tail, &basepoint],
+            width,
+            strategy,
+        )
     };
     result.mul_by_cofactor().is_identity()
 }
