@@ -15,7 +15,7 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
-use commonware_utils::{FuzzRng, NZU16, NZUsize};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -149,26 +149,14 @@ impl<'a> Arbitrary<'a> for CorruptionType {
     }
 }
 
-#[derive(Arbitrary, Debug, Clone, Copy)]
-enum SyncOperation {
-    Scalar,
-    Array,
-    ArrayRef,
-    Slice,
-    Vec,
-    BTreeSet,
-}
-
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     /// Number of entries per section (1-10)
     entries_per_section: [u8; 3],
-    sync_operations: [SyncOperation; 3],
     /// Corruptions to apply before recovery
     corruptions: Vec<CorruptionType>,
     /// Whether to sync before corruption
     sync_before_corrupt: bool,
-    raw_bytes: Vec<u8>,
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
@@ -194,8 +182,7 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
-    let runner = deterministic::Runner::new(cfg);
+    let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let cfg = test_cfg(&context);
@@ -323,10 +310,10 @@ fn fuzz(input: FuzzInput) {
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.
                 Err(JournalError::Runtime(RuntimeError::InvalidChecksum))
-                    if index_page_integrity_may_be_invalidated =>
-                {
-                    return;
-                }
+                if index_page_integrity_may_be_invalidated =>
+                    {
+                        return;
+                    }
                 Err(err) => panic!("Unexpected recovery failure: {err:?}"),
             };
 
