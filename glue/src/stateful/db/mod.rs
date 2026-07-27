@@ -590,6 +590,9 @@ impl<D: Digest, T> TipUpdate<D, T> {
     }
 
     /// Record the update before releasing its observation barrier.
+    ///
+    /// Processing the update in the callback ensures observers cannot resume until the
+    /// coordinator has incorporated or rejected it.
     pub(crate) fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
         let result = record(self.anchor, self.targets);
         if let Some(observed) = self.observed {
