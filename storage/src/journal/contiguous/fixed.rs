@@ -131,6 +131,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
+    PruneHandle,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
     durability::Barrier,
@@ -1156,6 +1157,77 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok((self, true))
     }
 
+    /// See [Journal::start_prune]. `watermark` is the proven-durable frontier
+    /// ([`Barrier::size`](super::durability::Barrier::size)); the caller supplies it so the
+    /// variable journal can pass its joint frontier instead of the offsets sub-journal's own.
+    pub(crate) async fn start_prune(
+        mut self: Box<Self>,
+        min_item_pos: u64,
+        watermark: u64,
+    ) -> Result<(Box<Self>, PruneHandle), Error> {
+        let items_per_blob = self.items_per_blob.get();
+
+        // Clamp the target to the proven-durable frontier: `start_prune` reclaims only already-
+        // durable data, so it needs no data sync. Cap at the physical tail and never regress below
+        // the current boundary (as `prune` does).
+        let target_blob = super::position_to_blob(min_item_pos, items_per_blob);
+        let watermark_blob = super::position_to_blob(watermark, items_per_blob);
+        let min_blob = target_blob
+            .min(watermark_blob)
+            .min(self.blobs.tail_blob_index())
+            .max(super::position_to_blob(self.bounds.start, items_per_blob));
+
+        // The max keeps a mid-blob adopted boundary from regressing to its blob's start. With
+        // `min_blob <= watermark_blob` and the durable boundary never exceeding the frontier,
+        // `new_boundary <= watermark`, so the retained data below it is already durable and no data
+        // sync is needed. This is load-bearing: a boundary past the frontier would let a crash lose
+        // retained data that was recorded as pruned.
+        let new_boundary =
+            super::blob_first_position(min_blob, items_per_blob)?.max(self.bounds.start);
+        assert!(new_boundary <= watermark);
+
+        if target_blob > watermark_blob {
+            warn!(
+                requested = min_item_pos,
+                frontier = watermark,
+                effective = new_boundary,
+                "start_prune target exceeds durable frontier; clamped (use prune)"
+            );
+        }
+
+        if min_blob <= self.blobs.oldest_blob_index() {
+            return Ok((self, PruneHandle::noop(new_boundary)));
+        }
+
+        // Adopt the boundary in memory. A dropped future consumes the journal, discarding this
+        // advance; the boundary the returned handle persists is what recovery completes on reopen.
+        self.bounds.start = new_boundary;
+
+        // Commit the boundary and raise the watermark to the proven frontier in one pipelined
+        // write. Every retained item is already durable (`new_boundary <= watermark`), so no data
+        // sync is needed, and recording the frontier advances the durable watermark for free. The
+        // write's durability is joined by the returned handle; recovery treats an ahead boundary as
+        // an interrupted prune and completes the removal, so the unlink is deferred below.
+        let (checkpoint, boundary) = self
+            .checkpoint
+            .start_persist(new_boundary, watermark)
+            .await?;
+        self.checkpoint = checkpoint;
+
+        // Advance the in-memory blob boundary and defer the unlink into the returned handle, gated
+        // on the boundary being durable. The blobs layer retains its own clone so a later reset or
+        // teardown can fence the unlink before reusing the freed indices.
+        let removal = self.blobs.start_prune(min_blob).await?;
+        self.metrics
+            .update(self.bounds.end, self.bounds.start, items_per_blob);
+
+        let handle = Handle::from_future(async move {
+            boundary.await?;
+            removal.await
+        });
+        Ok((self, PruneHandle::new(new_boundary, handle)))
+    }
+
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
         self.blobs.destroy().await?;
@@ -1407,6 +1479,29 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let (inner, pruned) = self.0.prune(min_item_pos).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Begin pruning items older than `min_item_pos` off the hot path, without a data sync.
+    ///
+    /// `min_item_pos` is clamped down to the proven-durable frontier: only already-synced data is
+    /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped (logging a
+    /// warning) rather than rejected; use [`Self::prune`] to prune data not yet synced. As with
+    /// `prune`, blob boundaries are preserved, so slightly fewer items than requested may be pruned.
+    ///
+    /// The boundary is recorded by a pipelined checkpoint write (which also advances the recovery
+    /// watermark to the frontier) and the freed blobs are unlinked as the returned [PruneHandle]
+    /// completes. Like [`Self::start_sync`], recording the boundary waits for a prior in-flight
+    /// checkpoint sync before starting a new one. Await the handle to observe a durable boundary and
+    /// removed blobs, or drive it off the hot path. Cancelling this call (dropping its future before
+    /// it returns) consumes the journal and discards the in-memory boundary advance, as with any
+    /// mutating method; dropping the returned handle does neither. A dropped or crashed removal is
+    /// completed by recovery from the durable boundary, so the unlink never has to finish atomically
+    /// or in order.
+    pub async fn start_prune(mut self, min_item_pos: u64) -> Result<(Self, PruneHandle), Error> {
+        let watermark = self.0.barrier.size();
+        let (inner, handle) = self.0.start_prune(min_item_pos, watermark).await?;
+        self.0 = inner;
+        Ok((self, handle))
     }
 
     /// Remove any persisted data created by the journal.
@@ -1841,8 +1936,8 @@ mod tests {
         buffer::paged::Writer,
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
-            fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RemoveFaultContext, RemoveFaults, WriteFaultContext,
+            WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -3383,6 +3478,315 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `start_prune` below the durable watermark commits the boundary and frees the old blobs
+    /// without a data sync: the watermark is unchanged and the boundary survives a reopen.
+    #[test_traced]
+    fn test_fixed_start_prune_below_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let watermark = journal.0.recovery_watermark();
+
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+            assert!(handle.pruned());
+            assert_eq!(handle.boundary(), 10);
+            // No data sync; the persisted watermark already covers the frontier, so it does not move.
+            assert_eq!(journal.0.recovery_watermark(), watermark);
+            assert_eq!(journal.bounds(), 10..15);
+            handle.await.unwrap();
+
+            // Pruned items are gone; retained items remain.
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(_))));
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            // A request at or below the current boundary is a no-op handle.
+            let (journal, noop) = journal.start_prune(5).await.unwrap();
+            assert!(!noop.pruned());
+            assert_eq!(noop.boundary(), 10);
+            noop.await.unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            drop(journal);
+
+            // The committed boundary survives a reopen and the freed blobs stay pruned.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A `start_prune` target past the durable watermark is clamped to it: only already-synced
+    /// blobs are freed, the retained unsynced tail is untouched, and the watermark does not move.
+    #[test_traced]
+    fn test_fixed_start_prune_clamps_to_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+            // Append past the durable watermark without syncing.
+            for i in 15..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.0.recovery_watermark(), 15);
+
+            // Request pruning the whole journal; it clamps to the watermark's blob boundary.
+            let (journal, handle) = journal.start_prune(20).await.unwrap();
+            assert_eq!(journal.bounds(), 15..20);
+            assert_eq!(journal.0.recovery_watermark(), 15);
+            handle.await.unwrap();
+
+            // The retained (unsynced) tail above the boundary is still readable.
+            for i in 15..20u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A `start_prune` handle dropped at the parked unlink leaves the boundary durably committed
+    /// but the blobs unremoved. Recovery completes the interrupted prune from that boundary.
+    #[test_traced]
+    fn test_fixed_start_prune_interrupted_unlink_completed_by_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Park the deferred unlink: the handle makes the boundary durable, then parks before
+            // removing any blob.
+            journal.0.blobs.halt_prune_unlinks = true;
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+            {
+                futures::pin_mut!(handle);
+                assert!(
+                    futures::poll!(handle.as_mut()).is_pending(),
+                    "start_prune handle must park at the halted unlink"
+                );
+            }
+            // Crash: drop the parked handle and the journal without finishing the unlink.
+            drop(journal);
+
+            // Recovery completes the interrupted prune from the durable boundary.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `clear_to_size` fences an in-flight deferred unlink before reusing the freed indices: a
+    /// stale unlink driven after the reset must not delete a blob the reset repopulated.
+    #[test_traced]
+    fn test_fixed_start_prune_fenced_by_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Begin a deferred prune but do not drive the returned handle: the unlink of blobs 0
+            // and 1 is still pending when the reset runs.
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+
+            // The reset must drive the pending unlink to completion before reusing the low indices.
+            let mut journal = journal.clear_to_size(0).await.unwrap();
+            for i in 0..5u64 {
+                (journal, _) = journal.append(&test_digest(100 + i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Driving the stale handle now is a no-op: its unlink already completed during the
+            // reset, so the freshly written blob 0 survives.
+            handle.await.unwrap();
+            assert_eq!(journal.bounds(), 0..5);
+            for i in 0..5u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(100 + i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Two `start_prune` calls in a row: the second drains the first's deferred unlink before
+    /// advancing further, so both handles resolve and the journal ends at the later boundary.
+    #[test_traced]
+    fn test_fixed_start_prune_consecutive_handles() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // First prune to boundary 5; do not drive its handle.
+            let (journal, first) = journal.start_prune(5).await.unwrap();
+            assert_eq!(first.boundary(), 5);
+
+            // Second prune to 10 drains the first unlink before detaching further.
+            let (journal, second) = journal.start_prune(10).await.unwrap();
+            assert_eq!(second.boundary(), 10);
+            assert_eq!(journal.bounds(), 10..15);
+
+            first.await.unwrap();
+            second.await.unwrap();
+
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(_))));
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot taken before `start_prune` keeps reading the pruned range through its own blob
+    /// handles while the deferred unlink removes those blobs (the read-after-remove contract).
+    #[test_traced]
+    fn test_fixed_start_prune_snapshot_reads_across_unlink() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Freeze a snapshot over the full range, then prune below it and finish the unlink.
+            let (journal, snapshot) = journal.snapshot().await.unwrap();
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+            handle.await.unwrap();
+
+            // The live snapshot still reads the unlinked range via its retained handles.
+            assert_eq!(snapshot.bounds(), 0..15);
+            for i in 0..15u64 {
+                assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
+            }
+            // The journal itself reports the pruned prefix.
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(_))));
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// After `commit` (data durable, watermark not yet persisted), `start_prune` reclaims up to the
+    /// proven-durable frontier, past the stale persisted watermark, and advances the recovery
+    /// watermark to that frontier, still without a data sync.
+    #[test_traced]
+    fn test_fixed_start_prune_uses_proven_frontier() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            // Persist a watermark at 5, then commit more data durable without advancing it.
+            for i in 0..5u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+            for i in 5..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.commit().await.unwrap();
+            assert_eq!(journal.0.recovery_watermark(), 5);
+
+            // The prune target (10) is past the persisted watermark (5) but within the proven
+            // frontier (15), so it prunes to 10 and advances the watermark to the frontier.
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+            assert!(handle.pruned());
+            assert_eq!(handle.boundary(), 10);
+            assert_eq!(journal.bounds(), 10..15);
+            assert_eq!(journal.0.recovery_watermark(), 15);
+            handle.await.unwrap();
+
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(_))));
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A failed deferred unlink surfaces the error through the handle but does not poison the
+    /// journal: the boundary still commits, and a later prune (with removals working) succeeds.
+    #[test_traced]
+    fn test_fixed_start_prune_unlink_failure_does_not_poison() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = RemoveFaults::default();
+            let cfg = test_cfg(&context, NZU64!(5));
+            let ctx = RemoveFaultContext {
+                inner: context.child("journal"),
+                faults: faults.clone(),
+            };
+            let mut journal = Journal::<_, Digest>::init(ctx, cfg.clone()).await.unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Arm the fault so the deferred unlink fails; the boundary still commits and the handle
+            // reports the error.
+            faults.arm();
+            let (journal, handle) = journal.start_prune(5).await.unwrap();
+            assert!(handle.pruned());
+            assert!(handle.await.is_err());
+
+            // The failure did not poison the journal: with removals working again, a later prune
+            // still succeeds and the retained items stay readable.
+            faults.disarm();
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
             assert_eq!(journal.bounds(), 10..15);
             for i in 10..15u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));

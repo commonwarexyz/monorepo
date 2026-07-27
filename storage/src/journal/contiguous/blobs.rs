@@ -14,8 +14,8 @@ use futures::{
     FutureExt as _,
     future::{self, try_join_all},
 };
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
-use tracing::debug;
+use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range, sync::Arc};
+use tracing::{debug, warn};
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -153,6 +153,10 @@ pub(super) struct Writable<E: Context> {
     /// Sync of the live tail. Kept on failure so later operations keep failing.
     tail_sync: Option<SyncCompletion>,
 
+    /// Deferred unlink from the most recent [Self::start_prune], kept so a reset or teardown can
+    /// fence it before the freed indices are reused, mirroring [Self::tail_sync].
+    pending_prune: Option<SyncCompletion>,
+
     /// Test-only: park [Self::seal_tail] at entry so tests can drop an append future at the
     /// roll-over await, leaving the logical end ahead of the physical tail.
     #[cfg(test)]
@@ -231,6 +235,7 @@ impl<E: Context> Writable<E> {
             sealed_snapshot: None,
             tail_predecessor_sync: None,
             tail_sync: None,
+            pending_prune: None,
             #[cfg(test)]
             halt_seal_tail: false,
             #[cfg(test)]
@@ -309,6 +314,25 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Advance the in-memory pruning boundary to `min_blob`, returning the freed blob indices for
+    /// the caller to unlink (inline in [Self::prune], deferred in [Self::start_prune]). Metrics
+    /// reflect the logical prune immediately; the physical unlink follows.
+    ///
+    /// # Invariants
+    ///
+    /// - `oldest_blob_index < min_blob <= tail_blob_index`
+    fn detach(&mut self, min_blob: u64) -> Range<u64> {
+        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        let drop_count = (min_blob - self.oldest_blob_index) as usize;
+        let freed = self.oldest_blob_index..min_blob;
+        self.sealed.drain(..drop_count);
+        self.sealed_snapshot = None;
+        self.oldest_blob_index = min_blob;
+        self.metrics.tracked.dec_by(drop_count as i64);
+        self.metrics.pruned.inc_by(drop_count as u64);
+        freed
+    }
+
     /// Drop and remove every blob below `min_blob`.
     ///
     /// Safe with live readers: snapshot readers keep their own handles, which the runtime's
@@ -318,15 +342,10 @@ impl<E: Context> Writable<E> {
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
-        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
-
-        let drop_count = (min_blob - self.oldest_blob_index) as usize;
-        let prev_oldest_blob_index = self.oldest_blob_index;
-        self.sealed.drain(..drop_count);
-        self.sealed_snapshot = None;
-        self.oldest_blob_index = min_blob;
+        self.drain_pending_prune().await;
+        let freed = self.detach(min_blob);
 
         #[cfg(test)]
         if self.halt_prune_unlinks {
@@ -336,11 +355,74 @@ impl<E: Context> Writable<E> {
         // Remove blobs concurrently. (Some backends serialize removals internally, so concurrency
         // is an upper bound, not a guarantee.)
         let partition = &self.partition;
-        try_join_all((prev_oldest_blob_index..min_blob).map(|blob| partition.remove(blob))).await?;
-
-        self.metrics.tracked.dec_by(drop_count as i64);
-        self.metrics.pruned.inc_by(drop_count as u64);
+        try_join_all(freed.map(|blob| partition.remove(blob))).await?;
         Ok(())
+    }
+
+    /// Advance the pruning boundary to `min_blob` in memory and return a shared handle that unlinks
+    /// the freed blobs.
+    ///
+    /// Unlike [`Self::prune`], the unlink is deferred: the caller drives the returned handle off the
+    /// hot path, and a dropped or failed removal is completed by recovery from the durable boundary.
+    /// A clone is retained in [Self::pending_prune] so [Self::clear]/[Self::destroy]/[Self::prune]
+    /// can fence it before the freed indices are reused, and any prior deferred unlink is drained
+    /// first to keep at most one in flight. No tail sync is drained because every freed blob is
+    /// below the durable watermark (the caller clamps `min_blob` to it), so its sync is already
+    /// complete; only the tail and its predecessor can have a sync in flight, and both sit above the
+    /// removal range. The freed blobs are strictly older than the live tail, so the removal runs
+    /// safely alongside continued appends, and an already-unlinked blob is tolerated so overlapping
+    /// prunes and recovery-completed removals stay idempotent.
+    ///
+    /// # Invariants
+    ///
+    /// - `oldest_blob_index < min_blob <= tail_blob_index`
+    /// - every blob in `oldest_blob_index..min_blob` is durable
+    pub(super) async fn start_prune(&mut self, min_blob: u64) -> Result<SyncCompletion, Error> {
+        self.drain_pending_prune().await;
+        let freed = self.detach(min_blob);
+
+        // Take an owned context + name so the removal can outlive this borrow and run concurrently
+        // with continued appends (freed blobs are all below the live tail). The context isn't
+        // `Clone`, so use `child` (as init does) to get an owned handle to the same storage.
+        let context = self.partition.context.child("prune");
+        let name = self.partition.name.clone();
+        #[cfg(test)]
+        let halt_prune_unlinks = self.halt_prune_unlinks;
+        let removal = async move {
+            #[cfg(test)]
+            if halt_prune_unlinks {
+                std::future::pending::<()>().await;
+            }
+            let context = &context;
+            let name = name.as_str();
+            let result = try_join_all(freed.map(move |blob| async move {
+                match context.remove(name, Some(&blob.to_be_bytes())).await {
+                    // An already-removed blob (or partition) is a no-op: a missing blob surfaces as
+                    // `BlobMissing`, a missing partition as `PartitionMissing`. Tolerating both keeps
+                    // overlapping prunes and recovery-completed removals idempotent.
+                    Ok(()) | Err(RError::BlobMissing(..)) | Err(RError::PartitionMissing(_)) => {
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
+                }
+            }))
+            .await
+            .map(|_| ());
+            // Log at the source so a failure is recorded exactly once regardless of who drives the
+            // removal (the caller's handle or a later drain); the error still propagates to the
+            // caller's handle.
+            if let Err(err) = &result {
+                warn!(
+                    ?err,
+                    "deferred prune unlink failed; leaving stray blobs for recovery"
+                );
+            }
+            result
+        }
+        .boxed()
+        .shared();
+        self.pending_prune = Some(removal.clone());
+        Ok(removal)
     }
 
     /// Rewind the tail to `byte_offset`, shrinking it in place.
@@ -414,6 +496,9 @@ impl<E: Context> Writable<E> {
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
+        // Fence any deferred unlink before reusing the freed indices: a live removal targeting an
+        // old index would otherwise unlink a blob this reset repopulates.
+        self.drain_pending_prune().await;
 
         // Remove the whole partition: a cancelled prune may leave untracked blob files
         // whose contents would become visible again after resetting the boundary.
@@ -447,6 +532,18 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Await the deferred unlink from the most recent [Self::start_prune] so a reset or teardown
+    /// cannot reuse a freed index while it is still in flight. The unlink is best-effort: a failed
+    /// removal (logged at its source) leaves a stray blob below the durable boundary that recovery
+    /// or a later `remove_all` reclaims, so it is not propagated here (which would poison this and
+    /// every later prune, clear, or destroy). The caller's own handle still surfaces the error.
+    async fn drain_pending_prune(&mut self) {
+        let Some(pending) = self.pending_prune.take() else {
+            return;
+        };
+        let _ = pending.await;
+    }
+
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
     pub(super) async fn start_sync(&mut self) -> Handle<()> {
@@ -476,6 +573,7 @@ impl<E: Context> Writable<E> {
     pub(super) async fn destroy(mut self) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
+        self.drain_pending_prune().await;
 
         let tail_blob = self.tail_blob_index();
         drop(self.tail);
