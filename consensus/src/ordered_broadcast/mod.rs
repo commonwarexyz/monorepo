@@ -98,12 +98,13 @@ mod tests {
         deterministic::{self, Context},
     };
     use commonware_utils::{
+        hash_map,
         NZU16, NZU64, NZUsize,
         channel::{fallible::OneshotExt, oneshot},
     };
     use futures::future::join_all;
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
@@ -714,8 +715,8 @@ mod tests {
             let mut reporters = BTreeMap::new();
 
             // Create validators instances that we can update later for epoch changes
-            let mut validators_providers = HashMap::new();
-            let mut monitors = HashMap::new();
+            let mut validators_providers = hash_map::new();
+            let mut monitors = hash_map::new();
             let namespace = b"my testing namespace";
 
             for (idx, validator) in fixture.participants.iter().enumerate() {

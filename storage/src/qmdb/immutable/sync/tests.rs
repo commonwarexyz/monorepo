@@ -26,11 +26,11 @@ use commonware_math::algebra::Random;
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, hash_map, HashMap, non_empty_range};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -119,7 +119,7 @@ where
         let target_oldest_retained_loc = bounds.start;
         let target_root = H::db_root(&target_db);
 
-        let mut expected_kvs: HashMap<H::Key, H::Value> = HashMap::new();
+        let mut expected_kvs: HashMap<H::Key, H::Value> = hash_map::new();
         for op in &target_ops {
             if let Some((key, value)) = H::op_kv(op) {
                 expected_kvs.insert(key.clone(), value.clone());

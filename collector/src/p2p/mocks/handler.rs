@@ -1,7 +1,6 @@
 use super::types::{Request, Response};
 use commonware_cryptography::ed25519::PublicKey;
-use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
-use std::collections::HashMap;
+use commonware_utils::{channel::{fallible::OneshotExt, mpsc, oneshot}, hash_map, HashMap};
 
 /// A mock [crate::Handler] received a request.
 #[derive(Debug, Clone)]
@@ -30,7 +29,7 @@ impl Handler {
         (
             Self {
                 sender,
-                responses: HashMap::new(),
+                responses: hash_map::new(),
                 respond_by_default,
             },
             receiver,
@@ -42,7 +41,7 @@ impl Handler {
         let (sender, _) = mpsc::unbounded_channel();
         Self {
             sender,
-            responses: HashMap::new(),
+            responses: hash_map::new(),
             respond_by_default: true,
         }
     }

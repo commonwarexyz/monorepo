@@ -573,14 +573,14 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, hash_map, HashMap, ordered::Set, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
     use rand::{RngExt as _, SeedableRng, rngs::StdRng};
     use rand_core::CryptoRng;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -706,7 +706,7 @@ mod tests {
             ),
         ),
     > {
-        let mut registrations = HashMap::new();
+        let mut registrations = hash_map::new();
         for validator in validators.iter() {
             let registration = register_validator(oracle, validator.clone()).await;
             registrations.insert(validator.clone(), registration);
@@ -969,8 +969,8 @@ mod tests {
                 }
 
                 // Ensure no forks
-                let mut notarized = HashMap::new();
-                let mut finalized = HashMap::new();
+                let mut notarized = hash_map::new();
+                let mut finalized = hash_map::new();
                 {
                     let notarizes = reporter.notarizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
@@ -1705,7 +1705,7 @@ mod tests {
                 // Create engines
                 let elector = L::default();
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-                let mut reporters = HashMap::new();
+                let mut reporters = hash_map::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
                     // Create scheme context
@@ -5984,8 +5984,8 @@ mod tests {
                 reporter.assert_no_invalid();
 
                 // Ensure no forks
-                let mut notarized = HashMap::new();
-                let mut finalized = HashMap::new();
+                let mut notarized = hash_map::new();
+                let mut finalized = hash_map::new();
                 {
                     let notarizes = reporter.notarizes.lock();
                     for view in View::range(View::new(1), latest_complete) {

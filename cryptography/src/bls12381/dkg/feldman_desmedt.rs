@@ -1053,6 +1053,8 @@ where
         match choice {
             0 => {
                 use commonware_utils::TryFromIterator;
+                #[allow(clippy::disallowed_types)]
+                {
                 use std::collections::HashMap;
 
                 let base: HashMap<P, AckOrReveal<P>> = u.arbitrary()?;
@@ -1060,6 +1062,7 @@ where
                     Map::try_from_iter(base).map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
                 Ok(Self::Ok(map))
+                }
             }
             1 => Ok(Self::TooManyReveals),
             _ => unreachable!(),

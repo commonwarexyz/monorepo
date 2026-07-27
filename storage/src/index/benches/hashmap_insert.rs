@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 use commonware_utils::TestRng;
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;

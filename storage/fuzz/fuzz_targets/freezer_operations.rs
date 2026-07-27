@@ -3,10 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU16, NZUsize, hash_map, HashMap, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
 };
 
@@ -70,7 +69,7 @@ fn fuzz(input: FuzzInput) {
                 .await
                 .unwrap();
 
-        let mut expected_state: HashMap<FixedBytes<32>, i32> = HashMap::new();
+        let mut expected_state: HashMap<FixedBytes<32>, i32> = hash_map::new();
 
         for op in input.ops {
             match op {

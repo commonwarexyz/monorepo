@@ -7,6 +7,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_utils::{
+    HashMap,
     Faults, Participant,
     ordered::{Quorum, Set},
     sequence::U64,
@@ -15,7 +16,7 @@ use commonware_utils::{
 use core::fmt;
 use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashSet},
     sync::Arc,
     vec::Vec,
 };

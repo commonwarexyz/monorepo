@@ -1,6 +1,7 @@
+use crate::{hash_map, HashMap};
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashSet},
     hash::Hash,
 };
 
@@ -39,7 +40,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     pub fn new() -> Self {
         Self {
             entries: BTreeSet::new(),
-            keys: HashMap::new(),
+            keys: hash_map::new(),
         }
     }
 

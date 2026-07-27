@@ -7,9 +7,8 @@
 //! making assumptions about how data is fetched.
 
 use crate::{Consumer, Delivery};
-use commonware_utils::futures::{AbortablePool, Aborter};
+use commonware_utils::{futures::{AbortablePool, Aborter}, hash_map::{self, Entry as HashMapEntry}, HashMap};
 use futures::future::Aborted;
-use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,7 +87,7 @@ where
     /// Create an empty tracker backed by the provided consumer.
     pub fn new(consumer: Con) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: hash_map::new(),
             deliveries: AbortablePool::default(),
             next_generation: 0,
             consumer,

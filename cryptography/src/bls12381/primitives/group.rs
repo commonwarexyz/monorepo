@@ -1903,9 +1903,9 @@ mod tests {
     use commonware_macros::test_group;
     use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::test_rng;
+    use commonware_utils::{HashMap, test_rng};
     use std::{
-        collections::{BTreeSet, HashMap},
+        collections::BTreeSet,
         num::NonZeroUsize,
     };
 

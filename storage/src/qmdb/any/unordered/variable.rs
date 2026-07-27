@@ -1188,7 +1188,7 @@ pub(crate) mod test {
     fn test_owned_batch_homogeneous_collection() {
         use crate::qmdb::any::batch::MerkleizedBatch;
         use commonware_cryptography::sha256;
-        use std::collections::HashMap;
+        use commonware_utils::{hash_map, HashMap};
 
         type Snap = MerkleizedBatch<
             mmr::Family,
@@ -1207,7 +1207,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Build several batches at different depths and store them by root.
-            let mut collection: HashMap<sha256::Digest, Arc<Snap>> = HashMap::new();
+            let mut collection: HashMap<sha256::Digest, Arc<Snap>> = hash_map::new();
 
             // Depth 1.
             let key = Digest::random(commonware_utils::TestRng::new(500));

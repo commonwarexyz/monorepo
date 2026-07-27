@@ -71,7 +71,7 @@ use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
-use commonware_utils::{
+use commonware_utils::{hash_map, HashMap, 
     Cached, SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
@@ -89,7 +89,7 @@ use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRand
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap},
     convert::Infallible,
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
@@ -972,7 +972,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
-            dns: Mutex::new(HashMap::new()),
+            dns: Mutex::new(hash_map::new()),
         });
 
         (

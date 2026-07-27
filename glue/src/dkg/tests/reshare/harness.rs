@@ -72,6 +72,8 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
+    hash_map,
+    HashMap,
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Set},
     range::NonEmptyRange,
@@ -80,7 +82,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
+    collections::{BTreeMap, HashSet, btree_map::Entry},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -326,7 +328,7 @@ struct DynamicProvider {
 impl DynamicProvider {
     pub(super) fn new() -> Self {
         Self {
-            schemes: Arc::new(Mutex::new(HashMap::new())),
+            schemes: Arc::new(Mutex::new(hash_map::new())),
         }
     }
 

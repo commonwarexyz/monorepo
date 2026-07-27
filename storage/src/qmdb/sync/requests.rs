@@ -10,10 +10,10 @@ use crate::{
     qmdb::sync::engine::IndexedFetchResult,
 };
 use commonware_cryptography::Digest;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, hash_map, HashMap};
 use futures::stream::FuturesUnordered;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
 };
@@ -62,7 +62,7 @@ impl<F: Family, Op, D: Digest, E> Requests<F, Op, D, E> {
         Self {
             futures: FuturesUnordered::new(),
             next_id: 0,
-            tracked: HashMap::new(),
+            tracked: hash_map::new(),
             by_location: BTreeMap::new(),
         }
     }

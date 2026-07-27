@@ -5,8 +5,7 @@ use crate::{
 use commonware_macros::select_loop;
 use commonware_runtime::{Handle, IoBufs, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::channel::{mpsc, oneshot};
-use std::collections::HashMap;
+use commonware_utils::{channel::{mpsc, oneshot}, hash_map, HashMap};
 use tracing::{debug, warn};
 
 const REQUEST_BUFFER_SIZE: usize = 64;
@@ -127,6 +126,6 @@ where
 {
     let (request_tx, request_rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
     let handle =
-        context.spawn(move |context| run_loop(context, sink, stream, request_rx, HashMap::new()));
+        context.spawn(move |context| run_loop(context, sink, stream, request_rx, hash_map::new()));
     Ok((request_tx, handle))
 }

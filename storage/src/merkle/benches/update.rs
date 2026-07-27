@@ -9,7 +9,8 @@ use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, Location, m
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
-use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
+use std::{num::NonZeroUsize, time::Instant};
+use commonware_utils::hash_map;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -70,7 +71,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let start = Instant::now();
                             for _ in 0..iters {
                                 // Simulate leaf-batching being the responsibility of the caller.
-                                let mut leaf_map = HashMap::new();
+                                let mut leaf_map = hash_map::new();
                                 for _ in 0..updates {
                                     let rand_leaf_num = sampler.random_range(0..leaves);
                                     let rand_leaf_loc = leaf_locations[rand_leaf_num];

@@ -1280,7 +1280,7 @@ pub mod tests {
         let mut open_db_clone = open_db.clone();
         let db: C = Box::pin(open_db_clone(context.child("first"), "build-big".into())).await;
 
-        let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
+        let mut map = commonware_utils::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
         // All creates, updates, and deletes in one batch.
         let mut batch = db.new_batch();

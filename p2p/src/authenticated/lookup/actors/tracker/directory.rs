@@ -10,10 +10,10 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::GaugeExt};
-use commonware_utils::{IpAddrExt, PrioritySet, SystemTimeExt, ordered::Set};
+use commonware_utils::{hash_map, hash_map::Entry, HashMap, IpAddrExt, PrioritySet, SystemTimeExt, ordered::Set};
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashSet},
     net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -91,7 +91,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
-        let mut peers = HashMap::new();
+        let mut peers = hash_map::new();
         peers.insert(myself, Record::myself());
 
         let metrics = Metrics::init(&context);

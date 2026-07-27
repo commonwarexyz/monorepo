@@ -14,11 +14,13 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
+    hash_map,
+    HashMap,
     ordered::{Map, Set},
 };
 use rand::{RngExt as _, seq::SliceRandom};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -410,7 +412,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
         let base_port = 63000; // Arbitrary starting port for localhost testing
 
         // Build peer_infos and reverse lookup map together
-        let mut pk_to_id = HashMap::new();
+        let mut pk_to_id = hash_map::new();
         let mut peer_infos = Vec::new();
 
         for i in 0..input.peers {
@@ -460,11 +462,11 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
         // Track expected messages: (to_idx, from_idx) -> queue of messages
         // Messages are sent with the same priority, ensuring FIFO delivery per sender-receiver pair
-        let mut expected_msgs: HashMap<(u8, u8), VecDeque<IoBuf>> = HashMap::new();
+        let mut expected_msgs: HashMap<(u8, u8), VecDeque<IoBuf>> = hash_map::new();
 
         // Track which receivers have pending messages from which senders
         // Receiver index -> set of sender indices that have pending messages for this receiver
-        let mut pending_by_receiver: HashMap<u8, HashSet<u8>> = HashMap::new();
+        let mut pending_by_receiver: HashMap<u8, HashSet<u8>> = hash_map::new();
 
         for op in input.operations.into_iter() {
             match op {

@@ -13,9 +13,9 @@ use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_parallel::Sequential;
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
-use commonware_utils::{NZUsize, channel::oneshot};
+use commonware_utils::{hash_map, HashMap, NZUsize, channel::oneshot};
 use rand_core::CryptoRng;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map::Entry};
+use std::collections::{BTreeMap, HashSet, VecDeque, btree_map::Entry};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, S: Scheme, D: Digest> {
@@ -80,9 +80,9 @@ where
                 scheme,
                 proposals: HashSet::new(),
                 limit_misses,
-                digests: HashMap::new(),
-                contiguous: HashMap::new(),
-                highest: HashMap::new(),
+                digests: hash_map::new(),
+                contiguous: hash_map::new(),
+                highest: hash_map::new(),
             },
             Mailbox { sender },
         )

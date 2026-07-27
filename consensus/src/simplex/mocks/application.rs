@@ -14,14 +14,18 @@ use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
-use commonware_utils::channel::{
-    fallible::{FallibleExt, OneshotExt},
-    mpsc, oneshot,
+use commonware_utils::{
+    channel::{
+        fallible::{FallibleExt, OneshotExt},
+        mpsc, oneshot,
+    },
+    hash_map,
+    HashMap,
 };
 use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::Arc,
     time::Duration,
 };
@@ -236,8 +240,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
-                pending: HashMap::new(),
-                seen: HashMap::new(),
+                pending: hash_map::new(),
+                seen: hash_map::new(),
                 verified: HashSet::new(),
                 propose_observer: None,
                 verify_observer: None,
@@ -416,7 +420,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         let mut waiters: HashMap<
             H::Digest,
             Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
-        > = HashMap::new();
+        > = hash_map::new();
 
         // Handle actions
         select_loop! {

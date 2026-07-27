@@ -266,10 +266,10 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::sync::Mutex;
+    use commonware_utils::{hash_map, sync::Mutex};
     use rand::RngExt as _;
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashSet,
         sync::Arc,
         thread,
     };
@@ -671,7 +671,7 @@ mod tests {
         index: &mut I,
         mut fill: impl FnMut(&mut [u8]),
     ) {
-        let mut expected = HashMap::new();
+        let mut expected = hash_map::new();
         let mut translated = HashSet::new();
         cfg_if::cfg_if! {
             if #[cfg(miri)] {

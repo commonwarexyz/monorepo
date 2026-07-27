@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)]
 //! Implementation of [Ordered] that uses an ordered map internally to map translated keys to
 //! arbitrary values. Beyond the standard [Unordered] implementation, this variant adds the
 //! capability to retrieve values associated with both next and previous translated keys of a given
@@ -15,9 +16,10 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
+use hashbrown::HashMap;
 use std::{
     collections::{
-        BTreeMap, HashMap,
+        BTreeMap,
         btree_map::{
             Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
             VacantEntry as BTreeVacantEntry,
