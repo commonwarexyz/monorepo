@@ -79,6 +79,17 @@ type DbB<E> = Shared<QmdbB<E>>;
 /// A full and a compact QMDB as a tuple.
 pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);
 
+/// Serving sources projected from the set's published snapshots, one per member.
+type SetSnapshot<E> = <MultiDatabaseSet<E> as DatabaseSet<E>>::Snapshot;
+type SrcA<E> = crate::stateful::db::MemberSource<
+    SetSnapshot<E>,
+    <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
+>;
+type SrcB<E> = crate::stateful::db::MemberSource<
+    SetSnapshot<E>,
+    <QmdbB<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
+>;
+
 /// A block carrying state from two QMDB databases.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Block {
@@ -586,12 +597,12 @@ impl EngineDefinition for MultiDbEngine {
 
         // QMDB state-sync resolvers (one per database).
         let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>>::new(
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SrcA<_>>::new(
                 context.child("qmdb_resolver_a"),
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
-                    database: None,
+                    source: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
                     initial: Duration::from_secs(1),
@@ -610,14 +621,14 @@ impl EngineDefinition for MultiDbEngine {
             _,
             _,
             mmr::Family,
-            QmdbB<_>,
+            SrcB<_>,
             Sha256,
         >::new(
             context.child("qmdb_resolver_b"),
             compact_resolver::Config {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
-                database: None,
+                source: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
                 initial: Duration::from_secs(1),

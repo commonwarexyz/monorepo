@@ -65,6 +65,12 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
+/// Serving source projected from the database's published snapshots.
+type SingleSrc<E> = crate::stateful::db::MemberSource<
+    <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
+    <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
+>;
+
 pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
@@ -481,12 +487,12 @@ impl EngineDefinition for SingleDbEngine {
 
         // QMDB state-sync resolver.
         let (qmdb_resolver_actor, qmdb_sync_resolver) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, Qmdb<_>>::new(
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SingleSrc<_>>::new(
                 context.child("qmdb_resolver"),
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
-                    database: None,
+                    source: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
                     initial: Duration::from_secs(1),

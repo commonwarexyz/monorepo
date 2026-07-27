@@ -258,7 +258,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         qmdb_resolver::Config {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
-            database: None,
+            source: None,
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
             initial: Duration::from_secs(1),

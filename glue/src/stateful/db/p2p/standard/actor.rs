@@ -1,11 +1,11 @@
 //! Resolver service actor for QMDB sync over P2P.
 
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
-use crate::stateful::db::Shared;
+use crate::stateful::db::ServeSource;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
@@ -26,14 +26,16 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Shared<DB> as SyncResolver>::Op;
-type DatabaseRoot<DB> = <Shared<DB> as SyncResolver>::Digest;
-type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
+type Serve<Src> = <Src as ServeSource>::Serve;
+type Op<Src> = <Serve<Src> as SyncResolver>::Op;
+type DatabaseRoot<Src> = <Serve<Src> as SyncResolver>::Digest;
+type SyncMailbox<F, Src> = Mailbox<Src, F, Op<Src>, DatabaseRoot<Src>>;
 type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
-type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
+type PendingSubs<F, Src> =
+    BTreeMap<handler::Request<F>, Vec<Pending<F, Op<Src>, DatabaseRoot<Src>>>>;
 
 /// Configuration for [`Actor`].
-pub struct Config<P, D, B, DB>
+pub struct Config<P, D, B, Src>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
@@ -45,8 +47,8 @@ where
     /// Blocker used when peers send invalid data.
     pub blocker: B,
 
-    /// Local database used to serve incoming requests when available.
-    pub database: Option<Shared<DB>>,
+    /// Local serving source used to answer incoming requests when available.
+    pub source: Option<Src>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -74,11 +76,11 @@ where
 }
 
 /// Runtime serving state for the resolver actor.
-enum State<DB> {
-    /// Database is not attached yet.
-    NoDb,
-    /// Database is attached and can serve incoming requests.
-    HasDb(Shared<DB>),
+enum State<Src> {
+    /// No serving source is attached yet.
+    NoSource,
+    /// A serving source is attached; requests are answered from published snapshots.
+    HasSource(Src),
 }
 
 /// An action dispatched by incoming mailbox messages.
@@ -89,40 +91,42 @@ enum MailboxAction<F: Family> {
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
-pub struct Actor<E, P, D, B, F, DB>
+pub struct Actor<E, P, D, B, F, Src>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Shared<DB>: SyncResolver<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Src: ServeSource,
+    Serve<Src>: SyncResolver<Family = F>,
+    Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
-    config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>>,
-    state: State<DB>,
+    config: Config<P, D, B, Src>,
+    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<Src, F, Op<Src>, DatabaseRoot<Src>>>,
+    state: State<Src>,
     metrics: ResolverMetrics,
-    pending: PendingSubs<F, DB>,
+    pending: PendingSubs<F, Src>,
 }
 
-impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
+impl<E, P, D, B, F, Src> Actor<E, P, D, B, F, Src>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Shared<DB>: SyncResolver<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Src: ServeSource,
+    Serve<Src>: SyncResolver<Family = F>,
+    Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
-    pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
+    pub fn new(context: E, mut cfg: Config<P, D, B, Src>) -> (Self, SyncMailbox<F, Src>) {
         let metrics = ResolverMetrics::new(&context);
-        let state = cfg.database.take().map_or(State::NoDb, |db| {
+        let state = cfg.source.take().map_or(State::NoSource, |source| {
             let _ = metrics.has_database.try_set(1i64);
-            State::HasDb(db)
+            State::HasSource(source)
         });
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -223,13 +227,13 @@ where
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>,
+        message: mailbox::Message<Src, F, Op<Src>, DatabaseRoot<Src>>,
     ) -> MailboxAction<F> {
         match message {
-            mailbox::Message::AttachDatabase(db) => {
-                let replacing_existing = matches!(self.state, State::HasDb(_));
-                info!(replacing_existing, "attached resolver database");
-                self.state = State::HasDb(db);
+            mailbox::Message::AttachSource(source) => {
+                let replacing_existing = matches!(self.state, State::HasSource(_));
+                info!(replacing_existing, "attached resolver serving source");
+                self.state = State::HasSource(source);
                 let _ = self.metrics.has_database.try_set(1i64);
                 MailboxAction::None
             }
@@ -290,7 +294,7 @@ where
         // `max_ops` is sourced from the original local request key above.
         let max_ops = key.max_ops.get() as usize;
         let decoded =
-            match handler::Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &max_ops) {
+            match handler::Response::<F, Op<Src>, DatabaseRoot<Src>>::decode_cfg(value, &max_ops) {
                 Ok(decoded) => decoded,
                 Err(_) => {
                     self.pending.insert(key, subscribers);
@@ -340,13 +344,17 @@ where
         response.send_lossy(peer_valid);
     }
 
-    /// Serve a peer's request by querying the local database.
+    /// Serve a peer's request from the latest published snapshot.
+    ///
+    /// The serve runs against owned snapshot state and is aborted (via the resolver's
+    /// cancellation receiver) if the requester stops waiting or the actor shuts down; an
+    /// abort only releases this request's snapshot clone.
     async fn handle_produce(
         &mut self,
         key: handler::Request<F>,
-        response: oneshot::Sender<bytes::Bytes>,
+        mut response: oneshot::Sender<bytes::Bytes>,
     ) {
-        let State::HasDb(database) = &self.state else {
+        let State::HasSource(source) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -354,16 +362,33 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let (_cancel_tx, cancel_rx) = oneshot::channel();
-        let result = database
-            .get_operations(
-                key.op_count,
-                key.start_loc,
-                key.max_ops,
-                key.include_pinned_nodes,
-                cancel_rx,
-            )
-            .await;
+        let Some(resolver) = source.serve() else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
+            return;
+        };
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let serve = resolver.get_operations(
+            key.op_count,
+            key.start_loc,
+            key.max_ops,
+            key.include_pinned_nodes,
+            cancel_rx,
+        );
+        futures::pin_mut!(serve);
+        let mut shutdown = self.context.stopped();
+        let result = select! {
+            result = serve.as_mut() => result,
+            _ = response.closed() => {
+                drop(cancel_tx);
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+            _ = &mut shutdown => {
+                drop(cancel_tx);
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+        };
 
         let Ok(fetch) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
@@ -402,7 +427,7 @@ mod tests {
     use std::{num::NonZeroU64, time::Duration};
 
     #[derive(Clone, Debug)]
-    struct DummyProvider;
+    pub(super) struct DummyProvider;
 
     impl Provider for DummyProvider {
         type PublicKey = ed25519::PublicKey;
@@ -418,7 +443,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct DummyBlocker;
+    pub(super) struct DummyBlocker;
 
     impl commonware_p2p::Blocker for DummyBlocker {
         type PublicKey = ed25519::PublicKey;
@@ -437,7 +462,10 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as SyncResolver>::Op;
+    type TestSnapshot =
+        <TestDb as crate::stateful::db::ManagedDb<deterministic::Context>>::Snapshot;
+    type TestSrc = crate::stateful::db::MemberSource<TestSnapshot, TestSnapshot>;
+    type TestOp = <TestSnapshot as SyncResolver>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -445,16 +473,16 @@ mod tests {
         DummyProvider,
         DummyBlocker,
         mmr::Family,
-        TestDb,
+        TestSrc,
     >;
 
     fn test_config(
-        database: Option<Shared<TestDb>>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
+        source: Option<TestSrc>,
+    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestSrc> {
         Config {
             peer_provider: DummyProvider,
             blocker: DummyBlocker,
-            database,
+            source,
             mailbox_size: NZUsize!(16),
             me: None,
             initial: Duration::from_millis(10),
@@ -508,11 +536,28 @@ mod tests {
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
+    /// Initialize a database, capture its snapshot, and publish it through a test source.
+    ///
+    /// The returned publisher must stay alive for the test's duration: dropping it detaches
+    /// the source.
+    async fn init_source(
+        context: deterministic::Context,
+        suffix: &str,
+    ) -> (
+        crate::stateful::db::Publisher<TestSnapshot>,
+        TestSrc,
+        Location,
+    ) {
+        use crate::stateful::db::ManagedDb as _;
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");
-        Shared::new("test", db)
+        let (_db, snapshot) = db.snapshot().await.expect("snapshot should succeed");
+        let op_count = snapshot.op_count();
+        let (mut publisher, source) = crate::stateful::db::Publisher::new(&context);
+        publisher.install_durable(snapshot);
+        let source = crate::stateful::db::MemberSource::new(source, |s| s);
+        (publisher, source, op_count)
     }
 
     fn encoded_fetch_payload() -> Bytes {
@@ -545,9 +590,9 @@ mod tests {
     fn same_request_served_after_attach() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
-            let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let op_count = db.read().await.bounds().end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+            let (_publisher, source, op_count) =
+                init_source(context.child("resolver_db"), "resolver-after-attach").await;
+            actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -565,9 +610,9 @@ mod tests {
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
-            let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let op_count = db.read().await.bounds().end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+            let (_publisher, source, op_count) =
+                init_source(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
+            actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
 
             let request = handler::Request {
                 op_count,
@@ -710,6 +755,207 @@ mod tests {
             let pending = actor.pending.get(&request).unwrap();
             assert_eq!(pending.len(), 1);
             assert!(!pending[0].is_closed());
+        });
+    }
+}
+
+#[cfg(test)]
+mod serve_lifecycle_tests {
+    use super::*;
+    use crate::stateful::db::{MemberSource, Publisher, Shared};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_storage::{
+        mmr::{self, Location, Proof},
+        qmdb,
+    };
+    use commonware_utils::{NZU64, NZUsize, channel::oneshot, sync::Mutex};
+    use std::{sync::Arc, time::Duration};
+
+    /// A resolver whose serve parks until `gate` fires, reporting when it starts and when
+    /// its future is dropped mid-flight.
+    #[derive(Clone)]
+    struct ParkedResolver {
+        gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        dropped: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    struct SendOnDrop(Option<oneshot::Sender<()>>);
+    impl Drop for SendOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    impl SyncResolver for ParkedResolver {
+        type Family = mmr::Family;
+        type Digest = commonware_cryptography::sha256::Digest;
+        type Op = u64;
+        type Error = qmdb::Error<mmr::Family>;
+
+        async fn get_operations(
+            &self,
+            _op_count: Location,
+            _start_loc: Location,
+            _max_ops: NonZeroU64,
+            _include_pinned_nodes: bool,
+            cancel_rx: oneshot::Receiver<()>,
+        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            let mut guard = SendOnDrop(self.dropped.lock().take());
+            let gate = self.gate.lock().take().expect("gate consumed once");
+            commonware_macros::select! {
+                _ = cancel_rx => {
+                    guard.0 = None;
+                    Err(qmdb::Error::Cancelled)
+                },
+                _ = gate => {
+                    guard.0 = None;
+                    Ok(FetchResult::new(
+                        Proof { leaves: Location::new(0), inactive_peaks: 0, digests: Vec::new() },
+                        Vec::new(),
+                        None,
+                    ))
+                },
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticSource(ParkedResolver);
+    impl crate::stateful::db::ServeSource for StaticSource {
+        type Serve = ParkedResolver;
+        fn serve(&self) -> Option<ParkedResolver> {
+            Some(self.0.clone())
+        }
+    }
+
+    type ParkedActor = Actor<
+        deterministic::Context,
+        commonware_cryptography::ed25519::PublicKey,
+        super::tests::DummyProvider,
+        super::tests::DummyBlocker,
+        mmr::Family,
+        StaticSource,
+    >;
+
+    fn parked() -> (
+        ParkedResolver,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (gate_tx, gate_rx) = oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let resolver = ParkedResolver {
+            gate: Arc::new(Mutex::new(Some(gate_rx))),
+            started: Arc::new(Mutex::new(Some(started_tx))),
+            dropped: Arc::new(Mutex::new(Some(dropped_tx))),
+        };
+        (resolver, gate_tx, started_rx, dropped_rx)
+    }
+
+    fn parked_config(
+        source: StaticSource,
+    ) -> Config<
+        commonware_cryptography::ed25519::PublicKey,
+        super::tests::DummyProvider,
+        super::tests::DummyBlocker,
+        StaticSource,
+    > {
+        Config {
+            peer_provider: super::tests::DummyProvider,
+            blocker: super::tests::DummyBlocker,
+            source: Some(source),
+            mailbox_size: NZUsize!(16),
+            me: None,
+            initial: Duration::from_millis(10),
+            timeout: Duration::from_millis(10),
+            fetch_retry_timeout: Duration::from_millis(10),
+            max_serve_ops: NZU64!(16),
+            priority_requests: false,
+            priority_responses: false,
+        }
+    }
+
+    fn request() -> handler::Request<mmr::Family> {
+        handler::Request {
+            op_count: Location::new(0),
+            start_loc: Location::new(0),
+            max_ops: NZU64!(1),
+            include_pinned_nodes: false,
+        }
+    }
+
+    /// A serve is aborted when the requester stops waiting: the in-flight serve future is
+    /// dropped (releasing its snapshot clone) and no response is produced.
+    #[commonware_macros::test_traced]
+    fn serve_aborts_when_response_closed() {
+        deterministic::Runner::default().start(|context| async move {
+            let (resolver, _gate_tx, mut started_rx, mut dropped_rx) = parked();
+            let (mut actor, _mailbox) =
+                ParkedActor::new(context, parked_config(StaticSource(resolver)));
+
+            let (response_tx, response_rx) = oneshot::channel();
+            drop(response_rx);
+            actor.handle_produce(request(), response_tx).await;
+
+            // The serve started (or was pre-empted by the already-closed response) and its
+            // future was dropped without the gate ever opening.
+            let _ = started_rx.try_recv();
+            assert!(
+                dropped_rx.try_recv().is_ok(),
+                "serve future must be dropped"
+            );
+        });
+    }
+
+    /// A serve parked on I/O never blocks a writer's exclusive access: serving reads owned
+    /// snapshot state, so the write slot is acquirable while the serve is in flight.
+    #[commonware_macros::test_traced]
+    fn parked_serve_does_not_block_writer() {
+        deterministic::Runner::default().start(|context| async move {
+            let (resolver, gate_tx, mut started_rx, _dropped_rx) = parked();
+            let (mut actor, _mailbox) =
+                ParkedActor::new(context, parked_config(StaticSource(resolver)));
+
+            let (response_tx, response_rx) = oneshot::channel();
+            let serve = actor.handle_produce(request(), response_tx);
+            futures::pin_mut!(serve);
+            assert!(futures::poll!(serve.as_mut()).is_pending());
+            started_rx.try_recv().expect("serve should have started");
+
+            // The writer's cell is fully available while the serve is parked mid-"I/O".
+            let writer_cell = Shared::new("writer", 0u64);
+            let (slot, value) = writer_cell.write().await;
+            slot.put(value + 1);
+            drop(writer_cell);
+
+            gate_tx.send(()).expect("gate should open");
+            serve.await;
+            assert!(
+                !response_rx
+                    .await
+                    .expect("response should arrive")
+                    .is_empty()
+            );
+        });
+    }
+
+    /// Dropping the publisher detaches serving: new requests get no response instead of
+    /// panicking or hanging, while previously captured state drains.
+    #[commonware_macros::test_traced]
+    fn detached_source_drops_new_serves() {
+        deterministic::Runner::default().start(|context| async move {
+            let (publisher, source) = Publisher::<u8>::new(&context);
+            let member = MemberSource::new(source, |member| member);
+            drop(publisher);
+            assert!(crate::stateful::db::ServeSource::serve(&member).is_none());
         });
     }
 }

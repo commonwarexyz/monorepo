@@ -1,7 +1,7 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
 use super::handler;
-use crate::stateful::db::{AttachableResolver, Shared};
+use crate::stateful::db::{AttachableResolver, publication::ServeSource};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -20,9 +20,9 @@ use std::{collections::VecDeque, future::Future, num::NonZeroU64};
 pub struct ResponseDropped;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
-pub(super) enum Message<DB, F: Family, Op, D: Digest> {
-    /// Provide a database handle so the actor can serve incoming requests.
-    AttachDatabase(Shared<DB>),
+pub(super) enum Message<Src, F: Family, Op, D: Digest> {
+    /// Provide a serving source so the actor can serve incoming requests.
+    AttachSource(Src),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: handler::Request<F>,
@@ -32,42 +32,42 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     CancelOperations { request: handler::Request<F> },
 }
 
-impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
+impl<Src, F: Family, Op, D: Digest> Message<Src, F, Op, D> {
     fn response_closed(&self) -> bool {
         match self {
-            Self::AttachDatabase(_) | Self::CancelOperations { .. } => false,
+            Self::AttachSource(_) | Self::CancelOperations { .. } => false,
             Self::GetOperations { response, .. } => response.is_closed(),
         }
     }
 }
 
-pub(super) struct Pending<DB, F: Family, Op, D: Digest> {
-    database: Option<Shared<DB>>,
-    messages: VecDeque<Message<DB, F, Op, D>>,
+pub(super) struct Pending<Src, F: Family, Op, D: Digest> {
+    source: Option<Src>,
+    messages: VecDeque<Message<Src, F, Op, D>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> Default for Pending<DB, F, Op, D> {
+impl<Src, F: Family, Op, D: Digest> Default for Pending<Src, F, Op, D> {
     fn default() -> Self {
         Self {
-            database: None,
+            source: None,
             messages: VecDeque::new(),
         }
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<DB, F, Op, D> {
+impl<Src, F: Family, Op, D: Digest> Overflow<Message<Src, F, Op, D>> for Pending<Src, F, Op, D> {
     fn is_empty(&self) -> bool {
-        self.database.is_none() && self.messages.is_empty()
+        self.source.is_none() && self.messages.is_empty()
     }
 
     fn drain<P>(&mut self, mut push: P)
     where
-        P: FnMut(Message<DB, F, Op, D>) -> Option<Message<DB, F, Op, D>>,
+        P: FnMut(Message<Src, F, Op, D>) -> Option<Message<Src, F, Op, D>>,
     {
-        if let Some(database) = self.database.take()
-            && let Some(Message::AttachDatabase(database)) = push(Message::AttachDatabase(database))
+        if let Some(source) = self.source.take()
+            && let Some(Message::AttachSource(source)) = push(Message::AttachSource(source))
         {
-            self.database = Some(database);
+            self.source = Some(source);
             return;
         }
 
@@ -84,8 +84,8 @@ impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<D
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
-    type Overflow = Pending<DB, F, Op, D>;
+impl<Src, F: Family, Op, D: Digest> Policy for Message<Src, F, Op, D> {
+    type Overflow = Pending<Src, F, Op, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
@@ -93,8 +93,8 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
         }
 
         match message {
-            Self::AttachDatabase(database) => {
-                overflow.database = Some(database);
+            Self::AttachSource(source) => {
+                overflow.source = Some(source);
             }
             message => overflow.messages.push_back(message),
         }
@@ -102,11 +102,11 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 }
 
 /// Client-facing resolver mailbox used by the QMDB sync engine.
-pub struct Mailbox<DB, F: Family, Op, D: Digest> {
-    sender: Sender<Message<DB, F, Op, D>>,
+pub struct Mailbox<Src, F: Family, Op, D: Digest> {
+    sender: Sender<Message<Src, F, Op, D>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
+impl<Src, F: Family, Op, D: Digest> Clone for Mailbox<Src, F, Op, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -114,24 +114,25 @@ impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D> {
-    pub(super) const fn new(sender: Sender<Message<DB, F, Op, D>>) -> Self {
+impl<Src, F: Family, Op, D: Digest> Mailbox<Src, F, Op, D> {
+    pub(super) const fn new(sender: Sender<Message<Src, F, Op, D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
-    pub fn attach_database(&self, db: Shared<DB>) {
-        let _ = self.sender.enqueue(Message::AttachDatabase(db));
+impl<Src: Send, F: Family, Op: Send, D: Digest> Mailbox<Src, F, Op, D> {
+    /// Attach a serving source; queued attaches coalesce so only the latest survives.
+    pub fn attach_source(&self, source: Src) {
+        let _ = self.sender.enqueue(Message::AttachSource(source));
     }
 }
 
-impl<DB, F, Op, D> SyncResolver for Mailbox<DB, F, Op, D>
+impl<Src, F, Op, D> SyncResolver for Mailbox<Src, F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
-    DB: Send + Sync + 'static,
+    Src: Send + Sync + 'static,
 {
     type Family = F;
     type Digest = D;
@@ -174,15 +175,15 @@ where
     }
 }
 
-impl<DB, F, Op, D> AttachableResolver<DB> for Mailbox<DB, F, Op, D>
+impl<Src, F, Op, D> AttachableResolver<Src> for Mailbox<Src, F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
-    DB: Send + Sync + 'static,
+    Src: ServeSource,
 {
-    fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send {
-        Self::attach_database(self, db);
+    fn attach_source(&self, source: Src) -> impl Future<Output = ()> + Send {
+        Self::attach_source(self, source);
         std::future::ready(())
     }
 }
@@ -215,7 +216,7 @@ mod tests {
                         assert!(!request.include_pinned_nodes);
                         response
                     }
-                    Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                    Message::AttachSource(_) => panic!("unexpected attach message"),
                     Message::CancelOperations { .. } => panic!("cancel should come after request"),
                 };
 
@@ -228,7 +229,7 @@ mod tests {
                         assert_eq!(request.max_ops, max_ops);
                         assert!(!request.include_pinned_nodes);
                     }
-                    Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                    Message::AttachSource(_) => panic!("unexpected attach message"),
                     Message::GetOperations { .. } => panic!("unexpected duplicate request"),
                 }
 

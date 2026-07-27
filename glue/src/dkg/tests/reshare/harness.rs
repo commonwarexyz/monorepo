@@ -890,7 +890,7 @@ impl EngineDefinition for ReshareEngine {
             qmdb_resolver::Config {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
-                database: None,
+                source: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
                 initial: Duration::from_secs(1),
