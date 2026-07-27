@@ -25,7 +25,7 @@ mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::Mailbox;
+pub(crate) use mailbox::{Artifact, Mailbox};
 
 mod plan;
 pub use plan::SyncPlan;
@@ -135,19 +135,6 @@ where
     pub databases: A::Databases,
     /// The anchor at which state sync completed.
     pub anchor: Anchor<BlockDigest<A, E>>,
-}
-
-impl<E, A> Clone for SyncResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            databases: self.databases.clone(),
-            anchor: self.anchor,
-        }
-    }
 }
 
 /// Resolved state sync floor data derived from the selected finalization.

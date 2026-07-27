@@ -215,11 +215,18 @@ where
             // block's tip update. If we ack after merely enqueueing it, sync can still
             // complete on the previous anchor and handoff would observe marshal ahead of
             // `artifact.anchor.height.next()`.
-            if let Some(artifact) = self.syncer.update_targets(anchor, targets).await {
-                self.artifact = Some(artifact);
-            } else {
-                acknowledgement.acknowledge();
-                return (self, None);
+            match self.syncer.update_targets(anchor, targets).await {
+                Some(syncer::Artifact::Delivered(artifact)) => self.artifact = Some(artifact),
+                Some(syncer::Artifact::Announced) => {
+                    let artifact = (&mut self.sync_completed)
+                        .await
+                        .expect("announced sync artifact must arrive on the completion channel");
+                    self.artifact = Some(artifact);
+                }
+                None => {
+                    acknowledgement.acknowledge();
+                    return (self, None);
+                }
             }
         }
 

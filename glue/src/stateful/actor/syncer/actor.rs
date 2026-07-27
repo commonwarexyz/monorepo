@@ -1,11 +1,11 @@
 use super::{
     BlockDigest, SyncResult,
-    mailbox::{Mailbox, Message},
+    mailbox::{Artifact, Mailbox, Message},
     resolve_state_sync_floor,
 };
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -70,8 +70,8 @@ where
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
 
-    /// The produced state sync artifact, if complete.
-    artifact: Option<SyncResult<E, A>>,
+    /// Whether the completed artifact already went out on the completion channel.
+    delivered: bool,
 
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
@@ -108,7 +108,7 @@ where
             Self {
                 context: ContextCell::new(config.context),
                 mailbox: receiver,
-                artifact: None,
+                delivered: false,
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
@@ -146,12 +146,10 @@ where
             },
             result = &mut state_sync_task => match result {
                 Ok((databases, anchor)) => {
-                    Self::publish_artifact(
-                        &mut self.artifact,
-                        &mut self.sync_complete,
-                        databases,
-                        anchor,
-                    );
+                    self.delivered = true;
+                    if let Some(sync_complete) = self.sync_complete.take() {
+                        sync_complete.send_lossy(SyncResult { databases, anchor });
+                    }
                     state_sync_task = None.into();
                 }
                 Err(err) => {
@@ -163,33 +161,34 @@ where
                 break;
             } => match message {
                 Message::UpdateTargets { update, response } => {
-                    if let Some(artifact) = self.artifact.clone() {
-                        response.send_lossy(Some(artifact));
+                    if self.delivered {
+                        // The artifact already went out on the completion channel, so
+                        // the caller collects it from there.
+                        response.send_lossy(Some(Artifact::Announced));
                         continue;
                     }
 
                     // If sync had already completed, the state-sync branch above would
-                    // have published `self.artifact` before this mailbox branch ran.
+                    // have marked delivery before this mailbox branch ran.
                     if tip_updates_tx.send(update).await.is_err() {
                         // Tuple sync closes the live tip-update receiver as soon as the
                         // coordinator converges, before the database tasks have necessarily
                         // finished. Treat that close as "wait for the in-flight sync task to
-                        // publish its artifact", not as a hard failure.
+                        // produce its artifact", not as a hard failure. The artifact travels
+                        // with this response, so the completion channel stays unused.
                         match (&mut state_sync_task).await {
                             Ok((databases, anchor)) => {
-                                Self::publish_artifact(
-                                    &mut self.artifact,
-                                    &mut self.sync_complete,
+                                self.delivered = true;
+                                state_sync_task = None.into();
+                                response.send_lossy(Some(Artifact::Delivered(SyncResult {
                                     databases,
                                     anchor,
-                                );
-                                state_sync_task = None.into();
+                                })));
                             }
                             Err(err) => {
                                 panic!("state sync task failed: {err:?}");
                             }
                         }
-                        response.send_lossy(self.artifact.clone());
                         continue;
                     }
                     response.send_lossy(None);
@@ -198,16 +197,4 @@ where
         }
     }
 
-    fn publish_artifact(
-        artifact: &mut Option<SyncResult<E, A>>,
-        sync_complete: &mut Option<oneshot::Sender<SyncResult<E, A>>>,
-        databases: A::Databases,
-        anchor: Anchor<BlockDigest<A, E>>,
-    ) {
-        let sync_result = SyncResult { databases, anchor };
-        *artifact = Some(sync_result.clone());
-        if let Some(sync_complete) = sync_complete.take() {
-            sync_complete.send_lossy(sync_result);
-        }
-    }
 }
