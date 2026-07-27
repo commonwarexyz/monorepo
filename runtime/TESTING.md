@@ -1,6 +1,6 @@
 # Deterministic runtime testing
 
-Use the deterministic runtime for async protocol tests. It makes scheduling, time, failure injection, and state recovery reproducible. Use `commonware_utils::test_rng()` for test data; for independent streams use `TestRng::new(seed)`.
+Use the deterministic runtime for async protocol tests. It makes scheduling, time, failure injection, and state recovery reproducible. Use `commonware_utils::test_rng()` for test data, and for independent streams use `TestRng::new(seed)`.
 
 ## Basic async test
 
@@ -60,3 +60,12 @@ loop {
 - For shutdown, assert the task-prefix count becomes non-zero before shutdown and zero afterward.
 - Run a scenario twice with the same seed when its state is meant to be deterministic.
 - Include recovery cases when the changed component has those boundaries.
+
+# io_uring runtime testing
+
+The `iouring` runtime (Linux 6.1 or newer, behind the `iouring` feature) has its own test surfaces:
+
+- Driver, network, and storage unit tests drive the event loop directly through the `iouring::testing::TestLoop` harness (`block_on`, `poll_once`, and `shutdown`) instead of starting a runtime.
+- The `_slow_` stress tests are excluded from the default nextest profile and run under the `slow` profile: `cargo nextest run -p commonware-runtime --features iouring --profile slow`.
+- The wake protocol's loom models run with `just test-loom --features iouring`.
+- All of the above require Linux 6.1 or newer (the ring is configured with `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN`).

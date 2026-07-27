@@ -252,7 +252,7 @@ impl crate::Network for Network {
         if rc == -1 {
             return Err(Error::BindFailed);
         }
-        // SAFETY: `fd` owns a live descriptor; `listen` touches no caller memory.
+        // SAFETY: `fd` owns a live descriptor, and `listen` touches no caller memory.
         let rc = unsafe { libc::listen(fd.as_raw_fd(), LISTEN_BACKLOG) };
         if rc == -1 {
             return Err(Error::BindFailed);
@@ -377,7 +377,7 @@ impl crate::Listener for Listener {
                     ));
                 }
                 // The deadline exists so an abandoned accept cannot occupy a
-                // ring slot forever; an expired accept is simply reissued.
+                // ring slot forever, and an expired accept is simply reissued.
                 Err(Error::Timeout) => continue,
                 // Match the tokio backend's contract: every accept failure
                 // surfaces as [Error::Closed], so portable callers observe
@@ -734,7 +734,7 @@ mod tests {
         // encoded address of the provided length.
         let rc = unsafe { libc::bind(fd.as_raw_fd(), raw.as_sockaddr_ptr(), raw.len()) };
         assert!(rc != -1, "failed to bind listener socket");
-        // SAFETY: `fd` owns a live descriptor; `listen` touches no caller memory.
+        // SAFETY: `fd` owns a live descriptor, and `listen` touches no caller memory.
         let rc = unsafe { libc::listen(fd.as_raw_fd(), 0) };
         assert!(rc != -1, "failed to listen on socket");
         let listener_addr = local_addr(&fd).expect("failed to read listener address");
@@ -764,7 +764,7 @@ mod tests {
             },
         ));
         runner.start(|context| async move {
-            // The context doubles as the network under test; contexts are
+            // The context doubles as the network under test, and contexts are
             // only duplicable through the supervision tree.
             let network = context.child("network");
             tests::stress_test_network_trait(move || network.child("socket"), context).await;

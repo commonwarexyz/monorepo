@@ -264,8 +264,8 @@ impl Request {
     /// Return the failure result for a request that was never admitted (the
     /// driver closed before staging).
     ///
-    /// Every kind resolves to its staging failure; syncs report [Error::Closed]
-    /// because a sync that never ran must not report success.
+    /// Every kind resolves to its staging failure, and syncs report
+    /// [Error::Closed] because a sync that never ran must not report success.
     pub fn fail(self) -> Output {
         match self {
             Self::Send(_) => Output::Send(Err(Box::new(Error::SendFailed))),
@@ -616,7 +616,7 @@ impl WriteAtRequest {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
             // Preserve the kernel errno (e.g. EIO vs ENOSPC) as SyncRequest
-            // does; a zero-length write carries no errno and stays the
+            // does. A zero-length write carries no errno and stays the
             // kind-specific failure. A shutdown cancellation is not a kernel
             // failure: it surfaces as closed.
             CqeResult::Cancelled(CancelReason::Shutdown) => Some(Err(Error::Closed)),
@@ -875,7 +875,7 @@ impl ConnectRequest {
             // retries immediately, which can spin the loop at full speed for
             // up to an RTT: EALREADY completes without waiting. The spin is
             // bounded by the connect deadline, and needs a prior retry to
-            // arise at all; retrying via a writability poll instead is
+            // arise at all. Retrying via a writability poll instead is
             // deliberate future work.
             CqeResult::Error(code) if code == -libc::EALREADY => None,
             CqeResult::Error(code) if code == -libc::EISCONN => Some(Ok(())),
@@ -2023,7 +2023,7 @@ mod tests {
     #[test]
     fn test_vectored_build_sqe_caps_iovec_batch() {
         // More chunks than IOVEC_BATCH_SIZE must clamp the SQE to the scratch
-        // capacity; later stagings pick up the tail as earlier chunks drain.
+        // capacity, and later stagings pick up the tail as earlier chunks drain.
         let mut vectored = IoBufs::default();
         for _ in 0..(IOVEC_BATCH_SIZE + 4) {
             vectored.append(IoBuf::from(b"x"));
@@ -2047,7 +2047,7 @@ mod tests {
         }
         check_vectored_scratch(&request.write, &[1; IOVEC_BATCH_SIZE]);
 
-        // Drain one full batch; the remaining four chunks stage next.
+        // Drain one full batch, and the remaining four chunks stage next.
         assert!(
             request
                 .on_cqe(

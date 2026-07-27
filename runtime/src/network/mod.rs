@@ -570,8 +570,10 @@ mod tests {
             for _ in 0..10 {
                 // A peer close is not guaranteed to make the next send fail
                 // immediately, so retry briefly until the error becomes
-                // visible. The blocking sleep is deliberate: it stays
-                // runtime-agnostic and only pauses a test.
+                // visible. The bounded blocking sleep briefly stalls
+                // single-threaded runtimes, which is harmless here: the
+                // oneshot handshakes above guarantee nothing else needs the
+                // executor during it.
                 match sink.send(vec![9u8]).await {
                     Ok(()) => std::thread::sleep(Duration::from_millis(5)),
                     Err(send_err) => {

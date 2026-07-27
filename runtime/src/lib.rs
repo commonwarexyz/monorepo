@@ -6,6 +6,13 @@
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!
+//! On Linux 6.1 or newer, the `iouring` feature enables the `iouring` module,
+//! a production runtime whose executor and io_uring I/O driver share one
+//! thread: tasks submit storage and network operations directly into the ring
+//! without locks or channels, and ring-bound resources are affine to the
+//! worker that created them. See the `iouring` module documentation for
+//! details.
+//!
 //! # Terminology
 //!
 //! Each runtime is typically composed of an `Executor` and a `Context`. The `Executor` implements the
@@ -666,8 +673,8 @@ stability_scope!(BETA {
         /// removing its entire partition. This includes bytes written but never synced. Physical
         /// resources are reclaimed once the last handle is dropped.
         ///
-        /// Re-opening a removed blob's name creates a new, independent blob; handles opened
-        /// before the removal continue to observe the removed blob's contents.
+        /// Re-opening a removed blob's name creates a new, independent blob, and handles
+        /// opened before the removal continue to observe the removed blob's contents.
         ///
         /// Mutating a removed blob (e.g. via [`Blob::write_at`], [`Blob::resize`], or
         /// [`Blob::sync`]) is unspecified: implementations may succeed or return an error.

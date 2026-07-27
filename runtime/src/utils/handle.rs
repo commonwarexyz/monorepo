@@ -26,7 +26,7 @@ use tracing::error;
 /// Handle to an asynchronous result.
 ///
 /// Handles returned by [`crate::Spawner::spawn`] abort the spawned task. Completion handles only
-/// stop waiting when aborted, resolving to [`Error::Aborted`]; they do not cancel the underlying
+/// stop waiting when aborted, resolving to [`Error::Aborted`], and do not cancel the underlying
 /// work.
 pub struct Handle<T>
 where
@@ -109,8 +109,8 @@ where
 
             // Mark the task as aborted and abort all descendants before
             // publishing the result: a handle awaited on another worker can
-            // resume as soon as the send lands, and spawns it then issues
-            // from contexts derived from the consumed one must observe the
+            // resume as soon as the send lands, and any spawn it then issues
+            // from a context derived from the consumed one must observe the
             // closure.
             tree.abort();
 
@@ -121,7 +121,7 @@ where
                 }
                 Ok(Err(panic)) => {
                     // An undeliverable payload here means the root completed
-                    // on another thread in the same instant; the executors
+                    // on another thread in the same instant. The executors
                     // using this wrapper have no later shutdown path to
                     // route it through, so it is logged and dropped.
                     let _ = panicker.notify(panic);
@@ -334,7 +334,6 @@ impl Panicker {
         self.catch
     }
 
-    /// Notifies the [Panicker] that a panic has occurred.
     /// Notify the runtime of a task panic.
     ///
     /// Returns the payload when it could not be delivered: panics are not
@@ -358,7 +357,7 @@ impl Panicker {
         // If we've already sent a panic, later ones rank below it.
         let sender = self.sender.lock().take()?;
 
-        // Send the panic; a dead receiver hands the payload back.
+        // Send the panic. A dead receiver hands the payload back.
         sender.send(panic).err()
     }
 }

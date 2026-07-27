@@ -41,8 +41,8 @@ type UserData = u64;
 #[derive(Debug)]
 pub(crate) struct Metrics {
     /// Number of active logical requests whose CQEs haven't yet been fully
-    /// processed. Note this metric doesn't include timeouts, which are
-    /// generated internally by the io_uring event loop.
+    /// processed. Internal SQEs (the wake poll and async cancels) are not
+    /// counted, only logical requests.
     /// This is updated in the main loop and at shutdown drain exit, so it may
     /// temporarily vary from the exact in-flight count between update points.
     pending_operations: PendingOperations,
@@ -102,7 +102,7 @@ impl Drop for PendingOperations {
 pub(crate) struct IoUringLoop {
     cfg: RingConfig,
     metrics: Metrics,
-    /// Ops op state, also reachable from the front-ends' op futures.
+    /// Shared op state, also reachable from the front-ends' op futures.
     handle: Handle,
     timeout_wheel: TimeoutWheel,
     idle_spinner: Spinner,
@@ -316,8 +316,8 @@ impl IoUringLoop {
     /// Park the calling thread until progress is possible or the earliest
     /// deadline elapses.
     ///
-    /// `limit` bounds the wait in addition to the loop's own timeout wheel; the
-    /// runtime executor passes the delay until its next sleeper alarm. Callers
+    /// `limit` bounds the wait in addition to the loop's own timeout wheel (the
+    /// runtime executor passes the delay until its next sleeper alarm). Callers
     /// must invoke [Self::turn] immediately before parking so the wake poll is
     /// armed and staged work has been flushed.
     ///
@@ -343,7 +343,7 @@ impl IoUringLoop {
         // futex until another thread latches a wake. Before parking, spin
         // briefly to avoid the futex round-trip when work is imminent.
         if fully_idle && deadline.is_none() {
-            // A wake that lands during the spin ends it early; `park_idle`'s
+            // A wake that lands during the spin ends it early, and `park_idle`'s
             // post-arm snapshot then consumes the latch without a futex round
             // trip. The spin must not skip `park_idle` on a hit: only the
             // arm-and-clear cycle consumes the latch, and leaving it set
@@ -738,7 +738,7 @@ impl IoUringLoop {
             // mailbox and must be able to interrupt this wait (an unarmed
             // wake only latches the state word without writing the eventfd).
             // When a wake is already latched, skip blocking and let the next
-            // iteration process the mailbox; the guard's drop consumes the
+            // iteration process the mailbox. The guard's drop consumes the
             // latch either way.
             let arm = self.waker.arm(self.processed_seq);
             if !arm.wake_latched() {
@@ -927,7 +927,7 @@ impl Drop for AbortOnUnwind {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! Ops single-threaded harness for tests that drive the loop
+    //! A single-threaded harness for tests that drive the loop
     //! directly (loop, network, and storage unit tests).
 
     use super::*;
@@ -1110,8 +1110,8 @@ mod tests {
         // Closing the ring fd out from under the loop makes the next enter
         // fail with EBADF.
         let driver = harness.driver();
-        // SAFETY: the fd is intentionally invalidated; the harness issues no
-        // further ring operations after the failed wait.
+        // SAFETY: the fd is intentionally invalidated, and the harness issues
+        // no further ring operations after the failed wait.
         unsafe {
             libc::close(std::os::fd::AsRawFd::as_raw_fd(&driver.ring));
         }
@@ -1458,7 +1458,7 @@ mod tests {
         // Every worker's driver registers the same pending-operations gauge
         // (the registry dedups by name): drivers must fold deltas into it
         // rather than set absolute values, and a destroyed driver must remove
-        // its own contribution — including parked terminal results (escaped
+        // its own contribution, including parked terminal results (escaped
         // tickets), which survive the drain and keep `waiters.len()` nonzero
         // at its exit.
         let mut registry = Registry::default();
@@ -1486,7 +1486,7 @@ mod tests {
             panic!("admission should not park on an empty slab");
         };
 
-        // Driver A reports its pending op; an idle driver B turn must not
+        // Driver A reports its pending op, and an idle driver B turn must not
         // clobber that contribution.
         driver_a.turn();
         assert_eq!(gauge.get(), 1);
@@ -2241,17 +2241,17 @@ mod tests {
     #[test]
     fn test_completion_races_timeout_expiry() {
         // Data arriving in the same window as deadline expiry must resolve
-        // to either success or timeout — never panic, double-remove a wheel
-        // tick, or leak the slot.
+        // to either success or timeout, and never panic, double-remove a
+        // wheel tick, or leak the slot.
         let mut harness = TestLoop::new(RingConfig {
             max_request_timeout: Duration::from_secs(1),
             timeout_wheel_tick: Duration::from_millis(1),
             ..Default::default()
         });
-        let driver = harness.handle.clone();
+        let handle = harness.handle.clone();
         for i in 0..40u64 {
             let (left, right) = UnixStream::pair().unwrap();
-            let mut recv = Box::pin(driver.recv(
+            let mut recv = Box::pin(handle.recv(
                 Arc::new(left.into()),
                 IoBufMut::with_capacity(1),
                 0,
@@ -2317,7 +2317,7 @@ mod tests {
     #[test]
     fn test_drop_after_timeout_before_cancel_resolves() {
         // Deadline expiry transitions the waiter to cancel-requested and
-        // releases its wheel tick; dropping the future in that window must
+        // releases its wheel tick. Dropping the future in that window must
         // not double-release deadline accounting or leak the slot.
         let mut harness = TestLoop::new(RingConfig {
             max_request_timeout: Duration::from_secs(1),

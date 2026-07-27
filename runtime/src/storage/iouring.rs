@@ -18,13 +18,13 @@
 //!
 //! ## Blocking Metadata Operations
 //!
-//! `open`, `remove`, and `scan` execute synchronous filesystem calls — including
-//! fsyncs — on the calling worker's thread, serialized across all workers by a
+//! `open`, `remove`, and `scan` execute synchronous filesystem calls (including
+//! fsyncs) on the calling worker's thread, serialized across all workers by a
 //! runtime-wide lock. A slow metadata operation therefore stalls the calling
 //! worker's event loop, and other workers entering a metadata operation block on
 //! the same lock until it completes. [crate::Blob::resize] (tracked by #831) is
 //! likewise a synchronous `set_len` on the worker, though it touches only the open
-//! file and takes no lock. Keep these off hot paths; data-path reads, writes, and
+//! file and takes no lock. Keep these off hot paths. Data-path reads, writes, and
 //! syncs go through the ring and do not block.
 //!
 //! This blocking behavior is accepted debt, not a resolved design: offloading
@@ -149,8 +149,8 @@ impl crate::Storage for Storage {
 
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
+        // Handle header: existing blobs have their header read, while new blobs and blobs left
+        // torn by an interrupted creation get a fresh header written.
         let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
         let (logical_len, blob_version, data_offset) = match existing {
             Some(resolved) => resolved,

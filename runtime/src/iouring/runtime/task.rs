@@ -68,7 +68,7 @@ where
     /// A waker may legally fire many times before its task is polled, and
     /// each unguarded push is a full re-poll (a future waking itself twice
     /// per poll would double the queue every executor turn). Only the wake
-    /// that transitions this latch queues the task; the rest coalesce. The
+    /// that transitions this latch queues the task, and the rest coalesce. The
     /// latch is released immediately before polling a live future and set
     /// terminally once the future is gone, so late wakes on a completed or
     /// cleared cell buy at most one dead poll.
@@ -215,7 +215,7 @@ impl ArcWake for RootWaker {
 
 /// The arena of running tasks, plus whether the executor has shut down.
 struct Running {
-    /// Task slots; freed slots are recycled through `free`.
+    /// Task slots. Freed slots are recycled through `free`.
     slots: Vec<Option<Arc<dyn Erased>>>,
     /// Recycled slot indices.
     free: Vec<usize>,
@@ -525,7 +525,7 @@ mod tests {
 
     /// Spawns registered from a dedicated worker onto a worker that is
     /// concurrently tearing down must either run or resolve with
-    /// [Error::Closed] — never hang, panic, or leave a task polled after
+    /// [Error::Closed], and never hang, panic, or leave a task polled after
     /// teardown.
     #[test]
     fn test_cross_worker_spawn_races_teardown() {
@@ -578,7 +578,7 @@ mod tests {
     }
 
     /// A dedicated task can spawn onto another worker through a moved
-    /// context; the spawned task runs on the context's origin worker.
+    /// context, and the spawned task runs on the context's origin worker.
     #[test]
     fn test_cross_worker_spawn() {
         Runner::default().start(|context| async move {

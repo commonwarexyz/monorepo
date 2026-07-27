@@ -977,8 +977,8 @@ mod tests {
         let last_slot_tick = wheel.buckets.len() as Tick - 1;
         assert!(advance(&mut wheel, last_slot_tick).is_empty());
 
-        // No active bits: first scan over [start, end) is empty; wrapped scan is
-        // [0, 0) and should also return None.
+        // No active bits: first scan over [start, end) is empty, and wrapped
+        // scan is [0, 0) and should also return None.
         wheel.active_occupied.fill(0);
         assert_eq!(wheel.compute_min_scheduled_tick(), Tick::MAX);
     }

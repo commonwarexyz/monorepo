@@ -12,8 +12,9 @@
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
 //! `blocking == true` run as the root of a [Worker] on their own thread with
 //! its own ring, so blocking work cannot starve the executor thread and the
-//! task's context still submits IO thread-locally. (Blocking shared tasks
-//! currently alias dedicated ones; a shared blocking pool may replace this.)
+//! task's context still submits IO thread-locally. Blocking shared tasks
+//! currently run as dedicated workers, and a shared blocking pool may
+//! replace this.
 //! Resources created on one worker (blobs, sockets, listeners) are bound to
 //! that worker's thread and must not be driven from another. Cross-thread
 //! interactions that do not submit ring operations (waking a task from a
@@ -517,7 +518,7 @@ impl Executor {
 
     /// Return the delay until the next sleeper alarm, if any.
     ///
-    /// Tombstones may report a deadline with no waker behind it; the loop
+    /// Tombstones may report a deadline with no waker behind it, so the loop
     /// then wakes up only to discard them, which is harmless.
     fn next_alarm(&self) -> Option<Duration> {
         let sleeping = self.sleeping.lock();
@@ -768,7 +769,7 @@ impl Worker {
             );
         }
 
-        // Handle the result — resume the original panic after cleanup if one
+        // Handle the result: resume the original panic after cleanup if one
         // was caught, preferring it over a panic from task teardown, and
         // either over a close-waker panic.
         match (result, teardown, close_wakers) {
@@ -902,13 +903,13 @@ impl crate::Runner for Runner {
         // BY that cascade (and reaped by a racing foreign-thread spawn)
         // outrank the root panic it resulted from. A cascade panic from
         // `run`'s own internal abort can still slip in through the same
-        // foreign-reap race; distinguishing it would require stamping
+        // foreign-reap race. Distinguishing it would require stamping
         // stashes with a teardown epoch, which the diagnostic payoff does
         // not justify.
         let stashed = shared.worker_panic.lock().take();
 
         // `run` aborts the tree before it returns or unwinds, but a panic in
-        // `f` itself never reaches `run`; abort again (idempotent) so every
+        // `f` itself never reaches `run`, so abort again (idempotent) so every
         // worker observes its wind-down before being joined.
         root_tree.abort();
 
@@ -939,7 +940,7 @@ impl crate::Runner for Runner {
         // Panic precedence: earliest cause first. A worker panic stashed
         // while the root still ran predates the root's own panic (and is
         // usually its cause: a dead worker fails the tasks that depended on
-        // it), so it wins; the root panic beats join-loop and teardown-era
+        // it), so it wins. The root panic beats join-loop and teardown-era
         // payloads, which are its downstream cascade.
         if let Some(payload) = stashed {
             resume_unwind(payload);
@@ -1113,7 +1114,7 @@ impl Context {
 struct Publisher<T> {
     /// The consumed context's supervision node.
     parent: Arc<Tree>,
-    /// The handle's result channel; `None` once published.
+    /// The handle's result channel, `None` once published.
     sender: Option<oneshot::Sender<Result<T, Error>>>,
 }
 
@@ -1129,7 +1130,7 @@ impl<T> Publisher<T> {
 
 impl<T> Drop for Publisher<T> {
     fn drop(&mut self) {
-        // Idempotent after `publish`; on unpublished paths this runs before
+        // Idempotent after `publish`. On unpublished paths this runs before
         // the sender field drops, preserving abort-before-resolution.
         self.parent.abort();
     }
@@ -1155,10 +1156,10 @@ impl crate::Spawner for Context {
         // A spawn can race its origin worker's full teardown (e.g. issued
         // from another worker through a moved context, after the tree-abort
         // cascade but also after the worker dropped its executor). Hold the
-        // executor strong for the duration of the spawn; when it is already
-        // gone, resolve with [Error::Closed] — the same outcome the
+        // executor strong for the duration of the spawn. When it is already
+        // gone, resolve with [Error::Closed] (the same outcome the
         // tree-aborted check below gives while the worker is still winding
-        // down — instead of panicking on the dead reference.
+        // down) instead of panicking on the dead reference.
         let Some(executor) = self.executor.upgrade() else {
             return Handle::ready(Err(Error::Closed));
         };
@@ -2213,8 +2214,8 @@ mod tests {
             };
 
             // The heap may hold unrelated live alarms (e.g. the process
-            // metrics collector); nothing else runs between these reads (no
-            // awaits on this single-threaded worker), so counts are exact.
+            // metrics collector), but nothing else runs between these reads
+            // (no awaits on this single-threaded worker), so counts are exact.
             let (baseline, baseline_cancelled) = alarms(&executor);
             assert_eq!(baseline_cancelled, 0);
 
@@ -2469,7 +2470,7 @@ mod tests {
 
             context.child("server").spawn(move |_| async move {
                 let (_, _sink, mut stream) = listener.accept().await.unwrap();
-                // Never receives data; aborted when the root returns.
+                // Never receives data, aborted when the root returns.
                 let _ = stream.recv(1).await;
             });
 

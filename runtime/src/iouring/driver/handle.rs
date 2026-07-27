@@ -127,11 +127,11 @@ pub(crate) struct Ops {
 /// under a saturated ring reuses slots instead of growing the arena) and are
 /// epoch-tagged: [Self::drain] wakes every waiter and bumps the epoch,
 /// invalidating all outstanding registrations at once. Each admission holds
-/// at most one slot — re-polls refresh the stored waker in place — and
+/// at most one slot (re-polls refresh the stored waker in place) and
 /// cancellation clears the slot immediately, so a long-saturated ring
 /// retains no wakers for admissions that no longer exist.
 pub(super) struct CapacityWaiters {
-    /// Slot arena; `None` entries are cancelled registrations awaiting reuse.
+    /// Slot arena. `None` entries are cancelled registrations awaiting reuse.
     slots: Vec<Option<Waker>>,
     /// Indices of `None` entries in `slots`.
     free: Vec<usize>,
@@ -234,9 +234,9 @@ impl CapacityWaiters {
 ///
 /// The slot is cleared on admission or closed-driver resolution (inside the
 /// admission poll) and cancelled when the attempt is dropped while parked. A
-/// foreign-thread drop cannot clear its slot (drop must not panic); the entry
-/// is discarded by the next drain, consistent with the documented policy that
-/// op futures must not move to other threads.
+/// foreign-thread drop cannot clear its slot (drop must not panic), so the
+/// entry is discarded by the next drain, consistent with the documented
+/// policy that op futures must not move to other threads.
 struct Registration<'a> {
     handle: &'a Handle,
     slot: Option<CapacitySlot>,
@@ -674,13 +674,13 @@ enum OpState {
 /// Future driving one logical request through admission and completion.
 ///
 /// Borrows the driver from its front-end, so the hot path carries no
-/// refcount traffic. Dropping the future before completion orphans the slot;
-/// see the module docs for the wind-down rules.
+/// refcount traffic. Dropping the future before completion orphans the slot
+/// (see the module docs for the wind-down rules).
 #[must_use]
 struct Op<'a> {
     handle: &'a Handle,
     state: OpState,
-    /// Capacity wait-list registration while queued on a full slab; released
+    /// Capacity wait-list registration while queued on a full slab, released
     /// on admission or by drop (via its RAII guard).
     registration: Registration<'a>,
 }

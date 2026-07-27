@@ -8,13 +8,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Per-platform guarantee:
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
-    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
-    ///   crash-durable.
-    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
-    ///   otherwise, so it is **not** crash-durable.
+    /// - **macOS/BSD**: best-effort `sync(2)`, which does not flush the drive cache, so it is
+    ///   **not** crash-durable.
+    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`, which needs admin and is
+    ///   skipped otherwise, so it is **not** crash-durable.
     ///
-    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8. A missing `dir` is treated as success.
+    /// Assumes storage lives on a single filesystem. On Linux reliable error detection needs
+    /// kernel >= 5.8. A missing `dir` is treated as success.
     pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
@@ -24,8 +24,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                     Err(e) => return Err(e),
                 };
-                // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
-                // that fd, performs no memory access, and returns -1 on error.
+                // SAFETY: `file` owns a valid fd that lives across the call, and `syncfs` takes
+                // only that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -279,8 +279,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Re-opening a removed blob's name creates an independent blob; the pre-removal handle keeps
-    /// observing the removed blob's contents.
+    /// Re-opening a removed blob's name creates an independent blob, and the pre-removal handle
+    /// keeps observing the removed blob's contents.
     async fn test_recreate_after_remove<S>(storage: &S)
     where
         S: Storage + Send + Sync,

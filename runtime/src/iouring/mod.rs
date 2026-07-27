@@ -17,7 +17,9 @@
 //! Work is submitted thread-locally: op futures stage requests directly into the loop's
 //! shared state (a waiter slab plus a backlog FIFO) while they are polled on the runtime
 //! thread, and completions are parked in the waiter slot until the owning future takes
-//! them. There are no channels and no per-op allocations on this path. The event loop
+//! them. There are no channels and no per-op queue or completion allocations on this
+//! path (address-carrying ops and vectored writes allocate their scratch once per
+//! logical request when built). The event loop
 //! blocks either in userspace futex wait (when the ring is truly idle) or in
 //! `io_uring_enter` (when the ring has active waiters), and is woken by:
 //! - normal CQE progress in the ring
@@ -41,17 +43,17 @@
 //!
 //! Every task spawned with [crate::Spawner::dedicated] (or [crate::Spawner::shared]
 //! with `blocking == true`) runs as the root of a worker on its own thread with its
-//! own ring. Ring-bound resources — [crate::Blob]s, [crate::Sink]s, [crate::Stream]s,
-//! [crate::Listener]s, and in-flight operation futures — are bound to the worker that
+//! own ring. Ring-bound resources ([crate::Blob]s, [crate::Sink]s, [crate::Stream]s,
+//! [crate::Listener]s, and in-flight operation futures) are bound to the worker that
 //! created them: **using one from another worker panics** with "io_uring runtime
 //! operations must run on the runtime thread". Like any other task panic, it is
 //! caught by the using task's wrapper and resolves the task's handle with
 //! [Error::Exited](crate::Error::Exited) when the runtime is configured with
-//! `catch_panics(true)`; with the default `catch_panics(false)` the panic is
+//! `catch_panics(true)`. With the default `catch_panics(false)` the panic is
 //! forwarded to the root and unwinds [crate::Runner::start]. Moving a blob or
-//! socket into a dedicated task works on the tokio runtime but not here; this is a deliberate
-//! trade — thread affinity is what lets the op path run without locks. Move plain
-//! data between workers and open resources on the worker that uses them.
+//! socket into a dedicated task works on the tokio runtime but not here. This is a
+//! deliberate trade: thread affinity is what lets the op path run without locks. Move
+//! plain data between workers and open resources on the worker that uses them.
 //!
 //! Everything else crosses workers freely: task handles, contexts (spawning,
 //! sleeping, stopping), channels, and *dropping* a ring-bound resource (foreign
@@ -156,7 +158,7 @@
 //! ## Liveness Model
 //!
 //! This loop enforces a configured upper bound on in-flight requests. New submissions
-//! park on a capacity wait list when the slab is full; freeing a slot wakes every
+//! park on a capacity wait list when the slab is full. Freeing a slot wakes every
 //! parked admission at once and losers re-register, so ordering among admissions is
 //! unspecified (a fresh submission may barge ahead of a long-parked one), and
 //! already-admitted requests may be restaged ahead of fresh admissions according to
@@ -193,7 +195,7 @@
 //! - Parked terminal results count toward the capacity limit until their ticket is polled or
 //!   dropped, and capacity waiters themselves have no deadline protection (deadlines only apply
 //!   after admission). A task that retains a completed ticket indefinitely therefore withholds a
-//!   slot from waiting admissions, exactly as an unread completion channel did previously.
+//!   slot from waiting admissions.
 
 pub(crate) mod driver;
 #[cfg(test)]
@@ -216,6 +218,10 @@ pub struct RingConfig {
     /// is [`MAX_RING_SIZE`], larger rounded sizes panic during construction.
     pub size: u32,
     /// If true, use IOPOLL mode.
+    ///
+    /// IOPOLL requires files opened with O_DIRECT, which the runtime does not
+    /// use, so the mode is honored by ring construction but not exercised end
+    /// to end by the runtime.
     pub io_poll: bool,
     /// If true, use single issuer mode.
     /// Warning: when enabled, the same thread that creates the ring must be
