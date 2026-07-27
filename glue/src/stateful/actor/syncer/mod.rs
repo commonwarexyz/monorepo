@@ -443,8 +443,8 @@ mod tests {
     }
 
     impl ManagedDb<deterministic::Context> for RewindDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = (u64, bool, Arc<Mutex<Vec<u64>>>);
         type SyncTarget = u64;
@@ -466,7 +466,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {

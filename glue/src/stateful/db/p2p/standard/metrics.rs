@@ -28,7 +28,7 @@ pub(super) struct Metrics {
     pub serve_cancelled: Registered<Counter>,
 
     /// Whether a database is currently attached (1) or not (0).
-    pub has_database: Registered<Gauge>,
+    pub has_source: Registered<Gauge>,
 }
 
 impl Metrics {
@@ -56,9 +56,9 @@ impl Metrics {
             "Serves aborted because the requester stopped waiting or the actor shut down",
             Counter::default(),
         );
-        let has_database = context.register(
-            "has_database",
-            "Whether a database is currently attached",
+        let has_source = context.register(
+            "has_source",
+            "Whether a serving source is attached",
             Gauge::default(),
         );
 
@@ -69,7 +69,7 @@ impl Metrics {
             deliveries,
             serve_requests,
             serve_cancelled,
-            has_database,
+            has_source,
         }
     }
 }

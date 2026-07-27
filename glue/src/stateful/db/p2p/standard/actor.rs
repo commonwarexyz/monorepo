@@ -125,7 +125,7 @@ where
     pub fn new(context: E, mut cfg: Config<P, D, B, Src>) -> (Self, SyncMailbox<F, Src>) {
         let metrics = ResolverMetrics::new(&context);
         let state = cfg.source.take().map_or(State::NoSource, |source| {
-            let _ = metrics.has_database.try_set(1i64);
+            let _ = metrics.has_source.try_set(1i64);
             State::HasSource(source)
         });
         let (mailbox_tx, mailbox_rx) =
@@ -234,7 +234,7 @@ where
                 let replacing_existing = matches!(self.state, State::HasSource(_));
                 info!(replacing_existing, "attached resolver serving source");
                 self.state = State::HasSource(source);
-                let _ = self.metrics.has_database.try_set(1i64);
+                let _ = self.metrics.has_source.try_set(1i64);
                 MailboxAction::None
             }
             mailbox::Message::GetOperations { request, response } => {

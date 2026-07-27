@@ -322,8 +322,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for GatedFlushDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -342,7 +342,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -441,7 +441,7 @@ mod tests {
             _databases: &Self::Databases,
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            (TestMerkleized,)
+            (TestMerkleized::new(),)
         }
     }
 

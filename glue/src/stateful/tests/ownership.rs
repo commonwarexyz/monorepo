@@ -53,8 +53,8 @@ fn parked_set() -> ((ParkedDb,), Flushes) {
 }
 
 impl ManagedDb<deterministic::Context> for ParkedDb {
-    type Unmerkleized = TestUnmerkleized;
-    type Merkleized = TestMerkleized;
+    type Unmerkleized = TestUnmerkleized<Self>;
+    type Merkleized = TestMerkleized<Self>;
     type Error = std::convert::Infallible;
     type Config = ();
     type SyncTarget = ();
@@ -70,7 +70,7 @@ impl ManagedDb<deterministic::Context> for ParkedDb {
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
-        TestUnmerkleized
+        TestUnmerkleized::new()
     }
 
     fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -126,7 +126,7 @@ fn parked_flush_never_blocks_the_next_finalize() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (set, flushes) = parked_set();
-        let (set, _, first) = set.finalize((TestMerkleized,)).await;
+        let (set, _, first) = set.finalize((TestMerkleized::new(),)).await;
         assert_eq!(flushes.lock().len(), 1, "the first flush is parked");
 
         // The baseline held the write slot across the flush and this probe
@@ -134,7 +134,7 @@ fn parked_flush_never_blocks_the_next_finalize() {
         // immediately.
         let next = context
             .child("finalize")
-            .spawn(move |_| async move { set.finalize((TestMerkleized,)).await });
+            .spawn(move |_| async move { set.finalize((TestMerkleized::new(),)).await });
         let (_, _, second) = blocked_on(&context, Box::pin(next))
             .await
             .unwrap_or_else(|_| panic!("a parked flush blocked the next finalize"))
@@ -157,7 +157,7 @@ fn unpublished_generation_stays_invisible() {
 
         // The first generation applies but its flush is parked, so it stays
         // staged and no subscriber can see it.
-        let (set, snapshot, first) = set.finalize((TestMerkleized,)).await;
+        let (set, snapshot, first) = set.finalize((TestMerkleized::new(),)).await;
         let staged = publisher.stage(snapshot);
         assert!(
             source.latest().is_none(),
@@ -167,7 +167,7 @@ fn unpublished_generation_stays_invisible() {
         // The unpublished generation does not hold the writer back.
         let next = context
             .child("finalize")
-            .spawn(move |_| async move { set.finalize((TestMerkleized,)).await });
+            .spawn(move |_| async move { set.finalize((TestMerkleized::new(),)).await });
         let (_, snapshot, second) = blocked_on(&context, Box::pin(next))
             .await
             .unwrap_or_else(|_| panic!("an unpublished generation delayed the writer"))
@@ -192,7 +192,7 @@ fn parked_serve_never_delays_the_writer() {
     executor.start(|context| async move {
         let (set, flushes) = parked_set();
         let (mut publisher, source) = Publisher::new(&context);
-        let (set, snapshot, barrier) = set.finalize((TestMerkleized,)).await;
+        let (set, snapshot, barrier) = set.finalize((TestMerkleized::new(),)).await;
         let staged = publisher.stage(snapshot);
         release(&flushes, barrier).await;
         staged.install();
@@ -210,7 +210,7 @@ fn parked_serve_never_delays_the_writer() {
         // finalize and publication proceed without delay.
         let next = context
             .child("finalize")
-            .spawn(move |_| async move { set.finalize((TestMerkleized,)).await });
+            .spawn(move |_| async move { set.finalize((TestMerkleized::new(),)).await });
         let (_, snapshot, barrier) = blocked_on(&context, Box::pin(next))
             .await
             .unwrap_or_else(|_| panic!("a parked serve delayed the writer"))

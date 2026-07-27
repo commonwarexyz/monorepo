@@ -173,7 +173,10 @@ pub trait Merkleized: Sized + Send + Sync {
 /// recoverable.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
-    type Unmerkleized: Unmerkleized;
+    ///
+    /// Constrained to merkleize against this database type, so a batch cannot
+    /// be associated with a database that did not create it.
+    type Unmerkleized: Unmerkleized<Db = Self>;
 
     /// A batch whose root has been computed but has not yet been applied to
     /// the underlying database.
@@ -1980,8 +1983,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for TestDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -1998,7 +2001,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2020,8 +2023,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for CountingRewindDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2040,7 +2043,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2066,8 +2069,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for PruneCountingDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = Arc<AtomicUsize>;
         type SyncTarget = ();
@@ -2084,7 +2087,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2181,8 +2184,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FailingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = TestFinalizeError;
         type Config = ();
         type SyncTarget = ();
@@ -2199,7 +2202,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2267,8 +2270,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for BlockingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -2285,7 +2288,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2313,8 +2316,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for SlowSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2333,7 +2336,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2357,8 +2360,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for RejectDuplicateTargetSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2381,7 +2384,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2405,8 +2408,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FastSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2425,7 +2428,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2449,8 +2452,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FailingStateSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2469,7 +2472,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2493,8 +2496,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for MismatchedTargetSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2513,7 +2516,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2537,8 +2540,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for ImmediateStateSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2557,7 +2560,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2581,8 +2584,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FinishClosedSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2601,7 +2604,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2625,8 +2628,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for ObservedSlowSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2645,7 +2648,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2669,8 +2672,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for ObservedFastSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2689,7 +2692,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2713,8 +2716,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for DistinctObservedFastSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2737,7 +2740,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -2870,8 +2873,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for StaleReachedSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2890,7 +2893,7 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
+            TestUnmerkleized::new()
         }
 
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -3348,7 +3351,9 @@ mod tests {
 
             let finalize = <(BlockingFinalizeDb, BlockingFinalizeDb) as DatabaseSet<
                 deterministic::Context,
-            >>::finalize(databases, (TestMerkleized, TestMerkleized));
+            >>::finalize(
+                databases, (TestMerkleized::new(), TestMerkleized::new())
+            );
             pin_mut!(finalize);
             assert!(finalize.as_mut().now_or_never().is_none());
 
@@ -3378,7 +3383,7 @@ mod tests {
             let databases = (TestDb, FailingFinalizeDb);
             let _ = <(TestDb, FailingFinalizeDb) as DatabaseSet<deterministic::Context>>::finalize(
                 databases,
-                (TestMerkleized, TestMerkleized),
+                (TestMerkleized::new(), TestMerkleized::new()),
             )
             .await;
         });

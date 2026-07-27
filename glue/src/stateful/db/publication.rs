@@ -216,7 +216,11 @@ impl<S, M> Clone for MemberSource<S, M> {
 
 impl<S, M: Clone> MemberSource<S, M> {
     /// Create a projection of `source` via `project`.
-    pub(crate) fn new(source: SnapshotSource<S>, project: fn(&S) -> &M) -> Self {
+    ///
+    /// Public so [`super::DatabaseSet::member_sources`] is implementable outside this
+    /// crate; the source only reads installed generations, so nothing mutation-capable
+    /// escapes.
+    pub fn new(source: SnapshotSource<S>, project: fn(&S) -> &M) -> Self {
         Self { source, project }
     }
 }
