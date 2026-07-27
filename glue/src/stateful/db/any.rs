@@ -1,7 +1,7 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. The wrapper types here keep that shape: reads and
+//! read-through to committed state. The wrapper types here keep that shape: reads and
 //! merkleization borrow the owning database at each call, so batches hold no database
 //! handle and dropping one never drops the database.
 
@@ -41,6 +41,7 @@ use commonware_storage::{
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{
+    marker::PhantomData,
     ops::{Deref, Range},
     sync::Arc,
 };
@@ -63,7 +64,7 @@ where
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
     metadata: Option<U::Value>,
-    _db: std::marker::PhantomData<fn(E, C, I)>,
+    _db: PhantomData<fn(E, C, I)>,
 }
 
 /// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
@@ -85,7 +86,7 @@ where
 {
     staged: Staged<F, H, U, S>,
     metadata: Option<U::Value>,
-    _db: std::marker::PhantomData<fn(E, C, I)>,
+    _db: PhantomData<fn(E, C, I)>,
 }
 
 /// Key-value operations shared by both `any` update kinds.
@@ -107,7 +108,7 @@ where
         self
     }
 
-    /// Read a value by key, falling back to `db`'s applied state.
+    /// Read a value by key, falling back to `db`'s committed state.
     pub async fn get(
         &self,
         key: &U::Key,
@@ -116,7 +117,7 @@ where
         self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s applied state.
+    /// Read multiple values by key, falling back to `db`'s committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(
@@ -141,7 +142,7 @@ where
             AnyStaged {
                 staged,
                 metadata: self.metadata,
-                _db: std::marker::PhantomData,
+                _db: PhantomData,
             },
         ))
     }
@@ -167,7 +168,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    _db: std::marker::PhantomData<fn(E, C, I)>,
+    _db: PhantomData<fn(E, C, I)>,
 }
 
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
@@ -243,7 +244,7 @@ where
             Self {
                 staged,
                 metadata: self.metadata,
-                _db: std::marker::PhantomData,
+                _db: PhantomData,
             },
         ))
     }
@@ -287,7 +288,7 @@ where
             .await?;
         Ok(AnyMerkleized {
             inner,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -330,7 +331,7 @@ where
             .await?;
         Ok(AnyMerkleized {
             inner,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -347,7 +348,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to `db`'s applied state.
+    /// Read a value by key, falling back to `db`'s committed state.
     pub async fn get(
         &self,
         key: &U::Key,
@@ -356,7 +357,7 @@ where
         self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s applied state.
+    /// Read multiple values by key, falling back to `db`'s committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(
@@ -390,7 +391,7 @@ where
         let merkleized = self.batch.merkleize(db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -417,7 +418,7 @@ where
         let merkleized = self.batch.merkleize(db, self.metadata).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -446,7 +447,7 @@ where
         AnyUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         }
     }
 }
@@ -521,7 +522,7 @@ where
         AnyUnmerkleized {
             batch: Db::new_batch(self),
             metadata: None,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         }
     }
 
@@ -644,7 +645,7 @@ where
         AnyUnmerkleized {
             batch: Db::new_batch(self),
             metadata: None,
-            _db: std::marker::PhantomData,
+            _db: PhantomData,
         }
     }
 

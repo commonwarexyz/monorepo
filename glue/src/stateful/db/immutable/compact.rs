@@ -27,7 +27,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{Array, channel::mpsc};
-use std::{ops::Deref, sync::Arc};
+use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
 /// Wraps an unjournaled immutable batch before merkleization.
 pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
@@ -43,7 +43,7 @@ where
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
-    marker: std::marker::PhantomData<(E, C)>,
+    _db: PhantomData<fn(E, C)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -112,7 +112,7 @@ where
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    marker: std::marker::PhantomData<(E, C)>,
+    _db: PhantomData<fn(E, C)>,
 }
 
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
@@ -158,7 +158,7 @@ where
             .await;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
-            marker: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -185,7 +185,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            marker: std::marker::PhantomData,
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -222,8 +222,8 @@ where
 
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
-            batch: self.new_batch(),
-            marker: std::marker::PhantomData,
+            batch: Self::new_batch(self),
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -301,8 +301,8 @@ where
 
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
-            batch: self.new_batch(),
-            marker: std::marker::PhantomData,
+            batch: Self::new_batch(self),
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }

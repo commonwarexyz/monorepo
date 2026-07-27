@@ -1,7 +1,7 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
 use super::handler;
-use crate::stateful::db::{AttachableResolver, publication::ServeSource};
+use crate::stateful::db::AttachableResolver;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -120,7 +120,7 @@ impl<Src, F: Family, Op, D: Digest> Mailbox<Src, F, Op, D> {
     }
 }
 
-impl<Src: Send, F: Family, Op: Send, D: Digest> Mailbox<Src, F, Op, D> {
+impl<Src: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<Src, F, Op, D> {
     /// Attach a serving source; queued attaches coalesce so only the latest survives.
     pub fn attach_source(&self, source: Src) {
         let _ = self.sender.enqueue(Message::AttachSource(source));
@@ -177,10 +177,10 @@ where
 
 impl<Src, F, Op, D> AttachableResolver<Src> for Mailbox<Src, F, Op, D>
 where
+    Src: Send + Sync + 'static,
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
-    Src: ServeSource,
 {
     fn attach_source(&self, source: Src) -> impl Future<Output = ()> + Send {
         Self::attach_source(self, source);

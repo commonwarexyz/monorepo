@@ -434,7 +434,7 @@ where
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
+    /// recover the database on reopen.
     #[boxed]
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.log = self.log.sync().await?;
@@ -534,7 +534,7 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// plus a best-effort attempt to bound the recovery needed on reopen. Use [Self::sync] to
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed offsets or recovery-watermark sync is not

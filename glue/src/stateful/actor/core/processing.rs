@@ -189,9 +189,11 @@ where
                         let (processor, applied) = self
                             .processor
                             .finalize(&self.context, block.as_ref())
-                            .instrument(process)
+                            .instrument(process.clone())
                             .await;
                         self.processor = processor;
+                        // Keep the publication bookkeeping under the same span.
+                        let _process = process.entered();
                         if let Some(Applied {
                             snapshot,
                             barrier,
@@ -267,9 +269,10 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::Processor,
         },
-        db::{DatabaseSet, ManagedDb},
+        db::DatabaseSet,
         tests::mocks::{
-            TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor,
+            FlushControl, GatedFlushDb, TestBlock, TestMerkleized, TestScheme, TestVariant, anchor,
+            archive_config,
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
@@ -288,8 +291,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock as _, ContextCell, Error as RuntimeError, Runner as _, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -299,78 +302,7 @@ mod tests {
         sync::Mutex,
     };
     use futures::poll;
-    use std::{convert::Infallible, sync::Arc, time::Duration};
-
-    /// Completes one parked flush when released by the test.
-    type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
-
-    /// Shared observer for [`GatedFlushDb`]: parked flush releases and
-    /// recorded prune targets.
-    #[derive(Clone, Default)]
-    struct FlushControl {
-        flushes: Arc<Mutex<Vec<FlushRelease>>>,
-        pruned: Arc<Mutex<Vec<u64>>>,
-    }
-
-    /// Database whose finalize flush completes only when the test releases it.
-    ///
-    /// Its `prune` records immediately, eliding the impl-side barrier real
-    /// databases provide (pruning waits for pending flushes, pinned in
-    /// `stateful::db::any` tests), so the actor's own scheduling is exposed.
-    struct GatedFlushDb {
-        control: FlushControl,
-    }
-
-    impl<E: Send> ManagedDb<E> for GatedFlushDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = u64;
-        type Snapshot = ();
-
-        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
-            Ok((self, ()))
-        }
-
-        fn initial_sync_target() -> Self::SyncTarget {
-            unreachable!("GatedFlushDb is constructed directly in tests")
-        }
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            unreachable!("GatedFlushDb is constructed directly in tests")
-        }
-
-        fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
-            let (release, released) = oneshot::channel();
-            self.control.flushes.lock().push(release);
-            Ok((self, (), Handle::from_receiver(released)))
-        }
-
-        async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
-            self.control.pruned.lock().push(*target);
-            Ok(self)
-        }
-
-        fn sync_target(&self) -> Self::SyncTarget {
-            0
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
-    }
+    use std::{sync::Arc, time::Duration};
 
     /// Parks one application execution: the app signals entry on the sender,
     /// then waits on the receiver while holding the turn's batch.
@@ -442,28 +374,6 @@ mod tests {
             _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             TestMerkleized::new()
-        }
-    }
-
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
         }
     }
 

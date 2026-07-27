@@ -819,7 +819,7 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup.
+    /// plus a best-effort attempt to bound the recovery needed on reopen.
     /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
     /// the prior sync before starting. Failures surface as described on
     /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
@@ -1306,8 +1306,8 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 /// keeps no history, so they are served only by the live database at its latest root — the
 /// same contract as the live API.
 ///
-/// Rewinding the source database in place while a snapshot is alive is forbidden because reads from
-/// the rewound range may observe unspecified contents.
+/// Rewinding the source database in place while a snapshot is alive leaves reads from
+/// the rewound range observing unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct ProofSnapshot<F, E, U, R, H>
 where
@@ -1366,22 +1366,9 @@ where
         self.ops.bounds()
     }
 
-    /// Returns an ops-level historical proof for the specified range, against this snapshot's
-    /// frozen state. Semantics match [Db::ops_historical_proof].
-    #[allow(clippy::type_complexity)]
-    pub async fn ops_historical_proof(
-        &self,
-        historical_size: Location<F>,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-    ) -> Result<(merkle::Proof<F, H::Digest>, Vec<Operation<F, U>>), Error<F>> {
-        self.ops
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-    }
-
-    /// The ops-level snapshot of the wrapped Any database. Sync serving reads through it,
-    /// and its proofs verify against [Self::ops_root], matching [Db::ops_historical_proof].
+    /// The ops-level snapshot of the wrapped Any database. Sync serving and ops-level
+    /// proofs read through it, and its proofs verify against [Self::ops_root], matching
+    /// [Db::ops_historical_proof].
     pub const fn ops(&self) -> &any::db::ProofSnapshot<F, E, U, R, H> {
         &self.ops
     }
@@ -1646,7 +1633,8 @@ mod tests {
             assert_eq!(snapshot.op_count(), op_count);
 
             let (proof, ops) = snapshot
-                .ops_historical_proof(op_count, Location::new(0), NZU64!(100))
+                .ops()
+                .historical_proof(op_count, Location::new(0), NZU64!(100))
                 .await
                 .unwrap();
             assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
@@ -1666,7 +1654,8 @@ mod tests {
             assert_ne!(db.ops_root(), ops_root);
 
             let (proof2, ops2) = snapshot
-                .ops_historical_proof(op_count, Location::new(0), NZU64!(100))
+                .ops()
+                .historical_proof(op_count, Location::new(0), NZU64!(100))
                 .await
                 .unwrap();
             assert_eq!(proof.encode(), proof2.encode());
@@ -1680,7 +1669,8 @@ mod tests {
             // Anything above the frozen size is rejected.
             assert!(
                 snapshot
-                    .ops_historical_proof(op_count + 1, Location::new(0), NZU64!(1))
+                    .ops()
+                    .historical_proof(op_count + 1, Location::new(0), NZU64!(1))
                     .await
                     .is_err()
             );

@@ -907,7 +907,7 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Also makes a best-effort attempt to bound the recovery needed on startup. Use
+    /// Also makes a best-effort attempt to bound the recovery needed on reopen. Use
     /// [Self::sync] to guarantee none is needed. A new sync waits for the prior sync before
     /// starting. Failures of the deferred durability work surface on the returned handle. A
     /// failed data sync also fails the next durability operation. A failed recovery-watermark
@@ -968,8 +968,8 @@ where
 /// source database continues to append, sync, and prune, and it exposes no mutation. It carries
 /// neither the keyed index nor the activity bitmap.
 ///
-/// Rewinding the source database in place while a snapshot is alive is forbidden because reads from the
-/// rewound range may observe unspecified contents.
+/// Rewinding the source database in place while a snapshot is alive leaves reads from the
+/// rewound range observing unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct ProofSnapshot<F, E, U, R, H>
 where

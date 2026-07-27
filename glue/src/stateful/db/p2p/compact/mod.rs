@@ -9,5 +9,7 @@ pub use actor::{Actor, Config};
 
 mod handler;
 
+mod metrics;
+
 mod mailbox;
 pub use mailbox::{Mailbox, ResponseDropped};

@@ -1,4 +1,7 @@
-use crate::simulate::processed::ProcessedHeight;
+use crate::{
+    simulate::processed::ProcessedHeight,
+    stateful::db::{AttachableResolver, ServeSource},
+};
 use commonware_consensus::{
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
     simplex::mocks::scheme::Scheme as MockScheme,
@@ -6,8 +9,18 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, ed25519, sha256};
 use commonware_runtime::{Quota, buffer::paged::CacheRef};
-use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZU16, NZU64, NZUsize};
+use commonware_storage::{
+    archive::prunable,
+    merkle::Location,
+    qmdb::sync::{
+        compact::{
+            FetchResult as CompactFetchResult, Resolver as CompactResolver, Target as CompactTarget,
+        },
+        resolver::{FetchResult, Resolver as SyncResolver},
+    },
+    translator::TwoCap,
+};
+use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex};
 use std::{
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -16,7 +29,7 @@ use std::{
 };
 
 /// Type-erased accessor returning the oldest operation location still retained
-/// by a validator's database set (the minimum across all databases).
+/// by a validator's database set (tests observe one representative member).
 ///
 /// Used by pruning properties to observe that QMDB actually discarded
 /// historical operations through the live actor.
@@ -37,22 +50,22 @@ pub(crate) type StorageRoots =
 #[derive(Clone)]
 pub(crate) struct CapturingResolver<R, Src> {
     inner: R,
-    pub(crate) source: Arc<commonware_utils::sync::Mutex<Option<Src>>>,
+    pub(crate) source: Arc<Mutex<Option<Src>>>,
 }
 
 impl<R, Src> CapturingResolver<R, Src> {
     pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
-            source: Arc::new(commonware_utils::sync::Mutex::new(None)),
+            source: Arc::new(Mutex::new(None)),
         }
     }
 }
 
-impl<R, Src> crate::stateful::db::AttachableResolver<Src> for CapturingResolver<R, Src>
+impl<R, Src> AttachableResolver<Src> for CapturingResolver<R, Src>
 where
-    R: crate::stateful::db::AttachableResolver<Src>,
-    Src: crate::stateful::db::ServeSource,
+    R: AttachableResolver<Src>,
+    Src: ServeSource,
 {
     async fn attach_source(&self, source: Src) {
         *self.source.lock() = Some(source.clone());
@@ -60,9 +73,9 @@ where
     }
 }
 
-impl<R, Src> commonware_storage::qmdb::sync::resolver::Resolver for CapturingResolver<R, Src>
+impl<R, Src> SyncResolver for CapturingResolver<R, Src>
 where
-    R: commonware_storage::qmdb::sync::resolver::Resolver,
+    R: SyncResolver,
     Src: Clone + Send + Sync + 'static,
 {
     type Family = R::Family;
@@ -72,15 +85,12 @@ where
 
     async fn get_operations(
         &self,
-        op_count: commonware_storage::merkle::Location<Self::Family>,
-        start_loc: commonware_storage::merkle::Location<Self::Family>,
-        max_ops: std::num::NonZeroU64,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
-    ) -> Result<
-        commonware_storage::qmdb::sync::resolver::FetchResult<Self::Family, Self::Op, Self::Digest>,
-        Self::Error,
-    > {
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         self.inner
             .get_operations(
                 op_count,
@@ -93,9 +103,9 @@ where
     }
 }
 
-impl<R, Src> commonware_storage::qmdb::sync::compact::Resolver for CapturingResolver<R, Src>
+impl<R, Src> CompactResolver for CapturingResolver<R, Src>
 where
-    R: commonware_storage::qmdb::sync::compact::Resolver,
+    R: CompactResolver,
     Src: Clone + Send + Sync + 'static,
 {
     type Family = R::Family;
@@ -105,11 +115,8 @@ where
 
     async fn get_compact_state(
         &self,
-        target: commonware_storage::qmdb::sync::compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<
-        commonware_storage::qmdb::sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>,
-        Self::Error,
-    > {
+        target: CompactTarget<Self::Family, Self::Digest>,
+    ) -> Result<CompactFetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         self.inner.get_compact_state(target).await
     }
 }

@@ -27,7 +27,7 @@ pub(super) struct Metrics {
     /// Serves aborted because the requester stopped waiting or the actor shut down.
     pub serve_cancelled: Registered<Counter>,
 
-    /// Whether a database is currently attached (1) or not (0).
+    /// Whether a serving source is attached (1) or not (0).
     pub has_source: Registered<Gauge>,
 }
 

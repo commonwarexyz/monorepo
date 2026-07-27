@@ -19,7 +19,10 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
-        db::{DatabaseSet, Merkleized as _, SyncEngineConfig, p2p::standard as qmdb_resolver},
+        db::{
+            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            p2p::standard as qmdb_resolver,
+        },
     },
 };
 use commonware_broadcast::buffered;
@@ -232,9 +235,7 @@ impl App {
         let mut batch = batches;
         let key = Sha256::hash(&[b"height"]);
         batch = batch.write(key, Some(u64_to_digest(height.get())));
-        crate::stateful::db::Unmerkleized::merkleize(batch, databases.as_ref())
-            .await
-            .unwrap()
+        batch.merkleize(databases.as_ref()).await.unwrap()
     }
 }
 

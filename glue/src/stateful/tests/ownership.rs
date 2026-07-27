@@ -19,14 +19,12 @@
 //! completes proves nothing was ever in its way. Generation ordering under
 //! pipelining is covered by the publication and processing tests.
 
-use super::mocks::{TestMerkleized, TestUnmerkleized};
-use crate::stateful::db::{Barrier, DatabaseSet, ManagedDb, Publisher, Single};
+use super::mocks::{FlushControl, GatedFlushDb, TestMerkleized};
+use crate::stateful::db::{Barrier, DatabaseSet, Publisher, Single};
 use commonware_macros::test_traced;
-use commonware_runtime::{
-    Clock, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _, deterministic,
-};
-use commonware_utils::{channel::oneshot, sync::Mutex};
-use std::{sync::Arc, time::Duration};
+use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
+use commonware_utils::channel::oneshot;
+use std::time::Duration;
 
 /// How long `blocked_on` waits before declaring the probed future blocked.
 ///
@@ -34,67 +32,13 @@ use std::{sync::Arc, time::Duration};
 /// one keeps traces readable.
 const BLOCKED: Duration = Duration::from_secs(1);
 
-/// Pending flush releases, shared between a [`ParkedDb`] and its test.
-type Flushes = Arc<Mutex<Vec<oneshot::Sender<Result<(), RuntimeError>>>>>;
-
-/// A database whose finalize applies instantly and parks its flush on an
-/// externally held release, mirroring `start_sync` pipelining.
-struct ParkedDb {
-    flushes: Flushes,
-}
-
-/// A parked single-member set plus the release queue driving its flushes.
-fn parked_set() -> (Single<ParkedDb>, Flushes) {
-    let flushes: Flushes = Arc::new(Mutex::new(Vec::new()));
-    let db = ParkedDb {
-        flushes: flushes.clone(),
+/// A parked single-member set plus the flush controls driving it.
+fn parked_set() -> (Single<GatedFlushDb>, FlushControl) {
+    let control = FlushControl::default();
+    let db = GatedFlushDb {
+        control: control.clone(),
     };
-    (db.into(), flushes)
-}
-
-impl ManagedDb<deterministic::Context> for ParkedDb {
-    type Unmerkleized = TestUnmerkleized<Self>;
-    type Merkleized = TestMerkleized<Self>;
-    type Error = std::convert::Infallible;
-    type Config = ();
-    type SyncTarget = ();
-    type Snapshot = ();
-
-    fn initial_sync_target() -> Self::SyncTarget {}
-
-    async fn init(
-        _context: deterministic::Context,
-        _config: Self::Config,
-    ) -> Result<Self, Self::Error> {
-        unreachable!("constructed directly in tests")
-    }
-
-    fn new_batch(&self) -> Self::Unmerkleized {
-        TestUnmerkleized::new()
-    }
-
-    fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-        true
-    }
-
-    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
-        Ok((self, ()))
-    }
-
-    async fn finalize(
-        self,
-        _batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
-        let (release, released) = oneshot::channel();
-        self.flushes.lock().push(release);
-        Ok((self, (), Handle::from_receiver(released)))
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {}
-
-    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-        Ok(self)
-    }
+    (db.into(), control)
 }
 
 /// Await `future` against a deterministic timeout, `Ok` if it completed and
@@ -111,8 +55,8 @@ where
 }
 
 /// Release the oldest parked flush and prove its barrier durable.
-async fn release(flushes: &Flushes, barrier: Barrier) {
-    flushes.lock().remove(0).send(Ok(())).unwrap();
+async fn release(control: &FlushControl, barrier: Barrier) {
+    control.flushes.lock().remove(0).send(Ok(())).unwrap();
     assert!(
         barrier.durable().await,
         "flush release must prove durability"
@@ -125,13 +69,11 @@ async fn release(flushes: &Flushes, barrier: Barrier) {
 fn parked_flush_never_blocks_the_next_finalize() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let (set, flushes) = parked_set();
+        let (set, control) = parked_set();
         let (set, _, first) = set.finalize(TestMerkleized::new()).await;
-        assert_eq!(flushes.lock().len(), 1, "the first flush is parked");
+        assert_eq!(control.flushes.lock().len(), 1, "the first flush is parked");
 
-        // The baseline held the write slot across the flush and this probe
-        // timed out. With the set owned by value, the next finalize proceeds
-        // immediately.
+        // With the set owned by value, the next finalize proceeds immediately.
         let next = context
             .child("finalize")
             .spawn(move |_| async move { set.finalize(TestMerkleized::new()).await });
@@ -140,19 +82,20 @@ fn parked_flush_never_blocks_the_next_finalize() {
             .unwrap_or_else(|_| panic!("a parked flush blocked the next finalize"))
             .unwrap();
 
-        release(&flushes, first).await;
-        release(&flushes, second).await;
+        release(&control, first).await;
+        release(&control, second).await;
     });
 }
 
-/// A generation whose flush is parked is never published, so no subscriber
-/// can observe state a crash could roll back, and the writer proceeds while
-/// the generation waits.
+/// Staging alone publishes nothing — a staged generation stays invisible until
+/// installed — and an unpublished generation does not hold the writer back.
+/// The actor discipline that installs only after durability is pinned by the
+/// processing-loop and publication tests.
 #[test_traced]
 fn unpublished_generation_stays_invisible() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let (set, flushes) = parked_set();
+        let (set, control) = parked_set();
         let (mut publisher, source) = Publisher::new(&context);
 
         // The first generation applies but its flush is parked, so it stays
@@ -175,10 +118,10 @@ fn unpublished_generation_stays_invisible() {
         let staged_second = publisher.stage(snapshot);
 
         // Durability publishes, in order.
-        release(&flushes, first).await;
+        release(&control, first).await;
         staged.install();
         assert_eq!(source.latest().unwrap().generation(), 0);
-        release(&flushes, second).await;
+        release(&control, second).await;
         staged_second.install();
         assert_eq!(source.latest().unwrap().generation(), 1);
     });
@@ -190,11 +133,11 @@ fn unpublished_generation_stays_invisible() {
 fn parked_serve_never_delays_the_writer() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let (set, flushes) = parked_set();
+        let (set, control) = parked_set();
         let (mut publisher, source) = Publisher::new(&context);
         let (set, snapshot, barrier) = set.finalize(TestMerkleized::new()).await;
         let staged = publisher.stage(snapshot);
-        release(&flushes, barrier).await;
+        release(&control, barrier).await;
         staged.install();
 
         // A serve clones the published generation and parks mid assembly.
@@ -216,7 +159,7 @@ fn parked_serve_never_delays_the_writer() {
             .unwrap_or_else(|_| panic!("a parked serve delayed the writer"))
             .unwrap();
         let staged = publisher.stage(snapshot);
-        release(&flushes, barrier).await;
+        release(&control, barrier).await;
         staged.install();
 
         // The serve completes against its captured generation while the

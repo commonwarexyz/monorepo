@@ -251,7 +251,7 @@ where
 
         let _ = self.metrics.sync_done.try_set(1);
         // Install the synced committed state as generation zero so serving can begin
-        // before the first finalization; synced state is durable by definition.
+        // before the first finalization; synced state is durable by construction.
         let mut publisher = self.publisher;
         let (databases, synced) = artifact.databases.snapshot().await;
         publisher.install_durable(synced);
@@ -294,14 +294,14 @@ where
                         return;
                     }
                     staged.install();
-                    if let Some(prune) = prune {
-                        processor = processor.prune_databases(prune, &self.marshal).await;
-                    }
                     debug!(
                         height = block.height().get(),
                         "persisted finalized database batch during sync handoff"
                     );
                     acknowledgement.acknowledge();
+                    if let Some(prune) = prune {
+                        processor = processor.prune_databases(prune, &self.marshal).await;
+                    }
                 }
             }
         }
@@ -343,111 +343,30 @@ mod tests {
             syncer::{self, StateSyncMetadata, SyncResult},
         },
         db::Anchor,
-        tests::mocks::{TestApp, TestBlock, TestScheme, TestVariant, anchor, test_databases},
-    };
-    use commonware_actor::{Feedback, mailbox as actor_mailbox};
-    use commonware_consensus::{
-        Heightable, Reporter,
-        marshal::{
-            self, Update,
-            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
-            resolver::handler,
+        tests::mocks::{
+            TestApp, TestBlock, TestScheme, TestVariant, anchor, init_marshal_mailbox,
+            start_marshal, test_databases,
         },
+    };
+    use commonware_actor::mailbox as actor_mailbox;
+    use commonware_consensus::{
+        Heightable,
+        marshal::core::Mailbox as MarshalMailbox,
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Finalization, Finalize, Proposal},
         },
-        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+        types::{Epoch, Height, Round, View},
     };
-    use commonware_cryptography::{
-        Digestible,
-        certificate::ConstantProvider,
-        ed25519,
-        sha256::{Digest as Sha256Digest, Sha256},
-    };
+    use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        ContextCell, Handle, Runner as _, Spawner as _, Supervisor as _,
-        buffer::paged::CacheRef,
-        deterministic,
+        ContextCell, Runner as _, Spawner as _, Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
     };
-    use commonware_storage::archive::{Archive as _, immutable};
-    use commonware_utils::{
-        Acknowledgement, NZU16, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-        vec::NonEmptyVec,
-    };
+    use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::{FutureExt, poll};
     use std::sync::Arc;
-
-    /// Reporter for the started marshal fixture that acknowledges every dispatched block.
-    #[derive(Clone)]
-    struct NoopReporter;
-
-    impl Reporter for NoopReporter {
-        type Activity = Update<TestBlock>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let Update::Block(_, ack) = activity {
-                ack.acknowledge();
-            }
-            Feedback::Ok
-        }
-    }
-
-    /// Backfill resolver for the started marshal fixture: its archives are pre-seeded, so
-    /// every fetch is ignored.
-    #[derive(Clone)]
-    struct IgnoreResolver;
-
-    impl Resolver for IgnoreResolver {
-        type Key = handler::Key<Sha256Digest>;
-        type Subscriber = handler::Annotation;
-
-        fn fetch<F>(&mut self, _key: F) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for IgnoreResolver {
-        type PublicKey = ed25519::PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-    }
 
     /// Builds a finalization for `view` whose payload is the digest `[digest_byte; 32]`.
     fn finalization(
@@ -556,140 +475,6 @@ mod tests {
                 },
             }
         }
-    }
-
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
-        }
-    }
-
-    async fn init_marshal_mailbox(
-        mut context: deterministic::Context,
-    ) -> commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant> {
-        let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
-        let provider = ConstantProvider::new(fixture.schemes[0].clone());
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), "syncing-finalizations"),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), "syncing-blocks"),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
-
-        let (_actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-            context.child("marshal_actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            marshal::Config {
-                provider,
-                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                partition_prefix: "syncing-harness".to_string(),
-                mailbox_size: NZUsize!(8),
-                view_retention: ViewDelta::new(1),
-                prunable_items_per_section: NZU64!(4),
-                page_cache,
-                replay_buffer: NZUsize!(64),
-                key_write_buffer: NZUsize!(64),
-                value_write_buffer: NZUsize!(64),
-                block_codec_config: (),
-                max_repair: NZUsize!(1),
-                max_pending_acks: NZUsize!(1),
-                strategy: Sequential,
-            },
-        )
-        .await;
-        mailbox
-    }
-
-    /// Initializes a marshal actor whose finalization archive is pre-seeded with the given
-    /// block's finalization, then starts it so `get_finalization` serves the finalization
-    /// without any peer fetching. The returned handler and handle must stay alive for the
-    /// marshal to keep running.
-    async fn start_marshal(
-        context: deterministic::Context,
-        scheme: TestScheme,
-        block: &TestBlock,
-        finalization: Option<Finalization<TestScheme, Sha256Digest>>,
-    ) -> (
-        MarshalMailbox<TestScheme, TestVariant>,
-        handler::Handler<Sha256Digest>,
-        Handle<()>,
-    ) {
-        let provider = ConstantProvider::new(scheme);
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let mut finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), "syncing-finalizations"),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        if let Some(finalization) = finalization {
-            finalizations_by_height = finalizations_by_height
-                .put(block.height().get(), block.digest(), finalization)
-                .await
-                .expect("failed to seed finalization")
-                .sync()
-                .await
-                .expect("failed to sync finalizations archive");
-        }
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), "syncing-blocks"),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
-
-        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-            context.child("marshal_actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            marshal::Config {
-                provider,
-                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                partition_prefix: "syncing-harness".to_string(),
-                mailbox_size: NZUsize!(8),
-                view_retention: ViewDelta::new(1),
-                prunable_items_per_section: NZU64!(4),
-                page_cache,
-                replay_buffer: NZUsize!(64),
-                key_write_buffer: NZUsize!(64),
-                value_write_buffer: NZUsize!(64),
-                block_codec_config: (),
-                max_repair: NZUsize!(1),
-                max_pending_acks: NZUsize!(1),
-                strategy: Sequential,
-            },
-        )
-        .await;
-        let (resolver_receiver, resolver_handler) =
-            handler::init(context.child("resolver_handler"), NZUsize!(8));
-        let handle = actor.start_unbuffered(NoopReporter, (resolver_receiver, IgnoreResolver));
-        (mailbox, resolver_handler, handle)
     }
 
     #[test]

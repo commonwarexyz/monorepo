@@ -58,7 +58,7 @@ type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-type SetSnapshots<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Snapshot;
+type SnapshotOf<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Snapshot;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -102,30 +102,6 @@ pub(super) struct Applied<T, S> {
 pub(super) struct Prune<T> {
     marshal_height: Height,
     qmdb_target: T,
-}
-
-impl<T> Prune<T> {
-    /// Run database and marshal pruning.
-    ///
-    /// Database pruning never discards state a restart would need (see
-    /// [`DatabaseSet::prune`]), and the durable commit justifying its target
-    /// sits at or above the oldest retained block, so the marshal prune that
-    /// follows retains every block a restart could replay.
-    pub(super) async fn run<E, DBs, S, V>(
-        self,
-        databases: DBs,
-        marshal: &MarshalMailbox<S, V>,
-    ) -> DBs
-    where
-        E: Rng + Spawner + Metrics + Clock,
-        DBs: DatabaseSet<E, SyncTargets = T>,
-        S: Scheme,
-        V: MarshalVariant,
-    {
-        let databases = databases.prune(&self.qmdb_target).await;
-        marshal.prune(self.marshal_height);
-        databases
-    }
 }
 
 /// Tracks the configured prune cadence and finalized sync targets needed to
@@ -246,6 +222,12 @@ where
     }
 
     /// Run a due prune against the owned database set.
+    /// Run database and marshal pruning.
+    ///
+    /// Database pruning never discards state a restart would need (see
+    /// [`DatabaseSet::prune`]), and the durable commit justifying its target
+    /// sits at or above the oldest retained block, so the marshal prune that
+    /// follows retains every block a restart could replay.
     pub(super) async fn prune_databases<S, V>(
         mut self,
         prune: Prune<PendingSyncTargets<A, E>>,
@@ -255,7 +237,8 @@ where
         S: Scheme,
         V: MarshalVariant,
     {
-        self.databases = prune.run(self.databases, marshal).await;
+        self.databases = self.databases.prune(&prune.qmdb_target).await;
+        marshal.prune(prune.marshal_height);
         self
     }
 
@@ -718,15 +701,15 @@ where
 
     /// Apply finalized state, start persisting it, and prune dead in-memory forks.
     ///
-    /// Returns [`None`] when the block was already processed (a duplicate
-    /// report).
+    /// Hands the processor back alongside the applied artifacts; the artifacts are
+    /// [`None`] when the block was already processed (a duplicate report).
     pub(super) async fn finalize(
         mut self,
         context: &E,
         block: &A::Block,
     ) -> (
         Self,
-        Option<Applied<PendingSyncTargets<A, E>, SetSnapshots<A, E>>>,
+        Option<Applied<PendingSyncTargets<A, E>, SnapshotOf<A, E>>>,
     ) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
@@ -778,8 +761,7 @@ where
         // Publication rides the barrier. The processing loop publishes this generation's
         // captured snapshot only after the barrier proves every member flush durable, so
         // a published snapshot can never expose state a crash could roll back.
-        let databases = self.databases;
-        let (databases, snapshot, barrier) = databases.finalize(batch).await;
+        let (databases, snapshot, barrier) = self.databases.finalize(batch).await;
         self.databases = databases;
         self.notify_finalized(context, block).await;
         let prune = self

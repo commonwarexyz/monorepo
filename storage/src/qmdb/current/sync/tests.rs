@@ -16,15 +16,16 @@
 use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
-    sync::Database as SyncDatabase,
+    sync::{Database as SyncDatabase, resolver::Resolver as _},
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Runner as _, Supervisor as _, deterministic, deterministic::Context,
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{channel::oneshot, non_empty_range};
 use rand::Rng as _;
 
 // ===== Harness Implementations =====
@@ -798,9 +799,6 @@ current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_va
 
 #[test_traced]
 fn test_current_proof_snapshot_resolver_matches_live() {
-    use crate::qmdb::{any::sync::tests::SyncTestHarness as _, sync::resolver::Resolver as _};
-    use commonware_codec::Encode as _;
-    use commonware_utils::channel::oneshot;
     use harnesses::UnorderedFixedMmrHarness as H;
     use std::{num::NonZeroU64, sync::Arc};
 
@@ -857,8 +855,6 @@ fn test_current_proof_snapshot_resolver_matches_live() {
 
 #[test_traced]
 fn test_current_live_resolver_honors_cancellation() {
-    use crate::qmdb::{any::sync::tests::SyncTestHarness as _, sync::resolver::Resolver as _};
-    use commonware_utils::channel::oneshot;
     use harnesses::UnorderedFixedMmrHarness as H;
     use std::{num::NonZeroU64, sync::Arc};
 

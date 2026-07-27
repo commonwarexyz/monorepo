@@ -346,9 +346,10 @@ where
 
     /// Serve a peer's request from the latest published snapshot.
     ///
-    /// The serve runs against owned snapshot state and is aborted (via the resolver's
-    /// cancellation receiver) if the requester stops waiting or the actor shuts down; an
-    /// abort only releases this request's snapshot clone.
+    /// The serve runs against owned snapshot state; if the requester stops waiting or the
+    /// actor shuts down, the serve future is dropped and `cancel_tx`'s drop signals any
+    /// work the resolver detached internally. An abort only releases this request's
+    /// snapshot clone.
     async fn handle_produce(
         &mut self,
         key: handler::Request<F>,
@@ -427,7 +428,7 @@ mod tests {
     use std::{num::NonZeroU64, time::Duration};
 
     #[derive(Clone, Debug)]
-    pub(super) struct DummyProvider;
+    struct DummyProvider;
 
     impl Provider for DummyProvider {
         type PublicKey = ed25519::PublicKey;
@@ -443,7 +444,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    pub(super) struct DummyBlocker;
+    struct DummyBlocker;
 
     impl commonware_p2p::Blocker for DummyBlocker {
         type PublicKey = ed25519::PublicKey;
@@ -757,201 +758,187 @@ mod tests {
             assert!(!pending[0].is_closed());
         });
     }
-}
 
-#[cfg(test)]
-mod serve_lifecycle_tests {
-    use super::*;
-    use crate::stateful::db::{MemberSource, Publisher};
-    use commonware_runtime::{Runner as _, deterministic};
-    use commonware_storage::{
-        mmr::{self, Location, Proof},
-        qmdb,
-    };
-    use commonware_utils::{NZU64, NZUsize, channel::oneshot, sync::Mutex};
-    use std::{sync::Arc, time::Duration};
-
-    /// A resolver whose serve parks until `gate` fires, reporting when it starts and when
-    /// its future is dropped mid-flight.
-    #[derive(Clone)]
-    struct ParkedResolver {
-        gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        dropped: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    }
-
-    struct SendOnDrop(Option<oneshot::Sender<()>>);
-    impl Drop for SendOnDrop {
-        fn drop(&mut self) {
-            if let Some(sender) = self.0.take() {
-                let _ = sender.send(());
-            }
-        }
-    }
-
-    impl SyncResolver for ParkedResolver {
-        type Family = mmr::Family;
-        type Digest = commonware_cryptography::sha256::Digest;
-        type Op = u64;
-        type Error = qmdb::Error<mmr::Family>;
-
-        async fn get_operations(
-            &self,
-            _op_count: Location,
-            _start_loc: Location,
-            _max_ops: NonZeroU64,
-            _include_pinned_nodes: bool,
-            cancel_rx: oneshot::Receiver<()>,
-        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-            if let Some(started) = self.started.lock().take() {
-                let _ = started.send(());
-            }
-            let mut guard = SendOnDrop(self.dropped.lock().take());
-            let gate = self.gate.lock().take().expect("gate consumed once");
-            commonware_macros::select! {
-                _ = cancel_rx => {
-                    guard.0 = None;
-                    Err(qmdb::Error::Cancelled)
-                },
-                _ = gate => {
-                    guard.0 = None;
-                    Ok(FetchResult::new(
-                        Proof { leaves: Location::new(0), inactive_peaks: 0, digests: Vec::new() },
-                        Vec::new(),
-                        None,
-                    ))
-                },
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct StaticSource(ParkedResolver);
-    impl crate::stateful::db::ServeSource for StaticSource {
-        type Serve = ParkedResolver;
-        fn serve(&self) -> Option<ParkedResolver> {
-            Some(self.0.clone())
-        }
-    }
-
-    type ParkedActor = Actor<
-        deterministic::Context,
-        commonware_cryptography::ed25519::PublicKey,
-        super::tests::DummyProvider,
-        super::tests::DummyBlocker,
-        mmr::Family,
-        StaticSource,
-    >;
-
-    fn parked() -> (
-        ParkedResolver,
-        oneshot::Sender<()>,
-        oneshot::Receiver<()>,
-        oneshot::Receiver<()>,
-    ) {
-        let (gate_tx, gate_rx) = oneshot::channel();
-        let (started_tx, started_rx) = oneshot::channel();
-        let (dropped_tx, dropped_rx) = oneshot::channel();
-        let resolver = ParkedResolver {
-            gate: Arc::new(Mutex::new(Some(gate_rx))),
-            started: Arc::new(Mutex::new(Some(started_tx))),
-            dropped: Arc::new(Mutex::new(Some(dropped_tx))),
+    mod serve_lifecycle {
+        use super::{super::*, DummyBlocker, DummyProvider};
+        use commonware_runtime::{Runner as _, deterministic};
+        use commonware_storage::{
+            mmr::{self, Location, Proof},
+            qmdb,
         };
-        (resolver, gate_tx, started_rx, dropped_rx)
-    }
+        use commonware_utils::{NZU64, NZUsize, channel::oneshot, sync::Mutex};
+        use std::{sync::Arc, time::Duration};
 
-    fn parked_config(
-        source: StaticSource,
-    ) -> Config<
-        commonware_cryptography::ed25519::PublicKey,
-        super::tests::DummyProvider,
-        super::tests::DummyBlocker,
-        StaticSource,
-    > {
-        Config {
-            peer_provider: super::tests::DummyProvider,
-            blocker: super::tests::DummyBlocker,
-            source: Some(source),
-            mailbox_size: NZUsize!(16),
-            me: None,
-            initial: Duration::from_millis(10),
-            timeout: Duration::from_millis(10),
-            fetch_retry_timeout: Duration::from_millis(10),
-            max_serve_ops: NZU64!(16),
-            priority_requests: false,
-            priority_responses: false,
+        /// A resolver whose serve parks until `gate` fires, reporting when it starts and when
+        /// its future is dropped mid-flight.
+        #[derive(Clone)]
+        struct ParkedResolver {
+            gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+            started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+            dropped: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         }
-    }
 
-    fn request() -> handler::Request<mmr::Family> {
-        handler::Request {
-            op_count: Location::new(0),
-            start_loc: Location::new(0),
-            max_ops: NZU64!(1),
-            include_pinned_nodes: false,
+        struct SendOnDrop(Option<oneshot::Sender<()>>);
+        impl Drop for SendOnDrop {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
         }
-    }
 
-    /// A serve is aborted when the requester stops waiting: the in-flight serve future is
-    /// dropped (releasing its snapshot clone) and no response is produced.
-    #[commonware_macros::test_traced]
-    fn serve_aborts_when_response_closed() {
-        deterministic::Runner::default().start(|context| async move {
-            let (resolver, _gate_tx, mut started_rx, mut dropped_rx) = parked();
-            let (mut actor, _mailbox) =
-                ParkedActor::new(context, parked_config(StaticSource(resolver)));
+        impl SyncResolver for ParkedResolver {
+            type Family = mmr::Family;
+            type Digest = commonware_cryptography::sha256::Digest;
+            type Op = u64;
+            type Error = qmdb::Error<mmr::Family>;
 
-            let (response_tx, response_rx) = oneshot::channel();
-            drop(response_rx);
-            actor.handle_produce(request(), response_tx).await;
+            async fn get_operations(
+                &self,
+                _op_count: Location,
+                _start_loc: Location,
+                _max_ops: NonZeroU64,
+                _include_pinned_nodes: bool,
+                cancel_rx: oneshot::Receiver<()>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+            {
+                if let Some(started) = self.started.lock().take() {
+                    let _ = started.send(());
+                }
+                let mut guard = SendOnDrop(self.dropped.lock().take());
+                let gate = self.gate.lock().take().expect("gate consumed once");
+                commonware_macros::select! {
+                    _ = cancel_rx => {
+                        guard.0 = None;
+                        Err(qmdb::Error::Cancelled)
+                    },
+                    _ = gate => {
+                        guard.0 = None;
+                        Ok(FetchResult::new(
+                            Proof { leaves: Location::new(0), inactive_peaks: 0, digests: Vec::new() },
+                            Vec::new(),
+                            None,
+                        ))
+                    },
+                }
+            }
+        }
 
-            // The serve started (or was pre-empted by the already-closed response) and its
-            // future was dropped without the gate ever opening.
-            let _ = started_rx.try_recv();
-            assert!(
-                dropped_rx.try_recv().is_ok(),
-                "serve future must be dropped"
-            );
-        });
-    }
+        #[derive(Clone)]
+        struct StaticSource(ParkedResolver);
+        impl crate::stateful::db::ServeSource for StaticSource {
+            type Serve = ParkedResolver;
+            fn serve(&self) -> Option<ParkedResolver> {
+                Some(self.0.clone())
+            }
+        }
 
-    /// A serve parked on I/O never blocks a writer's exclusive access: serving reads owned
-    /// snapshot state, so the write slot is acquirable while the serve is in flight.
-    #[commonware_macros::test_traced]
-    fn parked_serve_does_not_block_writer() {
-        deterministic::Runner::default().start(|context| async move {
-            let (resolver, gate_tx, mut started_rx, _dropped_rx) = parked();
-            let (mut actor, _mailbox) =
-                ParkedActor::new(context, parked_config(StaticSource(resolver)));
+        type ParkedActor = Actor<
+            deterministic::Context,
+            commonware_cryptography::ed25519::PublicKey,
+            DummyProvider,
+            DummyBlocker,
+            mmr::Family,
+            StaticSource,
+        >;
 
-            let (response_tx, response_rx) = oneshot::channel();
-            let serve = actor.handle_produce(request(), response_tx);
-            futures::pin_mut!(serve);
-            assert!(futures::poll!(serve.as_mut()).is_pending());
-            started_rx.try_recv().expect("serve should have started");
+        fn parked() -> (
+            ParkedResolver,
+            oneshot::Sender<()>,
+            oneshot::Receiver<()>,
+            oneshot::Receiver<()>,
+        ) {
+            let (gate_tx, gate_rx) = oneshot::channel();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (dropped_tx, dropped_rx) = oneshot::channel();
+            let resolver = ParkedResolver {
+                gate: Arc::new(Mutex::new(Some(gate_rx))),
+                started: Arc::new(Mutex::new(Some(started_tx))),
+                dropped: Arc::new(Mutex::new(Some(dropped_tx))),
+            };
+            (resolver, gate_tx, started_rx, dropped_rx)
+        }
 
-            // The serve holds only its captured source, so it shares nothing a
-            // writer could block on.
-            gate_tx.send(()).expect("gate should open");
-            serve.await;
-            assert!(
-                !response_rx
-                    .await
-                    .expect("response should arrive")
-                    .is_empty()
-            );
-        });
-    }
+        fn parked_config(
+            source: StaticSource,
+        ) -> Config<
+            commonware_cryptography::ed25519::PublicKey,
+            DummyProvider,
+            DummyBlocker,
+            StaticSource,
+        > {
+            Config {
+                peer_provider: DummyProvider,
+                blocker: DummyBlocker,
+                source: Some(source),
+                mailbox_size: NZUsize!(16),
+                me: None,
+                initial: Duration::from_millis(10),
+                timeout: Duration::from_millis(10),
+                fetch_retry_timeout: Duration::from_millis(10),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            }
+        }
 
-    /// Dropping the publisher detaches serving: new requests get no response instead of
-    /// panicking or hanging, while previously captured state drains.
-    #[commonware_macros::test_traced]
-    fn detached_source_drops_new_serves() {
-        deterministic::Runner::default().start(|context| async move {
-            let (publisher, source) = Publisher::<u8>::new(&context);
-            let member = MemberSource::new(source, |member| member);
-            drop(publisher);
-            assert!(crate::stateful::db::ServeSource::serve(&member).is_none());
-        });
+        fn request() -> handler::Request<mmr::Family> {
+            handler::Request {
+                op_count: Location::new(0),
+                start_loc: Location::new(0),
+                max_ops: NZU64!(1),
+                include_pinned_nodes: false,
+            }
+        }
+
+        /// A serve is aborted when the requester stops waiting: the in-flight serve future is
+        /// dropped (releasing its snapshot clone) and no response is produced.
+        #[commonware_macros::test_traced]
+        fn serve_aborts_when_response_closed() {
+            deterministic::Runner::default().start(|context| async move {
+                let (resolver, _gate_tx, mut started_rx, mut dropped_rx) = parked();
+                let (mut actor, _mailbox) =
+                    ParkedActor::new(context, parked_config(StaticSource(resolver)));
+
+                let (response_tx, response_rx) = oneshot::channel();
+                drop(response_rx);
+                actor.handle_produce(request(), response_tx).await;
+
+                // The serve started (or was pre-empted by the already-closed response) and its
+                // future was dropped without the gate ever opening.
+                let _ = started_rx.try_recv();
+                assert!(
+                    dropped_rx.try_recv().is_ok(),
+                    "serve future must be dropped"
+                );
+            });
+        }
+
+        /// A serve parked on I/O runs entirely against owned snapshot state and completes
+        /// once its gate opens.
+        #[commonware_macros::test_traced]
+        fn parked_serve_completes_against_owned_state() {
+            deterministic::Runner::default().start(|context| async move {
+                let (resolver, gate_tx, mut started_rx, _dropped_rx) = parked();
+                let (mut actor, _mailbox) =
+                    ParkedActor::new(context, parked_config(StaticSource(resolver)));
+
+                let (response_tx, response_rx) = oneshot::channel();
+                let serve = actor.handle_produce(request(), response_tx);
+                futures::pin_mut!(serve);
+                assert!(futures::poll!(serve.as_mut()).is_pending());
+                started_rx.try_recv().expect("serve should have started");
+
+                // The serve holds only its captured source.
+                gate_tx.send(()).expect("gate should open");
+                serve.await;
+                assert!(
+                    !response_rx
+                        .await
+                        .expect("response should arrive")
+                        .is_empty()
+                );
+            });
+        }
     }
 }

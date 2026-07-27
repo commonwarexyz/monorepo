@@ -131,7 +131,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The database handle set.
+    /// The owned database set.
     pub databases: A::Databases,
     /// The anchor at which state sync completed.
     pub anchor: Anchor<BlockDigest<A, E>>,
@@ -361,7 +361,7 @@ where
     let mut databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
 
-    // In the case that the committed targets do not match the marshal floor, we may
+    // In the case that the applied targets do not match the marshal floor, we may
     // have suffered a crash that left the set in an inconsistent state. In this case,
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
@@ -397,29 +397,19 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed,
         db::{DatabaseSet, ManagedDb},
-        tests::mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant},
-    };
-    use commonware_actor::Feedback;
-    use commonware_consensus::{
-        Heightable as _, Reporter,
-        marshal::{
-            self, Update, ancestry::Ancestry, core::Actor as MarshalActor, resolver::handler,
+        tests::mocks::{
+            TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, start_marshal,
         },
+    };
+    use commonware_consensus::{
+        Heightable as _,
+        marshal::ancestry::Ancestry,
         simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
-        types::{FixedEpocher, Height, ViewDelta},
+        types::Height,
     };
-    use commonware_cryptography::{
-        certificate::ConstantProvider, ed25519, sha256::Digest as Sha256Digest,
-    };
-    use commonware_parallel::Sequential;
-    use commonware_resolver::{Fetch, Resolver, TargetedResolver};
-    use commonware_runtime::{
-        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-    };
-    use commonware_storage::archive::immutable;
-    use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize, sync::Mutex, vec::NonEmptyVec,
-    };
+    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::sync::Mutex;
     use std::{convert::Infallible, sync::Arc};
 
     #[cfg(feature = "arbitrary")]
@@ -552,148 +542,6 @@ mod tests {
         }
     }
 
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
-        }
-    }
-
-    /// Reporter for the started marshal fixture that acknowledges every dispatched block.
-    #[derive(Clone)]
-    struct NoopReporter;
-
-    impl Reporter for NoopReporter {
-        type Activity = Update<TestBlock>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let Update::Block(_, ack) = activity {
-                ack.acknowledge();
-            }
-            Feedback::Ok
-        }
-    }
-
-    /// Backfill resolver for the started marshal fixture; every fetch is ignored.
-    #[derive(Clone)]
-    struct IgnoreResolver;
-
-    impl Resolver for IgnoreResolver {
-        type Key = handler::Key<Sha256Digest>;
-        type Subscriber = handler::Annotation;
-
-        fn fetch<F>(&mut self, _key: F) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for IgnoreResolver {
-        type PublicKey = ed25519::PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-    }
-
-    /// Start a fresh marshal whose floor is the genesis block.
-    async fn init_marshal_mailbox(
-        mut context: deterministic::Context,
-    ) -> (
-        commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant>,
-        handler::Handler<Sha256Digest>,
-        commonware_runtime::Handle<()>,
-    ) {
-        let fixture = scheme_mocks::fixture(&mut context, b"syncer-harness", 1);
-        let provider = ConstantProvider::new(fixture.schemes[0].clone());
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), "syncer-finalizations"),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), "syncer-blocks"),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
-
-        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-            context.child("marshal_actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            marshal::Config {
-                provider,
-                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                partition_prefix: "syncer-harness".to_string(),
-                mailbox_size: NZUsize!(8),
-                view_retention: ViewDelta::new(1),
-                prunable_items_per_section: NZU64!(4),
-                page_cache,
-                replay_buffer: NZUsize!(64),
-                key_write_buffer: NZUsize!(64),
-                value_write_buffer: NZUsize!(64),
-                block_codec_config: (),
-                max_repair: NZUsize!(1),
-                max_pending_acks: NZUsize!(1),
-                strategy: Sequential,
-            },
-        )
-        .await;
-        let (resolver_receiver, resolver_handler) =
-            handler::init(context.child("resolver_handler"), NZUsize!(8));
-        let handle = actor.start_unbuffered(NoopReporter, (resolver_receiver, IgnoreResolver));
-        (mailbox, resolver_handler, handle)
-    }
-
     /// Run startup reconciliation for a [`RewindDb`] whose applied target is
     /// `target`, returning the recorded rewinds and the startup anchor height.
     async fn reconcile(
@@ -701,8 +549,15 @@ mod tests {
         target: u64,
         stubborn: bool,
     ) -> (Vec<u64>, Height) {
-        let (marshal, _resolver_handler, _marshal_handle) =
-            init_marshal_mailbox(context.child("marshal")).await;
+        let mut marshal_context = context.child("marshal");
+        let fixture = scheme_mocks::fixture(&mut marshal_context, b"syncer-harness", 1);
+        let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            marshal_context,
+            fixture.schemes[0].clone(),
+            &TestBlock::new(0, 0),
+            None,
+        )
+        .await;
         let sync_metadata = StateSyncMetadata::init(&context, "syncer-test").await;
         let rewinds: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let result = init_databases_from_marshal::<_, RewindApp, TestScheme, TestVariant>(

@@ -34,7 +34,7 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
-use std::{ops::Deref, sync::Arc};
+use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
 /// Wraps an immutable [`UnmerkleizedBatch`], implementing the
 /// [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -51,7 +51,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
-    marker: std::marker::PhantomData<(E, C, T)>,
+    _db: PhantomData<fn(E, C, T)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -105,8 +105,8 @@ where
     /// Read a value by key, falling back to the owning database's committed state.
     pub async fn get(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
         key: &K,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>> {
         self.batch.get(key, db).await
     }
@@ -116,8 +116,8 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
         keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.batch.get_many(keys, db).await
     }
@@ -144,7 +144,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    marker: std::marker::PhantomData<(E, C, T)>,
+    _db: PhantomData<fn(E, C, T)>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -181,8 +181,8 @@ where
     /// Read a value by key, falling back to the owning database's committed state.
     pub async fn get(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
         key: &K,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>> {
         self.inner.get(key, db).await
     }
@@ -192,8 +192,8 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
         keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.inner.get_many(keys, db).await
     }
@@ -222,7 +222,7 @@ where
             .await;
         Ok(ImmutableMerkleized {
             inner: merkleized,
-            marker: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -249,7 +249,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            marker: std::marker::PhantomData,
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -313,8 +313,8 @@ where
 
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: self.new_batch(),
-            marker: std::marker::PhantomData,
+            batch: Self::new_batch(self),
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -425,8 +425,8 @@ where
 
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: self.new_batch(),
-            marker: std::marker::PhantomData,
+            batch: Self::new_batch(self),
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }

@@ -9,7 +9,9 @@
 //! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
 //! 3. Finalization: apply the sealed batch and start persisting it via
-//!    [`ManagedDb::finalize`], observing durability via [`Barrier`].
+//!    [`ManagedDb::finalize`], observing durability via [`Barrier`]. Finalize also
+//!    captures each member's serving snapshot, which [`publication`] installs for
+//!    resolver serving once the barrier proves the generation durable.
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -217,7 +219,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Create a new unmerkleized batch rooted at the database's committed
     /// state.
-    ///
     fn new_batch(&self) -> Self::Unmerkleized;
 
     /// Return true if a merkleized batch matches a committed sync target.
@@ -240,7 +241,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Capture a snapshot of the current committed state.
     ///
     /// Used for the startup publication, before any batch is finalized; committed state is
-    /// durable by definition, so the capture may be published immediately.
+    /// durable by construction, so the capture may be published immediately.
     fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Snapshot), Self::Error>> + Send;
 
     /// Prune the database to a previously finalized sync target.
@@ -355,7 +356,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
 
     /// Create child unmerkleized batches from a pending merkleized parent.
     ///
-    /// No lock is needed; reads come from the in-memory merkleized state.
+    /// Reads come from the in-memory merkleized state.
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized;
 
     /// Return true if merkleized batches match the committed sync targets.
@@ -384,7 +385,8 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// Capture a snapshot of every member's current committed state.
     ///
     /// Used for the startup publication, before any batch is finalized; committed state
-    /// is durable by definition, so the capture may be published immediately.
+    /// is durable by construction, so the capture may be published immediately. A member
+    /// capture failure is fatal for the set and therefore panics.
     fn snapshot(self) -> impl Future<Output = (Self, Self::Snapshot)> + Send;
 
     /// Prune each database to the provided per-database targets.
@@ -488,13 +490,8 @@ where
     }
 
     async fn snapshot(self) -> (Self, Self::Snapshot) {
-        match T::snapshot(self.0).await {
-            Ok((database, snapshot)) => (Self(database), snapshot),
-            Err(err) => panic!(
-                "snapshot capture failed (type {}): {err:?}",
-                core::any::type_name::<T>(),
-            ),
-        }
+        let (database, snapshot) = snapshot_or_panic(self.0, None).await;
+        (Self(database), snapshot)
     }
 
     async fn prune(self, targets: &Self::SyncTargets) -> Self {
@@ -739,9 +736,11 @@ where
 
         let (db_result, (converged_anchor, converged_target)) = join!(sync, coordinator);
         let database = db_result?;
+        // The member's typed SyncError cannot carry this protocol violation, so it is
+        // fatal here; the tuple impl reports the same message through its boxed error.
         assert!(
             T::sync_target(&database) == converged_target,
-            "state sync database target does not match the coordinator target",
+            "state sync database targets do not match the coordinator target set",
         );
         Ok((Self(database), converged_anchor))
     }
@@ -878,16 +877,7 @@ macro_rules! impl_database_set {
 
             async fn snapshot(self) -> (Self, Self::Snapshot) {
                 let results = join!($(
-                    async {
-                        match $T::snapshot(self.$idx).await {
-                            Ok(captured) => captured,
-                            Err(err) => panic!(
-                                "snapshot capture failed (index {}, type {}): {err:?}",
-                                $idx,
-                                stringify!($T),
-                            ),
-                        }
-                    },
+                    snapshot_or_panic(self.$idx, Some($idx)),
                 )+);
                 (($(results.$idx.0,)+), ($(results.$idx.1,)+))
             }
@@ -1514,6 +1504,25 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
             return;
         }
         self.dbs[idx] = DbSyncState::Reached { generation };
+    }
+}
+
+#[tracing::instrument(name = "stateful.db.snapshot_or_panic", level = "info", skip_all, fields(index = index))]
+async fn snapshot_or_panic<E, T: ManagedDb<E>>(
+    database: T,
+    index: Option<usize>,
+) -> (T, T::Snapshot) {
+    // Capture failures are fatal by design: a set that cannot snapshot its committed
+    // state cannot publish, and other members may already have captured.
+    match database.snapshot().await {
+        Ok(result) => result,
+        Err(err) => {
+            let index = index.map_or(String::new(), |i| format!("index {i}, "));
+            panic!(
+                "database snapshot capture failed ({index}type {}): {err:?}",
+                core::any::type_name::<T>(),
+            );
+        }
     }
 }
 
@@ -2304,6 +2313,48 @@ mod tests {
             _batch: Self::Merkleized,
         ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
             Err(TestFinalizeError)
+        }
+
+        fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            Ok(self)
+        }
+    }
+
+    struct FailingSnapshotDb;
+
+    impl<E: Send> ManagedDb<E> for FailingSnapshotDb {
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
+        type Error = TestFinalizeError;
+        type Config = ();
+        type SyncTarget = ();
+        type Snapshot = ();
+
+        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            Err(TestFinalizeError)
+        }
+
+        fn initial_sync_target() -> Self::SyncTarget {}
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self)
+        }
+
+        fn new_batch(&self) -> Self::Unmerkleized {
+            TestUnmerkleized::new()
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+            Ok((self, (), Handle::ready(Ok(()))))
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
@@ -3475,6 +3526,20 @@ mod tests {
             let _ = <(TestDb, FailingFinalizeDb) as DatabaseSet<deterministic::Context>>::finalize(
                 databases,
                 (TestMerkleized::new(), TestMerkleized::new()),
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "database snapshot capture failed (index 1, type commonware_glue::stateful::db::tests::FailingSnapshotDb)"
+    )]
+    fn tuple_snapshot_panic_identifies_failing_database() {
+        deterministic::Runner::default().start(|_context| async move {
+            let databases = (TestDb, FailingSnapshotDb);
+            let _ = <(TestDb, FailingSnapshotDb) as DatabaseSet<deterministic::Context>>::snapshot(
+                databases,
             )
             .await;
         });

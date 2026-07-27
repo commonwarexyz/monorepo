@@ -713,8 +713,8 @@ where
 /// Merkle structure, so it stays readable — and its proofs stay valid — across concurrent
 /// appends, syncs, and prunes of the source journal. It exposes no mutation.
 ///
-/// Rewinding the source journal in place while a view is alive is forbidden because reads from the
-/// rewound range may observe unspecified contents.
+/// Rewinding the source journal in place while a view is alive leaves reads from the
+/// rewound range observing unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct View<F, E, R, H>
 where
@@ -3878,8 +3878,8 @@ mod tests {
         executor.start(test_view_frozen_across_append_and_prune_inner::<mmb::Family>);
     }
 
-    /// Rewinding the source journal into a live view's range is forbidden by the [View]
-    /// contract that reads from the rewound range may observe unspecified contents. This test
+    /// Rewinding the source journal into a live view's range leaves reads from the rewound
+    /// range observing unspecified contents, per the [View] contract. This test
     /// documents the boundary — it asserts only that such reads do not panic and that the
     /// view's own bounds still hold, never the contents of the rewound range.
     #[test_traced("INFO")]

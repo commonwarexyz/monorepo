@@ -19,7 +19,7 @@
 //!
 //! # When compact state changes
 //!
-//! The servable compact state advances only when a commit is persisted:
+//! The servable compact state advances only when a commit begins persisting:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
 //! - [`Database::from_validated_state`] reconstructs the already-validated state without
@@ -49,6 +49,7 @@ use crate::{
     qmdb::{
         self,
         any::{FixedValue, VariableValue, value::ValueEncoding},
+        compact::snapshot::StateSnapshot,
         immutable::{
             CompactDb as ImmutableCompactDb, Operation as ImmutableOp,
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
@@ -1118,8 +1119,7 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 // witness or the frozen journal reader and never touches the live database or any lock.
 // Reads are memory- or page-cache-backed, so no cancellation hook is needed and a dropped
 // request future stops the serve.
-impl<F, E, D, Op, Cfg> Resolver
-    for Arc<crate::qmdb::compact::snapshot::StateSnapshot<F, E, D, Op, Cfg>>
+impl<F, E, D, Op, Cfg> Resolver for Arc<StateSnapshot<F, E, D, Op, Cfg>>
 where
     F: Family,
     E: crate::Context,

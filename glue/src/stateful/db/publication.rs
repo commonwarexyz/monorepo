@@ -5,7 +5,9 @@
 //! capture through a [`Publisher`] and installs it once the barrier proves every member
 //! durable; resolver actors serve the latest installed generation through cloned
 //! [`MemberSource`]s. Publication is atomic at the set level because one [`SetSnapshot`]
-//! carries every member, so serving can never observe members from different generations.
+//! carries every member: a single source load can never observe members from different
+//! generations. That atomicity covers one [`ServeSource::serve`] (or `latest`) call —
+//! independent calls may straddle an installation and observe different generations.
 //! While a generation's durability is pending, sources continue to serve the previous
 //! installed generation.
 //!
@@ -60,13 +62,12 @@ impl<S> Cell<S> {
     /// Install `snapshot` unless a newer generation is already live.
     fn install(&self, snapshot: Arc<SetSnapshot<S>>) {
         let generation = snapshot.generation();
-        {
-            let mut state = self.state.lock();
-            match &*state {
-                State::Detached => return,
-                State::Live(live) if live.generation() > generation => return,
-                State::Empty | State::Live(_) => *state = State::Live(snapshot),
-            }
+        // Metrics update under the lock so the gauge can never trail a newer install.
+        let mut state = self.state.lock();
+        match &*state {
+            State::Detached => return,
+            State::Live(live) if live.generation() > generation => return,
+            State::Empty | State::Live(_) => *state = State::Live(snapshot),
         }
         self.metrics.generation.set(generation as i64);
         self.metrics.installed.inc();
@@ -98,7 +99,7 @@ impl Metrics {
     }
 }
 
-/// The writer side handle that stages captured generations for installation.
+/// The writer-side handle that stages captured generations for installation.
 ///
 /// Owned by actor orchestration. Dropping it detaches every source.
 pub(crate) struct Publisher<S> {

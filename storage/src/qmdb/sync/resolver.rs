@@ -201,7 +201,7 @@ where
 /// The corresponding sender is dropped (or signaled) when the caller no longer needs the
 /// result, so serving stops at its next await point and `cancelled` is returned. An
 /// already-cancelled receiver returns `cancelled` without polling `serve`.
-pub async fn serve_unless_cancelled<T, E>(
+pub(crate) async fn serve_unless_cancelled<T, E>(
     cancel_rx: oneshot::Receiver<()>,
     cancelled: E,
     serve: impl Future<Output = Result<T, E>>,
@@ -277,15 +277,15 @@ macro_rules! impl_resolver {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -324,15 +324,15 @@ macro_rules! impl_resolver {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -368,15 +368,15 @@ macro_rules! impl_resolver {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }
@@ -429,15 +429,15 @@ macro_rules! impl_resolver_immutable {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -476,15 +476,15 @@ macro_rules! impl_resolver_immutable {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -520,15 +520,15 @@ macro_rules! impl_resolver_immutable {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }
@@ -570,15 +570,15 @@ macro_rules! impl_resolver_keyless {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -614,15 +614,15 @@ macro_rules! impl_resolver_keyless {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -655,15 +655,15 @@ macro_rules! impl_resolver_keyless {
                     cancel_rx,
                     qmdb::Error::Cancelled.into(),
                     fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                ),
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }

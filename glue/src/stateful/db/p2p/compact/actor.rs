@@ -1,6 +1,6 @@
 //! Actor for compact QMDB sync over P2P.
 
-use super::{Mailbox, handler, mailbox};
+use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use crate::stateful::db::ServeSource;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
@@ -8,7 +8,10 @@ use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
-use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{GaugeExt as _, status},
+};
 use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
@@ -17,7 +20,7 @@ use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
 use rand_core::Rng;
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
-use tracing::info;
+use tracing::{debug, info};
 
 type Serve<Src> = <Src as ServeSource>::Serve;
 type DbOp<Src> = <Serve<Src> as compact::Resolver>::Op;
@@ -92,6 +95,7 @@ where
     mailbox_rx: actor_mailbox::Receiver<mailbox::Message<Src, F, DbOp<Src>, H::Digest>>,
     state: State<Src>,
     pending: PendingSubs<F, DbOp<Src>, H::Digest>,
+    metrics: ResolverMetrics,
 }
 
 impl<E, P, D, B, F, Src, H> Actor<E, P, D, B, F, Src, H>
@@ -111,10 +115,11 @@ where
         context: E,
         mut config: Config<P, D, B, Src>,
     ) -> (Self, Mailbox<Src, F, DbOp<Src>, H>) {
-        let state = config
-            .source
-            .take()
-            .map_or(State::NoSource, State::HasSource);
+        let metrics = ResolverMetrics::new(&context);
+        let state = config.source.take().map_or(State::NoSource, |source| {
+            let _ = metrics.has_source.try_set(1i64);
+            State::HasSource(source)
+        });
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
@@ -124,6 +129,7 @@ where
             mailbox_rx,
             state,
             pending: BTreeMap::new(),
+            metrics,
         };
         (actor, mailbox)
     }
@@ -221,6 +227,7 @@ where
                     "attached compact resolver serving source"
                 );
                 self.state = State::HasSource(source);
+                let _ = self.metrics.has_source.try_set(1i64);
                 MailboxAction::None
             }
             mailbox::Message::GetState { request, response } => {
@@ -342,9 +349,11 @@ where
         mut response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasSource(source) = &self.state else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
         let Some(state) = source.serve() else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
         let serve = compact::Resolver::get_compact_state(&state, key.to_target());
@@ -352,19 +361,34 @@ where
         let mut shutdown = self.context.stopped();
         let result = select! {
             result = serve.as_mut() => result,
-            _ = response.closed() => return,
-            _ = &mut shutdown => return,
+            _ = response.closed() => {
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+            _ = &mut shutdown => {
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
         };
-        let Ok(fetch) = result else {
-            return;
+        let fetch = match result {
+            Ok(fetch) => fetch,
+            Err(err) => {
+                // Declines and storage failures are indistinguishable to the requester, which
+                // simply retries against another peer, so record them here.
+                debug!(?err, "failed to serve compact state");
+                self.metrics.serve_requests.inc(status::Status::Failure);
+                return;
+            }
         };
         response.send_lossy(fetch.state.encode());
+        self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{ManagedDb as _, MemberSource, Publisher};
     use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
@@ -592,16 +616,14 @@ mod tests {
     }
 
     #[test]
-    fn produce_serves_attached_database() {
+    fn produce_serves_attached_source() {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
             let target = db.target();
-            use crate::stateful::db::ManagedDb as _;
             let (_db, snapshot) = db.snapshot().await.expect("snapshot should succeed");
-            let (mut publisher, raw_source) = crate::stateful::db::Publisher::new(&context);
+            let (mut publisher, raw_source) = Publisher::new(&context);
             publisher.install_durable(snapshot);
-            let source = crate::stateful::db::MemberSource::new(raw_source, |s| s);
-            let _publisher = publisher;
+            let source = MemberSource::new(raw_source, |s| s);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(source)));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();
@@ -618,6 +640,36 @@ mod tests {
                 compact::State::<mmr::Family, TestOp, sha256::Digest>::decode_cfg(encoded, &cfg)
                     .expect("served state should decode");
             assert_eq!(state.leaf_count, target.leaf_count);
+        });
+    }
+
+    /// A target the snapshot cannot serve is indistinguishable from a storage failure to
+    /// the requester, so the actor must at least record it locally.
+    #[test]
+    fn produce_records_unservable_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("db")).await;
+            let target = db.target();
+            let (_db, snapshot) = db.snapshot().await.expect("snapshot should succeed");
+            let (mut publisher, raw_source) = Publisher::new(&context);
+            publisher.install_durable(snapshot);
+            let source = MemberSource::new(raw_source, |s| s);
+            let (mut actor, _mailbox) =
+                TestActor::new(context.child("actor"), test_config(Some(source)));
+
+            // A target past the tip is declined by the snapshot.
+            let ahead = compact::Target::new(target.root, Location::new(*target.leaf_count + 1));
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_produce(handler::Request::from_target(ahead), response_tx)
+                .await;
+
+            assert!(response_rx.await.is_err(), "decline must not be answered");
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("actor_serve_requests_total{status=\"Failure\"} 1"),
+                "serve failure should be counted: {metrics}"
+            );
         });
     }
 
@@ -639,12 +691,10 @@ mod tests {
             let db = db.sync().await.expect("sync should succeed");
             assert_ne!(db.target(), below);
 
-            use crate::stateful::db::ManagedDb as _;
             let (_db, snapshot) = db.snapshot().await.expect("snapshot should succeed");
-            let (mut publisher, raw_source) = crate::stateful::db::Publisher::new(&context);
+            let (mut publisher, raw_source) = Publisher::new(&context);
             publisher.install_durable(snapshot);
-            let source = crate::stateful::db::MemberSource::new(raw_source, |s| s);
-            let _publisher = publisher;
+            let source = MemberSource::new(raw_source, |s| s);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(source)));
             let request = handler::Request::from_target(below.clone());
             let (response_tx, response_rx) = oneshot::channel();

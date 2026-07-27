@@ -287,6 +287,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// plus a best-effort attempt to bound the recovery needed on reopen. When nothing new must
     /// be appended, the handle still proves the current tip durable and resurfaces any retained
     /// sync failure.
+    ///
+    /// Unlike [Self::persist], this clears a pending import before the entry is durable: an
+    /// in-process failure of the deferred sync is latched and fatal for the handle, and a
+    /// crash mid-replacement is the documented fails-to-reopen/re-sync mode.
     pub(crate) async fn start_sync<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,

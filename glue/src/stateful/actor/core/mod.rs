@@ -169,7 +169,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<<A::Databases as crate::stateful::db::DatabaseSet<E>>::Sources>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Sources>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -209,11 +209,9 @@ where
         // startup paths install their initial durable snapshot into this publisher.
         let (publisher, snapshot_source) = Publisher::new(self.context.as_present());
         self.resolvers
-            .attach_sources(
-                <A::Databases as crate::stateful::db::DatabaseSet<E>>::member_sources(
-                    snapshot_source,
-                ),
-            )
+            .attach_sources(<A::Databases as DatabaseSet<E>>::member_sources(
+                snapshot_source,
+            ))
             .await;
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor, publisher).await;
@@ -229,7 +227,7 @@ where
     async fn start_state_sync(
         self,
         floor: Finalization<S, V::Commitment>,
-        publisher: Publisher<<A::Databases as crate::stateful::db::DatabaseSet<E>>::Snapshot>,
+        publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
     ) {
         let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = self
@@ -242,7 +240,7 @@ where
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
-            resolvers: self.resolvers.clone(),
+            resolvers: self.resolvers,
             finalization: floor,
             marshal: self.marshal.clone(),
             sync_complete,
@@ -268,7 +266,7 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(
         self,
-        mut publisher: Publisher<<A::Databases as crate::stateful::db::DatabaseSet<E>>::Snapshot>,
+        mut publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
     ) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
@@ -282,9 +280,9 @@ where
         .await;
 
         // Install the recovered committed state as generation zero so serving can begin
-        // before the first finalization; committed state is durable by definition.
-        let (databases, genesis) = databases.snapshot().await;
-        publisher.install_durable(genesis);
+        // before the first finalization; committed state is durable by construction.
+        let (databases, initial) = databases.snapshot().await;
+        publisher.install_durable(initial);
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
@@ -315,7 +313,7 @@ mod tests {
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
-        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant, archive_config},
     };
     use commonware_consensus::{
         Application as _, CertifiableBlock as _,
@@ -360,28 +358,6 @@ mod tests {
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
-        }
-    }
-
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
         }
     }
 

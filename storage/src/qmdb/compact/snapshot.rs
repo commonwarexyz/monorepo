@@ -1,8 +1,8 @@
-//! Owned immutable snapshot of a compact database's durable compact state.
+//! Owned immutable snapshot of a compact database's compact state.
 
 use crate::{
     Context,
-    merkle::{Family, Location},
+    merkle::Family,
     qmdb::{
         Error,
         compact::witness::{self, VerifiedWitness, Witness},
@@ -13,7 +13,7 @@ use commonware_codec::{Decode as _, Read};
 use commonware_cryptography::Digest;
 use core::marker::PhantomData;
 
-/// Owned immutable snapshot of a compact database's durable compact state, frozen at capture.
+/// Owned immutable snapshot of a compact database's compact state, frozen at capture.
 ///
 /// Produced by a compact database's `compact_snapshot`. It serves compact-sync state requests
 /// against the captured tip witness and, for targets below the tip, against a frozen reader
@@ -29,7 +29,9 @@ use core::marker::PhantomData;
 /// rejection rather than a serve-time check.
 #[commonware_macros::stability(ALPHA)]
 pub struct StateSnapshot<F: Family, E: Context, D: Digest, Op, Cfg> {
-    /// The captured verified witness, the last durably persisted commit at capture.
+    /// The captured verified witness, the tip commit at capture. An in-flight
+    /// `start_sync` installs its witness before durability is proven, so a capture may hold
+    /// an unproven tip; callers gating serving on durability wait on that commit's handle.
     witness: VerifiedWitness<F, D>,
 
     /// Frozen reader over the witness journal's retained entries at capture. `None` when a
@@ -69,11 +71,6 @@ where
     /// Return the root committed by the captured witness.
     pub const fn root(&self) -> D {
         self.witness.root
-    }
-
-    /// Return the committed leaf count of the captured witness.
-    pub const fn leaf_count(&self) -> Location<F> {
-        self.witness.leaf_count()
     }
 
     /// Return the compact-sync target described by the captured witness.

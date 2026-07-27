@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, SyncEngineConfig,
+            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
             p2p::{compact as compact_resolver, standard as qmdb_resolver},
         },
         probe::{Config as ProbeConfig, Probe},
@@ -231,12 +231,8 @@ impl App {
             u64_to_digest(height.get()),
         );
 
-        let merkleized_a = crate::stateful::db::Unmerkleized::merkleize(batch_a, &databases.0)
-            .await
-            .unwrap();
-        let merkleized_b = crate::stateful::db::Unmerkleized::merkleize(batch_b, &databases.1)
-            .await
-            .unwrap();
+        let merkleized_a = batch_a.merkleize(&databases.0).await.unwrap();
+        let merkleized_b = batch_b.merkleize(&databases.1).await.unwrap();
         (merkleized_a, merkleized_b)
     }
 }
@@ -683,6 +679,9 @@ impl EngineDefinition for MultiDbEngine {
         let storage_roots: StorageRoots = Arc::new(move || {
             let sources = root_observer.clone();
             Box::pin(async move {
+                // The two member reads are separate serve() calls, so an installation can
+                // land between them; a torn profile only reduces the agreement check's
+                // overlap, never fabricates a disagreement.
                 let source_a = sources.0.lock().clone().expect("source must be attached");
                 let source_b = sources.1.lock().clone().expect("source must be attached");
                 let a = crate::stateful::db::ServeSource::serve(&source_a)

@@ -155,13 +155,6 @@ where
     }
 }
 
-impl<E, A> Mailbox<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-}
-
 impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,

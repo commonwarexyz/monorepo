@@ -162,8 +162,8 @@ where
             } => match message {
                 Message::UpdateTargets { update, response } => {
                     if self.delivered {
-                        // The artifact already went out on the completion channel;
-                        // the caller collects it from there.
+                        // The artifact already went out on the completion channel or with
+                        // an earlier response; the caller collects it from there.
                         response.send_lossy(Some(Artifact::Announced));
                         continue;
                     }
@@ -180,6 +180,11 @@ where
                             Ok((databases, anchor)) => {
                                 self.delivered = true;
                                 state_sync_task = None.into();
+                                // The artifact travels with this response, so the completion
+                                // channel must never fire: drop its sender so any protocol
+                                // violation surfaces as the caller's loud expect instead of
+                                // an Announced reply that hangs awaiting a silent channel.
+                                self.sync_complete = None;
                                 response.send_lossy(Some(Artifact::Delivered(SyncResult {
                                     databases,
                                     anchor,

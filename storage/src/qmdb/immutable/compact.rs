@@ -494,7 +494,11 @@ where
         })
     }
 
-    /// Capture an owned immutable [StateSnapshot] of the database's durable compact state.
+    /// Capture an owned immutable [StateSnapshot] of the database's compact state.
+    ///
+    /// The captured tip is the current witness: an in-flight [`Self::start_sync`] installs
+    /// its witness before durability is proven, so callers gating serving on durability
+    /// wait on that commit's handle before exposing the capture.
     ///
     /// The snapshot is frozen at capture, so it does not observe later mutations. It serves
     /// the captured commit's compact state — and, from a frozen reader over the witness
@@ -835,7 +839,7 @@ mod tests {
     /// Open a [DelayedDb] whose blob syncs park on `pending`.
     ///
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
-    /// must be driven with `drive_pending_syncs` (or the mock unblocked first).
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
     fn open_delayed_db(
         context: &deterministic::Context,
         label: &'static str,

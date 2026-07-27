@@ -32,7 +32,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{channel::mpsc, non_empty_range};
-use std::{ops::Deref, sync::Arc};
+use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
 /// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -47,7 +47,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    marker: std::marker::PhantomData<(E, C)>,
+    _db: PhantomData<fn(E, C)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -97,8 +97,8 @@ where
     /// Read a value by location, falling back to the owning database's committed state.
     pub async fn get(
         &self,
-        db: &Keyless<F, E, V, C, H, S>,
         location: Location<F>,
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Option<V::Value>, Error<F>> {
         self.batch.get(location, db).await
     }
@@ -109,8 +109,8 @@ where
     /// order as the input locations.
     pub async fn get_many(
         &self,
-        db: &Keyless<F, E, V, C, H, S>,
         locations: &[Location<F>],
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.batch.get_many(locations, db).await
     }
@@ -135,7 +135,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    marker: std::marker::PhantomData<(E, C)>,
+    _db: PhantomData<fn(E, C)>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
@@ -168,8 +168,8 @@ where
     /// Read a value by location, falling back to the owning database's committed state.
     pub async fn get(
         &self,
-        db: &Keyless<F, E, V, C, H, S>,
         location: Location<F>,
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Option<V::Value>, Error<F>> {
         self.inner.get(location, db).await
     }
@@ -180,8 +180,8 @@ where
     /// order as the input locations.
     pub async fn get_many(
         &self,
-        db: &Keyless<F, E, V, C, H, S>,
         locations: &[Location<F>],
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.inner.get_many(locations, db).await
     }
@@ -208,7 +208,7 @@ where
             .await;
         Ok(KeylessMerkleized {
             inner: merkleized,
-            marker: std::marker::PhantomData,
+            _db: PhantomData,
         })
     }
 }
@@ -233,7 +233,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            marker: std::marker::PhantomData,
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -278,8 +278,8 @@ where
 
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnmerkleized {
-            batch: self.new_batch(),
-            marker: std::marker::PhantomData,
+            batch: Self::new_batch(self),
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -382,8 +382,8 @@ where
 
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnmerkleized {
-            batch: self.new_batch(),
-            marker: std::marker::PhantomData,
+            batch: Self::new_batch(self),
+            _db: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }

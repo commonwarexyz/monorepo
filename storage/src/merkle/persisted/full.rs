@@ -984,7 +984,7 @@ where
 /// Node reads combine the captured in-memory nodes with an owned snapshot of the node
 /// journal, so the view stays readable across concurrent appends, flushes, and prunes of
 /// the source structure. Rewinding the source structure in place while a view is alive is
-/// forbidden because reads from the rewound range may observe unspecified contents.
+/// unsupported: reads from the rewound range observe unspecified contents.
 #[commonware_macros::stability(ALPHA)]
 pub struct View<F: Family, E: Context, D: Digest> {
     /// Nodes resident in memory at capture.
@@ -1008,7 +1008,7 @@ impl<F: Family, E: Context, D: Digest> crate::merkle::storage::Storage<F> for Vi
 
         match self.nodes.read(*position).await {
             Ok(item) => Ok(Some(item)),
-            Err(JError::ItemPruned(_) | JError::ItemOutOfRange(_)) => Ok(None),
+            Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::Journal(e)),
         }
     }

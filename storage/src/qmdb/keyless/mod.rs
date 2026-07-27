@@ -481,7 +481,7 @@ where
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
+    /// recover the database on reopen.
     #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();
@@ -494,8 +494,12 @@ where
     /// calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// plus a best-effort attempt to bound the recovery needed on reopen. Use [Self::sync] to
     /// guarantee none is needed. A new sync waits for the prior sync before starting.
+    /// Failures of the deferred durability work surface on the returned handle. A failed
+    /// data sync also fails the next durability operation. A failed recovery-watermark
+    /// sync is not observed by [Self::commit], and a failed merkle-node sync may not be.
+    /// Both resurface on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

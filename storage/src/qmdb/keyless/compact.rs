@@ -479,7 +479,11 @@ where
         })
     }
 
-    /// Capture an owned immutable [StateSnapshot] of the database's durable compact state.
+    /// Capture an owned immutable [StateSnapshot] of the database's compact state.
+    ///
+    /// The captured tip is the current witness: an in-flight [`Self::start_sync`] installs
+    /// its witness before durability is proven, so callers gating serving on durability
+    /// wait on that commit's handle before exposing the capture.
     ///
     /// The snapshot is frozen at capture, so it does not observe later mutations. It serves
     /// the captured commit's compact state — and, from a frozen reader over the witness

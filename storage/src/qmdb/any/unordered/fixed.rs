@@ -146,10 +146,12 @@ pub(crate) mod test {
                 },
                 unordered::{Update, fixed::Operation},
             },
+            sync::resolver::Resolver as _,
             verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
@@ -161,7 +163,7 @@ pub(crate) mod test {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::oneshot};
     use core::num::NonZeroUsize;
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
@@ -1640,8 +1642,6 @@ pub(crate) mod test {
     /// activity bitmap.
     #[test]
     fn test_any_fixed_db_proof_snapshot() {
-        use commonware_codec::Encode as _;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = create_test_db(context.child("storage")).await;
@@ -1710,10 +1710,6 @@ pub(crate) mod test {
 
     #[test]
     fn test_any_fixed_snapshot_resolver_matches_live_db() {
-        use crate::qmdb::sync::resolver::Resolver as _;
-        use commonware_codec::Encode as _;
-        use commonware_utils::channel::oneshot;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = create_test_db(context.child("storage")).await;
@@ -1772,9 +1768,6 @@ pub(crate) mod test {
 
     #[test]
     fn test_any_fixed_snapshot_resolver_cancellation() {
-        use crate::qmdb::sync::resolver::Resolver as _;
-        use commonware_utils::channel::oneshot;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = create_test_db(context.child("storage")).await;

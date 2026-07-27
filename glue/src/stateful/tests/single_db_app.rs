@@ -7,7 +7,10 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
-        db::{DatabaseSet, Merkleized as _, SyncEngineConfig, p2p::standard as qmdb_resolver},
+        db::{
+            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            p2p::standard as qmdb_resolver,
+        },
         probe::{Config as ProbeConfig, Probe},
     },
 };
@@ -187,9 +190,7 @@ impl App {
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        crate::stateful::db::Unmerkleized::merkleize(batch, databases.as_ref())
-            .await
-            .unwrap()
+        batch.merkleize(databases.as_ref()).await.unwrap()
     }
 }
 
