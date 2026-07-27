@@ -71,17 +71,19 @@ impl EdwardsPoint {
         let sign = bytes[31] >> 7;
         let y = FieldElement::from_bytes(bytes);
 
-        // Recover x from x^2 = u/v, with u = y^2 - 1 and v = d*y^2 + 1, using the standard
-        // combined inverse-square-root computation:
-        //   x_candidate = u * v^3 * (u * v^7)^((p-5)/8)
+        // Recover x from x^2 = u/v, with u = y^2 - 1 and v = d*y^2 + 1, via one combined
+        // inverse-square-root exponentiation on the candidate
+        //   x_candidate = u * (u * v)^((p-5)/8),
+        // for which v*x^2 = u^2 * v * (uv)^((p-5)/4) = chi(uv) * u = +/-u (with chi the Legendre
+        // symbol, since (uv)^((p-1)/2) = chi(uv)): exactly the same two-case check as the
+        // classic u * v^3 * (u * v^7)^((p-5)/8) candidate (the two differ by v^(3(p-1)/4), a
+        // fourth root of unity the sqrt(-1) fixup below absorbs), but with the v^3/v^7 setup
+        // (2 squarings + 3 multiplies) replaced by the single u*v multiply.
         let y2 = y.square();
         let u = y2.sub(&FieldElement::ONE);
         let v = FieldElement::EDWARDS_D.mul(&y2).add(&FieldElement::ONE);
-        let v3 = v.square().mul(&v);
-        let v7 = v3.square().mul(&v);
-        let uv3 = u.mul(&v3);
-        let uv7 = u.mul(&v7);
-        let mut x = uv3.mul(&uv7.pow_p58());
+        let uv = u.mul(&v);
+        let mut x = u.mul(&uv.pow_p58());
 
         let vxx = v.mul(&x.square());
         if vxx.eq(&u) {
@@ -108,11 +110,12 @@ impl EdwardsPoint {
     }
 
     /// Decompresses `LANES` point encodings at once, running the arithmetic-heavy part of the
-    /// sqrt kernel above (the `u`/`v` setup, the `v^3`/`v^7` powers, and the `(p-5)/8`
-    /// exponentiation) 8-wide via [`FieldVec`], then finishing the branchy case analysis and sign
-    /// fixup per lane exactly as [`EdwardsPoint::decompress`] does. Point decompression is a full
-    /// modular exponentiation per point, so batching it this way (rather than looping over 8
-    /// calls to `decompress`) is where most of batch verification's cost lives besides the MSM.
+    /// sqrt kernel above (the `u`/`v` setup and the `(p-5)/8` exponentiation) 8-wide via
+    /// [`FieldVec`], then finishing the branchy case analysis and sign fixup per lane exactly as
+    /// [`EdwardsPoint::decompress`] does (see there for the candidate's derivation). Point
+    /// decompression is a full modular exponentiation per point, so batching it this way (rather
+    /// than looping over 8 calls to `decompress`) is where most of batch verification's cost
+    /// lives besides the MSM.
     pub(crate) fn decompress_batch(bytes: &[[u8; 32]; LANES]) -> [Option<Self>; LANES] {
         let ys: [FieldElement; LANES] =
             core::array::from_fn(|i| FieldElement::from_bytes(&bytes[i]));
@@ -123,11 +126,8 @@ impl EdwardsPoint {
         let y2 = y_vec.square();
         let u = y2.sub(&one).reduce();
         let v = d.mul(&y2).add(&one).reduce();
-        let v3 = v.square().mul(&v);
-        let v7 = v3.square().mul(&v);
-        let uv3 = u.mul(&v3);
-        let uv7 = u.mul(&v7);
-        let x_candidate = uv3.mul(&uv7.pow_p58());
+        let uv = u.mul(&v);
+        let x_candidate = u.mul(&uv.pow_p58());
         let vxx = v.mul(&x_candidate.square());
 
         let u_lanes = u.to_lanes();
