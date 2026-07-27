@@ -29,7 +29,6 @@ pub(super) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub(super) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-/// History needed to compare a deliberately slow state-sync joiner with the live validators.
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {

@@ -272,7 +272,6 @@ pub trait Merkleized: Sized + Send + Sync {
 
     /// Create a child unmerkleized batch that reads through this batch's
     /// pending changes before falling back to the database's applied state.
-    ///
     fn new_batch(&self) -> Self::Unmerkleized;
 }
 
