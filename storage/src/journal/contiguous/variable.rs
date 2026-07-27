@@ -1620,9 +1620,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.offsets = offsets;
         self.bounds.start = new_boundary;
 
-        // Defer the data unlink, fenced by the blobs layer like the offsets side. Gate it on the
-        // offsets boundary being durable so a crash never removes data ahead of an uncommitted
-        // boundary.
+        // Defer the data unlink into the returned handle, gated on the offsets boundary being
+        // durable so a crash never removes data ahead of an uncommitted boundary.
         let data_removal = self.blobs.start_prune(min_blob).await?;
         self.metrics.update(
             self.bounds.end,
@@ -2469,6 +2468,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Persist data blobs and all metadata for both the data and offsets journals.
+    ///
+    /// Deferred prunes are the exception: if a [`Self::start_prune`] handle was dropped instead of
+    /// driven, its blobs are unlinked on the next open rather than by this call.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0 = self.0.sync().await?;
         Ok(self)

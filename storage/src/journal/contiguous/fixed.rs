@@ -1198,8 +1198,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // pruned; the real-prune path (past the no-op above) guarantees `new_boundary <= watermark`.
         assert!(new_boundary <= watermark);
 
-        // Adopt the boundary in memory. A dropped future consumes the journal, discarding this
-        // advance; the boundary the returned handle persists is what recovery completes on reopen.
+        // Adopt the boundary in memory.
         self.bounds.start = new_boundary;
 
         // Commit the boundary and raise the watermark to the proven frontier in one pipelined
@@ -1214,8 +1213,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.checkpoint = checkpoint;
 
         // Advance the in-memory blob boundary and defer the unlink into the returned handle, gated
-        // on the boundary being durable. The blobs layer retains its own clone so a later reset or
-        // teardown can fence the unlink before reusing the freed indices.
+        // on the boundary being durable.
         let removal = self.blobs.start_prune(min_blob).await?;
         self.metrics
             .update(self.bounds.end, self.bounds.start, items_per_blob);
@@ -1377,7 +1375,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Durably persist the current state of the structure, ensuring no recovery is required in the
     /// event of a crash following this call.
     ///
-    /// Advances the recovery watermark to the current size.
+    /// Advances the recovery watermark to the current size. Deferred prunes are the exception: if a
+    /// [`Self::start_prune`] handle was dropped instead of driven, its blobs are unlinked on the
+    /// next open rather than by this call.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0 = self.0.sync().await?;
         Ok(self)
