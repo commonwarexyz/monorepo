@@ -32,8 +32,8 @@ fn bench_sync(c: &mut Criterion) {
                             }
 
                             // Sync twice to ensure both blobs populated
-                            metadata.sync().await.unwrap();
-                            metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
 
                             // Update some keys
                             for (k, v) in &modified_kvs {
@@ -42,7 +42,7 @@ fn bench_sync(c: &mut Criterion) {
 
                             // Sync new data
                             let start = Instant::now();
-                            metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
                             total += start.elapsed();
 
                             metadata.destroy().await.unwrap();

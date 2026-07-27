@@ -47,11 +47,11 @@ impl StorageWorkload for FreezerWorkload {
         for i in 0..64 {
             let mut key = [0u8; 64];
             context.fill(&mut key);
-            freezer.put(FixedBytes::new(key), i).await?;
+            (freezer, _) = freezer.put(FixedBytes::new(key), i).await?;
 
             // Sync periodically to trigger resize chunks
             if i % 8 == 0 {
-                freezer.sync().await?;
+                (freezer, _) = freezer.sync().await?;
             }
         }
         // Close to complete any pending resize

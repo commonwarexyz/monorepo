@@ -2,9 +2,10 @@ use super::{Config, ingress::Message};
 use crate::authenticated::{
     Mailbox,
     lookup::{
-        actors::{peer, router, tracker},
+        actors::{peer, tracker},
         metrics,
     },
+    router,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;

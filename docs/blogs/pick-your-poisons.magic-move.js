@@ -142,10 +142,9 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const window01 = (p, [start, end]) => clamp((p - start) / (end - start), 0, 1);
 
-// Layout-critical rules (track height, source-div hiding, and the
-// prefers-reduced-motion swap) live in an inline <style> in the markdown so
-// they apply at first paint — before this module executes — and the prose
-// sources never flash. Everything here only styles elements this module
+// Layout-critical rules (track height, source-div hiding) live in an inline
+// <style> in the markdown so they apply at first paint — before this module
+// executes — and the prose sources never flash. Everything here only styles elements this module
 // creates.
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) return;
@@ -384,8 +383,8 @@ function renderMath(container) {
 }
 
 // The source divs are hidden by the inline styles in the markdown and shown
-// again under prefers-reduced-motion (or via <noscript> with scripting off),
-// so the prose stays readable without the animation.
+// again via <noscript> with scripting off, so the prose stays readable
+// without the animation.
 function readMarkdownSource() {
   const storySource = document.getElementById('pick-your-poisons-story-source');
   const dreamSource = document.getElementById('pick-your-poisons-dream-source');
@@ -676,8 +675,8 @@ function initMagicMove(mount) {
   const dream = document.createElement('div');
   dream.className = 'cw-magic-dream';
   dream.innerHTML = markdownSource.dreamHtml;
-  // Keep fragment IDs on the visible reduced-motion source rather than
-  // duplicating them in this animated copy.
+  // Keep fragment IDs on the prose source rather than duplicating them in
+  // this animated copy.
   for (const el of dream.querySelectorAll('[id]')) el.removeAttribute('id');
   renderMath(dream);
 
@@ -843,11 +842,8 @@ function initMagicMove(mount) {
   // Arrow keys jump between story steps, Keynote style. Forward from above
   // the track enters the deck and forward past the last stop exits into the
   // article; backward steps all the way out to the top of the page. Outside
-  // that range keys stay native so readers are never trapped. Bail under
-  // prefers-reduced-motion (the preference can turn on after init) as the
-  // track is hidden and the stops would be meaningless.
+  // that range keys stay native so readers are never trapped.
   function onKeyDown(event) {
-    if (reducedMotion.matches) return;
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
     const backward = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
@@ -884,8 +880,6 @@ function initMagicMove(mount) {
   const dreamLink = document.querySelector('a[href="#dream-goal"]');
   if (dreamLink) {
     dreamLink.addEventListener('click', event => {
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-
       event.preventDefault();
       window.history.pushState(null, '', dreamLink.hash);
       window.scrollTo({
@@ -931,18 +925,8 @@ function initFinalFigure(mount) {
 }
 
 // Module scripts run after the document is parsed, so the mounts already exist.
-// Under prefers-reduced-motion the markdown's inline styles hide the animation
-// and show the prose sources instead, so defer the scroll machinery until the
-// preference lifts. Its key handler must not run while the track is
-// display:none, since it would compute stops against a zero-height track
-// and swallow arrow-key scrolling at the top of the page.
-const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const mount = document.getElementById(MOUNT_ID);
-if (mount && reducedMotion.matches) {
-  reducedMotion.addEventListener('change', () => initMagicMove(mount), { once: true });
-} else if (mount) {
-  initMagicMove(mount);
-}
+if (mount) initMagicMove(mount);
 
 const finalMount = document.getElementById(FINAL_MOUNT_ID);
 if (finalMount) initFinalFigure(finalMount);

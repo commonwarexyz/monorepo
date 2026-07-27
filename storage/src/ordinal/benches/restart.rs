@@ -15,9 +15,8 @@ fn bench_restart(c: &mut Criterion) {
     for items in [10_000, 50_000, 100_000, 500_000] {
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let bits = builder.start(|ctx| async move {
-            let mut store = init(ctx, None).await;
-            let indices = append_random(&mut store, items).await;
-            store.sync().await.unwrap();
+            let store = init(ctx, None).await;
+            let (_, indices) = append_random(store, items).await;
             bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
         });
 

@@ -81,7 +81,7 @@ fn fuzz(input: FuzzInput) {
                     model.clear();
                 }
                 MetadataOperation::Sync => {
-                    metadata.sync().await.unwrap();
+                    metadata = metadata.sync().await.unwrap();
                 }
                 MetadataOperation::Destroy => {
                     metadata.destroy().await.unwrap();

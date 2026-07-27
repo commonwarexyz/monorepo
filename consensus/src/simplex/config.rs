@@ -184,7 +184,7 @@ where
     pub view_retention: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for at least this long.
+    /// for at least this long while a quorum of participants has been active.
     ///
     /// This timeout must be greater than the certification timeout and timeout retry.
     pub skip_timeout: Duration,

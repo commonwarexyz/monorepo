@@ -35,9 +35,8 @@ fn bench_restart(c: &mut Criterion) {
                         if !initialized {
                             commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                                 |ctx| async move {
-                                    let mut a = Archive::init(ctx, variant, compression).await;
-                                    append_random(&mut a, items).await;
-                                    a.sync().await.unwrap();
+                                    let a = Archive::init(ctx, variant, compression).await;
+                                    append_random(a, items).await;
                                 },
                             );
                             initialized = true;

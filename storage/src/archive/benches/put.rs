@@ -31,11 +31,11 @@ fn bench_put(c: &mut Criterion) {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
-                            let mut archive =
+                            let archive =
                                 Archive::init(ctx.child("storage"), variant, compression).await;
 
                             let start = Instant::now();
-                            append_random(&mut archive, items).await;
+                            let (archive, _) = append_random(archive, items).await;
                             total += start.elapsed();
 
                             archive.destroy().await.unwrap();

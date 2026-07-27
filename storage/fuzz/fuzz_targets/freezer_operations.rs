@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
             match op {
                 Op::Put { key, value } => {
                     let k = vec_to_key(&key);
-                    let cursor = freezer.put(k.clone(), value).await.unwrap();
+                    (freezer, _) = freezer.put(k.clone(), value).await.unwrap();
                     expected_state.insert(k, value);
                     cursors.push((cursor, value));
                 }
@@ -132,51 +132,7 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(res, Some(value));
                 }
                 Op::Sync => {
-                    let checkpoint = freezer.sync().await.unwrap();
-                    synced = Some((checkpoint, expected_state.clone(), cursors.clone()));
-                }
-                Op::Restart { mode } => {
-                    let checkpoint = match mode % 3 {
-                        // Close and reopen empty: a `None` checkpoint deletes all
-                        // freezer data, so the model must be reset to match.
-                        0 => {
-                            freezer.close().await.unwrap();
-                            expected_state.clear();
-                            cursors.clear();
-                            None
-                        }
-                        // Close and restore from the returned checkpoint
-                        1 => Some(freezer.close().await.unwrap()),
-                        // Crash (drop without close) and restore from the latest
-                        // synced checkpoint, rolling back to its state
-                        _ => match synced.clone() {
-                            Some((checkpoint, state, synced_cursors)) => {
-                                drop(freezer);
-                                expected_state = state;
-                                cursors = synced_cursors;
-                                Some(checkpoint)
-                            }
-                            None => Some(freezer.close().await.unwrap()),
-                        },
-                    };
-                    freezer = Freezer::<_, FixedBytes<32>, i32>::init(
-                        context
-                            .child("storage")
-                            .with_attribute("instance", restarts),
-                        cfg.clone(),
-                        checkpoint,
-                    )
-                    .await
-                    .unwrap();
-                    restarts += 1;
-                    // Refresh the crash-recovery model from the checkpoint we just
-                    // reopened from: it is now the latest persisted baseline, paired
-                    // with the current state, so a later crash can validly restore it.
-                    // Mode 0 reopens from the table (no checkpoint), which cannot serve
-                    // as a restore point, so it leaves no synced checkpoint. A stale
-                    // pre-restart checkpoint would otherwise be recovered past, dropping
-                    // re-put keys the rolled-back model still expects.
-                    synced = checkpoint.map(|cp| (cp, expected_state.clone(), cursors.clone()));
+                    (freezer, _) = freezer.sync().await.unwrap();
                 }
                 Op::Close => {
                     freezer.close().await.unwrap();

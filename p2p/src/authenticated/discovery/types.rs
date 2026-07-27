@@ -1,12 +1,9 @@
-use crate::{
-    Channel, Ingress,
-    authenticated::data::{Data, EncodedData},
-};
+use crate::{Ingress, authenticated::data::Data};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg, varint::UInt,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::{Buf, BufMut, BufferPool, Clock, IoBufs};
+use commonware_runtime::{Buf, BufMut, Clock};
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 use thiserror::Error;
@@ -24,16 +21,8 @@ pub enum Error {
     SynchronyBound,
 }
 
-/// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
-///
-/// The byte overhead is calculated as the sum of the following:
-/// - 1: Payload enum value
-/// - 10: Channel varint
-/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
-
 /// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = 0;
+const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
 /// Prefix byte used to identify a [Payload] with variant Greeting.
 const GREETING_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant BitVec.
@@ -79,13 +68,6 @@ pub enum Payload<C: PublicKey> {
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
-}
-
-impl<C: PublicKey> Payload<C> {
-    /// Encode `Payload::Data` bytes for transmission using pooled header allocation.
-    pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
-        EncodedData::new(pool, DATA_PREFIX, channel, message)
-    }
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {
@@ -393,6 +375,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::data::MAX_PAYLOAD_DATA_OVERHEAD;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
@@ -410,6 +393,11 @@ mod tests {
             public_key: c.public_key(),
             signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
         }
+    }
+
+    #[test]
+    fn test_data_prefix_value() {
+        assert_eq!(DATA_PREFIX, 0);
     }
 
     #[test]

@@ -383,7 +383,10 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     /// Write the information necessary to restore the bitmap in its fully pruned state at its last
     /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
     /// retained elements.
-    pub async fn write_pruned(&mut self) -> Result<(), Error> {
+    ///
+    /// Consumes the bitmap and returns it only on success: an error (or a dropped future)
+    /// destroys the handle.
+    pub async fn write_pruned(mut self) -> Result<Self, Error> {
         self.metadata.clear();
 
         // Write the number of pruned chunks.
@@ -403,7 +406,8 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(Error::Metadata)
+        self.metadata = self.metadata.sync().await.map_err(Error::Metadata)?;
+        Ok(self)
     }
 
     /// Destroy the bitmap metadata from disk.

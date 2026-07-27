@@ -84,6 +84,27 @@
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
 //! every item that may have become durable through `commit` or storage behavior.
 //!
+//! # Watermark advancement
+//!
+//! The watermark must never exceed what is durably on disk. `sync()` completes its data sync
+//! before writing the watermark, so it can advance it to the current size. `start_sync()`
+//! returns before its data sync completes, so it advances the watermark using an older proof:
+//! the journal's *barrier*, the highest size whose sync it has already observed complete.
+//! A durable value is safe to write at any time, so the watermark write needs no ordering
+//! against the in-flight data sync.
+//!
+//! An advance that fails to start fails the call, destroying the journal. A started advance's
+//! failure surfaces on the returned handle, and the next checkpoint write observes it and
+//! fails before writing.
+//!
+//! The invariants:
+//!
+//! - The watermark only takes values the barrier has held (never an in-flight size).
+//! - The barrier advances only on an observed sync success.
+//! - Operations that move blob state backward (rewind, clear) durably lower the watermark
+//!   before touching blob state (draining any in-flight watermark write that could exceed
+//!   the surviving data), then lower the barrier.
+//!
 //! # Consistency
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
@@ -112,11 +133,12 @@
 use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
+    durability::Barrier,
 };
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
@@ -128,7 +150,7 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
-use futures::{Stream, future::try_join_all};
+use futures::{FutureExt as _, Stream, future::try_join_all};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -328,8 +350,7 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// The journal state behind the [Journal] handle, boxed so the handle stays pointer-sized
-/// and mutated in place by the handle's methods.
+/// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 pub(super) struct Inner<E: Context, A> {
     /// The blobs that comprise the journal.
     blobs: Writable<E>,
@@ -345,6 +366,9 @@ pub(super) struct Inner<E: Context, A> {
 
     /// Shared with [Reader]s.
     metrics: Arc<Metrics<E>>,
+
+    /// The known-durable size of the journal.
+    barrier: Barrier,
 
     _phantom: PhantomData<A>,
 }
@@ -377,6 +401,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ) -> Self {
         Self {
             blobs,
+            barrier: Barrier::new(
+                checkpoint
+                    .watermark()
+                    .expect("recovery watermark must exist after init"),
+            ),
             checkpoint,
             bounds,
             items_per_blob,
@@ -395,7 +424,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     async fn init_with_checkpoint(
         context: E,
         cfg: Config,
-        mut checkpoint: Checkpoint<E>,
+        checkpoint: Checkpoint<E>,
     ) -> Result<Self, Error> {
         // A staged clear intent means all old blob data is about to be discarded. Honor it before
         // scanning or opening blobs so corrupt stale blobs cannot block recovery of the reset.
@@ -491,7 +520,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Persist any lowered checkpoint before applying blob repairs that move recovered state
         // backward.
-        checkpoint
+        let checkpoint = checkpoint
             .persist(
                 cfg.items_per_blob.get(),
                 pruning_boundary,
@@ -539,7 +568,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     async fn complete_staged_clear(
         context: E,
         cfg: Config,
-        mut checkpoint: Checkpoint<E>,
+        checkpoint: Checkpoint<E>,
         clear_target: u64,
     ) -> Result<Self, Error> {
         warn!(clear_target, "crash repair: completing interrupted clear");
@@ -554,7 +583,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         );
         let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
         let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
-        checkpoint
+        let checkpoint = checkpoint
             .finish_clear(cfg.items_per_blob.get(), clear_target)
             .await?;
 
@@ -778,8 +807,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Stage the reset intent durably. `init_with_checkpoint` will detect the intent and
         // complete the clear before recovering bounds.
-        let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        checkpoint.stage_clear(size).await?;
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        let checkpoint = checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
@@ -806,36 +835,65 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
-    /// In-place [Journal::start_commit].
-    pub(crate) async fn start_commit(&mut self) -> Handle<()> {
-        self.metrics.start_commit_calls.inc();
-        self.blobs.start_sync().await
+    /// Begin durably persisting the data blobs.
+    pub(super) async fn start_data_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
+        let handle = self.blobs.start_sync().await;
+        let completion: SyncCompletion = handle.boxed().shared();
+        self.barrier.record(self.bounds.end, completion.clone());
+        (self, Handle::from_future(completion))
     }
 
-    /// In-place [Journal::commit].
-    pub(crate) async fn commit(&mut self) -> Result<(), Error> {
+    /// Begin raising the recovery watermark toward `size`, capped at the barrier.
+    pub(super) async fn start_watermark_sync(
+        mut self: Box<Self>,
+        size: u64,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let size = size.min(self.barrier.size());
+        let (checkpoint, handle) = self.checkpoint.start_watermark_sync(size).await?;
+        self.checkpoint = checkpoint;
+        Ok((self, handle))
+    }
+
+    /// See [Journal::start_sync].
+    pub(crate) async fn start_sync(self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
+        self.metrics.start_sync_calls.inc();
+        let (mut journal, data) = self.start_data_sync().await;
+        let size = journal.barrier.size();
+        let (journal, watermark) = journal.start_watermark_sync(size).await?;
+        let handle = Handle::from_future(async move {
+            data.await?;
+            watermark.await
+        });
+        Ok((journal, handle))
+    }
+
+    /// See [Journal::commit].
+    pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        let handle = self.blobs.start_sync().await;
-        Ok(handle.await?)
-    }
-
-    /// In-place [Journal::sync].
-    pub(crate) async fn sync(&mut self) -> Result<(), Error> {
-        let _timer = self.metrics.sync_timer();
-        self.metrics.sync_calls.inc();
+        let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
-        self.checkpoint
-            .persist(
-                self.items_per_blob.get(),
-                self.bounds.start,
-                self.bounds.end,
-            )
-            .await
+        self.barrier.mark_durable(size);
+        Ok(self)
     }
 
-    /// In-place [Journal::snapshot].
+    /// See [Journal::sync].
+    pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
+        let size = self.bounds.end;
+        let handle = self.blobs.start_sync().await;
+        handle.await?;
+        self.barrier.mark_durable(size);
+        self.checkpoint = self
+            .checkpoint
+            .persist(self.items_per_blob.get(), self.bounds.start, size)
+            .await?;
+        Ok(self)
+    }
+
+    /// See [Journal::snapshot].
     pub(crate) async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
         Ok(Reader {
             blobs: self.blobs.snapshot().await?,
@@ -870,7 +928,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.end
     }
 
-    /// In-place [Journal::append].
+    /// See [Journal::append].
     pub(crate) async fn append(&mut self, item: &A) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
@@ -878,7 +936,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .await
     }
 
-    /// In-place [Journal::append_many].
+    /// See [Journal::append_many].
     pub(crate) async fn append_many<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
         let _timer = self.metrics.append_many_timer();
         self.metrics.append_many_calls.inc();
@@ -891,7 +949,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.write_encoded(prepared).await
     }
 
-    /// In-place [Journal::prepare_append].
+    /// See [Journal::prepare_append].
     pub(crate) fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
         // Encode all items into a single contiguous buffer up front.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
@@ -916,7 +974,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
     }
 
-    /// In-place [Journal::append_prepared].
+    /// See [Journal::append_prepared].
     pub(crate) async fn append_prepared(
         &mut self,
         prepared: PreparedAppend<A>,
@@ -975,11 +1033,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(self.bounds.end - 1)
     }
 
-    /// In-place [Journal::rewind].
-    pub(crate) async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+    /// See [Journal::rewind].
+    pub(crate) async fn rewind(mut self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
         match size.cmp(&self.bounds.end) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
-            std::cmp::Ordering::Equal => return Ok(()),
+            std::cmp::Ordering::Equal => return Ok(self),
             std::cmp::Ordering::Less => {}
         }
 
@@ -993,7 +1051,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Persist a lowered recovery watermark before blob state moves backward.
         if self.checkpoint.lower_watermark(size) {
-            self.checkpoint.sync().await?;
+            self.checkpoint = self.checkpoint.sync().await?;
         }
 
         if blob == self.blobs.tail_blob_index() {
@@ -1003,13 +1061,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
 
         self.bounds.end = size;
+        self.barrier.truncate(size);
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
             self.items_per_blob.get(),
         );
 
-        Ok(())
+        Ok(self)
     }
 
     /// Return the location before which all items have been pruned.
@@ -1017,8 +1076,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
-    /// In-place [Journal::prune].
-    pub(crate) async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
+    /// See [Journal::prune].
+    pub(crate) async fn prune(
+        mut self: Box<Self>,
+        min_item_pos: u64,
+    ) -> Result<(Box<Self>, bool), Error> {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
@@ -1026,18 +1088,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
         if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok(false);
+            return Ok((self, false));
         }
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this barrier could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The barrier also covers unsynced
+        // durable, so pruning without this sync could leave a recovered journal whose
+        // surviving items no longer justify its boundary. The sync also covers unsynced
         // survivors above the boundary: removal may be interrupted, and recovery truncates at
         // the first torn item, so an unsynced survivor could discard every synced blob
         // behind it.
         let sync = self.blobs.start_sync().await;
         sync.await?;
+        self.barrier.mark_durable(self.bounds.end);
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;
@@ -1049,7 +1112,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.items_per_blob.get(),
         );
 
-        Ok(true)
+        Ok((self, true))
     }
 
     /// See [Journal::destroy].
@@ -1068,23 +1131,28 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
-    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+    pub(crate) async fn clear_to_size(
+        mut self: Box<Self>,
+        new_size: u64,
+    ) -> Result<Box<Self>, Error> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
         }
 
         // Durably record the intent first, so a crash mid-clear is finished on reopen.
-        self.checkpoint.stage_clear(new_size).await?;
+        self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
 
         // Remove every blob, then start fresh at the new size.
         self.blobs
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.bounds = new_size..new_size;
+        self.barrier = Barrier::new(new_size);
 
         // Complete the clear in the checkpoint.
-        self.checkpoint
+        self.checkpoint = self
+            .checkpoint
             .finish_clear(self.items_per_blob.get(), new_size)
             .await?;
 
@@ -1093,7 +1161,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.bounds.start,
             self.items_per_blob.get(),
         );
-        Ok(())
+        Ok(self)
     }
 
     /// Durably stage a clear to `new_size` without completing it.
@@ -1103,12 +1171,16 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
     #[commonware_macros::stability(ALPHA)]
-    pub(super) async fn stage_clear_intent(&mut self, new_size: u64) -> Result<(), Error> {
+    pub(super) async fn stage_clear_intent(
+        mut self: Box<Self>,
+        new_size: u64,
+    ) -> Result<Box<Self>, Error> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
         }
-        self.checkpoint.stage_clear(new_size).await
+        self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
+        Ok(self)
     }
 }
 
@@ -1122,6 +1194,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying blob will be truncated to the last valid item). Repair is performed during init.
+///
+/// Mutating functions consume the journal and return it only on success: an error (or a dropped
+/// future) destroys the handle.
 pub struct Journal<E: Context, A>(Box<Inner<E, A>>);
 
 impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
@@ -1157,35 +1232,37 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Discard all items and reposition the journal at `new_size`.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
-        self.0.clear_to_size(new_size).await
+    pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
+        self.0 = self.0.clear_to_size(new_size).await?;
+        Ok(self)
     }
 
     /// Durably persists the current state of the structure.
     ///
-    /// Does not advance the recovery watermark, so external consumers may need to replay entries
-    /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
-    /// crash after this call doesn't require any recovery.
+    /// Does not advance the recovery watermark, so reopen may replay entries above it. Use
+    /// `sync()` to advance the watermark and to ensure that a crash after this call doesn't
+    /// require any recovery.
     pub async fn commit(mut self) -> Result<Self, Error> {
-        self.0.commit().await?;
+        self.0 = self.0.commit().await?;
         Ok(self)
     }
 
     /// Begin durably persisting the current state of the structure.
     ///
-    /// Does not advance the recovery watermark, so external consumers may need to replay entries
-    /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
-    /// crash after this call doesn't require any recovery.
+    /// Awaiting the returned [Handle] guarantees state appended before this call survives a
+    /// crash. Also tries to advance the recovery watermark to the previous proven durable
+    /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
-    /// At most one commit's sync is in flight at a time: this call waits for the sync the prior
-    /// commit started before starting another. It does not wait for a pending rollover fsync:
-    /// the returned handle joins it, so an earlier commit's handle may still be pending when
-    /// this call returns. Reads always proceed while the returned handle is pending, and
-    /// appends proceed while they fit in the write buffer (a buffer flush or rollover waits for
-    /// the in-flight fsync). Dropping the handle does not cancel the sync.
-    pub async fn start_commit(mut self) -> (Self, Handle<()>) {
-        let handle = self.0.start_commit().await;
-        (self, handle)
+    /// At most one data sync and one watermark sync are in flight at a time: this call waits
+    /// for the prior call's syncs before starting new ones. It does not wait for a pending
+    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
+    /// pending when this call returns. Reads always proceed while the returned handle is
+    /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
+    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let (inner, handle) = self.0.start_sync().await?;
+        self.0 = inner;
+        Ok((self, handle))
     }
 
     /// Durably persist the current state of the structure, ensuring no recovery is required in the
@@ -1193,7 +1270,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Advances the recovery watermark to the current size.
     pub async fn sync(mut self) -> Result<Self, Error> {
-        self.0.sync().await?;
+        self.0 = self.0.sync().await?;
         Ok(self)
     }
 
@@ -1266,7 +1343,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
     ///   rewind truncates into their range.
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
-        self.0.rewind(size).await?;
+        self.0 = self.0.rewind(size).await?;
         Ok(self)
     }
 
@@ -1285,7 +1362,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(mut self, min_item_pos: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min_item_pos).await?;
+        let (inner, pruned) = self.0.prune(min_item_pos).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -1297,7 +1375,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
     /// for a recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
-        (*self.0).destroy().await
+        self.0.destroy().await
     }
 }
 
@@ -1633,8 +1711,8 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::rewind(self, size).await
     }
 
-    async fn start_commit(self) -> Result<(Self, Handle<()>), Error> {
-        Ok(Self::start_commit(self).await)
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
+        Self::start_sync(self).await
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -1671,10 +1749,13 @@ mod tests {
         Supervisor as _,
         buffer::paged::Writer,
         deterministic::{self, Context},
-        mocks::{DelayedSyncContext, PendingSyncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
+            fail_pending_syncs, release_pending_syncs,
+        },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
-    use futures::{FutureExt as _, StreamExt, pin_mut};
+    use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
@@ -1699,11 +1780,11 @@ mod tests {
     }
 
     #[test]
-    fn test_start_commit_keeps_predecessor_sync() {
+    fn test_start_sync_keeps_predecessor_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let mut journal = Inner::<_, u64>::init(context, cfg).await.unwrap();
+            let mut journal = Box::new(Inner::<_, u64>::init(context, cfg).await.unwrap());
 
             // Rollover starts a predecessor sync.
             journal
@@ -1713,7 +1794,7 @@ mod tests {
             assert!(journal.blobs.has_tail_predecessor_sync());
 
             // Handle includes predecessor; slot drains later.
-            let handle = journal.start_commit().await;
+            let (journal, handle) = journal.start_sync().await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
             handle.await.unwrap();
             assert!(journal.blobs.has_tail_predecessor_sync());
@@ -1722,58 +1803,312 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_dropped_commit_keeps_predecessor_sync() {
+    #[test_traced]
+    fn test_start_sync_advances_watermark_lagged() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let cfg = test_cfg(&context, NZU64!(3));
-            let mut journal = Inner::<_, u64>::init(
-                DelayedSyncContext {
-                    inner: context.child("journal"),
-                    pending: pending.clone(),
-                },
-                cfg,
-            )
-            .await
-            .unwrap();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let make = |pending: PendingSyncs| {
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending,
+                    },
+                    cfg.clone(),
+                )
+            };
+            let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
-            journal
-                .append_many(Many::Flat(&[1, 2, 3, 4]))
+            // Nothing proven while the first sync is parked: the watermark must not move.
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 0);
+
+            release_pending_syncs(&pending);
+            h1.await.unwrap();
+
+            // The first sync is proven, so the next call advances the watermark to its size,
+            // one interval behind the tip.
+            journal.append(&4).await.unwrap();
+            let (journal, h2) = journal.start_sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 3);
+            drive_pending_syncs(&pending, h2).await.unwrap();
+
+            // A third call catches the watermark up to the second sync's size.
+            let (journal, h3) = drive_pending_syncs(&pending, journal.start_sync())
                 .await
                 .unwrap();
-            assert!(journal.blobs.has_tail_predecessor_sync());
+            assert_eq!(journal.recovery_watermark(), 4);
+            drive_pending_syncs(&pending, h3).await.unwrap();
 
-            assert!(journal.commit().now_or_never().is_none());
-            assert!(journal.blobs.has_tail_predecessor_sync());
-
+            // The advanced watermark is durable: a reopen resumes from it.
             pending.unblock();
-            journal.commit().await.unwrap();
-            assert!(journal.blobs.has_tail_predecessor_sync());
+            drop(journal);
+            let journal = make(pending.clone()).await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
+            assert_eq!(journal.bounds(), 0..4);
             journal.destroy().await.unwrap();
         });
     }
 
-    /// A flush failure inside `start_commit` never reaches the writer's sync state, so only the
+    #[test_traced]
+    fn test_start_sync_failure_blocks_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (journal, h1) = journal.start_sync().await.unwrap();
+            fail_pending_syncs(&pending);
+            assert!(h1.await.is_err());
+
+            // The failed sync proves nothing: the watermark must not advance, and the retained
+            // failure resurfaces on the next call's handle.
+            let (journal, h2) = journal.start_sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 0);
+            assert!(h2.await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_drains_parked_watermark_advance() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let make = |pending: PendingSyncs| {
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending,
+                    },
+                    cfg.clone(),
+                )
+            };
+            let mut journal = Box::new(make(pending.clone()).await.unwrap());
+
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
+            release_pending_syncs(&pending);
+            h1.await.unwrap();
+
+            // This parks the metadata sync advancing the watermark to 3.
+            journal.append(&4).await.unwrap();
+            let (journal, h2) = journal.start_sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 3);
+
+            // Rewind below the in-flight advance: the lowered value must win on reopen.
+            let journal = drive_pending_syncs(&pending, journal.rewind(2))
+                .await
+                .unwrap();
+            assert_eq!(journal.recovery_watermark(), 2);
+            drop(h2);
+
+            // Reopen: the lowered watermark held, and no corruption is reported.
+            pending.unblock();
+            drop(journal);
+            let journal = make(pending.clone()).await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 2);
+            assert_eq!(journal.bounds(), 0..2);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_watermark_advance_inline_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let make = |faults: WriteFaults| {
+                Inner::<_, u64>::init(
+                    WriteFaultContext {
+                        inner: context.child("journal"),
+                        faults,
+                    },
+                    cfg.clone(),
+                )
+            };
+            let mut journal = Box::new(make(faults.clone()).await.unwrap());
+
+            // Prove three items durable (watermark 3), then one more so the next call has an
+            // advance to start.
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
+            h1.await.unwrap();
+            journal.append(&4).await.unwrap();
+            let journal = journal.commit().await.unwrap();
+
+            // The advance's inline metadata writes fail: the call fails, consuming the
+            // journal, even though the data is durable.
+            faults.arm();
+            assert!(journal.start_sync().await.is_err());
+            faults.disarm();
+
+            // The failed advance never compromised the data: a reopen recovers it all and a
+            // fresh sync succeeds.
+            let journal = Box::new(make(faults).await.unwrap());
+            assert_eq!(journal.bounds(), 0..4);
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_watermark_advance_deferred_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (journal, h1) = journal.start_sync().await.unwrap();
+            release_pending_syncs(&pending);
+            h1.await.unwrap();
+
+            // Only the advance's metadata fsync is in flight: its failure surfaces on the
+            // journal handle even though the data is durable.
+            let (mut journal, h2) = journal.start_sync().await.unwrap();
+            fail_pending_syncs(&pending);
+            assert!(h2.await.is_err());
+
+            // An advance at or below the staged value is skipped, so the next handle succeeds:
+            // the failure is observed only by the next checkpoint write.
+            journal.append(&4).await.unwrap();
+            let (journal, h3) = journal.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, h3).await.unwrap();
+
+            // The failed advance's completion stays pending until observed: commit (which
+            // does not write the checkpoint) still succeeds, and the next checkpoint write
+            // observes the failure and fails.
+            let journal = drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_watermark_lowering_failure_keeps_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let make = |faults: WriteFaults| {
+                Inner::<_, u64>::init(
+                    WriteFaultContext {
+                        inner: context.child("journal"),
+                        faults,
+                    },
+                    cfg.clone(),
+                )
+            };
+            let mut journal = Box::new(make(faults.clone()).await.unwrap());
+            journal
+                .append_many(Many::Flat(&[1, 2, 3, 4]))
+                .await
+                .unwrap();
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
+
+            // Rewind must durably lower the watermark before touching blob state: when the
+            // lowering fails, the rewind fails with the blobs intact.
+            faults.arm();
+            assert!(journal.rewind(2).await.is_err());
+            faults.disarm();
+
+            let journal = make(faults).await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 4);
+            assert_eq!(journal.bounds(), 0..4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_truncates_durable_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(&context, NZU64!(100));
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 3);
+
+            // Rewind discards the proof for position 2: while re-appended data is still
+            // syncing, the next call's advance must not raise the watermark past the rewind
+            // point.
+            let mut journal = drive_pending_syncs(&pending, journal.rewind(2))
+                .await
+                .unwrap();
+            journal.append(&9).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            assert_eq!(journal.recovery_watermark(), 2);
+
+            pending.unblock();
+            handle.await.unwrap();
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A flush failure inside `start_sync` never reaches the writer's sync state, so only the
     /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
-    fn test_fixed_dropped_failed_commit_surfaces_after_rollover() {
+    fn test_fixed_dropped_failed_start_sync_surfaces_after_rollover() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
-            let mut journal = Inner::<_, u64>::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(context.child("journal"), cfg)
+                    .await
+                    .unwrap(),
+            );
 
-            // Buffer an item, then fail the flush inside start_commit, dropping the returned
+            // Buffer an item, then fail the flush inside start_sync, dropping the returned
             // handle unobserved.
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(1.0),
                 ..Default::default()
             };
-            drop(journal.start_commit().await);
+            let (mut journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
             // Appending through the blob boundary must surface the retained failure.
@@ -1812,11 +2147,12 @@ mod tests {
 
         /// Test helper: Set and persist the recovery watermark directly.
         pub(crate) async fn test_set_recovery_watermark(
-            &mut self,
+            mut self: Box<Self>,
             watermark: u64,
-        ) -> Result<(), Error> {
+        ) -> Result<Box<Self>, Error> {
             self.checkpoint.set_watermark(Some(watermark));
-            self.checkpoint.sync().await
+            self.checkpoint = self.checkpoint.sync().await?;
+            Ok(self)
         }
 
         /// Test helper: Durably stage a clear intent in the journal's checkpoint.
@@ -1825,8 +2161,9 @@ mod tests {
             partition: &str,
             target: u64,
         ) -> Result<(), Error> {
-            let mut checkpoint = Checkpoint::open(context, partition).await?;
-            checkpoint.stage_clear(target).await
+            let checkpoint = Checkpoint::open(context, partition).await?;
+            checkpoint.stage_clear(target).await?;
+            Ok(())
         }
     }
 
@@ -1848,10 +2185,11 @@ mod tests {
 
         /// Test helper: Set and persist the recovery watermark directly.
         pub(crate) async fn test_set_recovery_watermark(
-            &mut self,
+            mut self,
             watermark: u64,
-        ) -> Result<(), Error> {
-            self.0.test_set_recovery_watermark(watermark).await
+        ) -> Result<Self, Error> {
+            self.0 = self.0.test_set_recovery_watermark(watermark).await?;
+            Ok(self)
         }
 
         /// Test helper: Durably stage a clear intent in the journal's checkpoint.
@@ -1876,10 +2214,10 @@ mod tests {
                 .unwrap();
             (journal, _) = journal.append(&1).await.unwrap();
             (journal, _) = journal.append(&2).await.unwrap();
-            let mut journal = journal.sync().await.unwrap();
+            let journal = journal.sync().await.unwrap();
             // Simulate the state left by a crash after item 2 became visible to recovery, but
             // before the persisted recovery watermark advanced past item 1.
-            journal.test_set_recovery_watermark(1).await.unwrap();
+            let journal = journal.test_set_recovery_watermark(1).await.unwrap();
             drop(journal);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
@@ -2484,7 +2822,7 @@ mod tests {
             // Persist the recovered metadata (watermark=9) as init_with_checkpoint does before
             // applying the rewind repair. This simulates a crash after metadata sync but before
             // the repair removes stale blobs.
-            journal
+            journal.0.checkpoint = journal
                 .0
                 .checkpoint
                 .persist(cfg.items_per_blob.get(), 0, 9)
@@ -2651,10 +2989,10 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            let mut journal = journal.sync().await.expect("failed to sync journal");
+            let journal = journal.sync().await.expect("failed to sync journal");
             assert_eq!(journal.bounds(), 7..15);
 
-            journal
+            let journal = journal
                 .test_set_recovery_watermark(6)
                 .await
                 .expect("failed to sync lower recovery watermark");
@@ -2700,12 +3038,12 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            let mut journal = journal.sync().await.expect("failed to sync journal");
+            let journal = journal.sync().await.expect("failed to sync journal");
             assert_eq!(journal.bounds(), 7..17);
 
             // Stage the stale forward-looking watermark while the journal is alive (so we go
             // through the public metadata path), then drop and corrupt the underlying blob.
-            journal
+            let journal = journal
                 .test_set_recovery_watermark(12)
                 .await
                 .expect("failed to sync recovery watermark");
@@ -2773,7 +3111,7 @@ mod tests {
 
             {
                 journal.0.checkpoint.set_watermark(None);
-                journal
+                journal.0.checkpoint = journal
                     .0
                     .checkpoint
                     .sync()
@@ -2833,7 +3171,7 @@ mod tests {
             {
                 journal.0.checkpoint.set_boundary_hint(8);
                 journal.0.checkpoint.set_watermark(Some(3));
-                journal.0.checkpoint.sync().await.unwrap();
+                journal.0.checkpoint = journal.0.checkpoint.sync().await.unwrap();
             }
             drop(journal);
 
@@ -2897,7 +3235,7 @@ mod tests {
 
             {
                 journal.0.checkpoint.set_watermark(None);
-                journal
+                journal.0.checkpoint = journal
                     .0
                     .checkpoint
                     .sync()
@@ -2945,7 +3283,7 @@ mod tests {
             // Remove the watermark to simulate a legacy journal.
             {
                 journal.0.checkpoint.set_watermark(None);
-                journal.0.checkpoint.sync().await.unwrap();
+                journal.0.checkpoint = journal.0.checkpoint.sync().await.unwrap();
             }
             drop(journal);
 
@@ -3320,9 +3658,9 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            let mut journal = journal.sync().await.expect("failed to sync journal");
+            let journal = journal.sync().await.expect("failed to sync journal");
 
-            journal
+            let journal = journal
                 .test_set_recovery_watermark(7)
                 .await
                 .expect("failed to lower recovery watermark");
@@ -4467,7 +4805,7 @@ mod tests {
             journal = journal.sync().await.unwrap();
 
             // Clear to position 100, effectively resetting the journal
-            journal.0.clear_to_size(100).await.unwrap();
+            journal.0 = journal.0.clear_to_size(100).await.unwrap();
             assert_eq!(journal.size(), 100);
 
             // Old positions should fail
@@ -4519,18 +4857,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
-            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
             assert!(matches!(
                 journal.0.clear_to_size(u64::MAX).await,
                 Err(Error::SizeOverflow)
             ));
+            // The failed clear consumed the journal. Reopen to exercise the staging path.
+            let journal = Journal::<_, Digest>::init(context.child("journal_intent"), cfg)
+                .await
+                .unwrap();
             assert!(matches!(
                 journal.0.stage_clear_intent(u64::MAX).await,
                 Err(Error::SizeOverflow)
             ));
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -4577,7 +4918,7 @@ mod tests {
 
             // Simulate metadata deletion (corruption).
             journal.0.checkpoint.clear();
-            journal.0.checkpoint.sync().await.unwrap();
+            journal.0.checkpoint = journal.0.checkpoint.sync().await.unwrap();
             drop(journal);
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
@@ -4813,7 +5154,7 @@ mod tests {
                 .await
                 .unwrap();
             checkpoint.set_clear_target(12);
-            checkpoint.sync().await.unwrap();
+            let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
             context.remove(&blob_part, None).await.unwrap();
 
@@ -4835,7 +5176,7 @@ mod tests {
                 .unwrap();
             checkpoint.set_boundary_hint(7);
             checkpoint.set_clear_target(2);
-            checkpoint.sync().await.unwrap();
+            let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
             // Crash Scenario 2: after the new tail blob is created, but before final metadata
@@ -4882,7 +5223,7 @@ mod tests {
                 .await
                 .unwrap();
             checkpoint.set_clear_target(2);
-            checkpoint.sync().await.unwrap();
+            let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
             context.remove(&blob_part, None).await.unwrap();
@@ -4918,7 +5259,7 @@ mod tests {
                 .await
                 .unwrap();
             checkpoint.set_clear_target(100);
-            checkpoint.sync().await.unwrap();
+            let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
             drop(journal);
 
@@ -4943,7 +5284,7 @@ mod tests {
                 .await
                 .unwrap();
             checkpoint.set_clear_target(12);
-            checkpoint.sync().await.unwrap();
+            let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
             // This name would fail `Partition::open_all` if init tried to parse stale blobs before
@@ -4982,7 +5323,7 @@ mod tests {
                 .await
                 .unwrap();
             checkpoint.set_clear_target(15);
-            checkpoint.sync().await.unwrap();
+            let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
             drop(journal);
 
@@ -5370,7 +5711,7 @@ mod tests {
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
-            (journal, handle) = journal.start_commit().await;
+            (journal, handle) = journal.start_sync().await.unwrap();
             handle.await.unwrap();
             let (journal, reader) = journal.snapshot().await.unwrap();
             reader.read(0).await.unwrap();
@@ -5392,7 +5733,7 @@ mod tests {
                 "fixed_metrics_read_calls_total 1",
                 "fixed_metrics_read_many_calls_total 1",
                 "fixed_metrics_items_read_total 5",
-                "fixed_metrics_start_commit_calls_total 1",
+                "fixed_metrics_start_sync_calls_total 1",
                 "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",

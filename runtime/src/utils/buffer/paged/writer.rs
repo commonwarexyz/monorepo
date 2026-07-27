@@ -80,16 +80,16 @@ fn adjusted_capacity(capacity: usize, page_size: u64) -> usize {
 ///
 /// Larger appends bypass the buffer, so a buffered append exceeds `capacity` by less than one
 /// page (given `capacity` is a whole number of pages; see [adjusted_capacity]). The write
-/// buffer's peak size therefore stays under `capacity + logical_page_size`.
+/// buffer's peak size therefore stays under `capacity + page_size`.
 const fn too_big_for_buffer(
     buffer_len: usize,
     buffer_capacity: usize,
     append_len: usize,
-    logical_page_size: usize,
+    page_size: usize,
 ) -> bool {
-    let fill = buffer_len.next_multiple_of(logical_page_size) - buffer_len;
+    let fill = buffer_len.next_multiple_of(page_size) - buffer_len;
     let overflows_capacity = buffer_len + append_len > buffer_capacity;
-    let has_full_page_after_fill = append_len >= fill + logical_page_size;
+    let has_full_page_after_fill = append_len >= fill + page_size;
 
     overflows_capacity && has_full_page_after_fill
 }
@@ -277,14 +277,14 @@ impl<B: Blob> Writer<B> {
     /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
     /// the first byte was written.
     pub async fn append(&mut self, buf: &[u8]) -> Result<u64, Error> {
-        let logical_page_size = self.cache_ref.page_size() as usize;
+        let page_size = self.cache_ref.page_size() as usize;
 
         // Bypass the write buffer and write whole pages directly when `buf` is large.
         if too_big_for_buffer(
             self.buffer.len(),
             self.buffer.capacity,
             buf.len(),
-            logical_page_size,
+            page_size,
         ) {
             return self.append_owned(IoBuf::copy_from_slice(buf)).await;
         }
@@ -302,7 +302,7 @@ impl<B: Blob> Writer<B> {
     /// blob, and leave only a sub-page suffix in the write buffer. This avoids copying full-page
     /// payloads while preserving the invariant that the buffer starts at `current_page`.
     pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, Error> {
-        let logical_page_size = self.cache_ref.page_size() as usize;
+        let page_size = self.cache_ref.page_size() as usize;
         let offset = self.buffer.size();
 
         // Buffer the append unless `buf` is too big for the buffer.
@@ -310,7 +310,7 @@ impl<B: Blob> Writer<B> {
             self.buffer.len(),
             self.buffer.capacity,
             buf.len(),
-            logical_page_size,
+            page_size,
         ) {
             if self.buffer.append(buf.as_ref()) {
                 self.flush_internal(false, false).await?;
@@ -319,7 +319,7 @@ impl<B: Blob> Writer<B> {
         }
 
         // Bytes needed to fill current page to a page boundary (0 if already aligned).
-        let fill = self.buffer.len().next_multiple_of(logical_page_size) - self.buffer.len();
+        let fill = self.buffer.len().next_multiple_of(page_size) - self.buffer.len();
 
         // Top up the tip to a page boundary so its contents flush as full pages, leaving any
         // partial-page CRC handling to the regular flush path.
@@ -337,7 +337,7 @@ impl<B: Blob> Writer<B> {
 
         // Prepare physical pages for the whole pages remaining in `buf` without copying logical
         // payload bytes.
-        let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
+        let bulk_len = (buf.len() - fill) / page_size * page_size;
         let bulk = buf.slice(fill..fill + bulk_len);
         let mut physical_pages = IoBufs::default();
         self.append_full_pages(&bulk, None, &mut physical_pages);
@@ -366,7 +366,7 @@ impl<B: Blob> Writer<B> {
         // The suffix (less than one page) is copied: a sub-page tip is never drained by flush,
         // so seeding it with a view of `buf` would pin the entire backing allocation until the
         // next append to this blob (or forever, if there is none).
-        self.current_page += (bulk_len / logical_page_size) as u64;
+        self.current_page += (bulk_len / page_size) as u64;
         let suffix = buf.slice(fill + bulk_len..);
         let suffix = if suffix.is_empty() {
             suffix
@@ -383,8 +383,8 @@ impl<B: Blob> Writer<B> {
             self.buffer.offset
         );
 
-        let physical_page_size = logical_page_size as u64 + CHECKSUM_SIZE;
-        let write_at_offset = boundary / logical_page_size as u64 * physical_page_size;
+        let physical_page_size = page_size as u64 + CHECKSUM_SIZE;
+        let write_at_offset = boundary / page_size as u64 * physical_page_size;
         self.write_at(write_at_offset, physical_pages).await?;
 
         Ok(offset)
@@ -425,9 +425,9 @@ impl<B: Blob> Writer<B> {
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
-        let logical_page_size = self.cache_ref.page_size() as usize;
-        let pages_to_cache = self.buffer.len() / logical_page_size;
-        let bytes_to_drain = pages_to_cache * logical_page_size;
+        let page_size = self.cache_ref.page_size() as usize;
+        let pages_to_cache = self.buffer.len() / page_size;
+        let bytes_to_drain = pages_to_cache * page_size;
 
         // Remember the logical start offset and page bytes for caching of flushed full pages.
         let cache_pages = if pages_to_cache > 0 {
@@ -456,7 +456,7 @@ impl<B: Blob> Writer<B> {
             assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
         }
 
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
+        let physical_page_size = page_size + CHECKSUM_SIZE as usize;
         let write_at_offset = self.current_page * physical_page_size as u64;
 
         // Identify protected regions based on the OLD partial page state.
@@ -481,10 +481,10 @@ impl<B: Blob> Writer<B> {
                 // both are emitted, keep them plain so one later sync covers both.
                 //
                 // Write 1: new data in first page [prefix_len..page_size].
-                let has_first_write = prefix_len < logical_page_size;
+                let has_first_write = prefix_len < page_size;
                 if has_first_write {
                     let _ = physical_pages.split_to(prefix_len);
-                    let first_payload = physical_pages.split_to(logical_page_size - prefix_len);
+                    let first_payload = physical_pages.split_to(page_size - prefix_len);
                     let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
                     self.write_at_maybe_sync(
                         write_at_offset + prefix_len as u64,
@@ -497,14 +497,14 @@ impl<B: Blob> Writer<B> {
                     }
                 } else {
                     // Skip the protected first page bytes when they are fully covered.
-                    let _ = physical_pages.split_to(logical_page_size);
+                    let _ = physical_pages.split_to(page_size);
                 }
 
                 // Write 2: second CRC of first page + all remaining pages [page_size+6..end].
                 if physical_pages.len() > CHECKSUM_SLOT_SIZE {
                     let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
                     self.write_at_maybe_sync(
-                        write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
+                        write_at_offset + (page_size + CHECKSUM_SLOT_SIZE) as u64,
                         physical_pages,
                         sync && !has_first_write,
                     )
@@ -523,7 +523,7 @@ impl<B: Blob> Writer<B> {
                 // both are emitted, keep them plain so one later sync covers both.
                 //
                 // Write 1: new data + first CRC of first page [prefix_len..page_size+6].
-                let first_crc_end = logical_page_size + CHECKSUM_SLOT_SIZE;
+                let first_crc_end = page_size + CHECKSUM_SLOT_SIZE;
                 let skip = physical_page_size - first_crc_end;
                 let has_first_write = prefix_len < first_crc_end;
                 if has_first_write {
@@ -684,15 +684,15 @@ impl<B: Blob> Writer<B> {
         include_partial_page: bool,
         old_crc_record: Option<&Checksum>,
     ) -> (IoBufs, Option<Checksum>) {
-        let logical_page_size = self.cache_ref.page_size() as usize;
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
-        let pages_to_write = buffer.len() / logical_page_size;
+        let page_size = self.cache_ref.page_size() as usize;
+        let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+        let pages_to_write = buffer.len() / page_size;
         let mut write_buffer = IoBufs::default();
         let buffer_data = buffer.as_ref();
 
         if pages_to_write > 0 {
             self.append_full_pages(
-                &buffer.slice(..pages_to_write * logical_page_size),
+                &buffer.slice(..pages_to_write * page_size),
                 old_crc_record,
                 &mut write_buffer,
             );
@@ -702,7 +702,7 @@ impl<B: Blob> Writer<B> {
             return (write_buffer, None);
         }
 
-        let partial_page = &buffer_data[pages_to_write * logical_page_size..];
+        let partial_page = &buffer_data[pages_to_write * page_size..];
         if partial_page.is_empty() {
             // No partial page data to write.
             return (write_buffer, None);
@@ -733,7 +733,7 @@ impl<B: Blob> Writer<B> {
         // [partial logical bytes, zero padding, crc record].
         let mut padded = self.cache_ref.pool().alloc(physical_page_size);
         padded.put_slice(partial_page);
-        let zero_count = logical_page_size - partial_len;
+        let zero_count = page_size - partial_len;
         if zero_count > 0 {
             padded.put_bytes(0, zero_count);
         }
@@ -756,29 +756,29 @@ impl<B: Blob> Writer<B> {
         old_crc_record: Option<&Checksum>,
         write_buffer: &mut IoBufs,
     ) {
-        let logical_page_size = self.cache_ref.page_size() as usize;
-        let pages = data.len() / logical_page_size;
+        let page_size = self.cache_ref.page_size() as usize;
+        let pages = data.len() / page_size;
         debug_assert!(pages > 0);
-        debug_assert_eq!(data.len() % logical_page_size, 0);
-        let logical_page_size_u16 =
-            u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
+        debug_assert_eq!(data.len() % page_size, 0);
+        let page_size_u16 =
+            u16::try_from(page_size).expect("page size must fit in u16 for CRC record");
 
         // Build CRC bytes for full pages once. Full-page payload bytes are appended below as
         // slices from `data`, so we avoid copying logical payload here.
         let mut crcs = self.cache_ref.pool().alloc(CHECKSUM_SIZE as usize * pages);
         let data_bytes = data.as_ref();
         for page in 0..pages {
-            let start_read_idx = page * logical_page_size;
-            let end_read_idx = start_read_idx + logical_page_size;
+            let start_read_idx = page * page_size;
+            let end_read_idx = start_read_idx + page_size;
             let logical_page = &data_bytes[start_read_idx..end_read_idx];
             let crc = Crc32::checksum(logical_page);
 
             // For the first page, if there's an old partial page CRC, construct the record
             // to preserve the old CRC in its original slot.
             let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
-                Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
+                Self::build_crc_record_preserving_old(page_size_u16, crc, old_crc)
             } else {
-                Checksum::new(logical_page_size_u16, crc)
+                Checksum::new(page_size_u16, crc)
             };
             crcs.put_slice(&crc_record.to_bytes());
         }
@@ -786,8 +786,8 @@ impl<B: Blob> Writer<B> {
 
         // Physical full-page layout is [logical_page_bytes, crc_record_bytes].
         for page in 0..pages {
-            let start_read_idx = page * logical_page_size;
-            let end_read_idx = start_read_idx + logical_page_size;
+            let start_read_idx = page * page_size;
+            let end_read_idx = start_read_idx + page_size;
             write_buffer.append(data.slice(start_read_idx..end_read_idx));
 
             let crc_start = page * CHECKSUM_SIZE as usize;
@@ -827,7 +827,7 @@ impl<B: Blob> Writer<B> {
     async fn sync_partial_page_shrink(
         &mut self,
         page: u64,
-        logical_page_size: u64,
+        page_size: u64,
         new_len: u16,
         new_crc: u32,
         old_crc: &Checksum,
@@ -836,12 +836,12 @@ impl<B: Blob> Writer<B> {
         // checksum must be made durable without becoming authoritative until the old longer slot
         // can be disabled. The sequence below therefore lets recovery observe either the old page
         // or the new shorter page, but not a footer where both slots were damaged by one torn write.
-        let physical_page_size = logical_page_size
+        let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
         let crc_start = page
             .checked_mul(physical_page_size)
-            .and_then(|start| start.checked_add(logical_page_size))
+            .and_then(|start| start.checked_add(page_size))
             .ok_or(Error::OffsetOverflow)?;
         let old_slot = old_crc.authoritative();
         let new_slot = old_slot.other();
@@ -881,15 +881,14 @@ impl<B: Blob> Writer<B> {
     /// This is not a durable operation. Buffered data may be plainly written so the replay can
     /// read it, but callers must still use [`sync`](Self::sync) if that data must survive a crash.
     pub async fn replay(&mut self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
-        let logical_page_size = self.cache_ref.page_size();
-        let logical_page_size_nz =
-            NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
+        let page_size = self.cache_ref.page_size();
+        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
         self.flush_internal(true, false).await?;
 
         // Convert buffer size (bytes) to page count
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+        let physical_page_size = page_size + CHECKSUM_SIZE;
         let prefetch_pages = buffer_size.get() / physical_page_size as usize;
         let prefetch_pages = prefetch_pages.max(1); // At least 1 page
 
@@ -898,7 +897,7 @@ impl<B: Blob> Writer<B> {
             || {
                 // All pages are full.
                 let physical = physical_page_size * self.current_page;
-                let logical = logical_page_size * self.current_page;
+                let logical = page_size * self.current_page;
                 (physical, logical)
             },
             |crc_record| {
@@ -908,7 +907,7 @@ impl<B: Blob> Writer<B> {
                 // Physical: all pages including the partial one (which is padded to full size).
                 let physical = physical_page_size * (self.current_page + 1);
                 // Logical: full pages before this + partial page's actual data length.
-                let logical = logical_page_size * self.current_page + partial_len;
+                let logical = page_size * self.current_page + partial_len;
                 (physical, logical)
             },
         );
@@ -918,7 +917,7 @@ impl<B: Blob> Writer<B> {
             physical_blob_size,
             logical_blob_size,
             prefetch_pages,
-            logical_page_size_nz,
+            page_size_nz,
         );
         Ok(Replay::new(reader))
     }
@@ -1032,8 +1031,8 @@ impl<B: Blob> Writer<B> {
 
     /// Coordinate the dispatch logic for shrinking the blob.
     async fn shrink(&mut self, target_size: u64) -> Result<(), Error> {
-        let logical_page_size = self.cache_ref.page_size();
-        let physical_page_size = logical_page_size
+        let page_size = self.cache_ref.page_size();
+        let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
 
@@ -1041,8 +1040,8 @@ impl<B: Blob> Writer<B> {
         self.sync().await?;
 
         // Calculate the physical size needed for the new size.
-        let full_pages = target_size / logical_page_size;
-        let partial_bytes = target_size % logical_page_size;
+        let full_pages = target_size / page_size;
+        let partial_bytes = target_size % page_size;
         let physical_pages = full_pages
             .checked_add(u64::from(partial_bytes > 0))
             .ok_or(Error::OffsetOverflow)?;
@@ -1050,7 +1049,7 @@ impl<B: Blob> Writer<B> {
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
         let tail_offset = full_pages
-            .checked_mul(logical_page_size)
+            .checked_mul(page_size)
             .ok_or(Error::OffsetOverflow)?;
         let current_physical_size = if self.partial_page_state.is_some() {
             self.current_page
@@ -1081,7 +1080,7 @@ impl<B: Blob> Writer<B> {
 
         if partial_bytes > 0 {
             return self
-                .shrink_to_partial(full_pages, partial_bytes, logical_page_size, tail_offset)
+                .shrink_to_partial(full_pages, partial_bytes, page_size, tail_offset)
                 .await;
         }
 
@@ -1099,7 +1098,7 @@ impl<B: Blob> Writer<B> {
         &mut self,
         full_pages: u64,
         partial_bytes: u64,
-        logical_page_size: u64,
+        page_size: u64,
         tail_offset: u64,
     ) -> Result<(), Error> {
         // Update blob state and buffer based on the desired size. The page data is
@@ -1108,8 +1107,7 @@ impl<B: Blob> Writer<B> {
         self.buffer.offset = tail_offset;
 
         let (page_data, old_crc) =
-            super::get_page_with_checksum_from_blob(&self.blob, full_pages, logical_page_size)
-                .await?;
+            super::get_page_with_checksum_from_blob(&self.blob, full_pages, page_size).await?;
 
         // Ensure the validated data covers what we need.
         if (page_data.len() as u64) < partial_bytes {
@@ -1124,7 +1122,7 @@ impl<B: Blob> Writer<B> {
         let final_record = self
             .sync_partial_page_shrink(
                 full_pages,
-                logical_page_size,
+                page_size,
                 partial_bytes as u16,
                 Crc32::checksum(new_data),
                 &old_crc,
@@ -1143,10 +1141,10 @@ impl<B: Blob> Writer<B> {
 
     /// Construct an immutable read handle for the current blob state.
     fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
-        let logical_page_size = self.cache_ref.page_size();
+        let page_size = self.cache_ref.page_size();
         let full_pages = self.current_page;
         assert_eq!(
-            full_pages.checked_mul(logical_page_size),
+            full_pages.checked_mul(page_size),
             Some(self.buffer.offset),
             "flushed page count is inconsistent with the buffer offset"
         );
@@ -3265,9 +3263,9 @@ mod tests {
 
             // Build logical data with exactly two full pages followed by one trailing partial page.
             // This lets us verify that only the partial page is materialized.
-            let logical_page_size = PAGE_SIZE.get() as usize;
+            let page_size = PAGE_SIZE.get() as usize;
             let partial_len = 17usize;
-            let data: Vec<u8> = (0..(logical_page_size * 2 + partial_len))
+            let data: Vec<u8> = (0..(page_size * 2 + partial_len))
                 .map(|i| (i % 251) as u8)
                 .collect();
 
@@ -3291,18 +3289,15 @@ mod tests {
 
             // Coalesce for easier content inspection. The assembled bytes should still form three
             // full physical pages on disk.
-            let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
+            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
             let coalesced = physical_pages.coalesce();
             assert_eq!(coalesced.len(), physical_page_size * 3);
 
             // The first two physical pages must preserve the two full logical pages verbatim.
+            assert_eq!(&coalesced.as_ref()[..page_size], &data[..page_size]);
             assert_eq!(
-                &coalesced.as_ref()[..logical_page_size],
-                &data[..logical_page_size]
-            );
-            assert_eq!(
-                &coalesced.as_ref()[physical_page_size..physical_page_size + logical_page_size],
-                &data[logical_page_size..logical_page_size * 2],
+                &coalesced.as_ref()[physical_page_size..physical_page_size + page_size],
+                &data[page_size..page_size * 2],
             );
 
             // The trailing partial page must contain the remaining logical bytes followed by zero
@@ -3310,10 +3305,10 @@ mod tests {
             let partial_start = physical_page_size * 2;
             assert_eq!(
                 &coalesced.as_ref()[partial_start..partial_start + partial_len],
-                &data[logical_page_size * 2..],
+                &data[page_size * 2..],
             );
             assert!(
-                coalesced.as_ref()[partial_start + partial_len..partial_start + logical_page_size]
+                coalesced.as_ref()[partial_start + partial_len..partial_start + page_size]
                     .iter()
                     .all(|byte| *byte == 0)
             );

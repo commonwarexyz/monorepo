@@ -50,12 +50,8 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Simple section-based blob storage for values.
-///
-/// Uses [`buffer::Write`](commonware_runtime::buffer::Write) for batching writes.
-/// Reads go directly to blobs without any caching (ideal for large values that
-/// shouldn't pollute a page cache).
-pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec> {
+/// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
+struct Inner<E: BufferPooler + Storage + Metrics, V: Codec> {
     manager: Manager<E, WriteFactory>,
 
     /// Compression level (if enabled).
@@ -65,9 +61,9 @@ pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
-    /// Initialize blob storage, opening existing section blobs.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
+    /// See [Glob::init].
+    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
@@ -84,12 +80,8 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         })
     }
 
-    /// Append value to section, returns (offset, size).
-    ///
-    /// The returned offset is the byte offset where the entry was written.
-    /// The returned size is the total bytes written (compressed_data + crc32).
-    /// Both should be stored in the index entry for later retrieval.
-    pub async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
+    /// See [Glob::append].
+    async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
         // Encode and optionally compress, then append checksum
         let buf = if let Some(level) = self.compression {
             // Compressed: encode first, then compress, then append checksum
@@ -118,11 +110,8 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok((offset, entry_size))
     }
 
-    /// Read value at offset with known size (from index entry).
-    ///
-    /// The offset should be the byte offset returned by `append()`.
-    /// Reads directly from blob without any caching.
-    pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
+    /// See [Glob::get].
+    async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         let writer = self
             .manager
             .get(section)?
@@ -162,12 +151,8 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(value)
     }
 
-    /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.
-    ///
-    /// Returns `Ok(false)` if the frame is smaller than its checksum trailer, the section
-    /// does not exist, the range is not fully covered by the section, or the checksum does
-    /// not match. Other read failures are propagated.
-    pub(super) async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
+    /// See [Glob::verify].
+    async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
         // A frame is at least its checksum trailer.
         if (size as usize) < crc32::Digest::SIZE {
             return Ok(false);
@@ -190,6 +175,133 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(Crc32::checksum(&buf.as_ref()[..data_len]) == stored_checksum)
     }
 
+    /// See [Glob::inject].
+    #[cfg(test)]
+    async fn inject(&mut self, section: u64, offset: u64, buf: Vec<u8>) -> Result<(), Error> {
+        let writer = self.manager.get_or_create(section).await?;
+        writer.write_at(offset, buf).await.map_err(Error::Runtime)
+    }
+
+    /// See [Glob::sync].
+    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
+        self.manager.sync(sections).await
+    }
+
+    /// See [Glob::start_sync].
+    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
+        self.manager.start_sync(sections).await
+    }
+
+    /// See [Glob::sync_all].
+    async fn sync_all(&mut self) -> Result<(), Error> {
+        self.manager.sync_all().await
+    }
+
+    /// See [Glob::size].
+    fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section)
+    }
+
+    /// See [Glob::rewind].
+    async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.rewind(section, size).await
+    }
+
+    /// See [Glob::rewind_section].
+    async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.rewind_section(section, size).await
+    }
+
+    /// See [Glob::prune].
+    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+        self.manager.prune(min).await
+    }
+
+    /// See [Glob::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
+    }
+
+    /// See [Glob::oldest_section].
+    fn oldest_section(&self) -> Option<u64> {
+        self.manager.oldest_section()
+    }
+
+    /// See [Glob::newest_section].
+    fn newest_section(&self) -> Option<u64> {
+        self.manager.newest_section()
+    }
+
+    /// See [Glob::sections].
+    fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.manager.sections()
+    }
+
+    /// See [Glob::remove_section].
+    async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
+        self.manager.remove_section(section).await
+    }
+
+    /// See [Glob::destroy].
+    async fn destroy(self) -> Result<(), Error> {
+        self.manager.destroy().await
+    }
+}
+
+/// Simple section-based blob storage for values.
+///
+/// Uses [`buffer::Write`](commonware_runtime::buffer::Write) for batching writes.
+/// Reads go directly to blobs without any caching (ideal for large values that
+/// shouldn't pollute a page cache).
+///
+/// Mutating functions consume the glob and return it only on success: an error (or a dropped
+/// future) destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection] without mutating. Check [Glob::pruned] first to keep the
+/// handle.
+pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
+
+impl<E: BufferPooler + Storage + Metrics, V: CodecShared> std::fmt::Debug for Glob<E, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Glob")
+            .field("oldest_section", &self.oldest_section())
+            .field("newest_section", &self.newest_section())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
+    /// Initialize blob storage, opening existing section blobs.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Append value to section.
+    ///
+    /// The returned offset is the byte offset where the entry was written.
+    /// The returned size is the total bytes written (compressed_data + crc32).
+    /// Both should be stored in the index entry for later retrieval.
+    pub async fn append(mut self, section: u64, value: &V) -> Result<(Self, u64, u32), Error> {
+        let (offset, size) = self.0.append(section, value).await?;
+        Ok((self, offset, size))
+    }
+
+    /// Read value at offset with known size (from index entry).
+    ///
+    /// The offset should be the byte offset returned by `append()`.
+    /// Reads directly from blob without any caching.
+    pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
+        self.0.get(section, offset, size).await
+    }
+
+    /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.
+    ///
+    /// Returns `Ok(false)` if the frame is smaller than its checksum trailer, the section
+    /// does not exist, the range is not fully covered by the section, or the checksum does
+    /// not match. Other read failures are propagated.
+    pub(super) async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
+        self.0.verify(section, offset, size).await
+    }
+
     /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.
     #[cfg(test)]
     pub(super) async fn inject(
@@ -198,75 +310,92 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         offset: u64,
         buf: Vec<u8>,
     ) -> Result<(), Error> {
-        let writer = self.manager.get_or_create(section).await?;
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)
+        self.0.inject(section, offset, buf).await
     }
 
     /// Sync the given `sections` to disk (flushes write buffers).
-    pub async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        self.0.sync(sections).await?;
+        Ok(self)
     }
 
     /// Start syncing the given `sections` to disk.
+    ///
+    /// An error reported by the returned [Handle] is fatal to the glob: the caller
+    /// must stop using the returned glob.
     pub async fn start_sync(
-        &mut self,
+        mut self,
         sections: impl crate::Sections,
-    ) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    ) -> Result<(Self, Handle<()>), Error> {
+        let handle = self.0.start_sync(sections).await?;
+        Ok((self, handle))
     }
 
     /// Sync all sections to disk.
-    pub async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        self.0.sync_all().await?;
+        Ok(self)
     }
 
     /// Get the current size of a section (including buffered data).
     pub fn size(&self, section: u64) -> Result<u64, Error> {
-        self.manager.size(section)
+        self.0.size(section)
     }
 
     /// Rewind to a specific section and size.
     ///
     /// Truncates the section to the given size and removes all sections after it.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
+    pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.rewind(section, size).await?;
+        Ok(self)
     }
 
     /// Rewind only the given section to a specific size.
     ///
     /// Unlike `rewind`, this does not affect other sections.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
+    pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.rewind_section(section, size).await?;
+        Ok(self)
     }
 
     /// Prune sections before min.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        self.manager.prune(min).await
+    pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
+        let pruned = self.0.prune(min).await?;
+        Ok((self, pruned))
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
     }
 
     /// Returns the number of the oldest section.
     pub fn oldest_section(&self) -> Option<u64> {
-        self.manager.oldest_section()
+        self.0.oldest_section()
     }
 
     /// Returns the number of the newest section.
     pub fn newest_section(&self) -> Option<u64> {
-        self.manager.newest_section()
+        self.0.newest_section()
     }
 
     /// Returns an iterator over all section numbers.
     pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
-        self.manager.sections()
+        self.0.sections()
     }
 
     /// Remove a specific section. Returns true if the section existed and was removed.
-    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.manager.remove_section(section).await
+    pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
+        let removed = self.0.remove_section(section).await?;
+        Ok((self, removed))
     }
 
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+        self.0.destroy().await
     }
 }
 
@@ -290,13 +419,13 @@ mod tests {
     fn test_glob_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
             // Append a value
             let value: i32 = 42;
-            let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
+            let (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
             assert_eq!(offset, 0);
 
             // Get the value back
@@ -304,7 +433,7 @@ mod tests {
             assert_eq!(retrieved, value);
 
             // Sync and verify
-            glob.sync(1).await.expect("Failed to sync");
+            let glob = glob.sync(1).await.expect("Failed to sync");
             let retrieved = glob.get(1, offset, size).await.expect("Failed to get");
             assert_eq!(retrieved, value);
 
@@ -325,7 +454,9 @@ mod tests {
             let mut locations = Vec::new();
 
             for value in &values {
-                let (offset, size) = glob.append(1, value).await.expect("Failed to append");
+                let offset;
+                let size;
+                (glob, offset, size) = glob.append(1, value).await.expect("Failed to append");
                 locations.push((offset, size));
             }
 
@@ -349,13 +480,13 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
             };
-            let mut glob: Glob<_, [u8; 100]> = Glob::init(context.child("storage"), cfg)
+            let glob: Glob<_, [u8; 100]> = Glob::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to init glob");
 
             // Append a value
             let value: [u8; 100] = [0u8; 100]; // Compressible data
-            let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
+            let (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
 
             // Size should be smaller due to compression
             assert!(size < 100 + 4);
@@ -378,23 +509,29 @@ mod tests {
 
             // Append to multiple sections
             for section in 1..=5 {
-                glob.append(section, &(section as i32))
+                (glob, _, _) = glob
+                    .append(section, &(section as i32))
                     .await
                     .expect("Failed to append");
-                glob.sync(section).await.expect("Failed to sync");
+                glob = glob.sync(section).await.expect("Failed to sync");
             }
 
             // Prune sections < 3
-            glob.prune(3).await.expect("Failed to prune");
+            let (glob, _) = glob.prune(3).await.expect("Failed to prune");
+
+            // The public accessor mirrors the guard
+            assert!(glob.pruned(1));
+            assert!(glob.pruned(2));
+            assert!(!glob.pruned(3));
 
             // Sections 1 and 2 should be gone
             assert!(glob.get(1, 0, 8).await.is_err());
             assert!(glob.get(2, 0, 8).await.is_err());
 
             // Sections 3-5 should still exist
-            assert!(glob.manager.blobs.contains_key(&3));
-            assert!(glob.manager.blobs.contains_key(&4));
-            assert!(glob.manager.blobs.contains_key(&5));
+            assert!(glob.0.manager.blobs.contains_key(&3));
+            assert!(glob.0.manager.blobs.contains_key(&4));
+            assert!(glob.0.manager.blobs.contains_key(&5));
 
             glob.destroy().await.expect("Failed to destroy");
         });
@@ -404,17 +541,17 @@ mod tests {
     fn test_glob_checksum_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
             // Append a value
             let value: i32 = 42;
-            let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            let (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
+            let mut glob = glob.sync(1).await.expect("Failed to sync");
 
             // Corrupt the data by writing directly to the underlying blob
-            let writer = glob.manager.blobs.get_mut(&1).unwrap();
+            let writer = glob.0.manager.blobs.get_mut(&1).unwrap();
             writer
                 .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await
@@ -442,15 +579,18 @@ mod tests {
             let mut locations = Vec::new();
 
             for value in &values {
-                let (offset, size) = glob.append(1, value).await.expect("Failed to append");
+                let offset;
+                let size;
+                (glob, offset, size) = glob.append(1, value).await.expect("Failed to append");
                 locations.push((offset, size));
             }
-            glob.sync(1).await.expect("Failed to sync");
+            glob = glob.sync(1).await.expect("Failed to sync");
 
             // Rewind to after the third value
             let (third_offset, third_size) = locations[2];
             let rewind_size = third_offset + u64::from(third_size);
-            glob.rewind_section(1, rewind_size)
+            let glob = glob
+                .rewind_section(1, rewind_size)
                 .await
                 .expect("Failed to rewind");
 
@@ -476,13 +616,13 @@ mod tests {
             let cfg = test_cfg();
 
             // Create and populate glob
-            let mut glob: Glob<_, i32> = Glob::init(context.child("first"), cfg.clone())
+            let glob: Glob<_, i32> = Glob::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to init glob");
 
             let value: i32 = 42;
-            let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            let (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
+            let glob = glob.sync(1).await.expect("Failed to sync");
             drop(glob);
 
             // Reopen and verify
@@ -501,12 +641,12 @@ mod tests {
     fn test_glob_get_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
-            let (offset, _size) = glob.append(1, &42).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            let (glob, offset, _size) = glob.append(1, &42).await.expect("Failed to append");
+            let glob = glob.sync(1).await.expect("Failed to sync");
 
             // Size 0 - should fail
             assert!(glob.get(1, offset, 0).await.is_err());
@@ -528,12 +668,12 @@ mod tests {
     fn test_glob_get_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
-            let (offset, correct_size) = glob.append(1, &42).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            let (glob, offset, correct_size) = glob.append(1, &42).await.expect("Failed to append");
+            let glob = glob.sync(1).await.expect("Failed to sync");
 
             // Size too small (but >= CRC_SIZE) - checksum mismatch
             let result = glob.get(1, offset, correct_size - 1).await;

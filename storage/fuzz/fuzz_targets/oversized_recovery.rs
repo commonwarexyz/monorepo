@@ -214,34 +214,20 @@ fn fuzz(input: FuzzInput) {
             for _ in 0..count {
                 let value: TestValue = [entry_id as u8; 16];
                 let entry = TestEntry::new(entry_id);
-                let _ = oversized.append(section, entry, &value).await;
+                (oversized, _, _, _) = oversized
+                    .append(section, entry, &value)
+                    .await
+                    .expect("setup append failed");
                 entry_id += 1;
             }
-            match input.sync_operations[section_idx] {
-                SyncOperation::Scalar => assert!(oversized.sync(section).await.is_ok()),
-                SyncOperation::Array => assert!(oversized.sync([section]).await.is_ok()),
-                SyncOperation::ArrayRef => {
-                    let sections = [section];
-                    assert!(oversized.sync(&sections).await.is_ok());
-                }
-                SyncOperation::Slice => {
-                    let sections = [section];
-                    assert!(oversized.sync(&sections[..]).await.is_ok());
-                }
-                SyncOperation::Vec => assert!(oversized.sync(vec![section]).await.is_ok()),
-                SyncOperation::BTreeSet => assert!(
-                    oversized
-                        .sync(std::collections::BTreeSet::from([section]))
-                        .await
-                        .is_ok()
-                ),
-            }
+            oversized = oversized.sync(section).await.expect("setup sync failed");
         }
 
         if input.sync_before_corrupt {
-            let _ = oversized.sync_all().await;
+            let _ = oversized.sync_all().await.expect("setup sync_all failed");
+        } else {
+            drop(oversized);
         }
-        drop(oversized);
 
         // Phase 2: Apply corruptions
         let mut index_page_integrity_may_be_invalidated = false;
@@ -368,6 +354,7 @@ fn fuzz(input: FuzzInput) {
                 append_result.is_ok(),
                 "Should be able to append to section {section} after recovery"
             );
+            (recovered, _, _, _) = append_result.unwrap();
         }
 
         let _ = recovered.destroy().await;

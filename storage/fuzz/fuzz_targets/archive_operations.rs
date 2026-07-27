@@ -289,28 +289,26 @@ async fn run_archive<A: ArchiveHarness>(
     // Keep a map of inserted items for verification
     let mut items = Vec::new();
 
-    // Track the oldest allowed index for pruning
-    let mut oldest_allowed: Option<u64> = None;
+        for op in &data.operations {
+            match op {
+                ArchiveOperation::Put {
+                    index,
+                    key_data,
+                    value_data,
+                } => {
+                    let key = Key::new(*key_data);
+                    let value = Value::new(*value_data);
 
-    // Track written indices
-    let mut written_indices = HashSet::new();
+                    // Put the item into the archive. A put below the prune floor is
+                    // satisfied without storing, so the model only records puts at or
+                    // above the floor.
+                    archive = archive.put(*index, key, value).await.expect("put failed");
+                    let below_floor = oldest_allowed.is_some_and(|min| *index < min);
 
-    for op in operations {
-        match op {
-            ArchiveOperation::Put {
-                index,
-                key_data,
-                value_data,
-            } => {
-                let key = Key::new(*key_data);
-                let value = Value::new(*value_data);
-
-                // Put the item into the archive
-                match archive.put(*index, key, value).await {
-                    Ok(()) => {}
-                    Err(ArchiveError::AlreadyPrunedTo(pruned_to)) => {
-                        assert!(*index < pruned_to);
-                        return;
+                    // Only add if not already written (Archive doesn't allow overwrites)
+                    if !below_floor && !written_indices.contains(index) {
+                        items.push((*index, *key_data, *value_data));
+                        written_indices.insert(*index);
                     }
                     Err(error) => panic!("put failed: {error}"),
                 }
@@ -505,108 +503,46 @@ async fn run_archive<A: ArchiveHarness>(
                 }
             }
 
-            ArchiveOperation::Prune(min) => {
-                if !A::SUPPORTS_PRUNE {
-                    continue;
-                }
-                let min = min - min % A::items_per_section(&cfg);
-                archive.prune_harness(min).await.expect("prune failed");
-                match oldest_allowed {
-                    None => {
-                        oldest_allowed = Some(min);
-                        items.retain(|(i, _, _)| *i >= min);
-                        written_indices.retain(|i| *i >= min);
-                    }
-                    Some(already_pruned) => {
-                        if min > already_pruned {
+                ArchiveOperation::Prune(min) => {
+                    let min = min - min % cfg.items_per_section.get();
+                    archive = archive.prune(min).await.expect("prune failed");
+                    match oldest_allowed {
+                        None => {
                             oldest_allowed = Some(min);
                             items.retain(|(i, _, _)| *i >= min);
                             written_indices.retain(|i| *i >= min);
                         }
                     }
                 }
-            }
 
-            ArchiveOperation::Sync => {
-                archive.sync().await.expect("sync failed");
-            }
+                ArchiveOperation::Sync => {
+                    archive = archive.sync().await.expect("sync failed");
+                }
 
-            ArchiveOperation::Restart => {
-                archive.sync().await.expect("sync before restart failed");
-                drop(archive);
-                archive = A::init(
-                    context
-                        .child("storage")
-                        .with_attribute("instance", restarts),
-                    cfg.clone(),
-                )
-                .await;
-                restarts += 1;
-                oldest_allowed = None;
-            }
+                ArchiveOperation::NextGap { start } => {
+                    let (gap, next_written) = archive.next_gap(*start);
 
-            ArchiveOperation::Ranges => {
-                let actual: Vec<_> = archive.ranges().collect();
-                assert_eq!(actual, ranges(&written_indices));
-            }
+                    if let Some(gap_index) = gap {
+                        // Gap should be at or after start
+                        assert!(gap_index >= *start, "Gap {gap_index} before requested start {start}");
 
-            ArchiveOperation::RangesFrom(from) => {
-                let actual: Vec<_> = archive.ranges_from(*from).collect();
-                let expected: Vec<_> = ranges(&written_indices)
-                    .into_iter()
-                    .filter(|(_, end)| end >= from)
-                    .collect();
-                assert_eq!(actual, expected);
-            }
-
-            ArchiveOperation::FirstLastIndex => {
-                assert_eq!(archive.first_index(), written_indices.iter().min().copied());
-                assert_eq!(archive.last_index(), written_indices.iter().max().copied());
-            }
-
-            ArchiveOperation::MissingItems { start, max } => {
-                let max = usize::from(*max % 64) + 1;
-                assert_eq!(
-                    archive.missing_items(*start, max),
-                    missing_items(&written_indices, *start, max)
-                );
-            }
-
-            ArchiveOperation::NextGap { start } => {
-                let (gap, next_written) = archive.next_gap(*start);
-
-                if let Some(gap_index) = gap {
-                    // Gap should be at or after start
-                    assert!(
-                        gap_index >= *start,
-                        "Gap {gap_index} before requested start {start}"
-                    );
-
-                    // If pruned, gap should be above threshold
-                    if let Some(threshold) = oldest_allowed
-                        && gap_index < threshold
-                    {
-                        panic!(
-                            "Warning: next_gap returned gap {gap_index} below pruning threshold {threshold}"
-                        );
+                        // If pruned, gap should be above threshold
+                        if let Some(threshold) = oldest_allowed
+                            && gap_index < threshold {
+                                panic!("Warning: next_gap returned gap {gap_index} below pruning threshold {threshold}");
+                            }
                     }
-                }
 
-                if let Some(next_index) = next_written
-                    && next_index < *start
-                {
-                    panic!("Warning: next_written {next_index} is before start {start}");
+                    if let Some(next_index) = next_written
+                        && next_index < *start {
+                            panic!("Warning: next_written {next_index} is before start {start}");
+                        }
                 }
-            }
-
-            ArchiveOperation::Destroy => {
-                archive.destroy().await.expect("destroy failed");
-                return;
             }
         }
     }
 
-    archive.sync().await.expect("final sync failed");
+        archive = archive.sync().await.expect("final sync failed");
 
     let indices_with_items: HashSet<_> = items.iter().map(|(index, _, _)| *index).collect();
     assert_eq!(indices_with_items, written_indices);

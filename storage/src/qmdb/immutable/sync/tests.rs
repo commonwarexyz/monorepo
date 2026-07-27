@@ -992,6 +992,7 @@ pub(crate) mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
+        #[boxed]
         async fn destroy(db: Self::Db) {
             db.destroy().await.unwrap();
         }
