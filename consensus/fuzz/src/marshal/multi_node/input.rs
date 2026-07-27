@@ -12,7 +12,7 @@ use arbitrary::Arbitrary;
 use commonware_consensus::simplex::ForwardingPolicy;
 
 const MIN_REQUIRED: u64 = 1;
-const MAX_TWINS_ROUNDS: u8 = 6;
+pub(super) const MAX_TWINS_ROUNDS: u8 = 6;
 const MAX_TWINS_TRAILING_BLOCKS: u8 = 3;
 
 fn sample_fault_rounds(

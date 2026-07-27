@@ -38,7 +38,6 @@ use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
 use layout::{AttackLayout, attack_layout};
 use observer::ObservedMarshal;
-use rand::RngExt as _;
 use stack::{
     ATTACK_SLOW_VERIFY_DELAY, ATTACK_VICTIM_VERIFY_DELAY, DEFAULT_MAX_PENDING_ACKS,
     DeferredMarshal, InlineMarshal, MarshalChoice, SelectedMarshal, TwinsBlockBuilder,
@@ -118,7 +117,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
             input.rounds
         };
         let mut rng = FuzzRng::new(entropy);
-        let app_config = FaultyConfig::new(rng.random(), View::new(fault_injection_rounds.into()));
+        let app_config = FaultyConfig::new(&mut rng, View::new(fault_injection_rounds.into()));
         Self {
             input,
             probe_input,

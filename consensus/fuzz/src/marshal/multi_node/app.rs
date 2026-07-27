@@ -15,6 +15,7 @@
 //! Generic over the context type `C` so the same builder serves both variants:
 //! standard uses `Context<Digest, K>`, coding uses `Context<Commitment, K>`.
 
+use super::input::MAX_TWINS_ROUNDS;
 use commonware_actor::Feedback;
 use commonware_codec::Codec;
 use commonware_consensus::{
@@ -30,11 +31,12 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    Digestible, Hasher as _, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
+    Digestible, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Clock as _, deterministic};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{FuzzRng, sync::Mutex};
 use futures::StreamExt;
+use rand_core::Rng as _;
 use std::{
     collections::HashMap, fmt, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration,
 };
@@ -242,6 +244,7 @@ const RANDOM_BUCKETS: u8 = 16;
 const PROPOSE_NONE_BUCKET: u8 = 0;
 const VERIFY_DELAY_BUCKETS: [u8; 2] = [0, 1];
 const VERIFY_REJECT_BUCKET: u8 = 2;
+const FAULT_BEHAVIOR_VIEWS: usize = MAX_TWINS_ROUNDS as usize + 1;
 
 /// Honest application selected by the final byte of the general Twins input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,16 +274,18 @@ impl fmt::Display for ApplicationChoice {
     }
 }
 
-/// Input-derived behavior shared by every faulty honest application.
+/// Input-derived per-view behavior shared by every faulty honest application.
 ///
-/// Outcomes are keyed by consensus context rather than call order so honest
-/// validators make the same validity decision for the same proposal.
+/// The table is generated once from fuzz bytes, then indexed by view rather
+/// than call order so honest validators make the same validity decision.
 #[derive(Clone, Copy)]
 pub(super) struct FaultyConfig {
-    seed: u64,
+    omit_proposal: [bool; FAULT_BEHAVIOR_VIEWS],
+    verification: [VerificationBehavior; FAULT_BEHAVIOR_VIEWS],
     fault_injection_through: View,
 }
 
+#[derive(Clone, Copy)]
 enum VerificationBehavior {
     Delay(Duration),
     Reject,
@@ -288,48 +293,55 @@ enum VerificationBehavior {
 }
 
 impl FaultyConfig {
-    pub(super) const fn new(seed: u64, fault_injection_through: View) -> Self {
+    pub(super) fn new(rng: &mut FuzzRng, fault_injection_through: View) -> Self {
+        let mut omit_proposal = [false; FAULT_BEHAVIOR_VIEWS];
+        let mut verification = [VerificationBehavior::Accept; FAULT_BEHAVIOR_VIEWS];
+        for view in 0..FAULT_BEHAVIOR_VIEWS {
+            let mut samples = [0u8; 3];
+            rng.fill_bytes(&mut samples);
+            let [propose_sample, verify_sample, delay_sample] = samples;
+            omit_proposal[view] = propose_sample % RANDOM_BUCKETS == PROPOSE_NONE_BUCKET;
+            verification[view] = match verify_sample % RANDOM_BUCKETS {
+                bucket if VERIFY_DELAY_BUCKETS.contains(&bucket) => VerificationBehavior::Delay(
+                    Duration::from_secs(1 + u64::from(delay_sample % 3)),
+                ),
+                VERIFY_REJECT_BUCKET => VerificationBehavior::Reject,
+                _ => VerificationBehavior::Accept,
+            };
+        }
         Self {
-            seed,
+            omit_proposal,
+            verification,
             fault_injection_through,
         }
     }
 
-    fn sample<C: Codec<Cfg = ()>>(&self, domain: &[u8], context: &C) -> Sha256Digest {
-        Sha256::hash(&[domain, &self.seed.to_be_bytes(), &context.encode()])
-    }
-
-    fn enabled<C: Viewable>(&self, context: &C) -> bool {
-        context.view() <= self.fault_injection_through
+    fn behavior_index<C: Viewable>(&self, context: &C) -> Option<usize> {
+        if context.view() > self.fault_injection_through {
+            return None;
+        }
+        let view = usize::try_from(context.view().get()).expect("view must fit usize");
+        assert!(
+            view < FAULT_BEHAVIOR_VIEWS,
+            "fault-injection view {view} exceeds the configured behavior table"
+        );
+        Some(view)
     }
 
     fn omit_proposal<C>(&self, context: &C) -> bool
     where
         C: Codec<Cfg = ()> + Viewable,
     {
-        if !self.enabled(context) {
-            return false;
-        }
-        let sample = self.sample(b"marshal-fuzz-propose", context);
-        sample.as_ref()[0] % RANDOM_BUCKETS == PROPOSE_NONE_BUCKET
+        self.behavior_index(context)
+            .is_some_and(|view| self.omit_proposal[view])
     }
 
     fn verification<C>(&self, context: &C) -> VerificationBehavior
     where
         C: Codec<Cfg = ()> + Viewable,
     {
-        if !self.enabled(context) {
-            return VerificationBehavior::Accept;
-        }
-        let sample = self.sample(b"marshal-fuzz-verify", context);
-        let bytes: &[u8] = sample.as_ref();
-        match bytes[0] % RANDOM_BUCKETS {
-            bucket if VERIFY_DELAY_BUCKETS.contains(&bucket) => {
-                VerificationBehavior::Delay(Duration::from_secs(1 + u64::from(bytes[1] % 3)))
-            }
-            VERIFY_REJECT_BUCKET => VerificationBehavior::Reject,
-            _ => VerificationBehavior::Accept,
-        }
+        self.behavior_index(context)
+            .map_or(VerificationBehavior::Accept, |view| self.verification[view])
     }
 
     pub(super) fn rejects<C>(&self, context: &C) -> bool
