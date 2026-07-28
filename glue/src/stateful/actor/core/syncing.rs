@@ -345,6 +345,10 @@ where
     }
 
     /// Classify finalized messages relative to the completed sync artifact.
+    ///
+    /// Marshal dispatches heights strictly ascending within one actor lifetime (redelivery
+    /// happens only after a restart), and the artifact anchors at the newest recorded target,
+    /// so handoff blocks reflect the anchor or extend it consecutively.
     fn prepare_handoffs(
         &self,
         finalized: impl IntoIterator<Item = Arc<A::Block>>,

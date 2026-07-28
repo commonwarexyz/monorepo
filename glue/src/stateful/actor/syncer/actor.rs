@@ -222,3 +222,206 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, Syncer};
+    use crate::stateful::{
+        Application, Input, Proposed,
+        db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
+        tests::{
+            fixtures::{self, MarshalFixture},
+            mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor},
+        },
+    };
+    use commonware_consensus::{
+        marshal::ancestry::Ancestry, simplex::mocks::scheme as scheme_mocks,
+        simplex::types::Context as SimplexContext, types::Height,
+    };
+    use commonware_cryptography::{
+        ed25519,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
+    use commonware_runtime::{
+        Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    };
+    use commonware_utils::{NZU64, NZUsize, channel::{oneshot, ring}};
+    use std::{convert::Infallible, time::Duration};
+
+    /// Database set whose sync holds the tip-update ring receiver without draining it, then
+    /// completes once the actor has parked a forwarded update in the ring buffer.
+    #[derive(Clone)]
+    struct WedgeSet;
+
+    impl DatabaseSet<deterministic::Context> for WedgeSet {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Config = ();
+        type SyncTargets = u64;
+
+        async fn init(_context: deterministic::Context, _config: Self::Config) -> Self {
+            unreachable!("WedgeSet is constructed by sync")
+        }
+
+        fn initial_sync_targets() -> Self::SyncTargets {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn new_batches(&self) -> Self::Unmerkleized {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        fn matches_sync_targets(_batches: &Self::Merkleized, _targets: &Self::SyncTargets) -> bool {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn finalize(&self, _batches: Self::Merkleized) -> Barrier {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn prune(&self, _targets: &Self::SyncTargets) {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn applied_targets(&self) -> Self::SyncTargets {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn rewind_to_targets(&self, _targets: Self::SyncTargets) {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+    }
+
+    impl StateSyncSet<deterministic::Context, (), Sha256Digest> for WedgeSet {
+        type Error = Infallible;
+
+        async fn sync(
+            context: deterministic::Context,
+            _config: Self::Config,
+            _resolvers: (),
+            anchor: Anchor<Sha256Digest>,
+            _targets: Self::SyncTargets,
+            tip_updates: ring::Receiver<TipUpdate<Sha256Digest, Self::SyncTargets>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<(Self, Anchor<Sha256Digest>), Self::Error> {
+            // Hold the ring receiver without draining it. The deterministic clock advances
+            // only at quiescence, so the sleep fires only once every other task has parked,
+            // which includes the actor forwarding a tip update into the ring buffer.
+            // Completing then drops the receiver with the update still queued.
+            context.sleep(Duration::from_secs(1)).await;
+            drop(tip_updates);
+            Ok((Self, anchor))
+        }
+    }
+
+    #[derive(Clone)]
+    struct WedgeApp;
+
+    impl Application<deterministic::Context> for WedgeApp {
+        type SigningScheme = TestScheme;
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+        type Block = TestBlock;
+        type Databases = WedgeSet;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            use commonware_consensus::Heightable as _;
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> TestMerkleized {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
+    }
+
+    /// A tip update stranded in the ring buffer by sync completion must resolve through the
+    /// caller's retry with the completed artifact, not wedge its observation forever.
+    #[test]
+    fn stranded_tip_update_resolves_to_artifact() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-wedge", 1);
+            let block = TestBlock::new(8, 10);
+            let finalization = fixtures::finalization(&fixture, 8, Sha256::fill(10));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "syncer-wedge",
+                fixture.schemes[0].clone(),
+                Some((&block, finalization.clone())),
+                true,
+            )
+            .await;
+
+            let (sync_complete, sync_completed) = oneshot::channel();
+            let (syncer, mailbox) = Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(
+                Config {
+                    context: context.child("syncer"),
+                    db_config: (),
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: 1,
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    resolvers: (),
+                    finalization,
+                    marshal,
+                    sync_complete,
+                },
+            );
+            let actor = syncer.start();
+
+            // The update is forwarded into the ring buffer and its observation parks before
+            // the sync task completes (the task's clock only advances at quiescence). The
+            // stranded observation must resolve through a retry that returns the artifact.
+            let update = context.child("update").spawn(move |_| async move {
+                mailbox.update_targets(anchor(9, 11), 9).await
+            });
+            let result = update.await.expect("update task failed");
+            assert!(
+                matches!(&result, Some(artifact) if artifact.anchor.height == Height::new(8)),
+                "stranded update must resolve to the completed artifact",
+            );
+
+            let artifact = sync_completed.await.expect("artifact must publish");
+            assert_eq!(artifact.anchor.height, Height::new(8));
+            actor.await.expect("syncer actor failed");
+        });
+    }
+}
