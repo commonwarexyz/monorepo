@@ -329,14 +329,31 @@ impl Read for Certificate {
 
 /// Generates a Secp256r1 signing scheme wrapper for a specific protocol.
 ///
-/// This macro creates a complete wrapper struct with constructors, `Scheme`
-/// trait implementation, and a `fixture` function for testing. The protocol
-/// supplies its subject type, namespace type, and fault model.
+/// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+/// implementation, and a `fixture` function for testing.
+///
+/// # Parameters
+///
+/// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
+///   in the subject type to bind to the GAT lifetime and digest type parameters.
+///
+/// - `$namespace`: The namespace type that implements [`Namespace`].
+///   This type pre-computes and stores any protocol-specific namespace bytes derived from
+///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
+///   to create the namespace, then passes it to `Subject::namespace()` during signing
+///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
+///   For protocols with multiple message types, a custom struct can pre-compute all variants.
+///
+/// - `$faults`: The `commonware_utils::Faults` implementation used to compute certificate quorums.
 ///
 /// # Example
 /// ```ignore
+/// // For non-generic subject types with a single namespace:
+/// impl_certificate_secp256r1!(MySubject, Vec<u8>, commonware_utils::N3f1);
+///
+/// // For protocols with generic subject types:
 /// impl_certificate_secp256r1!(
-///     VoteSubject<'a, D>,
+///     Subject<'a, D>,
 ///     Namespace,
 ///     commonware_utils::N3f1,
 /// );
