@@ -18,6 +18,7 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
+        Error as QmdbError,
         current::{VariableConfig, unordered::variable::Db as Current},
         verify_proof,
     },
@@ -612,13 +613,14 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                                     ));
                                     db
                                 }
-                                Err(_) => {
+                                Err(QmdbError::Journal(_) | QmdbError::Merkle(_)) => {
                                     let Expected::Exact(snapshot) = &mut expected else {
                                         unreachable!("prune starts from an exact state")
                                     };
                                     snapshot.max_start = target;
                                     break;
                                 }
+                                Err(_) => break,
                             }
                         }
                     }

@@ -85,6 +85,26 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn op_value(op: &OpOf<Self>) -> Option<&Self::Value>;
 }
 
+pub(crate) fn test_discard_sync_result_destroys_database<H: SyncTestHarness>() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let config = H::config("discard-sync-result", &context);
+        let db = H::init_db_with_config(context.child("create"), config.clone()).await;
+        let empty_bounds = H::bounds(&db);
+        let db = H::apply_ops(db, H::create_ops(2), Some(H::sample_metadata())).await;
+        let db = H::db_sync(db).await;
+        assert_ne!(H::bounds(&db), empty_bounds);
+
+        <DbOf<H> as qmdb::sync::Database>::discard_sync_result(db)
+            .await
+            .unwrap();
+
+        let reopened = H::init_db_with_config(context.child("reopen"), config).await;
+        assert_eq!(H::bounds(&reopened), empty_bounds);
+        H::destroy(reopened).await;
+    });
+}
+
 // ===== Generic tests =====
 
 pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
@@ -975,6 +995,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_sync_database_persistence() {
                 super::test_sync_database_persistence::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_discard_sync_result_destroys_database() {
+                super::test_discard_sync_result_destroys_database::<$harness>();
             }
 
             #[test_traced("WARN")]

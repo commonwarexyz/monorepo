@@ -198,6 +198,14 @@ impl Params {
             ..Default::default()
         }
     }
+
+    fn writes_fail_before_io(&self) -> bool {
+        self.write_rate == 1.0 && self.partial_write_rate == 0.0
+    }
+
+    fn resizes_fail_before_io(&self) -> bool {
+        self.resize_rate == 1.0 && self.partial_resize_rate == 0.0
+    }
 }
 
 /// Conservative bounds on what a recovery may produce after an unclean shutdown:
@@ -604,7 +612,9 @@ async fn run_ops<J: FuzzJournal>(
                         journal
                     }
                     Err(_) => {
-                        expected.append_failed(size_before, item);
+                        if !params.writes_fail_before_io() {
+                            expected.append_failed(size_before, item);
+                        }
                         return;
                     }
                 }
@@ -620,13 +630,22 @@ async fn run_ops<J: FuzzJournal>(
                 journal
             }
 
-            JournalOperation::Sync => match journal.sync().await {
-                Ok(journal) => {
-                    expected.synced(journal.bounds());
-                    journal
+            JournalOperation::Sync => {
+                let journal = match journal.commit().await {
+                    Ok(journal) => {
+                        expected.committed(journal.size().await);
+                        journal
+                    }
+                    Err(_) => return,
+                };
+                match journal.sync().await {
+                    Ok(journal) => {
+                        expected.synced(journal.bounds());
+                        journal
+                    }
+                    Err(_) => return,
                 }
-                Err(_) => return,
-            },
+            }
 
             JournalOperation::Commit => match journal.commit().await {
                 Ok(journal) => {
@@ -670,7 +689,9 @@ async fn run_ops<J: FuzzJournal>(
                             return;
                         }
                         Err(_) => {
-                            expected.rewound(target.min(bounds.end));
+                            if !params.resizes_fail_before_io() {
+                                expected.rewound(target.min(bounds.end));
+                            }
                             return;
                         }
                     }

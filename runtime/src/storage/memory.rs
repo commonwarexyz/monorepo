@@ -31,6 +31,17 @@ struct Recovery {
     pending: BTreeMap<BlobKey, Vec<Mutation>>,
 }
 
+fn apply_mutations(content: &mut Vec<u8>, mutations: &[Mutation]) {
+    for mutation in mutations {
+        match mutation {
+            Mutation::Write { offset, data, .. } => {
+                Storage::apply_write(content, *offset, data.as_ref());
+            }
+            Mutation::Resize { len } => content.resize(*len, 0),
+        }
+    }
+}
+
 fn apply_crash(
     recovery: &mut Recovery,
     partitions: &mut BTreeMap<String, Partition>,
@@ -159,7 +170,7 @@ impl Storage {
         let mut partitions = self.partitions.lock();
         apply_crash(&mut recovery, &mut partitions, &mut next_mask);
         self.epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                 epoch.checked_add(1)
             })
             .expect("storage crash epoch overflow");
@@ -219,15 +230,20 @@ impl crate::Storage for Storage {
         let mut partitions = self.partitions.lock();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
+        let mut opened_content = content.clone();
+        if let Some(mutations) = recovery.pending.get(&key) {
+            apply_mutations(&mut opened_content, mutations);
+        }
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(content, &versions, partition, name)?;
+        let existing = resolve_header(&opened_content, &versions, partition, name)?;
         let (logical_size, blob_version, data_offset) = existing.unwrap_or_else(|| {
             let (region, blob_version) = Header::create(&versions);
             let data_offset = region.len() as u64;
             content.clear();
             content.extend_from_slice(&region);
+            opened_content.clone_from(content);
             (0, blob_version, data_offset)
         });
         let generation = recovery.generation(&key);
@@ -239,7 +255,7 @@ impl crate::Storage for Storage {
                 epoch: self.epoch.clone(),
                 partition: partition.into(),
                 name: name.into(),
-                content: Arc::new(RwLock::new(content.clone())),
+                content: Arc::new(RwLock::new(opened_content)),
                 pool: self.pool.clone(),
                 data_offset,
                 generation,
@@ -601,6 +617,26 @@ mod tests {
         let (blob, size) = storage.open("partition", b"blob").await.unwrap();
         assert_eq!(size, 5);
         assert_eq!(blob.read_at(0, 5).await.unwrap().coalesce(), b"dSYNC");
+    }
+
+    #[tokio::test]
+    async fn test_reopen_and_sync_preserves_pending_mutations() {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"pending").await.unwrap();
+        drop(blob);
+
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 7);
+        assert_eq!(blob.read_at(0, 7).await.unwrap().coalesce(), b"pending");
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        storage.simulate_crash(|| 0);
+
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 7);
+        assert_eq!(blob.read_at(0, 7).await.unwrap().coalesce(), b"pending");
     }
 
     #[tokio::test]

@@ -59,6 +59,10 @@ const fn normalized_section(raw: u8) -> u64 {
     (raw % MAX_SECTIONS) as u64
 }
 
+const fn normalized_prune(raw: u8) -> u64 {
+    (raw % (MAX_SECTIONS + 1)) as u64
+}
+
 #[derive(Arbitrary, Clone, Copy, Debug)]
 enum JournalType {
     Fixed,
@@ -431,7 +435,7 @@ async fn run_operations<J: HarnessJournal>(
                 journal
             }
             Operation::Prune { min } => {
-                let min = normalized_section(*min);
+                let min = normalized_prune(*min);
                 let (journal, pruned) = journal.prune(min).await.expect("prune should succeed");
                 if pruned {
                     expected.prune(min);
@@ -545,10 +549,10 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
         }
     });
 
-    const PRUNE_MIN: u64 = MAX_SECTIONS as u64 - 1;
+    const PRUNE_MIN: u64 = MAX_SECTIONS as u64;
     let prune_partition = partition.clone();
-    let (expected, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
+    let ((expected, prune_result), checkpoint) = deterministic::Runner::from(checkpoint)
+        .start_and_recover(move |context| async move {
             let (journal, replayed) = J::init(
                 context.child("prune"),
                 J::config(&prune_partition, &context, params),
@@ -559,8 +563,8 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
             assert_recovered(replayed, &expected);
 
             *context.storage_fault_config().write() = remove_faults();
-            let _ = journal.prune(PRUNE_MIN).await;
-            expected
+            let prune_result = journal.prune(PRUNE_MIN).await.map(|(_, pruned)| pruned);
+            (expected, prune_result)
         });
 
     let destroy_partition = partition.clone();
@@ -575,25 +579,41 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
             .await
             .expect("journal must reopen after interrupted prune");
 
-            let mut relaxed = expected.clone();
-            for section in 0..PRUNE_MIN {
-                relaxed.durable.insert(section, 0);
-            }
-            let recovered = assert_recovered(replayed, &relaxed);
-            let mut retained = false;
-            for section in 0..PRUNE_MIN {
-                let recovered_entries = recovered.get(&section).map_or(&[][..], Vec::as_slice);
-                if recovered_entries.is_empty() {
-                    assert!(
-                        !retained,
-                        "interrupted ascending prune left a hole before section {section}"
-                    );
-                } else {
+            match prune_result {
+                Ok(pruned) => {
+                    let mut exact = expected.clone();
+                    if pruned {
+                        exact.prune(PRUNE_MIN);
+                    }
+                    let recovered = assert_recovered(replayed, &exact);
                     assert_eq!(
-                        recovered_entries, expected.attempted[&section],
-                        "interrupted prune partially removed section {section}"
+                        recovered, exact.attempted,
+                        "completed prune recovery must match its reported result"
                     );
-                    retained = true;
+                }
+                Err(_) => {
+                    let mut relaxed = expected.clone();
+                    for section in 0..PRUNE_MIN {
+                        relaxed.durable.insert(section, 0);
+                    }
+                    let recovered = assert_recovered(replayed, &relaxed);
+                    let mut retained = false;
+                    for section in 0..PRUNE_MIN {
+                        let recovered_entries =
+                            recovered.get(&section).map_or(&[][..], Vec::as_slice);
+                        if recovered_entries.is_empty() {
+                            assert!(
+                                !retained,
+                                "interrupted ascending prune left a hole before section {section}"
+                            );
+                        } else {
+                            assert_eq!(
+                                recovered_entries, expected.attempted[&section],
+                                "interrupted prune partially removed section {section}"
+                            );
+                            retained = true;
+                        }
+                    }
                 }
             }
 

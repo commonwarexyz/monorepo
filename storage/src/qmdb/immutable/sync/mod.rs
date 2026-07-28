@@ -151,7 +151,7 @@ where
     }
 
     async fn discard_sync_result(self) -> Result<(), Error<F>> {
-        Ok(())
+        self.destroy().await
     }
 
     async fn local_boundary_nodes(

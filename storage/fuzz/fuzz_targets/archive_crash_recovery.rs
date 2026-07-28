@@ -126,6 +126,13 @@ enum OptionalRecovery {
     Any,
 }
 
+#[derive(Clone, Copy)]
+enum PruneRecovery {
+    Unchanged,
+    RemovalMayHaveStarted,
+    Complete,
+}
+
 trait Variant: Send + 'static {
     type Store: ArchiveTrait<Key = Key, Value = Value> + 'static;
     const PRUNABLE: bool;
@@ -494,8 +501,8 @@ fn run<V: Variant>(input: FuzzInput) {
 
     // Give Prunable several populated sections below a fixed floor, then interrupt its production
     // metadata-sync/index-prune/value-prune sequence under storage faults.
-    let (prune_expected, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
+    let ((prune_expected, prune_recovery), checkpoint) = deterministic::Runner::from(checkpoint)
+        .start_and_recover(move |context| async move {
             let fault_config = context.storage_fault_config();
             let mut archive = V::init(context, settings)
                 .await
@@ -511,7 +518,7 @@ fn run<V: Variant>(input: FuzzInput) {
                 settings.items_per_section,
             )
             .await;
-            if V::PRUNABLE {
+            let prune_recovery = if V::PRUNABLE {
                 for index in PRUNE_SENTINEL_INDICES {
                     let value = [index as u8; 32];
                     archive = archive
@@ -522,14 +529,23 @@ fn run<V: Variant>(input: FuzzInput) {
                 }
                 archive = archive.sync().await.expect("pre-prune sync should succeed");
                 *fault_config.write() = interrupt_faults();
-                let _ = V::prune(archive, FIRST_SENTINEL_INDEX).await;
-            }
+                match V::prune(archive, FIRST_SENTINEL_INDEX).await {
+                    Ok(_) => PruneRecovery::Complete,
+                    Err(Error::Journal(_)) => PruneRecovery::RemovalMayHaveStarted,
+                    Err(_) => PruneRecovery::Unchanged,
+                }
+            } else {
+                PruneRecovery::Unchanged
+            };
 
-            Expected {
-                durable: live,
-                optional: Model::new(),
-                next_index: next_expected.next_index,
-            }
+            (
+                Expected {
+                    durable: live,
+                    optional: Model::new(),
+                    next_index: next_expected.next_index,
+                },
+                prune_recovery,
+            )
         });
 
     // Recovery may expose old sections or the advanced prune floor. Retained entries at and above
@@ -541,38 +557,30 @@ fn run<V: Variant>(input: FuzzInput) {
             let mut archive = V::init(context, settings)
                 .await
                 .expect("archive must reopen after interrupted prune");
-            let recovery_expected = if V::PRUNABLE {
-                Expected {
-                    durable: prune_expected
-                        .durable
-                        .iter()
-                        .filter(|(index, _)| **index >= FIRST_SENTINEL_INDEX)
-                        .map(|(&index, &value)| (index, value))
-                        .collect(),
-                    optional: prune_expected
-                        .durable
-                        .iter()
-                        .filter(|(index, _)| **index < FIRST_SENTINEL_INDEX)
-                        .map(|(&index, &value)| (index, value))
-                        .collect(),
-                    next_index: prune_expected.next_index,
+            let mut recovery_expected = prune_expected.clone();
+            let optional_recovery = match prune_recovery {
+                PruneRecovery::Unchanged => OptionalRecovery::None,
+                PruneRecovery::RemovalMayHaveStarted => {
+                    let retained = recovery_expected.durable.split_off(&FIRST_SENTINEL_INDEX);
+                    recovery_expected.optional =
+                        std::mem::replace(&mut recovery_expected.durable, retained);
+                    OptionalRecovery::Any
                 }
-            } else {
-                prune_expected.clone()
+                PruneRecovery::Complete => {
+                    recovery_expected.durable =
+                        recovery_expected.durable.split_off(&FIRST_SENTINEL_INDEX);
+                    OptionalRecovery::None
+                }
             };
             let mut live = recover_model(
                 &archive,
                 &recovery_expected,
-                if V::PRUNABLE {
-                    OptionalRecovery::Any
-                } else {
-                    OptionalRecovery::None
-                },
+                optional_recovery,
                 settings.items_per_section,
             )
             .await;
 
-            if V::PRUNABLE {
+            if matches!(prune_recovery, PruneRecovery::RemovalMayHaveStarted) {
                 assert_interrupted_prune(
                     &live,
                     &prune_expected.durable,

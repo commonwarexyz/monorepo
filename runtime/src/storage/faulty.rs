@@ -564,6 +564,8 @@ mod tests {
             Err(Error::Io(_))
         ));
 
+        drop(blob);
+        h.inner.simulate_crash(|| 0);
         let (_reopened, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);
     }
@@ -577,6 +579,8 @@ mod tests {
 
         blob.write_at_sync(4, Vec::<u8>::new()).await.unwrap();
 
+        drop(blob);
+        h.inner.simulate_crash(|| 0);
         let (_reopened, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);
     }

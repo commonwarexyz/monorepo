@@ -181,7 +181,7 @@ macro_rules! impl_sync_database {
             }
 
             async fn discard_sync_result(self) -> Result<(), qmdb::Error<F>> {
-                Ok(())
+                self.destroy().await
             }
 
             async fn local_boundary_nodes(

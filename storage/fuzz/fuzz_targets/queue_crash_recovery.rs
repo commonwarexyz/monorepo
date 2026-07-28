@@ -56,10 +56,19 @@ enum QueueOperation {
     AckOffset { offset: u8 },
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
-    /// Sync the queue (commit and prune).
-    Sync,
+    /// Sync the queue (commit and prune), targeting one stage with faults.
+    Sync { fault_stage: SyncFaultStage },
     /// Reset read position to ack floor.
     Reset,
+}
+
+/// Stage of [Queue::sync] targeted by fault injection.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum SyncFaultStage {
+    /// Fail the journal sync before pruning can begin.
+    Journal,
+    /// Allow the journal sync to finish, then fault blob removal during pruning.
+    Prune,
 }
 
 /// Fuzz input containing fault injection parameters and operations.
@@ -81,7 +90,7 @@ struct FuzzInput {
     write_buffer: usize,
     /// Optional variable-journal compression.
     compression: bool,
-    /// Failure rate for sync operations.
+    /// Failure rate for ordinary sync operations and targeted prune removals.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: f64,
     /// Failure rate for write operations.
@@ -137,7 +146,7 @@ impl RecoveryState {
         self.max_prune = boundary;
     }
 
-    fn sync_failed(&mut self, possible_boundary: u64) {
+    fn prune_failed(&mut self, possible_boundary: u64) {
         self.max_prune = self.max_prune.max(possible_boundary);
     }
 }
@@ -151,6 +160,8 @@ async fn run_operations(
     mut queue: Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
     items_per_section: u64,
+    context: &deterministic::Context,
+    injected_faults: &deterministic::FaultConfig,
 ) -> RecoveryState {
     let mut state = RecoveryState::new();
 
@@ -232,18 +243,30 @@ async fn run_operations(
                 queue
             }
 
-            QueueOperation::Sync => {
+            QueueOperation::Sync { fault_stage } => {
                 let size = queue.size();
                 let possible_boundary = (queue.ack_floor() / items_per_section)
                     .min(size / items_per_section)
                     * items_per_section;
-                match queue.sync().await {
+                let faults = context.storage_fault_config();
+                *faults.write() = match fault_stage {
+                    SyncFaultStage::Journal => deterministic::FaultConfig::default().sync(1.0),
+                    SyncFaultStage::Prune => deterministic::FaultConfig::default()
+                        .remove(injected_faults.sync_rate.unwrap_or_default()),
+                };
+                let result = queue.sync().await;
+                *faults.write() = injected_faults.clone();
+
+                match result {
                     Ok(queue) => {
                         state.synced(size, possible_boundary);
                         queue
                     }
                     Err(_) => {
-                        state.sync_failed(possible_boundary);
+                        if matches!(fault_stage, SyncFaultStage::Prune) {
+                            state.committed(size);
+                            state.prune_failed(possible_boundary);
+                        }
                         return state;
                     }
                 }
@@ -387,9 +410,16 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
             let faults = ctx.storage_fault_config();
-            *faults.write() = fault_config;
+            *faults.write() = fault_config.clone();
 
-            run_operations(queue, &operations, items_per_section.get()).await
+            run_operations(
+                queue,
+                &operations,
+                items_per_section.get(),
+                &ctx,
+                &fault_config,
+            )
+            .await
         }
     });
 

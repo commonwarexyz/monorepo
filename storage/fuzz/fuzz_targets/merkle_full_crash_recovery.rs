@@ -377,6 +377,14 @@ async fn run_operations<F: MerkleFamily>(
 
                 if target > merkle.bounds().start {
                     raise_storage_ceiling(&mut max_leaves, &merkle);
+                    let merkle = match merkle.sync().await {
+                        Err(_) => break,
+                        Ok(merkle) => merkle,
+                    };
+                    min_leaves = merkle.leaves().as_u64();
+                    max_leaves = min_leaves;
+                    min_pruned = merkle.bounds().start.as_u64();
+                    max_pruned = min_pruned;
                     match merkle.prune(target).await {
                         Err(_) => {
                             max_pruned = max_pruned.max(target.as_u64());
@@ -400,6 +408,14 @@ async fn run_operations<F: MerkleFamily>(
 
                 if leaves.as_u64() != 0 && merkle.bounds().start < *leaves {
                     raise_storage_ceiling(&mut max_leaves, &merkle);
+                    let merkle = match merkle.sync().await {
+                        Err(_) => break,
+                        Ok(merkle) => merkle,
+                    };
+                    min_leaves = merkle.leaves().as_u64();
+                    max_leaves = min_leaves;
+                    min_pruned = merkle.bounds().start.as_u64();
+                    max_pruned = min_pruned;
                     match merkle.prune_all().await {
                         Err(_) => {
                             max_pruned = max_pruned.max(leaves.as_u64());

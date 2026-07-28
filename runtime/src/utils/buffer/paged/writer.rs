@@ -244,7 +244,8 @@ impl<B: Blob> Writer<B> {
                     .ok_or(Error::OffsetOverflow)?;
                 let scrub_len = usize::try_from(cache_ref.page_size() - active_len)
                     .map_err(|_| Error::OffsetOverflow)?;
-                blob.write_at(scrub_offset, vec![0; scrub_len]).await?;
+                blob.write_at_sync(scrub_offset, vec![0; scrub_len])
+                    .await?;
             }
             let slot_offset = page_offset
                 .checked_add(cache_ref.page_size())
@@ -253,11 +254,8 @@ impl<B: Blob> Writer<B> {
             blob.write_at(slot_offset, Checksum::slot_bytes(0, 0).to_vec())
                 .await?;
 
-            // One barrier covers both writes: reopen re-arms this repair on any slot residue
-            // other than a clean tombstone, and a clean tombstone is never chosen and retains
-            // no record bytes a torn later write could complete into a record describing the
-            // unscrubbed suffix. The barrier completes before any append can build on the
-            // freed range.
+            // The suffix is already durable before the tombstone is issued. A crash that retains
+            // the tombstone can therefore no longer combine its zero CRC with stale payload.
             blob.sync().await?;
         }
 
@@ -280,7 +278,7 @@ impl<B: Blob> Writer<B> {
         // Without a completed barrier, a checksum-valid visible page may still contain bytes from
         // an unsynced writer. Before rewriting either checksum slot, make that entire visible page
         // durable so it becomes a safe fallback.
-        let needs_sync_before_write = needs_sync && partial_page_state.is_some();
+        let needs_sync_before_write = needs_sync;
         let synced_partial_page_state = if needs_sync_before_write {
             None
         } else {
@@ -2145,12 +2143,9 @@ mod tests {
         // handling for the first page before writing the bulk directly.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let (blob, blob_size) = context
-                .open("test_partition", b"owned_partial")
-                .await
-                .unwrap();
+            let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -2169,14 +2164,18 @@ mod tests {
             let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
             assert_eq!(read_buf, &all[..]);
 
-            // The direct write is not durable until sync: dropping without one preserves only the
-            // synced 50-byte prefix.
+            // The direct write is not durable until sync. Reconstructing the blob from its durable
+            // crash image preserves only the synced 50-byte prefix.
             drop(append);
-            let (blob, blob_size) = context
-                .open("test_partition", b"owned_partial")
-                .await
-                .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let (durable, _, _, _) = blob.snapshot();
+            let blob = SyncTrackingBlob::new();
+            blob.write_at_sync(0, durable.clone()).await.unwrap();
+            let mut append = Writer::new(
+                blob.clone(),
+                durable.len() as u64,
+                BUFFER_SIZE,
+                cache_ref.clone(),
+            )
                 .await
                 .unwrap();
             assert_eq!(append.size(), 50);
@@ -2192,11 +2191,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            let (blob, blob_size) = context
-                .open("test_partition", b"owned_partial")
-                .await
-                .unwrap();
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 500);
@@ -2907,14 +2902,14 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 2);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
 
             // With no new work, sync should not issue another durability operation.
             append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 2);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
 
             // The next sync still needs a full barrier because the append path flushed the full
@@ -2924,7 +2919,7 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 4);
-            assert_eq!(full_syncs, 2);
+            assert_eq!(full_syncs, 3);
             assert_eq!(range_syncs, 0);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -2963,14 +2958,14 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 0);
+            assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
 
             // A later sync must use a full barrier for the plain replay flush.
             append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
         });
     }
@@ -2996,7 +2991,7 @@ mod tests {
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert!(durable.is_empty());
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 0);
+            assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 0);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -3009,7 +3004,7 @@ mod tests {
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.len(), blob.size() as usize);
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
         });
     }
@@ -3146,14 +3141,10 @@ mod tests {
         });
     }
 
-    /// A crash during [`Writer::new`]'s slot repair can persist the retirement while losing the
-    /// suffix scrub, leaving a clean tombstone over stale payload bytes. That state must be
-    /// inert: the tombstone is never chosen, and a torn later slot write finds no record residue
-    /// to complete into one describing the stale suffix (contrast
-    /// `test_reopen_retires_failed_slot_before_reusing_tail`, where surviving CRC bytes make the
-    /// same torn write dangerous).
+    /// A clean tombstone has CRC zero. If slot repair can persist that tombstone without its suffix
+    /// scrub, a later torn length write can reactivate stale payload whose CRC is also zero.
     #[test_traced("DEBUG")]
-    fn test_reopen_ignores_retired_slot_over_unscrubbed_suffix() {
+    fn test_reopen_scrubs_crc_zero_suffix_before_retiring_slot() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
@@ -3162,60 +3153,99 @@ mod tests {
                 .await
                 .unwrap();
 
-            writer.append(b"A").await.unwrap();
+            let mut data = (0u8..76).collect::<Vec<_>>();
+            data.extend_from_slice(&[0xAF, 0x8C, 0x02, 0xA5]);
+            assert_eq!(Crc32::checksum(&data), 0);
+            assert_ne!(Crc32::checksum(&data[..50]), 0);
+            assert_ne!(Crc32::checksum(&data[..79]), 0);
+            let mut scrubbed = data[..50].to_vec();
+            scrubbed.resize(data.len(), 0);
+            assert_ne!(Crc32::checksum(&scrubbed), 0);
+
+            writer.append(&data[..50]).await.unwrap();
             writer.sync().await.unwrap();
-            writer.append(b"B").await.unwrap();
+            writer.append(&data[50..]).await.unwrap();
             writer.sync().await.unwrap();
             drop(writer);
 
-            // Tombstone the longer slot while its payload byte stays durable: the repair's
-            // retirement persisted and its scrub did not.
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
-            let ab_page = blob
+            let page = blob
                 .read_at(0, physical_page_size)
                 .await
                 .unwrap()
                 .coalesce();
-            let ab_crc = read_crc_record_from_page(ab_page.as_ref());
-            let retired_slot = ab_crc.authoritative();
+            let record = read_crc_record_from_page(page.as_ref());
+            let retired_slot = record.authoritative();
             let slot_offset = PAGE_SIZE.get() as usize + retired_slot.offset();
-            blob.write_at_sync(slot_offset as u64, Checksum::slot_bytes(0, 0).to_vec())
+
+            // Leave the longer slot invalid but non-retired so reopen attempts to scrub its stale
+            // payload and retire it. The injected second sync persists only the retirement and
+            // then fails, modeling an arbitrary crash image at that barrier.
+            blob.write_at_sync(
+                slot_offset as u64,
+                Checksum::slot_len_bytes(79).to_vec(),
+            )
                 .await
                 .unwrap();
-
-            // The tombstone is never chosen: reopen recovers the short slot's prefix.
+            let repairing = TombstoneOnlySyncBlob::new(blob.clone(), slot_offset as u64);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            assert!(
+                Writer::new(repairing, blob.size(), BUFFER_SIZE, cache_ref)
+                    .await
+                    .is_err()
+            );
+
+            // Restart from exactly the bytes made durable before the injected failure.
+            let (repair_crash_page, _, _, _) = blob.snapshot();
+            let crash_blob = SyncTrackingBlob::new();
+            crash_blob
+                .write_at_sync(0, repair_crash_page)
                 .await
                 .unwrap();
-            assert_eq!(writer.size(), 1);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(
+                crash_blob.clone(),
+                physical_page_size as u64,
+                BUFFER_SIZE,
+                cache_ref,
+            )
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 50);
 
-            // Extend over the stale byte, then persist only the replacement record's length
-            // byte. Over a tombstone that torn write yields no valid record, so the stale
-            // suffix stays discarded.
-            writer.append(b"C").await.unwrap();
+            // Extend to the stale payload's length, then retain only the new slot length. The
+            // tombstone's zero CRC must not validate the discarded suffix.
+            writer.append(&[0xFF; 30]).await.unwrap();
             drop(writer.snapshot().await.unwrap());
-            let (mut crash_page, _, _, _) = blob.snapshot();
-            let ac_page = blob
+            let (mut crash_page, _, _, _) = crash_blob.snapshot();
+            let replacement_page = crash_blob
                 .read_at(0, physical_page_size)
                 .await
                 .unwrap()
                 .coalesce();
             drop(writer);
 
-            let length = Checksum::slot_len_bytes(2);
-            let length_byte = length.iter().position(|byte| *byte != 0).unwrap();
-            let length_offset = slot_offset + length_byte;
-            crash_page[length_offset] = ac_page.as_ref()[length_offset];
-            blob.write_at(0, crash_page).await.unwrap();
-            blob.sync().await.unwrap();
+            let slot_len_size = Checksum::slot_len_bytes(0).len();
+            crash_page[slot_offset..slot_offset + slot_len_size].copy_from_slice(
+                &replacement_page.as_ref()[slot_offset..slot_offset + slot_len_size],
+            );
+            crash_blob.write_at(0, crash_page).await.unwrap();
+            crash_blob.sync().await.unwrap();
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = Writer::new(blob, physical_page_size as u64, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-            assert_eq!(reopened.size(), 1);
-            assert_eq!(reopened.read_at(0, 1).await.unwrap().coalesce(), b"A");
+            let reopened = Writer::new(
+                crash_blob,
+                physical_page_size as u64,
+                BUFFER_SIZE,
+                cache_ref,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.size(), 50);
+            assert_eq!(
+                reopened.read_at(0, 50).await.unwrap().coalesce().as_ref(),
+                &data[..50]
+            );
         });
     }
 
@@ -3395,6 +3425,78 @@ mod tests {
     fn read_crc_record_from_page(page_bytes: &[u8]) -> Checksum {
         let crc_start = page_bytes.len() - CHECKSUM_SIZE as usize;
         Checksum::read(&mut &page_bytes[crc_start..]).unwrap()
+    }
+
+    /// Blob wrapper whose second full sync persists only a repaired checksum tombstone, then
+    /// fails. This models an arbitrary subset of the repair writes reaching durable storage.
+    #[derive(Clone)]
+    struct TombstoneOnlySyncBlob<B: Blob> {
+        inner: B,
+        syncs: Arc<AtomicUsize>,
+        slot_offset: u64,
+    }
+
+    impl<B: Blob> TombstoneOnlySyncBlob<B> {
+        fn new(inner: B, slot_offset: u64) -> Self {
+            Self {
+                inner,
+                syncs: Arc::new(AtomicUsize::new(0)),
+                slot_offset,
+            }
+        }
+    }
+
+    impl<B: Blob> crate::Blob for TombstoneOnlySyncBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            let sync = self.syncs.fetch_add(1, Ordering::SeqCst) + 1;
+            if sync == 2 {
+                let tombstone = self
+                    .inner
+                    .read_at(self.slot_offset, CHECKSUM_SLOT_SIZE)
+                    .await?
+                    .coalesce();
+                self.inner
+                    .write_at_sync(self.slot_offset, tombstone)
+                    .await?;
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial repair sync").into(),
+                ));
+            }
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
     }
 
     /// Blob wrapper that turns one write into a durable partial write followed by an error.
@@ -5851,7 +5953,44 @@ mod tests {
             assert!(durable.is_empty());
             assert_eq!(writes, 2);
             assert_eq!(full_syncs, 2);
-            assert_eq!(range_syncs, 0);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_write_after_pre_wrapped_page_aligned_shrink_syncs_before_overwrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
+            for retained_pages in [0, 1] {
+                let blob = SyncTrackingBlob::new();
+                let cache_ref =
+                    CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
+
+                let old = vec![0xA5; PAGE_SIZE.get() as usize * 3];
+                writer.append(&old).await.unwrap();
+                writer.sync().await.unwrap();
+                drop(writer);
+
+                // Shrink through the raw handle, then recreate the writer before the shrink is
+                // durable. A replacement write must not reach the blob while old trailing pages
+                // can still survive a crash.
+                let shrunk_size = retained_pages * physical_page_size;
+                blob.resize(shrunk_size).await.unwrap();
+                let cache_ref =
+                    CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let mut writer = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
+                writer.append(b"new").await.unwrap();
+                drop(writer.snapshot().await.unwrap());
+
+                let (durable, _, _, _) = blob.snapshot();
+                assert_eq!(durable.len() as u64, shrunk_size);
+            }
         });
     }
 
