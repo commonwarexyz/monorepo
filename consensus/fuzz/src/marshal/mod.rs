@@ -18,7 +18,7 @@
 //!   `marshal_multi_node_liveness_coding`, `marshal_multi_node_twins`,
 //!   `marshal_multi_node_twins_id_split_header_deferred`,
 //!   `marshal_multi_node_twins_id_split_header_inline`.
-//! - [`inline`]: drives the standard inline and deferred block paths, including
+//! - [`runner`]: drives the standard inline and deferred block paths, including
 //!   split-header equivocation. Targets: `marshal_standard_inline`,
 //!   `marshal_standard_deferred`.
 //! - [`store`]: drives the marshal block/certificate store directly. Target:
@@ -37,15 +37,15 @@
 //!   - Con: heavier (fewer iterations) and only valid
 //!     consensus orderings.
 
-pub mod inline;
 pub mod multi_node;
+pub mod runner;
 pub mod single_node;
 pub mod store;
 
-pub use inline::{MarshalInlineInput, fuzz_marshal_deferred, fuzz_marshal_inline};
 pub use multi_node::{
     MarshalLivenessInput, MarshalTwinsInput, fuzz_marshal_liveness, fuzz_marshal_twins,
     fuzz_marshal_twins_id_split_header, fuzz_marshal_twins_id_split_header_inline,
 };
+pub use runner::{MarshalInlineInput, fuzz_marshal_deferred, fuzz_marshal_inline};
 pub use single_node::{MarshalEvent, MarshalFuzzInput, VariantPublish, fuzz_marshal_single_node};
 pub use store::{MarshalStoreInput, fuzz_marshal_store};

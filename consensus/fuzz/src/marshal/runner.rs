@@ -1,4 +1,4 @@
-//! Fuzz driver for the standard inline and deferred marshal wrappers.
+//! Shared fuzz driver for the standard inline and deferred marshal wrappers.
 //!
 //! The split-header invariant is armed only when the candidate, its embedded
 //! parent, and an older conflicting parent are all locally available and the
@@ -24,7 +24,7 @@ use commonware_consensus::{
         standard::{Deferred, Inline},
     },
     simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
-    types::{Epoch, FixedEpocher, Height, Round, View},
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
 };
 use commonware_cryptography::{
     Digestible, Hasher as _,
@@ -583,6 +583,10 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
                     let split_header =
                         matches!(context_kind, InlineContext::CertifiedAncestor { .. })
                             && verify_context.round == block.context.round
+                            && FixedEpocher::new(BLOCKS_PER_EPOCH)
+                                .containing(block.height())
+                                .is_some_and(|info| info.epoch() == verify_context.round.epoch())
+                            && digest != verify_context.parent.1
                             && verify_context.parent != block.context.parent
                             && available.contains(&digest)
                             && available.contains(&verify_context.parent.1)
@@ -685,4 +689,41 @@ pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
 
 pub fn fuzz_marshal_deferred(input: MarshalInlineInput) {
     fuzz_marshal_standard(input, WrapperKind::Deferred);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_out_of_epoch_split_header_does_not_arm_recovery() {
+        fuzz_marshal_deferred(MarshalInlineInput {
+            raw_bytes: vec![0],
+            app_propose_idx: None,
+            app_verify_result: true,
+            events: vec![
+                InlineEvent::Seed {
+                    block_idx: 23,
+                    seed: InlineSeed::Verified,
+                },
+                InlineEvent::Seed {
+                    block_idx: 1,
+                    seed: InlineSeed::Verified,
+                },
+                InlineEvent::Seed {
+                    block_idx: 22,
+                    seed: InlineSeed::Verified,
+                },
+                InlineEvent::Verify {
+                    block_idx: 23,
+                    context: InlineContext::CertifiedAncestor { parent_idx: 23 },
+                    await_result: true,
+                },
+                InlineEvent::Certify {
+                    block_idx: 23,
+                    await_result: true,
+                },
+            ],
+        });
+    }
 }
