@@ -304,13 +304,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I, T, M>(&self, attestations: I, strategy: &T) -> Option<Certificate<V>>
+    pub fn assemble<S, I, T>(&self, attestations: I, strategy: &T) -> Option<Certificate<V>>
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
         T: Strategy,
-        M: Faults,
     {
         let (partials, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
@@ -326,17 +325,17 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         let quorum = self.polynomial();
-        if partials.len() < quorum.required::<M>() as usize {
+        if partials.len() < quorum.required::<S::Faults>() as usize {
             return None;
         }
 
-        threshold::recover::<V, _, M>(quorum, partials.iter(), strategy)
+        threshold::recover::<V, _, S::Faults>(quorum, partials.iter(), strategy)
             .ok()
             .map(Certificate::new)
     }
 
     /// Verifies a certificate.
-    pub fn verify_certificate<'a, S, R, D, M>(
+    pub fn verify_certificate<'a, S, R, D>(
         &self,
         _rng: &mut R,
         subject: S::Subject<'a, D>,
@@ -347,7 +346,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
         D: Digest,
-        M: Faults,
     {
         let Some(signature) = certificate.get() else {
             return false;
@@ -362,7 +360,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I, T, M>(
+    pub fn verify_certificates<'a, S, R, D, I, T>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -375,7 +373,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
         T: Strategy,
-        M: Faults,
     {
         let mut entries: Vec<_> = Vec::new();
 
@@ -487,17 +484,23 @@ where
 ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
 ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
 ///
+/// - `$faults`: The [`Faults`] implementation used to compute certificate quorums.
+///
 /// # Example
 /// ```ignore
 /// // For non-generic subject types with a single namespace:
-/// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>);
+/// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>, commonware_utils::N3f1);
 ///
 /// // For protocols with generic subject types:
-/// impl_certificate_bls12381_threshold!(Subject<'a, D>, Namespace);
+/// impl_certificate_bls12381_threshold!(
+///     Subject<'a, D>,
+///     Namespace,
+///     commonware_utils::N3f1,
+/// );
 /// ```
 #[macro_export]
 macro_rules! impl_certificate_bls12381_threshold {
-    ($subject:ty, $namespace:ty) => {
+    ($subject:ty, $namespace:ty, $faults:ty) => {
         /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
         ///
         /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
@@ -593,10 +596,11 @@ macro_rules! impl_certificate_bls12381_threshold {
             V: $crate::bls12381::primitives::variant::Variant,
         > $crate::certificate::Verifier for Scheme<P, V> {
             type Subject<'a, D: $crate::Digest> = $subject;
+            type Faults = $faults;
             type PublicKey = P;
             type Certificate = $crate::bls12381::certificate::threshold::Certificate<V>;
 
-            fn verify_certificate<R, D, M>(
+            fn verify_certificate<R, D>(
                 &self,
                 rng: &mut R,
                 subject: Self::Subject<'_, D>,
@@ -606,13 +610,12 @@ macro_rules! impl_certificate_bls12381_threshold {
             where
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
-                M: commonware_utils::Faults,
             {
                 self.generic
-                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+                    .verify_certificate::<Self, _, D>(rng, subject, certificate)
             }
 
-            fn verify_certificates<'a, R, D, I, M>(
+            fn verify_certificates<'a, R, D, I>(
                 &self,
                 rng: &mut R,
                 certificates: I,
@@ -622,10 +625,9 @@ macro_rules! impl_certificate_bls12381_threshold {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                M: commonware_utils::Faults,
             {
                 self.generic
-                    .verify_certificates::<Self, _, D, _, _, M>(rng, certificates, strategy)
+                    .verify_certificates::<Self, _, D, _, _>(rng, certificates, strategy)
             }
 
             fn is_batchable() -> bool {
@@ -697,7 +699,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                     .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
             }
 
-            fn assemble<I, M>(
+            fn assemble<I>(
                 &self,
                 attestations: I,
                 strategy: &impl commonware_parallel::Strategy,
@@ -705,9 +707,8 @@ macro_rules! impl_certificate_bls12381_threshold {
             where
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
                 I::IntoIter: Send,
-                M: commonware_utils::Faults,
             {
-                self.generic.assemble::<Self, _, _, M>(attestations, strategy)
+                self.generic.assemble::<Self, _, _>(attestations, strategy)
             }
 
             fn is_attributable() -> bool {
@@ -761,7 +762,7 @@ mod tests {
     }
 
     // Use the macro to generate the test scheme
-    impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>);
+    impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(
@@ -920,12 +921,10 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Verify the assembled certificate
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -957,11 +956,9 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -993,12 +990,10 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Valid certificate passes
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -1009,7 +1004,7 @@ mod tests {
 
         // Corrupted certificate fails
         let corrupted = Certificate::new(V::Signature::zero());
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -1041,9 +1036,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
         let encoded = certificate.encode();
         let decoded = Certificate::<V>::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
@@ -1071,11 +1064,7 @@ mod tests {
             })
             .collect();
 
-        assert!(
-            schemes[0]
-                .assemble::<_, N3f1>(attestations, &Sequential)
-                .is_none()
-        );
+        assert!(schemes[0].assemble(attestations, &Sequential).is_none());
     }
 
     #[test]
@@ -1107,11 +1096,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(
-                schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap(),
-            );
+            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
         }
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
@@ -1123,7 +1108,7 @@ mod tests {
             )
         });
 
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
             certs_iter,
             &Sequential
@@ -1155,11 +1140,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            certificates.push(
-                schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap(),
-            );
+            certificates.push(schemes[0].assemble(attestations, &Sequential).unwrap());
         }
 
         // Corrupt second certificate
@@ -1174,7 +1155,7 @@ mod tests {
             )
         });
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
             certs_iter,
             &Sequential
@@ -1203,9 +1184,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
 
         // Create a certificate-only verifier using the identity from the polynomial
         let identity = polynomial.public();
@@ -1213,7 +1192,7 @@ mod tests {
             Scheme::<ed25519::PublicKey, V>::certificate_verifier(NAMESPACE, *identity);
 
         // Should be able to verify certificates
-        assert!(cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
                 message: Bytes::from_static(MESSAGE),
@@ -1457,9 +1436,7 @@ mod tests {
             })
             .collect();
 
-        let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
-            .unwrap();
+        let certificate = schemes[0].assemble(attestations, &Sequential).unwrap();
         let mut encoded = certificate.encode();
         encoded.truncate(encoded.len() - 1);
         assert!(V::Signature::decode(encoded).is_err());
