@@ -135,6 +135,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial's participant count or degree does not match the
+    /// committee, or if the share index does not identify a committee participant.
+    ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
@@ -149,6 +154,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.degree_exact(),
+            N3f1::quorum(participants.len()) - 1,
+            "polynomial degree must equal quorum minus one"
         );
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
@@ -174,6 +184,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial's participant count or degree does not match the
+    /// committee.
+    ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
@@ -182,6 +197,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.degree_exact(),
+            N3f1::quorum(participants.len()) - 1,
+            "polynomial degree must equal quorum minus one"
         );
         polynomial.precompute_partial_publics();
 
@@ -920,7 +940,7 @@ mod tests {
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, NZU32, test_rng};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -1013,6 +1033,59 @@ mod tests {
     #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    fn signer_validates_polynomial_degree<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = ed25519_participants(&mut rng, 4);
+
+        // For four participants, N5f1 produces a degree 3 polynomial while this
+        // N3f1 scheme requires degree 2.
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+
+        Scheme::<V>::signer(
+            NAMESPACE,
+            participants.keys().clone(),
+            polynomial,
+            shares[0].clone(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_signer_validates_polynomial_degree_min_pk() {
+        signer_validates_polynomial_degree::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_signer_validates_polynomial_degree_min_sig() {
+        signer_validates_polynomial_degree::<MinSig>();
+    }
+
+    fn verifier_validates_polynomial_degree<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = ed25519_participants(&mut rng, 4);
+
+        // For four participants, N5f1 produces a degree 3 polynomial while this
+        // N3f1 scheme requires degree 2.
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+
+        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_verifier_validates_polynomial_degree_min_pk() {
+        verifier_validates_polynomial_degree::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_verifier_validates_polynomial_degree_min_sig() {
+        verifier_validates_polynomial_degree::<MinSig>();
     }
 
     #[test]
