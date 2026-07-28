@@ -100,6 +100,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
+use commonware_runtime::Handle;
 use commonware_utils::Array;
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
@@ -530,6 +531,21 @@ where
         Ok((self, start_loc..end_loc))
     }
 
+    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle. A failed data sync also
+    /// fails the next durability operation. A failed offsets or recovery-watermark sync is not
+    /// observed by [Self::commit] and resurfaces on the next [Self::sync].
+    #[boxed]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        let handle;
+        (self.log, handle) = self.log.start_sync().await?;
+        Ok((self, handle))
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, Error> {
@@ -548,8 +564,16 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+    use commonware_runtime::{
+        Runner, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        reschedule,
+    };
     use commonware_utils::{NZU16, NZU64, NZUsize};
+    use core::future::Future;
+    use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -580,6 +604,202 @@ mod test {
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
         db.apply_batch(iter.into_iter().collect()).await.unwrap()
+    }
+
+    /// A store over a delayed-sync storage backend.
+    type DelayedStore = Db<DelayedSyncContext<deterministic::Context>, Digest, Vec<u8>, TwoCap>;
+
+    /// Open a [DelayedStore] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the recovered database, so while syncs park the returned future
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
+    /// uses large pages and sections: an apply that fills the write buffer or rolls the blob
+    /// over waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    fn open_delayed_store(
+        context: &deterministic::Context,
+        label: &'static str,
+        suffix: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedStore, Error>> {
+        let cfg = Config {
+            log: JournalConfig {
+                partition: format!("journal-{suffix}"),
+                write_buffer: NZUsize!(64 * 1024),
+                compression: None,
+                codec_config: ((), ((0..=10000).into(), ())),
+                items_per_section: NZU64!(1000),
+                page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
+            },
+            translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+        };
+        DelayedStore::init(
+            DelayedSyncContext {
+                inner: context.child(label),
+                pending: pending.clone(),
+            },
+            cfg,
+        )
+    }
+
+    /// Apply a single-key batch writing `key -> value`.
+    async fn apply_write(db: DelayedStore, key: Digest, value: Vec<u8>) -> DelayedStore {
+        let (db, _) = db.apply_batch([(key, Some(value))].into()).await.unwrap();
+        db
+    }
+
+    /// A sync handle must not block database use while the backend sync is pending.
+    #[test_traced]
+    fn test_store_start_sync_overlaps_work() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_store(&ctx, "delayed", "start-sync-overlap", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Blake3::hash(&[&0u64.to_be_bytes()]);
+            let value0 = vec![1u8; 8];
+            db = apply_write(db, key0, value0.clone()).await;
+
+            let starts_before = pending.starts();
+            let entered_before = pending.entered();
+            let completions_before = pending.completions();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+            assert_eq!(pending.completions(), completions_before);
+
+            // Observe the sync while the database keeps working.
+            let waiter = ctx
+                .child("await_sync")
+                .spawn(|_| async move { handle.await.unwrap() });
+            while pending.entered() == entered_before {
+                reschedule().await;
+            }
+
+            // Reads and applies complete before the sync does.
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+            let key1 = Blake3::hash(&[&1u64.to_be_bytes()]);
+            let value1 = vec![2u8; 8];
+            db = apply_write(db, key1, value1.clone()).await;
+            assert_eq!(
+                pending.completions(),
+                completions_before,
+                "the database made progress while the sync was still in flight"
+            );
+
+            pending.unblock();
+            waiter.await.unwrap();
+
+            // The mid-sync batch is durable after the next start_sync completes.
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let size = db.size();
+            drop(db);
+
+            let db = open_delayed_store(&ctx, "reopen", "start-sync-overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.size(), size);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
+    #[test_traced]
+    fn test_store_start_sync_failure_propagates() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // Pass syncs through so opening the database doesn't park.
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_store(&ctx, "delayed", "start-sync-fail", &pending)
+                .await
+                .unwrap();
+            db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+            let starts_before = pending.starts();
+            // A failed mutable method consumes the database per the failures-are-fatal contract.
+            assert!(
+                db.commit().await.is_err(),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the surfaced error is the retained failure, not a fresh sync's"
+            );
+        });
+    }
+
+    /// State persisted via an awaited start_sync handle is recovered on reopen.
+    #[test_traced]
+    fn test_store_start_sync_recovery() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_store(&ctx, "delayed", "start-sync-recovery", &pending)
+                .await
+                .unwrap();
+            let key = Blake3::hash(&[&0u64.to_be_bytes()]);
+            let value = vec![1u8; 8];
+            db = apply_write(db, key, value.clone()).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let size = db.size();
+            drop(db);
+
+            let db = open_delayed_store(&ctx, "reopen", "start-sync-recovery", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.size(), size);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning drains the in-flight sync before mutating storage.
+    #[test_traced]
+    fn test_store_start_sync_prune_waits() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_store(&ctx, "delayed", "start-sync-prune", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            // Two batches so floor-raising steps leave a non-trivial prune target.
+            db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
+            db = apply_write(db, Blake3::hash(&[&1u64.to_be_bytes()]), vec![2u8; 8]).await;
+
+            let starts_before = pending.starts();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
+            let db = {
+                let mut prune = std::pin::pin!(db.prune(floor));
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                prune.await.unwrap()
+            };
+            handle.await.unwrap();
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("DEBUG")]
