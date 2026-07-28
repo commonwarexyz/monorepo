@@ -11,7 +11,10 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::FuzzRng;
+use commonware_storage_fuzz::{
+    RNG_BYTES, bounded_items_per_section, bounded_page_cache_size, bounded_page_size, bounded_rate,
+    fuzz_runner,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -27,28 +30,8 @@ const ITEM_SIZE: usize = 32;
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
 
-/// Bytes reserved for deterministic runtime choices.
-const RNG_BYTES: usize = 32;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_rate(u: &mut Unstructured<'_>) -> Result<f64> {
-    let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
 }
 
 fn bounded_operations(u: &mut Unstructured<'_>) -> Result<Vec<QueueOperation>> {
@@ -371,15 +354,13 @@ fn fuzz(input: FuzzInput) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let cfg = deterministic::Config::default().with_rng(Box::new(rng));
     let partition_name = "queue-crash-recovery".to_string();
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;
     let compression = input.compression.then_some(3);
 
-    let runner = deterministic::Runner::new(cfg);
+    let runner = fuzz_runner(&input.raw_bytes);
 
     let (mut state, checkpoint) = runner.start_and_recover(|ctx| {
         let partition_name = partition_name.clone();
@@ -447,49 +428,23 @@ fn fuzz(input: FuzzInput) {
             (state, sentinel_pos)
         });
 
-    // Cross one more crash boundary so the sentinel's durability is actually exercised, then
-    // interrupt the real composite destroy at one of its storage awaits.
-    let (_, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(|ctx| async move {
-            let queue_cfg = Config {
-                partition: partition_name,
-                items_per_section,
-                compression,
-                codec_config: ((0usize..).into(), ()),
-                page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
-                write_buffer,
-            };
-            let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
-                .await
-                .expect("Queue sentinel recovery should succeed");
-            assert_eq!(queue.size(), sentinel_pos + 1);
-            let queue = verify_recovery(queue, &state, items_per_section.get()).await;
-            *ctx.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(0.5),
-                partial_write_rate: Some(1.0),
-                sync_rate: Some(0.5),
-                remove_rate: Some(0.5),
-                ..Default::default()
-            };
-            let _ = queue.destroy().await;
-        });
-
-    // Any interrupted-destroy state must remain openable, including the fully removed state, and
-    // destruction must be retryable.
+    // Cross one more crash boundary so the sentinel's durability is actually exercised. Destroy
+    // delegates to the journal, whose interrupted destroy journal_crash_recovery already fuzzes.
     deterministic::Runner::from(checkpoint).start(|ctx| async move {
-        *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let queue_cfg = Config {
-            partition: "queue-crash-recovery".to_string(),
+            partition: partition_name,
             items_per_section,
             compression,
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
         };
-        let queue = Queue::<_, Vec<u8>>::init(ctx.child("redestroy"), queue_cfg)
+        let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
             .await
-            .expect("queue must reopen after interrupted destroy");
-        queue.destroy().await.expect("destroy retry must succeed");
+            .expect("Queue sentinel recovery should succeed");
+        assert_eq!(queue.size(), sentinel_pos + 1);
+        let queue = verify_recovery(queue, &state, items_per_section.get()).await;
+        queue.destroy().await.expect("destroy must succeed");
     });
 }
 

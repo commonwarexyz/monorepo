@@ -176,6 +176,14 @@ macro_rules! impl_sync_database {
                 .await
             }
 
+            async fn publish_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                Ok(self)
+            }
+
+            async fn discard_sync_result(self) -> Result<(), qmdb::Error<F>> {
+                Ok(())
+            }
+
             async fn local_boundary_nodes(
                 context: Self::Context,
                 config: &Self::Config,

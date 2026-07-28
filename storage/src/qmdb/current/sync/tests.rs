@@ -1138,8 +1138,7 @@ fn test_incompatible_pending_target_resets_before_restage() {
         let pending = current_db::pending_sync::<F, _, Digest>(&metadata)
             .unwrap()
             .unwrap();
-        assert!(!pending.rejected);
-        assert_eq!(pending.target, second);
+        assert_eq!(pending, second);
         drop(metadata);
 
         let journal = fixed::Journal::<_, Op>::init(
@@ -1161,18 +1160,23 @@ fn test_incompatible_pending_target_resets_before_restage() {
 }
 
 #[test_traced]
-fn test_rejected_sync_result_is_not_resumed() {
+fn test_discarded_sync_result_is_not_resumed() {
     use crate::{
+        journal::contiguous::fixed,
         merkle::{Location, mmr},
-        qmdb::current::{db as current_db, unordered::fixed::Db},
+        qmdb::{
+            any::unordered::fixed::Operation,
+            current::{db as current_db, unordered::fixed::Db},
+        },
         translator::OneCap,
     };
 
     type F = mmr::Family;
+    type Op = Operation<F, Digest, Digest>;
     type DbType = Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
 
     deterministic::Runner::default().start(|context| async move {
-        let config = fixed_config::<OneCap>("rejected-sync-result", &context);
+        let config = fixed_config::<OneCap>("discarded-sync-result", &context);
         let mut db = DbType::init(context.child("db"), config.clone())
             .await
             .unwrap();
@@ -1193,22 +1197,32 @@ fn test_rejected_sync_result_is_not_resumed() {
             .await
             .unwrap();
 
+        // The discard destroyed the staged generation and cleared the intent.
         let metadata = current_db::open_metadata::<F, _>(
             context.child("inspect"),
             &config.grafted_metadata_partition,
         )
         .await
         .unwrap();
-        let pending = current_db::pending_sync::<F, _, Digest>(&metadata)
-            .unwrap()
-            .unwrap();
-        assert!(pending.rejected);
-        assert_eq!(pending.target, target);
+        assert!(
+            current_db::pending_sync::<F, _, Digest>(&metadata)
+                .unwrap()
+                .is_none()
+        );
         drop(metadata);
+
+        let journal = fixed::Journal::<_, Op>::init(
+            context.child("inspect_journal"),
+            config.journal_config.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.size(), 0);
+        drop(journal);
 
         let db = DbType::init(context.child("recover"), config)
             .await
-            .expect("a rejected target must reset instead of being resumed");
+            .expect("a discarded generation must not be resumed");
         assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
         db.destroy().await.unwrap();
     });

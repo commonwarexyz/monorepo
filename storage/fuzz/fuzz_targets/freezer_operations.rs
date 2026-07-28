@@ -3,7 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::freezer::{Checkpoint, Config, Cursor, Freezer, Identifier};
-use commonware_utils::{FuzzRng, NZU16, NZUsize, sequence::FixedBytes};
+use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, remove_faults, split_cycles};
+use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,7 +22,6 @@ enum Op {
 }
 
 const MAX_OPERATIONS: usize = 64;
-const RNG_BYTES: usize = 32;
 
 #[derive(Debug)]
 struct FuzzInput {
@@ -94,20 +94,6 @@ async fn verify(
             Some(value)
         );
     }
-}
-
-fn split_cycles(ops: Vec<Op>) -> Vec<Vec<Op>> {
-    let mut cycles = Vec::new();
-    let mut current = Vec::new();
-    for op in ops {
-        if matches!(op, Op::Crash) {
-            cycles.push(std::mem::take(&mut current));
-        } else {
-            current.push(op);
-        }
-    }
-    cycles.push(current);
-    cycles
 }
 
 fn run_cycle(
@@ -193,13 +179,11 @@ fn run_cycle(
 }
 
 fn fuzz(input: FuzzInput) {
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let mut runner =
-        deterministic::Runner::new(deterministic::Config::default().with_rng(Box::new(rng)));
+    let mut runner = fuzz_runner(&input.raw_bytes);
     let compression = input.compression;
     let mut expected = Expected::default();
 
-    for cycle in split_cycles(input.ops) {
+    for cycle in split_cycles(input.ops, |op| matches!(op, Op::Crash)) {
         let checkpoint;
         (expected, checkpoint) = run_cycle(runner, compression, expected, cycle);
         runner = deterministic::Runner::from(checkpoint);
@@ -246,8 +230,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("final recovery should succeed");
             verify(&freezer, &expected).await;
-            *context.storage_fault_config().write() =
-                deterministic::FaultConfig::default().remove(0.5);
+            *context.storage_fault_config().write() = remove_faults();
             let _ = freezer.destroy().await;
         });
 

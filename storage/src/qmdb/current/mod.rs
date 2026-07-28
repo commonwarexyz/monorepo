@@ -329,7 +329,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{Mutable, fixed::Config as FConfig, variable::Config as VConfig},
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
@@ -451,21 +451,12 @@ where
     let mut metadata =
         db::open_metadata::<F, _>(context.child("metadata"), &metadata_partition).await?;
     if db::pending_sync::<F, _, H::Digest>(&metadata)?.is_some() {
-        let journal = <J as authenticated::Backing<E>>::init(
-            context.child("pending_sync_journal"),
+        db::reset_sync_components::<F, _, J, H, S>(
+            &context,
             config.journal_config.clone(),
-        )
-        .await?;
-        <J as Mutable>::destroy(journal).await?;
-
-        let hasher = crate::qmdb::hasher::<H>();
-        let merkle = merkle::full::Merkle::<F, _, _, S>::init(
-            context.child("pending_sync_merkle"),
-            &hasher,
             config.merkle_config.clone(),
         )
         .await?;
-        merkle.destroy().await?;
 
         metadata.clear();
         metadata = metadata.sync().await?;

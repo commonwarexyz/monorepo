@@ -23,7 +23,11 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{FuzzRng, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_storage_fuzz::{
+    RNG_BYTES, bounded_items_per_section, bounded_page_cache_size, bounded_page_size, bounded_rate,
+    fuzz_runner, interrupt_faults,
+};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -41,9 +45,6 @@ const MAX_WRITE_BUF: usize = 2048;
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
 
-/// Bytes reserved for deterministic runtime choices.
-const RNG_BYTES: usize = 32;
-
 /// Smallest valid bitmap chunk size for SHA-256.
 const BITMAP_CHUNK_BYTES: usize = 32;
 
@@ -54,25 +55,8 @@ const PRUNE_PREP_KEYS: usize = 32;
 type Db<F> =
     Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, BITMAP_CHUNK_BYTES, Sequential>;
 
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_rate(u: &mut Unstructured<'_>) -> Result<f64> {
-    let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
 }
 
 fn bounded_operations(u: &mut Unstructured<'_>) -> Result<Vec<CurrentOperation>> {
@@ -111,9 +95,9 @@ struct FuzzInput {
     page_size: u16,
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items_per_section)]
     merkle_items_per_blob: u64,
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items_per_section)]
     log_items_per_blob: u64,
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
@@ -517,9 +501,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let operations = input.operations.clone();
     let suffix = suffix_base.to_string();
 
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let cfg = deterministic::Config::default().with_rng(Box::new(rng));
-    let runner = deterministic::Runner::new(cfg);
+    let runner = fuzz_runner(&input.raw_bytes);
 
     // Phase 1: Execute operations with fault injection until crash.
     let (expected, checkpoint) = runner.start_and_recover(|ctx| {
@@ -686,13 +668,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .await
                 .expect("sentinel recovery must succeed");
             verify_recovery(&db, &Expected::Exact(expected), params.log_items_per_blob).await;
-            *ctx.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(0.5),
-                partial_write_rate: Some(1.0),
-                sync_rate: Some(0.5),
-                remove_rate: Some(0.5),
-                ..Default::default()
-            };
+            *ctx.storage_fault_config().write() = interrupt_faults();
             let _ = db.destroy().await;
         });
 

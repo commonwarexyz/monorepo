@@ -88,7 +88,13 @@ impl<B: Blob> Write<B> {
             buffer: Buffer::new(size, capacity.get(), pool),
             // Existing blob contents may not be durable yet.
             sync_state: SyncState::Dirty,
-            // A pre-wrapped mutation may have shrunk the blob without making that shrink durable.
+
+            // A pre-wrap shrink may still be volatile: a replay repair dropped between its
+            // resize and sync, followed by in-process re-initialization, wraps a fresh writer
+            // over an unsynced truncation that re-init found nothing to repair for. The first
+            // physical write reuses that range before any sync runs, so without this barrier a
+            // crash could stitch the surviving old bytes and new bytes into a valid-looking
+            // tail that recovery adopts.
             needs_sync_before_write: true,
             poisoned: false,
         }

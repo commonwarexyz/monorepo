@@ -51,7 +51,11 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
-use commonware_utils::{FuzzRng, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_storage_fuzz::{
+    RNG_BYTES, bounded_items_per_section, bounded_page_cache_size, bounded_page_size, bounded_rate,
+    fuzz_runner, interrupt_faults, split_cycles,
+};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -78,33 +82,12 @@ const VERIFY_REPLAY_BUF: usize = 1024;
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
 
-/// Bytes reserved for deterministic runtime choices.
-const RNG_BYTES: usize = 32;
-
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
     u.int_in_range(1..=MAX_REPLAY_BUF)
 }
 
-fn bounded_page_size(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-    u.int_in_range(1..=64)
-}
-
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-/// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
-fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<f64> {
-    let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
 }
 
 /// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
@@ -760,7 +743,7 @@ async fn run_ops<J: FuzzJournal>(
                 journal
             }
 
-            // `split_into_cycles` strips `Crash`; a stray one defensively ends the cycle.
+            // `split_cycles` strips `Crash`; a stray one defensively ends the cycle.
             JournalOperation::Crash => return,
         };
     }
@@ -794,22 +777,6 @@ where
     })
 }
 
-/// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
-/// returns at least one list (possibly empty), so a bare recovery is still exercised.
-fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
-    let mut cycles = Vec::new();
-    let mut current = Vec::new();
-    for op in ops {
-        if matches!(op, JournalOperation::Crash) {
-            cycles.push(std::mem::take(&mut current));
-        } else {
-            current.push(op.clone());
-        }
-    }
-    cycles.push(current);
-    cycles
-}
-
 fn run<J: FuzzJournal + Send + 'static>(input: &FuzzInput, tag: &str)
 where
     J::Config: Send,
@@ -827,13 +794,13 @@ where
         compression: input.compression,
     };
     let partition = format!("crash-recovery-{tag}");
-    let cycles = split_into_cycles(&input.operations);
+    let cycles = split_cycles(input.operations.iter().cloned(), |op| {
+        matches!(op, JournalOperation::Crash)
+    });
 
     // First cycle starts from a fresh runtime and recovers an empty journal, so the expectation is
     // empty too.
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let runner =
-        deterministic::Runner::new(deterministic::Config::default().with_rng(Box::new(rng)));
+    let runner = fuzz_runner(&input.raw_bytes);
     let (mut expected, mut checkpoint) = run_cycle::<J>(
         runner,
         Expected::default(),
@@ -899,13 +866,7 @@ where
                 sentinel,
                 "final sentinel readback mismatch"
             );
-            *ctx.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(0.5),
-                partial_write_rate: Some(1.0),
-                sync_rate: Some(0.5),
-                remove_rate: Some(0.5),
-                ..Default::default()
-            };
+            *ctx.storage_fault_config().write() = interrupt_faults();
             let _ = journal.destroy().await;
         });
 

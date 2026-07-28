@@ -244,14 +244,19 @@ impl<B: Blob> Writer<B> {
                     .ok_or(Error::OffsetOverflow)?;
                 let scrub_len = usize::try_from(cache_ref.page_size() - active_len)
                     .map_err(|_| Error::OffsetOverflow)?;
-                blob.write_at_sync(scrub_offset, vec![0; scrub_len]).await?;
+                blob.write_at(scrub_offset, vec![0; scrub_len]).await?;
             }
             let slot_offset = page_offset
                 .checked_add(cache_ref.page_size())
                 .and_then(|offset| offset.checked_add(slot.offset() as u64))
                 .ok_or(Error::OffsetOverflow)?;
-            blob.write_at_sync(slot_offset, Checksum::slot_bytes(0, 0).to_vec())
+            blob.write_at(slot_offset, Checksum::slot_bytes(0, 0).to_vec())
                 .await?;
+
+            // One barrier covers both: either write alone surviving a crash already defeats
+            // resurrection (scrubbed bytes fail the slot's CRC, a zeroed slot is never chosen),
+            // and it completes before any append can build on the freed range.
+            blob.sync().await?;
         }
 
         let capacity = adjusted_capacity(capacity, cache_ref.page_size());
@@ -990,20 +995,7 @@ impl<B: Blob> Writer<B> {
         self.write_at_sync(old_slot_offset, Checksum::slot_bytes(0, 0).to_vec())
             .await?;
 
-        Ok(match new_slot {
-            Slot::First => Checksum {
-                len1: new_len,
-                crc1: new_crc,
-                len2: 0,
-                crc2: 0,
-            },
-            Slot::Second => Checksum {
-                len1: 0,
-                crc1: 0,
-                len2: new_len,
-                crc2: new_crc,
-            },
-        })
+        Ok(Checksum::in_slot(new_slot, new_len, new_crc))
     }
 
     /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
@@ -1114,14 +1106,20 @@ impl<B: Blob> Writer<B> {
     /// detect an earlier page that was lost or corrupted. This scans forward instead, stopping
     /// at the first invalid or short page.
     ///
+    /// Bytes below `trusted` were covered by a completed sync, so their pages cannot be torn:
+    /// full pages below the page containing `trusted` are counted without being re-read and the
+    /// scan starts at that page. Pass 0 to scan every page. `trusted` must not exceed the blob's
+    /// appended bytes.
+    ///
     /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
     /// still buffered in this writer is unreadable from the blob and fails the scan.
-    pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
+    pub async fn recoverable_prefix_len(&self, trusted: u64) -> Result<u64, Error> {
         self.ensure_usable()?;
         let logical_page_size = self.cache_ref.page_size();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
-        let mut valid_len = 0u64;
-        for page in 0..total_pages {
+        let start_page = trusted / logical_page_size;
+        let mut valid_len = start_page * logical_page_size;
+        for page in start_page..total_pages {
             match super::get_page_with_checksum_from_blob(&self.blob, page, logical_page_size).await
             {
                 Ok((logical, _)) => {
@@ -1377,13 +1375,16 @@ mod tests {
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 0);
+            assert_eq!(writer.recoverable_prefix_len(0).await.unwrap(), 0);
 
             let total = PAGE_SIZE.get() as usize * 2 + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
-            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
+            assert_eq!(
+                writer.recoverable_prefix_len(0).await.unwrap(),
+                total as u64
+            );
         });
     }
 
@@ -1416,8 +1417,18 @@ mod tests {
             blob.sync().await.unwrap();
 
             assert_eq!(
-                writer.recoverable_prefix_len().await.unwrap(),
+                writer.recoverable_prefix_len(0).await.unwrap(),
                 PAGE_SIZE.get() as u64
+            );
+
+            // Pages below `trusted` are counted without being re-read, so the torn page is
+            // skipped and the scan resumes at page 2.
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(2 * PAGE_SIZE.get() as u64)
+                    .await
+                    .unwrap(),
+                total as u64
             );
         });
     }
@@ -1457,7 +1468,7 @@ mod tests {
             blob.write_at(0, stale).await.unwrap();
             blob.sync().await.unwrap();
 
-            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 20);
+            assert_eq!(writer.recoverable_prefix_len(0).await.unwrap(), 20);
         });
     }
 

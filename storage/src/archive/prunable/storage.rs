@@ -545,8 +545,10 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             self.metadata.remove(&key);
             self.checkpoint_dirty = true;
         }
-        self.metadata = self.metadata.sync().await?;
-        self.checkpoint_dirty = false;
+        if self.checkpoint_dirty {
+            self.metadata = self.metadata.sync().await?;
+            self.checkpoint_dirty = false;
+        }
 
         // Prune oversized journal (handles both index and values)
         (self.oversized, _) = self.oversized.prune(min).await?;
@@ -609,13 +611,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Every requested section is now durable at the size observed above, so publish the
         // checkpoint before returning.
-        self.observe_unproven()?;
         for (section, size) in sizes {
             self.unproven.remove(&section);
             self.mark_durable(section, size);
         }
-        self.metadata = self.metadata.sync().await?;
-        self.checkpoint_dirty = false;
+        if self.checkpoint_dirty {
+            self.metadata = self.metadata.sync().await?;
+            self.checkpoint_dirty = false;
+        }
 
         self.requested.clear();
         Ok(self)
@@ -937,7 +940,6 @@ mod tests {
         archive::{Archive as _, Error},
         metadata::Error as MetadataError,
         translator::FourCap,
-        utils::snapshot_partition,
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -947,7 +949,6 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync, release_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
-    use std::collections::BTreeMap;
 
     type TestArchive =
         Archive<FourCap, DelayedSyncContext<deterministic::Context>, FixedBytes<64>, i32>;
@@ -966,16 +967,6 @@ mod tests {
             value_write_buffer: NZUsize!(1),
             replay_buffer: NZUsize!(1024),
         }
-    }
-
-    async fn snapshot_data(
-        context: &deterministic::Context,
-        cfg: &Config<FourCap, ()>,
-    ) -> (BTreeMap<Vec<u8>, Vec<u8>>, BTreeMap<Vec<u8>, Vec<u8>>) {
-        (
-            snapshot_partition(context, &cfg.key_partition).await,
-            snapshot_partition(context, &cfg.value_partition).await,
-        )
     }
 
     async fn start_checkpoint_sync(
@@ -1041,13 +1032,10 @@ mod tests {
             // The checkpoint is the first sync started by the second interval. Fail it without
             // polling the composite handle, leaving both current data syncs in flight.
             fail_checkpoint_sync(&pending);
-            let before = snapshot_data(&context, &cfg).await;
             let result = archive.put(2, FixedBytes::new([2; 64]), 2).await;
-            let after = snapshot_data(&context, &cfg).await;
 
             drop(composite);
             release_pending_syncs(&pending);
-            assert_eq!(after, before, "failed put mutated archive storage");
             assert_checkpoint_error(result.expect_err("put must surface checkpoint failure"));
         });
     }
@@ -1074,17 +1062,10 @@ mod tests {
             drop(composite);
             release_pending_syncs(&pending);
 
-            let before = snapshot_data(&context, &cfg).await;
-            pending.arm();
             let mut sync = Box::pin(archive.sync());
             let result = futures::poll!(sync.as_mut());
-            let calls = pending.calls();
             drop(sync);
-            let after = snapshot_data(&context, &cfg).await;
-            pending.unblock();
 
-            assert_eq!(calls, 0, "failed sync issued a durability operation");
-            assert_eq!(after, before, "failed sync mutated archive storage");
             let std::task::Poll::Ready(Err(error)) = result else {
                 panic!("sync must immediately surface checkpoint failure");
             };

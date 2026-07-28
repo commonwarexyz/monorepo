@@ -22,7 +22,10 @@ use commonware_storage::journal::{
         },
     },
 };
-use commonware_utils::{FuzzRng, sequence::FixedBytes};
+use commonware_storage_fuzz::{
+    RNG_BYTES, bounded_page_cache_size, bounded_page_size, fuzz_runner, remove_faults, split_cycles,
+};
+use commonware_utils::sequence::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -33,20 +36,11 @@ use std::{
 const ITEM_SIZE: usize = 32;
 const MAX_OPERATIONS: usize = 64;
 const MAX_REPLAY_BUFFER: usize = 2048;
-const RNG_BYTES: usize = 32;
 const MAX_SECTIONS: u8 = 4;
 const MAX_WRITE_BUFFER: usize = 2048;
 
 type Item = FixedBytes<ITEM_SIZE>;
 type State = BTreeMap<u64, Vec<Entry>>;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> ArbitraryResult<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> ArbitraryResult<usize> {
-    u.int_in_range(1..=16)
-}
 
 fn bounded_replay_buffer(u: &mut Unstructured<'_>) -> ArbitraryResult<usize> {
     u.int_in_range(1..=MAX_REPLAY_BUFFER)
@@ -450,20 +444,6 @@ async fn run_operations<J: HarnessJournal>(
     journal
 }
 
-fn split_cycles(operations: &[Operation]) -> Vec<Vec<Operation>> {
-    let mut cycles = Vec::new();
-    let mut current = Vec::new();
-    for operation in operations {
-        if matches!(operation, Operation::Crash) {
-            cycles.push(std::mem::take(&mut current));
-        } else {
-            current.push(operation.clone());
-        }
-    }
-    cycles.push(current);
-    cycles
-}
-
 fn run_cycle<J: HarnessJournal + Send + 'static>(
     runner: deterministic::Runner,
     partition: String,
@@ -508,10 +488,10 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
         compression: input.compression,
     };
     let partition = format!("segmented-crash-{tag}");
-    let cycles = split_cycles(&input.operations);
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let runner =
-        deterministic::Runner::new(deterministic::Config::default().with_rng(Box::new(rng)));
+    let cycles = split_cycles(input.operations.iter().cloned(), |operation| {
+        matches!(operation, Operation::Crash)
+    });
+    let runner = fuzz_runner(&input.raw_bytes);
     let (mut expected, mut checkpoint) = run_cycle::<J>(
         runner,
         partition.clone(),
@@ -578,8 +558,7 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
             .expect("pre-prune recovery should complete");
             assert_recovered(replayed, &expected);
 
-            *context.storage_fault_config().write() =
-                deterministic::FaultConfig::default().remove(0.5);
+            *context.storage_fault_config().write() = remove_faults();
             let _ = journal.prune(PRUNE_MIN).await;
             expected
         });
@@ -622,8 +601,7 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
                 .prune(PRUNE_MIN)
                 .await
                 .expect("prune retry must succeed");
-            *context.storage_fault_config().write() =
-                deterministic::FaultConfig::default().remove(0.5);
+            *context.storage_fault_config().write() = remove_faults();
             let _ = journal.destroy().await;
         });
 

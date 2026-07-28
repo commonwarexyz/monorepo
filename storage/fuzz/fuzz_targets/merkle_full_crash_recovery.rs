@@ -13,7 +13,11 @@ use commonware_storage::merkle::{
     Bagging, Family as MerkleFamily, Location, Position, full::Config,
     hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
-use commonware_utils::{FuzzRng, NZU64};
+use commonware_storage_fuzz::{
+    RNG_BYTES, bounded_items_per_section, bounded_page_cache_size, bounded_page_size, bounded_rate,
+    fuzz_runner, interrupt_faults,
+};
+use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
@@ -29,31 +33,11 @@ const MAX_WRITE_BUF: usize = 2048;
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 64;
 
-/// Bytes reserved for deterministic runtime choices.
-const RNG_BYTES: usize = 32;
-
 type Merkle<F> =
     commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
 
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
 fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_rate(u: &mut Unstructured<'_>) -> Result<f64> {
-    let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
 }
 
 fn bounded_operations(u: &mut Unstructured<'_>) -> Result<Vec<MerkleOperation>> {
@@ -96,7 +80,7 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per blob.
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items_per_section)]
     items_per_blob: u64,
     /// Write buffer size.
     #[arbitrary(with = bounded_write_buffer)]
@@ -450,10 +434,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let cfg = deterministic::Config::default().with_rng(Box::new(rng));
     let partition_suffix = format!("crash-{suffix}");
-    let runner = deterministic::Runner::new(cfg);
+    let runner = fuzz_runner(&input.raw_bytes);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;
@@ -548,13 +530,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             .await
             .expect("sentinel recovery should succeed");
             verify_recovery(&merkle, &hasher, &expected).await;
-            *ctx.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(0.5),
-                partial_write_rate: Some(1.0),
-                sync_rate: Some(0.5),
-                remove_rate: Some(0.5),
-                ..Default::default()
-            };
+            *ctx.storage_fault_config().write() = interrupt_faults();
             let _ = merkle.destroy().await;
         });
 

@@ -17,7 +17,10 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{FuzzRng, NZU16, NZUsize, sequence::FixedBytes};
+use commonware_storage_fuzz::{
+    RNG_BYTES, fuzz_runner, interrupt_faults, remove_faults, split_cycles,
+};
+use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -31,7 +34,6 @@ type RawValue = [u8; 32];
 type Model = BTreeMap<u64, RawValue>;
 
 const MAX_OPERATIONS: usize = 48;
-const RNG_BYTES: usize = 32;
 const FIRST_SENTINEL_INDEX: u64 = 64;
 const SECOND_SENTINEL_INDEX: u64 = 65;
 const PRUNE_SENTINEL_INDICES: [u64; 4] = [48, 52, 56, 60];
@@ -351,20 +353,6 @@ fn assert_interrupted_prune(
     }
 }
 
-fn split_cycles(operations: Vec<Operation>) -> Vec<Vec<Operation>> {
-    let mut cycles = Vec::new();
-    let mut current = Vec::new();
-    for operation in operations {
-        if matches!(operation, Operation::Crash) {
-            cycles.push(std::mem::take(&mut current));
-        } else {
-            current.push(operation);
-        }
-    }
-    cycles.push(current);
-    cycles
-}
-
 fn run_cycle<V: Variant>(
     runner: deterministic::Runner,
     expected: Expected,
@@ -456,12 +444,12 @@ fn run<V: Variant>(input: FuzzInput) {
         compression: input.compression.then_some(3),
         items_per_section: input.items_per_section,
     };
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let mut runner =
-        deterministic::Runner::new(deterministic::Config::default().with_rng(Box::new(rng)));
+    let mut runner = fuzz_runner(&input.raw_bytes);
     let mut expected = Expected::default();
 
-    for cycle in split_cycles(input.operations) {
+    for cycle in split_cycles(input.operations, |operation| {
+        matches!(operation, Operation::Crash)
+    }) {
         let checkpoint;
         (expected, checkpoint) = run_cycle::<V>(runner, expected, cycle, settings);
         runner = deterministic::Runner::from(checkpoint);
@@ -533,13 +521,7 @@ fn run<V: Variant>(input: FuzzInput) {
                     live.insert(index, value);
                 }
                 archive = archive.sync().await.expect("pre-prune sync should succeed");
-                *fault_config.write() = deterministic::FaultConfig {
-                    write_rate: Some(0.5),
-                    partial_write_rate: Some(1.0),
-                    sync_rate: Some(0.5),
-                    remove_rate: Some(0.5),
-                    ..Default::default()
-                };
+                *fault_config.write() = interrupt_faults();
                 let _ = V::prune(archive, FIRST_SENTINEL_INDEX).await;
             }
 
@@ -639,7 +621,7 @@ fn run<V: Variant>(input: FuzzInput) {
                     .expect("sentinel get should succeed"),
                 Some(Value::new(sentinel))
             );
-            *fault_config.write() = deterministic::FaultConfig::default().remove(0.5);
+            *fault_config.write() = remove_faults();
             let _ = archive.destroy().await;
         });
 

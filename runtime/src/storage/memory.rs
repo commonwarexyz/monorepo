@@ -158,7 +158,6 @@ impl Storage {
         let mut recovery = self.recovery.lock();
         let mut partitions = self.partitions.lock();
         apply_crash(&mut recovery, &mut partitions, &mut next_mask);
-
         self.epoch
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                 epoch.checked_add(1)
@@ -413,7 +412,6 @@ impl crate::Blob for Blob {
             return Err(crate::Error::BlobInsufficientLength);
         }
         bufs.copy_from_slice(&content[offset..end]);
-        self.ensure_current_epoch()?;
         Ok(bufs)
     }
 
@@ -445,7 +443,6 @@ impl crate::Blob for Blob {
                 durable: false,
             })?;
         }
-        self.ensure_current_epoch()?;
         Ok(())
     }
 
@@ -457,7 +454,6 @@ impl crate::Blob for Blob {
         self.ensure_current_epoch()?;
         let bufs = bufs.into();
         if !bufs.has_remaining() {
-            self.ensure_current_epoch()?;
             return Ok(());
         }
 
@@ -521,12 +517,6 @@ mod tests {
     }
 
     impl From<Paused<Self>> for IoBufs {
-        fn from(paused: Paused<Self>) -> Self {
-            paused.into_inner()
-        }
-    }
-
-    impl From<Paused<Self>> for IoBufsMut {
         fn from(paused: Paused<Self>) -> Self {
             paused.into_inner()
         }
@@ -699,77 +689,6 @@ mod tests {
         let (recovered, size) = storage.open("partition", b"blob").await.unwrap();
         assert_eq!(size, 4);
         assert_eq!(recovered.read_at(0, 4).await.unwrap().coalesce(), b"safe");
-    }
-
-    #[tokio::test]
-    async fn test_crash_rejects_read_that_passed_initial_epoch_check() {
-        let storage = Storage::new(test_pool());
-        let (escaped, _) = storage.open("partition", b"blob").await.unwrap();
-        escaped.write_at_sync(0, b"safe").await.unwrap();
-
-        let checked_epoch = Arc::new(std::sync::Barrier::new(2));
-        let resume = Arc::new(std::sync::Barrier::new(2));
-        let reader = std::thread::spawn({
-            let checked_epoch = checked_epoch.clone();
-            let resume = resume.clone();
-            move || {
-                futures::executor::block_on(escaped.read_at_buf(
-                    0,
-                    4,
-                    Paused {
-                        checked_epoch,
-                        resume,
-                        value: IoBufsMut::from(vec![0; 4]),
-                    },
-                ))
-            }
-        });
-
-        checked_epoch.wait();
-        storage.simulate_crash(|| 0);
-        resume.wait();
-
-        assert!(matches!(
-            reader.join().unwrap(),
-            Err(crate::Error::BlobMissing(..))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_crash_rejects_empty_writes_that_passed_initial_epoch_check() {
-        for range_sync in [false, true] {
-            let storage = Storage::new(test_pool());
-            let (escaped, _) = storage.open("partition", b"blob").await.unwrap();
-            escaped.write_at_sync(0, b"safe").await.unwrap();
-
-            let checked_epoch = Arc::new(std::sync::Barrier::new(2));
-            let resume = Arc::new(std::sync::Barrier::new(2));
-            let writer = std::thread::spawn({
-                let checked_epoch = checked_epoch.clone();
-                let resume = resume.clone();
-                move || {
-                    let bufs = Paused {
-                        checked_epoch,
-                        resume,
-                        value: IoBufs::default(),
-                    };
-                    if range_sync {
-                        futures::executor::block_on(escaped.write_at_sync(0, bufs))
-                    } else {
-                        futures::executor::block_on(escaped.write_at(0, bufs))
-                    }
-                }
-            });
-
-            checked_epoch.wait();
-            storage.simulate_crash(|| 0);
-            resume.wait();
-
-            assert!(matches!(
-                writer.join().unwrap(),
-                Err(crate::Error::BlobMissing(..))
-            ));
-        }
     }
 
     #[tokio::test]

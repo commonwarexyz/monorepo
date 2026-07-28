@@ -469,14 +469,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// refused by the page cache even inside its committed prefix. Removing the hole first makes
     /// that prefix the section's tip, which reads serve from the write buffer.
     ///
-    /// A hole below `floor` lost acknowledged data. The section is left untouched so the caller's
-    /// durable-end checks report it with the evidence intact.
+    /// Pages below the one containing `floor` were covered by a completed sync and are not
+    /// re-read. A hole in the floor page itself lost acknowledged data: the section is left
+    /// untouched so the caller's durable-end checks report it with the evidence intact.
     pub(super) async fn repair_prefix(mut self, section: u64, floor: u64) -> Result<Self, Error> {
         let Some(blob) = self.0.manager.get_mut(section) else {
             return Ok(self);
         };
         let size = blob.size();
-        let valid = blob.recoverable_prefix_len().await?;
+        if floor >= size {
+            return Ok(self);
+        }
+        let valid = blob.recoverable_prefix_len(floor).await?;
         if valid >= size || valid < floor {
             return Ok(self);
         }
@@ -628,14 +632,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                         // the last complete item before returning the journal.
                         let section = current.section;
                         let valid_offset = current.position * Inner::<E, A>::CHUNK_SIZE_U64;
-                        let durable_end = self.durable_ends.get(&section).copied().unwrap_or(0);
-                        if valid_offset < durable_end {
-                            self.sections.pop_front();
-                            return self.fail(Error::Corruption(format!(
-                                "section {section} is incomplete at {valid_offset}, below durable \
-                                 end {durable_end}"
-                            )));
-                        }
+
+                        // The caller verified each durable end is item-aligned and within its
+                        // section, so a clean read to end-of-section always covers it: only the
+                        // torn-page arm can observe a prefix ending below the durable end.
+                        assert!(
+                            valid_offset >= self.durable_ends.get(&section).copied().unwrap_or(0),
+                            "complete items end below durable end"
+                        );
                         warn!(
                             blob = section,
                             new_size = valid_offset,

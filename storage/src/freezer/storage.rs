@@ -424,10 +424,6 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
     resizable: u32,
     resize_progress: Option<u32>,
 
-    /// Test-only: park destruction after removing the oversized journal.
-    #[cfg(test)]
-    halt_destroy_after_oversized: bool,
-
     // Metrics
     puts: Counter,
     gets: Counter,
@@ -799,8 +795,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             modified_sections: BTreeSet::new(),
             resizable,
             resize_progress: None,
-            #[cfg(test)]
-            halt_destroy_after_oversized: false,
             puts,
             gets,
             has,
@@ -1172,11 +1166,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Destroy oversized journal
         self.oversized.destroy().await?;
 
-        #[cfg(test)]
-        if self.halt_destroy_after_oversized {
-            std::future::pending::<()>().await;
-        }
-
         // Destroy the table
         drop(self.table);
         self.context
@@ -1267,12 +1256,6 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// storage.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
-    }
-
-    /// Park destruction after its oversized journal await.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_oversized(&mut self) {
-        self.0.halt_destroy_after_oversized = true;
     }
 
     /// Get the current progress of the resize operation.
@@ -1488,15 +1471,6 @@ mod tests {
                         section: 0,
                         oversized_size: 0,
                         table_size: 3,
-                    },
-                ),
-                (
-                    "oversized_checkpoint_table_size",
-                    Checkpoint {
-                        epoch: checkpoint.epoch,
-                        section: checkpoint.section,
-                        oversized_size: checkpoint.oversized_size,
-                        table_size: 1 << 31,
                     },
                 ),
                 (

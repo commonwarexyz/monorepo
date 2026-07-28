@@ -146,6 +146,14 @@ where
         db.sync().await
     }
 
+    async fn publish_sync_result(self) -> Result<Self, Error<F>> {
+        Ok(self)
+    }
+
+    async fn discard_sync_result(self) -> Result<(), Error<F>> {
+        Ok(())
+    }
+
     async fn local_boundary_nodes(
         context: Self::Context,
         config: &Self::Config,

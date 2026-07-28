@@ -2148,7 +2148,9 @@ mod tests {
         // per-section backward scan at init sizes the section out to that valid island, so
         // replay meets the hole mid-stream. It must repair by truncating to the last
         // well-formed item (a synced page cannot tear, so the hole is unacknowledged tail
-        // data) rather than failing, which would deterministically wedge recovery.
+        // data) rather than failing, which would deterministically wedge recovery. The repair
+        // must end only the section that carries the tear: later sections are separate blobs,
+        // so their items must still be yielded and the replay must still finish.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2159,7 +2161,8 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Commit a prefix, then stage a multi-page tail.
+            // Commit a prefix, then stage a multi-page tail in section 1 and an intact tail in
+            // section 2.
             let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2171,6 +2174,10 @@ mod tests {
             journal = journal.sync_all().await.expect("failed to sync");
             for i in synced_count..count {
                 (journal, _, _) = journal.append(1, &i).await.expect("failed to append");
+            }
+            let tail: Vec<i32> = (count..count + 5).collect();
+            for i in &tail {
+                (journal, _, _) = journal.append(2, i).await.expect("failed to append");
             }
             // Materialize the candidate tail so the test can construct the on-disk state of
             // an arbitrarily torn unacknowledged flush. The corruption below represents the
@@ -2185,15 +2192,15 @@ mod tests {
                 .await
                 .expect("failed to open section");
 
-            // The section must span several pages so an interior page can be torn while a
+            // Section 1 must span several pages so an interior page can be torn while a
             // later page survives as the valid island.
             assert!(
                 section_size > 4 * PAGE_SIZE.get() as u64,
                 "test needs several pages, got {section_size}"
             );
 
-            // Corrupt an interior page in the unsynced tail, leaving later pages intact so
-            // init's backward scan still sizes the section past the hole. 3 * PAGE_SIZE + 100
+            // Corrupt an interior page in section 1's unsynced tail, leaving later pages intact
+            // so init's backward scan still sizes the section past the hole. 3 * PAGE_SIZE + 100
             // lands inside the fourth physical page despite the checksum records.
             let (blob, _) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
@@ -2214,128 +2221,36 @@ mod tests {
             )
             .await
             .expect("failed to re-initialize journal");
-            let mut items = Vec::<i32>::new();
-            while let Some(result) = replay.next().await {
-                let (_, _, _, item) = result.expect("replay must repair a torn page, not fail");
-                items.push(item);
-            }
-            let mut journal = replay.finish().expect("failed to finish replay");
-
-            // The acknowledged prefix survives intact, while the torn page and the valid
-            // island past it are dropped.
-            assert!(
-                items.len() as i32 >= synced_count,
-                "lost acknowledged items: recovered {} of {synced_count}",
-                items.len()
-            );
-            assert!(
-                (items.len() as i32) < count,
-                "torn tail must be dropped, recovered {} of {count}",
-                items.len()
-            );
-            for (i, item) in items.iter().enumerate() {
-                assert_eq!(*item, i as i32, "prefix must match appended order");
-            }
-
-            // The journal is usable after repair: append, sync, reopen, and read back.
-            (journal, _, _) = journal
-                .append(2, &777)
-                .await
-                .expect("failed to append after repair");
-            journal = journal
-                .sync_all()
-                .await
-                .expect("failed to sync after repair");
-            drop(journal);
-
-            let journal: Journal<_, i32> = init_journal(context.child("third"), cfg.clone())
-                .await
-                .expect("failed to reopen after repair");
-            assert_eq!(journal.get(2, 0).await.expect("failed to get"), 777);
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    /// Repairing a torn page must end only the section that carries it. Later sections are
-    /// separate blobs, so their items must still be yielded and the replay must still finish.
-    #[test_traced]
-    fn test_journal_replay_repairs_torn_page_in_earlier_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test-partition".into(),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Section 1 spans several pages so an interior page can be torn while a later page
-            // survives. Section 2 stays intact.
-            let mut journal = init_journal(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-            let count: i32 = 1000;
-            for i in 0..count {
-                (journal, _, _) = journal.append(1, &i).await.expect("failed to append");
-            }
-            let tail: Vec<i32> = (count..count + 5).collect();
-            for i in &tail {
-                (journal, _, _) = journal.append(2, i).await.expect("failed to append");
-            }
-            journal = journal.sync_all().await.expect("failed to sync");
-            drop(journal);
-
-            let (_, section_size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("failed to open section");
-            assert!(
-                section_size > 4 * PAGE_SIZE.get() as u64,
-                "test needs several pages, got {section_size}"
-            );
-
-            // Tear an interior page of section 1, leaving later pages of that section intact.
-            let (blob, _) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("failed to open section");
-            blob.write_at_sync(3 * PAGE_SIZE.get() as u64 + 100, vec![0xFFu8; 16])
-                .await
-                .expect("failed to corrupt interior page");
-            drop(blob);
-
-            let mut replay = Journal::<_, i32>::init(
-                context.child("second"),
-                cfg.clone(),
-                NZUsize!(1024 * 1024),
-            )
-            .await
-            .expect("failed to re-initialize journal");
             let mut first_section = Vec::<i32>::new();
             let mut second_section = Vec::<i32>::new();
             while let Some(result) = replay.next().await {
-                let (section, _, _, item) = result.expect("replay must repair, not fail");
+                let (section, _, _, item) =
+                    result.expect("replay must repair a torn page, not fail");
                 match section {
                     1 => first_section.push(item),
                     2 => second_section.push(item),
                     other => panic!("unexpected section {other}"),
                 }
             }
-            let journal = replay.finish().expect("failed to finish replay");
+            let mut journal = replay.finish().expect("failed to finish replay");
 
-            // Section 1 is truncated at the tear, section 2 is untouched.
+            // The acknowledged prefix survives intact, while the torn page and the valid
+            // island past it are dropped.
             assert!(
-                !first_section.is_empty() && (first_section.len() as i32) < count,
-                "section 1 must keep a shorter valid prefix, got {}",
+                first_section.len() as i32 >= synced_count,
+                "lost acknowledged items: recovered {} of {synced_count}",
+                first_section.len()
+            );
+            assert!(
+                (first_section.len() as i32) < count,
+                "torn tail must be dropped, recovered {} of {count}",
                 first_section.len()
             );
             for (i, item) in first_section.iter().enumerate() {
-                assert_eq!(
-                    *item, i as i32,
-                    "section 1 prefix must match appended order"
-                );
+                assert_eq!(*item, i as i32, "prefix must match appended order");
             }
+
+            // Section 1's repair ends only that section: section 2 is untouched.
             assert_eq!(
                 second_section, tail,
                 "a later section must survive an earlier section's repair"
@@ -2347,7 +2262,23 @@ mod tests {
                 }
                 bytes
             });
-            journal.destroy().await.expect("failed to destroy journal");
+
+            // The journal is usable after repair: append, sync, reopen, and read back.
+            (journal, _, _) = journal
+                .append(3, &777)
+                .await
+                .expect("failed to append after repair");
+            journal = journal
+                .sync_all()
+                .await
+                .expect("failed to sync after repair");
+            drop(journal);
+
+            let journal: Journal<_, i32> = init_journal(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to reopen after repair");
+            assert_eq!(journal.get(3, 0).await.expect("failed to get"), 777);
+            journal.destroy().await.expect("failed to destroy");
         });
     }
 

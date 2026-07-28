@@ -69,16 +69,12 @@ pub trait Database: Sized + Send {
     /// Publish a constructed database after its root has been verified against the target.
     fn publish_sync_result(
         self,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send {
-        async move { Ok(self) }
-    }
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Discard a constructed database whose root did not match the target.
     fn discard_sync_result(
         self,
-    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send {
-        async move { Ok(()) }
-    }
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Return locally available boundary nodes for the target, if persisted local state can
     /// authenticate them.

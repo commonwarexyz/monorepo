@@ -260,9 +260,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             let entry_count = index_size / chunk_size;
             let floor_count = watermark / chunk_size;
 
-            // Derive the value floor from the last durable entry. It must still be readable and
-            // checksum-valid so recovery does not roll back acknowledged data under the crash
-            // model.
+            // Derive the value floor from the last durable entry, the one below-floor read
+            // recovery needs. Verifying the entry's value checksum eagerly is deliberate policy
+            // rather than a crash-model obligation: deeper values stay lazy until `get_value`.
             let mut glob_target = if floor_count == 0 {
                 0
             } else {
@@ -461,7 +461,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             Err(
                 Error::Codec(_)
                 | Error::ItemOutOfRange(_)
-                | Error::SectionOutOfRange(_)
                 | Error::Runtime(RError::InvalidChecksum),
             ) => {
                 return Err(Error::Corruption(format!(
@@ -685,6 +684,11 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         index_size: u64,
         value_size: u64,
     ) -> Result<Self, Error> {
+        // Section removals are durable on their own, so only an actual truncation needs the
+        // sync ordering below. A rewind to the current sizes syncs nothing.
+        let index_resized = index_size < self.index.size(section)?;
+        let values_resized = value_size < self.values.size(section)?;
+
         // Rewind index first (this also removes sections after `section`)
         self.index = self.index.rewind(section, index_size).await?;
 
@@ -692,11 +696,15 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // values frees their ranges for reuse by later appends, and a dropped index entry
         // that stayed durable would be adopted referencing whatever bytes a later append
         // placed at its offsets.
-        self.index = self.index.sync(section).await?;
+        if index_resized {
+            self.index = self.index.sync(section).await?;
+        }
 
         // Rewind values (this also removes sections after `section`)
         self.values = self.values.rewind(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
+        if values_resized {
+            self.values = self.values.sync(section).await?;
+        }
         Ok(self)
     }
 
@@ -774,8 +782,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             halt_destroy_after_index,
         } = self;
 
-        // Remove references before their values. If interrupted, recovery can discard orphaned
-        // values; surviving index entries whose values were removed would be unrecoverable.
+        // Remove references before their values. An interrupted destroy then leaves only orphan
+        // value sections, which reopening with an empty checkpoint discards without any
+        // per-section truncate-and-sync repair.
         index.destroy().await?;
 
         #[cfg(test)]
@@ -2125,15 +2134,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_oversized_restore_rejects_sub_entry_checkpoint_without_mutation() {
+    fn test_oversized_restore_rejects_unaligned_checkpoint_without_mutation() {
         let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-        assert_restore_rejects_unaligned_checkpoint(chunk - 1);
-    }
 
-    #[test_traced]
-    fn test_oversized_restore_rejects_checkpoint_past_entry_without_mutation() {
-        let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-        assert_restore_rejects_unaligned_checkpoint(chunk + 1);
+        // A sub-entry and a past-entry checkpoint fail the same alignment check.
+        for index_size in [chunk - 1, chunk + 1] {
+            assert_restore_rejects_unaligned_checkpoint(index_size);
+        }
     }
 
     #[test_traced]
@@ -2243,14 +2250,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_oversized_restore_rejects_sub_entry_lower_section() {
-        assert_restore_rejects_unaligned_lower_section(1);
-    }
-
-    #[test_traced]
-    fn test_oversized_restore_rejects_partial_entry_lower_section() {
+    fn test_oversized_restore_rejects_unaligned_lower_section() {
         let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-        assert_restore_rejects_unaligned_lower_section(chunk + 1);
+
+        // A sub-entry and a partial-entry size fail the same lower-section alignment check.
+        for index_size in [1, chunk + 1] {
+            assert_restore_rejects_unaligned_lower_section(index_size);
+        }
     }
 
     #[test_traced]

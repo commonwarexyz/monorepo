@@ -6,7 +6,7 @@ use crate::{
     Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        Error as JournalError,
+        Error as JournalError, authenticated,
         contiguous::{Contiguous, Mutable},
     },
     merkle::{
@@ -54,20 +54,8 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-/// Prefix used for a pending state-sync replacement.
+/// Prefix used for a pending state-sync replacement target.
 const PENDING_SYNC_PREFIX: u8 = 2;
-
-/// On-disk format version for a pending state-sync replacement.
-const PENDING_SYNC_VERSION: u8 = 1;
-
-const PENDING_SYNC_ACTIVE: u8 = 0;
-const PENDING_SYNC_REJECTED: u8 = 1;
-
-/// Durable state-sync replacement intent.
-pub(super) struct PendingSync<F: merkle::Family, D: Digest> {
-    pub(super) target: qmdb::sync::Target<F, D>,
-    pub(super) rejected: bool,
-}
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
@@ -1245,56 +1233,19 @@ pub(super) async fn open_metadata<F: merkle::Family, E: Context>(
         .map_err(Into::into)
 }
 
-/// Load a durable state-sync replacement intent, if present.
+/// Load the durable state-sync replacement target, if present.
+///
+/// A record that is present but undecodable is loud corruption, never treated as "no intent":
+/// silently ignoring it would adopt a half-replaced generation.
 pub(super) fn pending_sync<F: merkle::Family, E: Context, D: Digest>(
     metadata: &Metadata<E, U64, Vec<u8>>,
-) -> Result<Option<PendingSync<F, D>>, Error<F>> {
-    let mut keys = metadata
-        .keys()
-        .filter(|key| key.prefix() == PENDING_SYNC_PREFIX);
-    let Some(key) = keys.next() else {
+) -> Result<Option<qmdb::sync::Target<F, D>>, Error<F>> {
+    let Some(value) = metadata.get(&U64::new(PENDING_SYNC_PREFIX, 0)) else {
         return Ok(None);
     };
-    if key.value() != 0 || keys.next().is_some() {
-        return Err(Error::DataCorrupted("invalid pending sync marker"));
-    }
-
-    let value = metadata
-        .get(key)
-        .ok_or(Error::DataCorrupted("missing pending sync value"))?;
-    let Some((&version, value)) = value.split_first() else {
-        return Err(Error::DataCorrupted("invalid pending sync version"));
-    };
-    if version != PENDING_SYNC_VERSION {
-        return Err(Error::DataCorrupted("invalid pending sync version"));
-    }
-    let Some((&state, target)) = value.split_first() else {
-        return Err(Error::DataCorrupted("invalid pending sync state"));
-    };
-    let rejected = match state {
-        PENDING_SYNC_ACTIVE => false,
-        PENDING_SYNC_REJECTED => true,
-        _ => return Err(Error::DataCorrupted("invalid pending sync state")),
-    };
-    let target = qmdb::sync::Target::<F, D>::decode(target)
+    let target = qmdb::sync::Target::<F, D>::decode(value.as_slice())
         .map_err(|_| Error::DataCorrupted("invalid pending sync target"))?;
-    Ok(Some(PendingSync { target, rejected }))
-}
-
-fn encode_pending_sync<F: merkle::Family, D: Digest>(
-    target: &qmdb::sync::Target<F, D>,
-    rejected: bool,
-) -> Vec<u8> {
-    let target = target.encode();
-    let mut value = Vec::with_capacity(2 + target.len());
-    value.push(PENDING_SYNC_VERSION);
-    value.push(if rejected {
-        PENDING_SYNC_REJECTED
-    } else {
-        PENDING_SYNC_ACTIVE
-    });
-    value.extend_from_slice(&target);
-    value
+    Ok(Some(target))
 }
 
 /// Durably record the target whose state sync may replace the active generation.
@@ -1302,33 +1253,42 @@ pub(super) async fn stage_sync<F: merkle::Family, E: Context, D: Digest>(
     mut metadata: Metadata<E, U64, Vec<u8>>,
     target: &qmdb::sync::Target<F, D>,
 ) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
-    if let Some(pending) = pending_sync::<F, _, D>(&metadata)?
-        && !pending.rejected
-        && pending.target == *target
-    {
+    if pending_sync::<F, _, D>(&metadata)?.as_ref() == Some(target) {
         return Ok(metadata);
     }
-    metadata.put(
-        U64::new(PENDING_SYNC_PREFIX, 0),
-        encode_pending_sync(target, false),
-    );
+    metadata.put(U64::new(PENDING_SYNC_PREFIX, 0), target.encode().to_vec());
     metadata.sync().await.map_err(Into::into)
 }
 
-/// Mark the current replacement target as rejected before returning a root mismatch.
-pub(super) async fn reject_sync<F: merkle::Family, E: Context, D: Digest>(
-    mut metadata: Metadata<E, U64, Vec<u8>>,
-) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
-    let pending = pending_sync::<F, _, D>(&metadata)?
-        .ok_or(Error::DataCorrupted("missing pending sync target"))?;
-    if pending.rejected {
-        return Ok(metadata);
-    }
-    metadata.put(
-        U64::new(PENDING_SYNC_PREFIX, 0),
-        encode_pending_sync(&pending.target, true),
-    );
-    metadata.sync().await.map_err(Into::into)
+/// Destroy the operations journal and Merkle structure named by `journal_config` and
+/// `merkle_config`, converging an unpublished sync generation to empty.
+///
+/// Callers own the metadata follow-up: the replacement intent must stay durable until this
+/// completes so an interrupted reset is retried on the next init or prepare.
+pub(super) async fn reset_sync_components<F, E, J, H, S>(
+    context: &E,
+    journal_config: <J as authenticated::Backing<E>>::Config,
+    merkle_config: merkle::full::Config<S>,
+) -> Result<(), Error<F>>
+where
+    F: merkle::Family,
+    E: Context,
+    J: authenticated::Backing<E>,
+    H: Hasher,
+    S: Strategy,
+{
+    let journal = J::init(context.child("reset_journal"), journal_config).await?;
+    <J as Mutable>::destroy(journal).await?;
+
+    let hasher = qmdb::hasher::<H>();
+    let merkle = merkle::full::Merkle::<F, _, _, S>::init(
+        context.child("reset_merkle"),
+        &hasher,
+        merkle_config,
+    )
+    .await?;
+    merkle.destroy().await?;
+    Ok(())
 }
 
 /// Load the pruning state for the active metadata generation.
@@ -1342,9 +1302,12 @@ pub(super) async fn reject_sync<F: merkle::Family, E: Context, D: Digest>(
 pub(super) fn load_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     metadata: &Metadata<E, U64, Vec<u8>>,
 ) -> Result<(usize, Vec<D>), Error<F>> {
-    if pending_sync::<F, _, D>(metadata)?.is_some() {
-        return Err(Error::DataCorrupted("pending sync was not recovered"));
-    }
+    // The caller resolves any durable replacement intent (reset both backing components, then
+    // clear the intent) before loading the active generation, so a surviving intent is a bug.
+    assert!(
+        pending_sync::<F, _, D>(metadata)?.is_none(),
+        "pending sync must be resolved before loading metadata"
+    );
 
     let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
     let pruned_chunks = match metadata.get(&key) {

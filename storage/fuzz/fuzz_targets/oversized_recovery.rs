@@ -16,7 +16,8 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
-use commonware_utils::{FuzzRng, NZU16, NZUsize};
+use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, remove_faults};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -213,7 +214,6 @@ enum FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 const CRASH_PAGE_SIZE: NonZeroU16 = NZU16!(4);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
-const RNG_BYTES: usize = 32;
 const MAX_CORRUPTIONS: usize = 16;
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
@@ -581,9 +581,7 @@ async fn recovered_prefix(journal: &TestJournal, expected: &Expected) -> Expecte
 }
 
 fn fuzz_corruption(input: CorruptionInput) {
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let runner =
-        deterministic::Runner::new(deterministic::Config::default().with_rng(Box::new(rng)));
+    let runner = fuzz_runner(&input.raw_bytes);
 
     let (recovery, runtime_checkpoint) = runner.start_and_recover(move |context| async move {
         let cfg = test_cfg(&context);
@@ -948,9 +946,7 @@ fn fuzz_corruption(input: CorruptionInput) {
 }
 
 fn fuzz_crash_recovery(input: CrashRecoveryInput) {
-    let rng = FuzzRng::new(input.raw_bytes.to_vec());
-    let runner =
-        deterministic::Runner::new(deterministic::Config::default().with_rng(Box::new(rng)));
+    let runner = fuzz_runner(&input.raw_bytes);
     let compression = input.compression;
     let entries_per_section = input.entries_per_section;
     let prune_min = u64::from(input.prune_min % 4) + 1;
@@ -1045,7 +1041,7 @@ fn fuzz_crash_recovery(input: CrashRecoveryInput) {
             .filter(|&&section| section >= INTERRUPTED_PRUNE_MIN)
             .filter_map(|&section| journal.size(section).ok().map(|size| (section, size)))
             .collect();
-        *context.storage_fault_config().write() = deterministic::FaultConfig::default().remove(0.5);
+        *context.storage_fault_config().write() = remove_faults();
         let _ = journal.prune(INTERRUPTED_PRUNE_MIN).await;
         (expected, post_prune_checkpoint)
     });
@@ -1085,8 +1081,7 @@ fn fuzz_crash_recovery(input: CrashRecoveryInput) {
                 .prune(INTERRUPTED_PRUNE_MIN)
                 .await
                 .expect("prune retry must succeed");
-            *context.storage_fault_config().write() =
-                deterministic::FaultConfig::default().remove(0.5);
+            *context.storage_fault_config().write() = remove_faults();
             let _ = journal.destroy().await;
         });
 

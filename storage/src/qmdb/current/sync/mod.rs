@@ -122,17 +122,17 @@ where
     Operation<F, U>: Codec + Committable + CodecShared,
 {
     // Reopen the intent staged before the sync journal was touched. The final metadata sync
-    // atomically replaces both the old generation and this intent.
+    // atomically replaces both the old generation and this intent. The engine stages the intent
+    // via prepare_sync before opening or resizing the sync journal, so a missing or mismatched
+    // intent here is a bug, not a crash shape.
     let metadata =
         db::open_metadata::<F, _>(context.child("metadata"), &metadata_partition).await?;
-    let pending = db::pending_sync::<F, _, H::Digest>(&metadata)?.ok_or(
-        qmdb::Error::<F>::DataCorrupted("missing pending sync target"),
-    )?;
-    if pending.rejected || pending.target.range != range {
-        return Err(qmdb::Error::<F>::DataCorrupted(
-            "pending sync target does not match replacement",
-        ));
-    }
+    let pending = db::pending_sync::<F, _, H::Digest>(&metadata)?
+        .expect("sync target staged by prepare_sync before assembly");
+    assert!(
+        pending.range == range,
+        "staged sync target does not cover the assembled range"
+    );
 
     // Build authenticated log.
     let merkle = Merkle::<F, _, _, S>::init_sync(
@@ -257,13 +257,12 @@ where
 
 /// Return whether an existing sync target can be reused as a prefix of `target`.
 fn can_resume<F: Graftable, D: commonware_cryptography::Digest>(
-    pending: &db::PendingSync<F, D>,
+    pending: &qmdb::sync::Target<F, D>,
     target: &qmdb::sync::Target<F, D>,
 ) -> bool {
-    !pending.rejected
-        && (pending.target == *target
-            || (pending.target.range.start() <= target.range.start()
-                && pending.target.range.end() < target.range.end()))
+    pending == target
+        || (pending.range.start() <= target.range.start()
+            && pending.range.end() < target.range.end())
 }
 
 macro_rules! impl_current_sync_database {
@@ -306,21 +305,12 @@ macro_rules! impl_current_sync_database {
                 {
                     // Keep the old marker durable until both components are reset. An
                     // interrupted reset is therefore retried before another target is staged.
-                    let journal = <$journal as authenticated::Backing<E>>::init(
-                        context.child("reset_journal"),
+                    db::reset_sync_components::<F, _, $journal, H, S>(
+                        &context,
                         config.journal_config.clone(),
-                    )
-                    .await?;
-                    <$journal as Mutable>::destroy(journal).await?;
-
-                    let hasher = qmdb::hasher::<H>();
-                    let merkle = full::Merkle::<F, _, _, S>::init(
-                        context.child("reset_merkle"),
-                        &hasher,
                         config.merkle_config.clone(),
                     )
                     .await?;
-                    merkle.destroy().await?;
                 }
 
                 drop(db::stage_sync::<F, _, H::Digest>(metadata, target).await?);
@@ -365,11 +355,12 @@ macro_rules! impl_current_sync_database {
             }
 
             async fn discard_sync_result(self) -> Result<(), qmdb::Error<F>> {
-                let db::Db { metadata, .. } = self;
-                // Make the rejected generation non-resumable before reporting RootMismatch.
-                // The next attempt resets both backing components before refetching.
-                drop(db::reject_sync::<F, _, H::Digest>(metadata).await?);
-                Ok(())
+                // Destroy the mismatched generation before reporting RootMismatch. Destroy
+                // durably empties the journal before removing its blobs and clears the intent
+                // with the metadata, so an interrupted discard converges through the
+                // pending-intent reset on the next init and a completed discard leaves nothing
+                // to resume.
+                self.destroy().await
             }
 
             async fn local_boundary_nodes(

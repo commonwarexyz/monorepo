@@ -195,6 +195,7 @@ const PENDING_RESET_PREFIX: u8 = 2;
 /// A durably staged state-sync reset.
 struct PendingReset<F: Family, D: Digest> {
     prune_loc: Location<F>,
+    prune_pos: Position<F>,
     pinned_nodes: Vec<D>,
 }
 
@@ -203,26 +204,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     fn pending_reset(
         metadata: &Metadata<E, U64, Vec<u8>>,
     ) -> Result<Option<PendingReset<F, D>>, Error<F>> {
-        let mut markers = metadata
-            .keys()
-            .filter(|key| key.prefix() == PENDING_RESET_PREFIX);
-        let Some(marker) = markers.next() else {
+        let Some(encoded) = metadata.get(&U64::new(PENDING_RESET_PREFIX, 0)) else {
             return Ok(None);
         };
-        if marker.value() != 0 || markers.next().is_some() {
-            return Err(Error::DataCorrupted("invalid pending reset marker"));
-        }
-
-        let encoded = metadata
-            .get(marker)
-            .ok_or(Error::DataCorrupted("missing pending reset boundary"))?;
         let boundary: [u8; 8] = encoded
             .get(..u64::SIZE)
             .ok_or(Error::DataCorrupted("invalid pending reset boundary"))?
             .try_into()
-            .map_err(|_| Error::DataCorrupted("invalid pending reset boundary"))?;
+            .expect("slice is u64::SIZE bytes");
         let prune_loc = Location::new(u64::from_be_bytes(boundary));
-        Position::try_from(prune_loc)
+        let prune_pos = Position::try_from(prune_loc)
             .map_err(|_| Error::DataCorrupted("invalid pending reset boundary"))?;
 
         let pin_count = F::nodes_to_pin(prune_loc).count();
@@ -242,6 +233,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         Ok(Some(PendingReset {
             prune_loc,
+            prune_pos,
             pinned_nodes,
         }))
     }
@@ -287,14 +279,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         metadata: Metadata<E, U64, Vec<u8>>,
         pending: PendingReset<F, D>,
     ) -> Result<(Journal<E, D>, Metadata<E, U64, Vec<u8>>), Error<F>> {
-        let prune_pos = Position::try_from(pending.prune_loc)
-            .map_err(|_| Error::DataCorrupted("invalid pending reset boundary"))?;
         let positions = F::nodes_to_pin(pending.prune_loc).collect::<Vec<_>>();
         let bounds = journal.bounds();
-        let journal = if bounds.is_empty() && bounds.start == *prune_pos {
+        let journal = if bounds.is_empty() && bounds.start == *pending.prune_pos {
             journal
         } else {
-            journal.clear_to_size(*prune_pos).await?
+            journal.clear_to_size(*pending.prune_pos).await?
         };
         let metadata = Self::publish_reset(
             metadata,
@@ -642,13 +632,24 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 pinned_nodes
             };
 
-            // The outer metadata intent spans the journal's own recoverable clear protocol. Once
-            // this sync completes, both ordinary init and init_sync finish the reset rather than
-            // interpreting a mixture of the old projection and the new empty journal.
-            metadata = Self::stage_reset(metadata, prune_loc, &pinned_nodes).await?;
-            journal = journal.clear_to_size(*prune_pos).await?;
-            metadata =
-                Self::publish_reset(metadata, prune_loc, &nodes_to_pin, &pinned_nodes).await?;
+            // A fresh target (empty journal and metadata at a zero boundary) is already the
+            // reset outcome: nothing staged, cleared, or published here would change durable
+            // state.
+            let bounds = journal.bounds();
+            let fresh = *prune_pos == 0
+                && bounds.is_empty()
+                && bounds.start == 0
+                && metadata.keys().next().is_none();
+            if !fresh {
+                // The outer metadata intent spans the journal's own recoverable clear protocol.
+                // Once this sync completes, both ordinary init and init_sync finish the reset
+                // rather than interpreting a mixture of the old projection and the new empty
+                // journal.
+                metadata = Self::stage_reset(metadata, prune_loc, &pinned_nodes).await?;
+                journal = journal.clear_to_size(*prune_pos).await?;
+                metadata =
+                    Self::publish_reset(metadata, prune_loc, &nodes_to_pin, &pinned_nodes).await?;
+            }
 
             let mem = Mem::init(MemConfig {
                 nodes: vec![],
