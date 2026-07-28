@@ -33,6 +33,7 @@ use crate::{
         batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
+            snapshot::Snapshot,
             witness::{self, VerifiedWitness, Witness},
         },
         sync::compact as compact_sync,
@@ -478,6 +479,34 @@ where
         })
     }
 
+    /// Capture an owned immutable [Snapshot] of the database's compact state.
+    ///
+    /// The captured tip is the current witness: an in-flight [`Self::start_sync`] installs
+    /// its witness before durability is proven, so callers gating serving on durability
+    /// wait on that commit's handle before exposing the capture.
+    ///
+    /// The snapshot is frozen at capture, so it does not observe later mutations. It serves
+    /// the captured commit's compact state — and, from a frozen reader over the witness
+    /// journal, any commit still retained at capture — while this database continues to
+    /// mutate and persist. Capture is cheap (owned handles over already-sealed journal
+    /// state); the snapshot must not outlive a rewind into its captured range.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, Snapshot<F, E, H::Digest, Operation<F, V>, C>), Error<F>>
+    where
+        Operation<F, V>: Read<Cfg = C>,
+    {
+        let retained;
+        (self.witness, retained) = self.witness.snapshot().await?;
+        let snapshot = Snapshot::new(
+            self.witness.with(Clone::clone),
+            retained,
+            self.commit_codec_config.clone(),
+        );
+        Ok((self, snapshot))
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V, S> {
         let committed_size = *self.last_commit_loc + 1;
@@ -661,6 +690,30 @@ where
         self.witness.destroy().await?;
         Ok(())
     }
+
+    /// Apply `batch`, start persisting the applied state, and capture the serving
+    /// [Snapshot], returning the handle that resolves once the state is durable.
+    ///
+    /// The sync starts before the capture, so the tip witness in the capture is the one
+    /// the handle proves durable. [Self::apply_batch], [Self::start_sync], and
+    /// [Self::snapshot] remain available for callers composing the steps themselves.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn finalize(
+        self,
+        batch: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
+    ) -> Result<
+        (
+            Self,
+            Snapshot<F, E, H::Digest, Operation<F, V>, C>,
+            Handle<()>,
+        ),
+        Error<F>,
+    > {
+        let (db, _) = self.apply_batch(batch)?;
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, snapshot, handle))
+    }
 }
 
 #[cfg(test)]
@@ -715,6 +768,213 @@ mod tests {
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
+    }
+
+    /// A compact state snapshot keeps serving its captured commit — and rejects the live
+    /// database's newer target as stale — while the source advances past it.
+    #[test_traced("INFO")]
+    fn test_compact_snapshot_frozen_at_capture() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-snapshot").await;
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+
+            let (db, snapshot) = db.snapshot().await.unwrap();
+            let captured = db.target();
+            assert_eq!(snapshot.target(), captured);
+            assert_eq!(snapshot.root(), db.root());
+            let state = snapshot.compact_state(captured.clone()).await.unwrap();
+            assert_eq!(state.leaf_count, captured.leaf_count);
+
+            // Advance the live database to a new durable commit.
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(2))
+                .merkleize(&db, Some(U64::new(22)), floor)
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+            let advanced = db.target();
+            assert_ne!(advanced, captured);
+
+            // The snapshot still serves the captured commit, byte-identically, and reports
+            // the target it never captured as stale relative to its own.
+            let state2 = snapshot.compact_state(captured.clone()).await.unwrap();
+            assert_eq!(state.pinned_nodes, state2.pinned_nodes);
+            assert_eq!(state.last_commit_op, state2.last_commit_op);
+            assert!(matches!(
+                snapshot.compact_state(advanced.clone()).await,
+                Err(compact_sync::ServeError::StaleTarget { current, .. }) if current == captured
+            ));
+
+            // The live serve path serves the new commit and reaches the captured target
+            // through the retained witness journal.
+            assert!(db.compact_state(advanced).await.is_ok());
+            assert!(db.compact_state(captured).await.is_ok());
+        });
+    }
+
+    /// Apply a single-append batch carrying `seed`, then commit it durably.
+    async fn commit_append(db: TestDb<mmr::Family>, seed: u64) -> TestDb<mmr::Family> {
+        let floor = db.inactivity_floor_loc();
+        let batch = db
+            .new_batch()
+            .append(U64::new(seed))
+            .merkleize(&db, Some(U64::new(seed)), floor)
+            .await;
+        let (db, _) = db.apply_batch(batch).unwrap();
+        db.commit().await.unwrap()
+    }
+
+    /// A snapshot serves below-tip targets from the witness journal entries retained at
+    /// capture, byte-identically to the live serve path, and rejects leaf counts no
+    /// retained entry commits.
+    #[test_traced("INFO")]
+    fn test_snapshot_serves_retained_below_tip() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-below-tip").await;
+            let db = commit_append(db, 1).await;
+            let below = db.target();
+            let db = commit_append(db, 2).await;
+
+            let (db, snapshot) = db.snapshot().await.unwrap();
+            assert_ne!(snapshot.target(), below);
+
+            // The below-tip serve matches the live path byte for byte.
+            let live = db.compact_state(below.clone()).await.unwrap();
+            let served = snapshot.compact_state(below.clone()).await.unwrap();
+            assert_eq!(served.leaf_count, live.leaf_count);
+            assert_eq!(served.pinned_nodes, live.pinned_nodes);
+            assert_eq!(served.last_commit_op, live.last_commit_op);
+            assert_eq!(served.last_commit_proof, live.last_commit_proof);
+
+            // A leaf count between retained entries is stale, exactly like the live path.
+            let missing = compact_sync::Target::new(below.root, below.leaf_count + 1);
+            assert!(matches!(
+                snapshot.compact_state(missing.clone()).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+            assert!(matches!(
+                db.compact_state(missing).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+        });
+    }
+
+    /// A snapshot's owned journal handles keep serving entries the live database prunes
+    /// after capture.
+    #[test_traced("INFO")]
+    fn test_snapshot_serves_across_prune() {
+        deterministic::Runner::default().start(|context| async move {
+            // Enough commits to span multiple witness journal sections, so pruning
+            // actually drops entries.
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-snap-prune").await;
+            for seed in 0..70 {
+                db = commit_append(db, seed).await;
+            }
+            let below = db.target();
+            db = commit_append(db, 70).await;
+
+            let (db, snapshot) = db.snapshot().await.unwrap();
+            let served = snapshot.compact_state(below.clone()).await.unwrap();
+
+            // Prune everything below the tip. The captured entry must fall out of the
+            // live serve path (proving the prune dropped it) while the snapshot's owned
+            // handles keep it readable.
+            let boundary = db.target().leaf_count;
+            let mut db = db.prune(boundary).await.unwrap();
+            for seed in 71..140 {
+                db = commit_append(db, seed).await;
+            }
+            let boundary = db.target().leaf_count;
+            let db = db.prune(boundary).await.unwrap();
+            assert!(matches!(
+                db.compact_state(below.clone()).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+            let after = snapshot.compact_state(below).await.unwrap();
+            assert_eq!(served.pinned_nodes, after.pinned_nodes);
+            assert_eq!(served.last_commit_op, after.last_commit_op);
+        });
+    }
+
+    /// A snapshot captured while a compact-sync import is pending serves only the tip:
+    /// the journal still holds the previous partition's contents.
+    #[test_traced("INFO")]
+    fn test_snapshot_import_pending_serves_tip_only() {
+        deterministic::Runner::default().start(|context| async move {
+            // A source database with a retained below-tip commit.
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-snap-import").await;
+            let db = commit_append(db, 1).await;
+            let below = db.target();
+            let db = commit_append(db, 2).await;
+            let tip = db.target();
+
+            // Import its served tip state into a fresh database, unpersisted.
+            let state = db.compact_state(tip.clone()).await.unwrap();
+            let journal =
+                open_witness_journal(context.child("import"), "keyless-snap-import-dst").await;
+            let imported = TestDb::<mmr::Family>::init_from_validated_state(
+                Sequential,
+                journal,
+                (),
+                compact_sync::ValidatedState {
+                    state,
+                    root: tip.root,
+                },
+            )
+            .unwrap();
+
+            let (_imported, snapshot) = imported.snapshot().await.unwrap();
+            assert!(snapshot.compact_state(tip).await.is_ok());
+            assert!(matches!(
+                snapshot.compact_state(below).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+        });
+    }
+
+    /// The compact resolver over an owned state snapshot serves the same state as the live
+    /// database's serve path at the captured generation.
+    #[test_traced("INFO")]
+    fn test_snapshot_resolver_matches_live_db() {
+        use crate::qmdb::sync::compact::Resolver as _;
+
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-snap-resolver").await;
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+
+            let target = db.target();
+            let live = db.compact_state(target.clone()).await.unwrap();
+            let (_db, snapshot) = db.snapshot().await.unwrap();
+            let resolver = std::sync::Arc::new(snapshot);
+
+            let result = resolver.get_compact_state(target.clone()).await.unwrap();
+            assert_eq!(result.state.leaf_count, live.leaf_count);
+            assert_eq!(result.state.pinned_nodes, live.pinned_nodes);
+            assert_eq!(result.state.last_commit_op, live.last_commit_op);
+
+            // A mismatched target is rejected exactly like the live serve path.
+            let stale = compact_sync::Target::new(target.root, target.leaf_count + 1);
+            assert!(matches!(
+                resolver.get_compact_state(stale).await,
+                Err(compact_sync::ServeError::StaleTarget { .. })
+            ));
+        });
     }
 
     /// A compact db over a delayed-sync storage backend.
@@ -2306,6 +2566,29 @@ mod tests {
                 Err(Error::FloorBeyondSize(floor, commit))
                     if floor == Location::new(3) && commit == Location::new(2)
             ));
+        });
+    }
+    /// The handle returned by `finalize` proves durable exactly the state the returned
+    /// snapshot contains: once it completes, a reopen converges on the snapshot.
+    #[test]
+    fn test_compact_finalize_handle_covers_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-finalize").await;
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let (db, snapshot, handle) = db.finalize(batch).await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(snapshot.target(), db.target());
+            drop(db);
+
+            let reopened =
+                open_db::<mmr::Family>(context.child("reopen"), "keyless-finalize").await;
+            assert_eq!(reopened.target(), snapshot.target());
+            assert_eq!(reopened.root(), snapshot.root());
         });
     }
 }

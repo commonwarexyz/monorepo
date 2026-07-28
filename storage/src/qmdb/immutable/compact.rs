@@ -33,6 +33,7 @@ use crate::{
         batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
+            snapshot::Snapshot,
             witness::{self, VerifiedWitness, Witness},
         },
         operation::Key,
@@ -493,6 +494,34 @@ where
         })
     }
 
+    /// Capture an owned immutable [Snapshot] of the database's compact state.
+    ///
+    /// The captured tip is the current witness: an in-flight [`Self::start_sync`] installs
+    /// its witness before durability is proven, so callers gating serving on durability
+    /// wait on that commit's handle before exposing the capture.
+    ///
+    /// The snapshot is frozen at capture, so it does not observe later mutations. It serves
+    /// the captured commit's compact state — and, from a frozen reader over the witness
+    /// journal, any commit still retained at capture — while this database continues to
+    /// mutate and persist. Capture is cheap (owned handles over already-sealed journal
+    /// state); the snapshot must not outlive a rewind into its captured range.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, Snapshot<F, E, H::Digest, Operation<F, K, V>, C>), Error<F>>
+    where
+        Operation<F, K, V>: Read<Cfg = C>,
+    {
+        let retained;
+        (self.witness, retained) = self.witness.snapshot().await?;
+        let snapshot = Snapshot::new(
+            self.witness.with(Clone::clone),
+            retained,
+            self.commit_codec_config.clone(),
+        );
+        Ok((self, snapshot))
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, K, V, S> {
         let committed_size = *self.last_commit_loc + 1;
@@ -685,6 +714,30 @@ where
         self.witness.destroy().await?;
         Ok(())
     }
+
+    /// Apply `batch`, start persisting the applied state, and capture the serving
+    /// [Snapshot], returning the handle that resolves once the state is durable.
+    ///
+    /// The sync starts before the capture, so the tip witness in the capture is the one
+    /// the handle proves durable. [Self::apply_batch], [Self::start_sync], and
+    /// [Self::snapshot] remain available for callers composing the steps themselves.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn finalize(
+        self,
+        batch: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
+    ) -> Result<
+        (
+            Self,
+            Snapshot<F, E, H::Digest, Operation<F, K, V>, C>,
+            Handle<()>,
+        ),
+        Error<F>,
+    > {
+        let (db, _) = self.apply_batch(batch)?;
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, snapshot, handle))
+    }
 }
 
 #[cfg(test)]
@@ -742,6 +795,60 @@ mod tests {
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
+    /// A compact state snapshot keeps serving its captured commit — and rejects the live
+    /// database's newer target as stale — while the source advances past it.
+    #[test_traced("INFO")]
+    fn test_compact_snapshot_frozen_at_capture() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-snapshot").await;
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(10u8))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+
+            let (db, snapshot) = db.snapshot().await.unwrap();
+            let captured = db.target();
+            assert_eq!(snapshot.target(), captured);
+            assert_eq!(snapshot.root(), db.root());
+            let state = snapshot.compact_state(captured.clone()).await.unwrap();
+            assert_eq!(state.leaf_count, captured.leaf_count);
+
+            // Advance the live database to a new durable commit.
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(20u8))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+            let advanced = db.target();
+            assert_ne!(advanced, captured);
+
+            // The snapshot still serves the captured commit, byte-identically, and reports
+            // the live target as stale relative to its own.
+            let state2 = snapshot.compact_state(captured.clone()).await.unwrap();
+            assert_eq!(state.pinned_nodes, state2.pinned_nodes);
+            assert_eq!(state.last_commit_op, state2.last_commit_op);
+            assert!(matches!(
+                snapshot.compact_state(advanced.clone()).await,
+                Err(compact_sync::ServeError::StaleTarget { current, .. }) if current == captured
+            ));
+
+            // The bootstrap commit sits below the captured tip and stays servable from
+            // the snapshot's frozen journal reader.
+            let bootstrap = compact_sync::Target::new(snapshot.root(), Location::new(1));
+            assert!(snapshot.compact_state(bootstrap).await.is_ok());
+
+            // The live serve path serves the new commit and reaches the captured target
+            // through the retained witness journal.
+            assert!(db.compact_state(advanced).await.is_ok());
+            assert!(db.compact_state(captured).await.is_ok());
+        });
+    }
+
     /// A compact db over a delayed-sync storage backend.
     type DelayedDb = Db<
         mmr::Family,
@@ -756,7 +863,7 @@ mod tests {
     /// Open a [DelayedDb] whose blob syncs park on `pending`.
     ///
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
-    /// must be driven with `drive_pending_syncs` (or the mock unblocked first).
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
     fn open_delayed_db(
         context: &deterministic::Context,
         label: &'static str,
@@ -2025,6 +2132,28 @@ mod tests {
                 Err(Error::FloorBeyondSize(floor, commit))
                     if floor == Location::new(3) && commit == Location::new(2)
             ));
+        });
+    }
+    /// The handle returned by `finalize` proves durable exactly the state the returned
+    /// snapshot contains: once it completes, a reopen converges on the snapshot.
+    #[test]
+    fn test_compact_finalize_handle_covers_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-finalize").await;
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[7u8]]), Sha256::fill(7u8))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let (db, snapshot, handle) = db.finalize(batch).await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(snapshot.target(), db.target());
+            drop(db);
+
+            let reopened =
+                open_db::<mmr::Family>(context.child("reopen"), "immutable-finalize").await;
+            assert_eq!(reopened.target(), snapshot.target());
+            assert_eq!(reopened.root(), snapshot.root());
         });
     }
 }
