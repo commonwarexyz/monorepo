@@ -314,6 +314,8 @@ impl Checksum {
             return None;
         }
 
+        // Decode the CRC record from the page footer. The size guard above guarantees all of its
+        // bytes are present, and every bit pattern decodes, so the read cannot fail.
         let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
         let mut crc_bytes = &buf[crc_start_idx..];
         let crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
