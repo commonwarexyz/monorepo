@@ -596,7 +596,6 @@ impl EngineDefinition for MultiDbEngine {
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
-                    source: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
                     initial: Duration::from_secs(1),
@@ -622,7 +621,6 @@ impl EngineDefinition for MultiDbEngine {
             compact_resolver::Config {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
-                source: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
                 initial: Duration::from_secs(1),

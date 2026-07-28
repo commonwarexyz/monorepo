@@ -29,7 +29,7 @@ type Pending<F, Op, D> =
 type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<Pending<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
-pub struct Config<P, D, B, Src>
+pub struct Config<P, D, B>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
@@ -40,9 +40,6 @@ where
 
     /// Blocker used when peers send invalid data.
     pub blocker: B,
-
-    /// Local serving source used to answer incoming requests when available.
-    pub source: Option<Src>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -91,7 +88,7 @@ where
     DbOp<Src>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     context: ContextCell<E>,
-    config: Config<P, D, B, Src>,
+    config: Config<P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<mailbox::Message<Src, F, DbOp<Src>, H::Digest>>,
     state: State<Src>,
     pending: PendingSubs<F, DbOp<Src>, H::Digest>,
@@ -111,15 +108,8 @@ where
     DbOp<Src>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     /// Create a new compact resolver actor and mailbox.
-    pub fn new(
-        context: E,
-        mut config: Config<P, D, B, Src>,
-    ) -> (Self, Mailbox<Src, F, DbOp<Src>, H>) {
+    pub fn new(context: E, config: Config<P, D, B>) -> (Self, Mailbox<Src, F, DbOp<Src>, H>) {
         let metrics = ResolverMetrics::new(&context);
-        let state = config.source.take().map_or(State::NoSource, |source| {
-            let _ = metrics.has_source.try_set(1i64);
-            State::HasSource(source)
-        });
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
@@ -127,7 +117,7 @@ where
             context: ContextCell::new(context),
             config,
             mailbox_rx,
-            state,
+            state: State::NoSource,
             pending: BTreeMap::new(),
             metrics,
         };
@@ -448,13 +438,10 @@ mod tests {
         <TestDb as crate::stateful::db::ManagedDb<deterministic::Context>>::Snapshot;
     type TestSrc = crate::stateful::db::MemberSource<TestSnapshot, TestSnapshot>;
 
-    fn test_config(
-        source: Option<TestSrc>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestSrc> {
+    fn test_config() -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker> {
         Config {
             peer_provider: DummyProvider,
             blocker: DummyBlocker,
-            source,
             mailbox_size: NZUsize!(16),
             me: None,
             initial: Duration::from_millis(10),
@@ -517,7 +504,7 @@ mod tests {
     #[test]
     fn invalid_proof_is_rejected() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let target = compact::Target {
                 root: sha256::Digest::from([7; 32]),
                 leaf_count: mmr::Location::new(1),
@@ -550,7 +537,7 @@ mod tests {
     #[test]
     fn invalid_pinned_node_count_is_rejected() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, mut fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
             let (pending_tx, _pending_rx) = oneshot::channel();
@@ -570,7 +557,7 @@ mod tests {
     #[test]
     fn valid_state_after_invalid_proof_completes_request() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
@@ -624,7 +611,8 @@ mod tests {
             let (mut publisher, raw_source) = Publisher::new(&context);
             publisher.install_durable(snapshot);
             let source = MemberSource::new(raw_source, |s| s);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(source)));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
+            let _ = actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();
 
@@ -654,8 +642,8 @@ mod tests {
             let (mut publisher, raw_source) = Publisher::new(&context);
             publisher.install_durable(snapshot);
             let source = MemberSource::new(raw_source, |s| s);
-            let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(Some(source)));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
+            let _ = actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
 
             // A target past the tip is declined by the snapshot.
             let ahead = compact::Target::new(target.root, Location::new(*target.leaf_count + 1));
@@ -695,7 +683,8 @@ mod tests {
             let (mut publisher, raw_source) = Publisher::new(&context);
             publisher.install_durable(snapshot);
             let source = MemberSource::new(raw_source, |s| s);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(source)));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
+            let _ = actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
             let request = handler::Request::from_target(below.clone());
             let (response_tx, response_rx) = oneshot::channel();
 
@@ -717,7 +706,7 @@ mod tests {
     #[test]
     fn downstream_rejection_marks_peer_invalid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 
@@ -748,7 +737,7 @@ mod tests {
     #[test]
     fn dropped_downstream_feedback_does_not_mark_peer_invalid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 
@@ -775,7 +764,7 @@ mod tests {
     #[test]
     fn cancel_state_cancels_last_subscriber() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, _) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 
@@ -795,7 +784,7 @@ mod tests {
     #[test]
     fn cancel_state_keeps_shared_request_alive() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, _) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 

@@ -35,7 +35,7 @@ type PendingSubs<F, Src> =
     BTreeMap<handler::Request<F>, Vec<Pending<F, Op<Src>, DatabaseRoot<Src>>>>;
 
 /// Configuration for [`Actor`].
-pub struct Config<P, D, B, Src>
+pub struct Config<P, D, B>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
@@ -46,9 +46,6 @@ where
 
     /// Blocker used when peers send invalid data.
     pub blocker: B,
-
-    /// Local serving source used to answer incoming requests when available.
-    pub source: Option<Src>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -103,7 +100,7 @@ where
     Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
-    config: Config<P, D, B, Src>,
+    config: Config<P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<mailbox::Message<Src, F, Op<Src>, DatabaseRoot<Src>>>,
     state: State<Src>,
     metrics: ResolverMetrics,
@@ -122,20 +119,16 @@ where
     Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
-    pub fn new(context: E, mut cfg: Config<P, D, B, Src>) -> (Self, SyncMailbox<F, Src>) {
+    pub fn new(context: E, cfg: Config<P, D, B>) -> (Self, SyncMailbox<F, Src>) {
         let metrics = ResolverMetrics::new(&context);
-        let state = cfg.source.take().map_or(State::NoSource, |source| {
-            let _ = metrics.has_source.try_set(1i64);
-            State::HasSource(source)
-        });
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
         let actor = Self {
             context: ContextCell::new(context),
             config: cfg,
+            state: State::NoSource,
             mailbox_rx,
-            state,
             metrics,
             pending: BTreeMap::new(),
         };
@@ -477,13 +470,10 @@ mod tests {
         TestSrc,
     >;
 
-    fn test_config(
-        source: Option<TestSrc>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestSrc> {
+    fn test_config() -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker> {
         Config {
             peer_provider: DummyProvider,
             blocker: DummyBlocker,
-            source,
             mailbox_size: NZUsize!(16),
             me: None,
             initial: Duration::from_millis(10),
@@ -577,7 +567,7 @@ mod tests {
     #[test]
     fn produce_denied_before_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -590,7 +580,7 @@ mod tests {
     #[test]
     fn same_request_served_after_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (_publisher, source, op_count) =
                 init_source(context.child("resolver_db"), "resolver-after-attach").await;
             actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
@@ -610,7 +600,7 @@ mod tests {
     #[test]
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (_publisher, source, op_count) =
                 init_source(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
@@ -631,7 +621,7 @@ mod tests {
     #[test]
     fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
@@ -650,7 +640,7 @@ mod tests {
     #[test]
     fn deliver_with_rejected_subscriber_blocks_peer() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -687,7 +677,7 @@ mod tests {
     #[test]
     fn deliver_ignores_dropped_subscriber_approval() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -720,7 +710,7 @@ mod tests {
     #[test]
     fn failed_then_deliver_clears_pending_and_allows_retry() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
@@ -739,7 +729,7 @@ mod tests {
     #[test]
     fn get_operations_refetches_when_pending_subscribers_are_closed() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (stale_tx, stale_rx) = test_subscriber();
@@ -859,18 +849,12 @@ mod tests {
             (resolver, gate_tx, started_rx, dropped_rx)
         }
 
-        fn parked_config(
-            source: StaticSource,
-        ) -> Config<
-            commonware_cryptography::ed25519::PublicKey,
-            DummyProvider,
-            DummyBlocker,
-            StaticSource,
-        > {
+        fn parked_config()
+        -> Config<commonware_cryptography::ed25519::PublicKey, DummyProvider, DummyBlocker>
+        {
             Config {
                 peer_provider: DummyProvider,
                 blocker: DummyBlocker,
-                source: Some(source),
                 mailbox_size: NZUsize!(16),
                 me: None,
                 initial: Duration::from_millis(10),
@@ -897,8 +881,9 @@ mod tests {
         fn serve_aborts_when_response_closed() {
             deterministic::Runner::default().start(|context| async move {
                 let (resolver, _gate_tx, mut started_rx, mut dropped_rx) = parked();
-                let (mut actor, _mailbox) =
-                    ParkedActor::new(context, parked_config(StaticSource(resolver)));
+                let (mut actor, _mailbox) = ParkedActor::new(context, parked_config());
+                actor
+                    .handle_mailbox_message(mailbox::Message::AttachSource(StaticSource(resolver)));
 
                 let (response_tx, response_rx) = oneshot::channel();
                 drop(response_rx);
@@ -920,8 +905,9 @@ mod tests {
         fn parked_serve_completes_against_owned_state() {
             deterministic::Runner::default().start(|context| async move {
                 let (resolver, gate_tx, mut started_rx, _dropped_rx) = parked();
-                let (mut actor, _mailbox) =
-                    ParkedActor::new(context, parked_config(StaticSource(resolver)));
+                let (mut actor, _mailbox) = ParkedActor::new(context, parked_config());
+                actor
+                    .handle_mailbox_message(mailbox::Message::AttachSource(StaticSource(resolver)));
 
                 let (response_tx, response_rx) = oneshot::channel();
                 let serve = actor.handle_produce(request(), response_tx);
