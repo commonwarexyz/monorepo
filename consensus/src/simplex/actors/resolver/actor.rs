@@ -924,6 +924,219 @@ mod tests {
         });
     }
 
+    /// A terminal certification verdict releases a response that parked both
+    /// background repair and a later proposal-ancestry objection.
+    #[test_async]
+    async fn certification_failure_unparks_attached_ancestry_fetch() {
+        let runtime = deterministic::Runner::timed(Duration::from_secs(10));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            let mut connections = Vec::new();
+            for participant in &participants {
+                connections.push(
+                    oracle
+                        .control(participant.clone())
+                        .register(2, Quota::per_second(NZU32!(1_000)))
+                        .await
+                        .unwrap(),
+                );
+            }
+            let mut connections = connections.into_iter();
+            let requester_connection = connections.next().unwrap();
+            let first_responder_connection = connections.next().unwrap();
+            let nullification_holder_connection = connections.next().unwrap();
+            let _unused_connection = connections.next().unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(
+                    participants[0].clone(),
+                    participants[1].clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    participants[1].clone(),
+                    participants[0].clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+
+            let (requester_voter_sender, mut requester_voter_receiver) =
+                mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let (requester, mut requester_mailbox) = TestActor::new(
+                context.child("requester"),
+                Config {
+                    scheme: schemes[0].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_concurrent: NZUsize!(4),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TermLength::ONE,
+                },
+            );
+            let _requester = requester.start(
+                voter::Mailbox::new(requester_voter_sender),
+                requester_connection.0,
+                requester_connection.1,
+            );
+
+            let (first_voter_sender, _first_voter_receiver) =
+                mailbox::new(context.child("first_voter"), NZUsize!(8));
+            let (first_responder, mut first_responder_mailbox) = TestActor::new(
+                context.child("first_responder"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_concurrent: NZUsize!(4),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TermLength::ONE,
+                },
+            );
+            let _first_responder = first_responder.start(
+                voter::Mailbox::new(first_voter_sender),
+                first_responder_connection.0,
+                first_responder_connection.1,
+            );
+
+            let (holder_voter_sender, _holder_voter_receiver) =
+                mailbox::new(context.child("holder_voter"), NZUsize!(8));
+            let (nullification_holder, mut nullification_holder_mailbox) = TestActor::new(
+                context.child("nullification_holder"),
+                Config {
+                    scheme: schemes[2].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_concurrent: NZUsize!(4),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TermLength::ONE,
+                },
+            );
+            let _nullification_holder = nullification_holder.start(
+                voter::Mailbox::new(holder_voter_sender),
+                nullification_holder_connection.0,
+                nullification_holder_connection.1,
+            );
+
+            let requested = View::new(1);
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, requested);
+            first_responder_mailbox.updated(Certificate::Notarization(notarization.clone()));
+            // Model the Byzantine peer as willing to serve this notarization.
+            // Honest certification at the requester may still reject it.
+            first_responder_mailbox.certified(notarization.round(), true);
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, requested);
+            nullification_holder_mailbox
+                .updated(Certificate::Nullification(nullification.clone()));
+            context.sleep(Duration::from_millis(10)).await;
+
+            // A later nullification exposes a gap and starts an unrestricted
+            // background fetch. The only connected peer answers with a valid
+            // notarization, whose resolver verdict waits for certification.
+            requester_mailbox.updated(Certificate::Nullification(build_nullification(
+                &schemes,
+                &verifier,
+                EPOCH,
+                requested.next(),
+            )));
+            let first = select! {
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("notarization was not fetched");
+                },
+            };
+            assert!(matches!(
+                first,
+                voter::Message::Verified {
+                    certificate: Certificate::Notarization(ref fetched),
+                    ..
+                } if fetched == &notarization
+            ));
+
+            oracle
+                .add_link(
+                    participants[0].clone(),
+                    participants[2].clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(participants[2].clone(), participants[0].clone(), link)
+                .await
+                .unwrap();
+
+            // A proposal objection for the same view attaches the honest
+            // leader as a target. It deliberately cannot bypass the response
+            // whose certification is still pending.
+            requester_mailbox.resolve(
+                View::new(3),
+                requested,
+                Purpose::Nullification,
+                participants[2].clone(),
+            );
+            select! {
+                _ = requester_voter_receiver.recv() => {
+                    panic!("pending certification unexpectedly allowed another delivery");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // The liveness contract requires a terminal verdict. Failure
+            // rejects the parked response, blocks its peer, and retries the
+            // attached request, which the honest leader answers with the
+            // covering nullification.
+            requester_mailbox.certified(notarization.round(), false);
+            let recovered = select! {
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("certification failure did not unpark ancestry repair");
+                },
+            };
+            assert!(matches!(
+                recovered,
+                voter::Message::Verified {
+                    certificate: Certificate::Nullification(fetched),
+                    ..
+                } if fetched == nullification
+            ));
+        });
+    }
+
     #[test_async]
     async fn updates_maintain_resolver_pending_set() {
         let runtime = deterministic::Runner::default();

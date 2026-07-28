@@ -172,9 +172,17 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// round. Temporary conditions such as waiting for more data should not conclude
         /// certification with `false`.
         ///
-        /// Closing the channel is also terminal for this request and should be reserved for cases
-        /// where certification can no longer produce a verdict (for example, shutdown), not for temporary
-        /// inability to decide.
+        /// # Liveness Requirement
+        ///
+        /// Pending may be arbitrarily long, but it must be finite while the validator remains live:
+        /// the returned channel must eventually produce `true` or `false`, unless consensus drops
+        /// the receiver after observing a finalization that makes the request obsolete. In
+        /// particular, resolver certificate repair may wait for this verdict before trying another
+        /// peer, so leaving a live request pending forever can halt consensus.
+        ///
+        /// Closing the channel without a verdict does not satisfy this requirement. It should be
+        /// reserved for cases where certification can no longer produce a verdict, such as
+        /// shutdown; after restart, consensus can request certification again.
         ///
         /// # Determinism Requirement
         ///

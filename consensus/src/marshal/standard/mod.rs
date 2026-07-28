@@ -1486,6 +1486,115 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_floor_closes_bounded_subscriptions() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            // No links are added, so fetch fallbacks can never complete over
+            // the network: waiters resolve only through the buffer or closure.
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mailbox = setup.mailbox;
+            let buffer = setup.extra;
+
+            // Build a chain whose tip is the floor anchor.
+            const ANCHOR_HEIGHT: u64 = 5;
+            let mut parent = Sha256::hash(&[b""]);
+            let mut anchor = None;
+            for i in 1..=ANCHOR_HEIGHT {
+                let block = make_raw_block(parent, Height::new(i), i);
+                parent = block.digest();
+                anchor = Some(block);
+            }
+            let anchor = anchor.unwrap();
+            let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
+
+            // Register waiters for a block that never arrives: one per fetch
+            // fallback kind, bounded below the coming floor, plus an unbounded
+            // local-only wait.
+            let missing = Sha256::hash(&[b"missing"]);
+            let below_by_round = mailbox.subscribe_by_digest(
+                missing,
+                DigestFallback::FetchByRound {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                },
+            );
+            let below_by_height = mailbox.subscribe_by_commitment(
+                missing,
+                CommitmentFallback::FetchByCommitment {
+                    height: Height::new(2),
+                },
+            );
+            let mut unbounded = mailbox.subscribe_by_digest(missing, DigestFallback::Wait);
+
+            // A bounded waiter for the anchor itself must be delivered by
+            // ingestion before the floor advance can close its bound.
+            let anchor_wait = mailbox.subscribe_by_digest(
+                anchor.digest(),
+                DigestFallback::FetchByRound {
+                    round: anchor_round,
+                },
+            );
+
+            // Install the floor and deliver the anchor through the buffer.
+            let finalization = StandardHarness::make_finalization(
+                Proposal {
+                    round: anchor_round,
+                    parent: View::new(ANCHOR_HEIGHT - 1),
+                    payload: anchor.digest(),
+                },
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(finalization);
+            let _ = buffer.broadcast(Recipients::All, anchor.clone());
+            let received = anchor_wait.await.unwrap();
+            assert_eq!(received.digest(), anchor.digest());
+
+            // Wait for the application to process the anchor so the processed
+            // floors advance past the registered bounds.
+            while mailbox.get_processed_height().await != Some(Height::new(ANCHOR_HEIGHT)) {
+                context.sleep(Duration::from_millis(50)).await;
+            }
+
+            // Bounded waiters below the floor are closed.
+            assert!(below_by_round.await.is_err());
+            assert!(below_by_height.await.is_err());
+
+            // A new below-floor fetch is refused at subscribe time.
+            let refused = mailbox.subscribe_by_digest(
+                missing,
+                DigestFallback::FetchByRound {
+                    round: Round::new(Epoch::zero(), View::new(3)),
+                },
+            );
+            assert!(refused.await.is_err());
+
+            // The local-only wait carries no bound and stays open.
+            select! {
+                _ = &mut unbounded => panic!("local-only wait must survive the floor advance"),
+                _ = context.sleep(Duration::from_millis(500)) => {},
+            };
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_resolver_floor_anchor_install_wakes_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {

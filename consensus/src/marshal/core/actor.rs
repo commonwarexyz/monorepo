@@ -7,7 +7,10 @@ use super::{
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
-    subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
+    subscriptions::{
+        Bound as SubscriptionBound, Key as SubscriptionKey, KeyFor as SubscriptionKeyFor,
+        Subscriptions,
+    },
     variant::NoBuffer,
 };
 use crate::{
@@ -904,9 +907,11 @@ where
 
                 self = self.prune_finalized_archives(height).await;
 
-                // Intentionally keep existing block subscriptions alive. Canceling
-                // waiters can have catastrophic consequences because actors do not
-                // retry subscriptions on failed channels.
+                // Intentionally keep local-only (Wait) block subscriptions
+                // alive: they carry no floor bound, and actors do not retry
+                // subscriptions on failed channels. Fetch-bounded waiters at or
+                // below the floor were already closed when the processed floor
+                // advanced (see [Subscriptions::prune_below]).
             }
         }
         self
@@ -1123,22 +1128,27 @@ where
             CommitmentFallback::Wait => {}
         }
 
-        let round = match fallback {
-            CommitmentFallback::FetchByRound { round } => Some(round),
-            CommitmentFallback::Wait | CommitmentFallback::FetchByCommitment { .. } => None,
+        // A fetch fallback carries the bound that retires the subscriber when
+        // the processed floor passes it (see [Subscriptions::prune_below]).
+        let bound = match fallback {
+            CommitmentFallback::FetchByRound { round } => Some(SubscriptionBound::Round(round)),
+            CommitmentFallback::FetchByCommitment { height } => {
+                Some(SubscriptionBound::Height(height))
+            }
+            CommitmentFallback::Wait => None,
         };
 
         // Register subscriber.
         match key {
             SubscriptionKey::Digest(digest) => {
-                debug!(?round, ?digest, "registering subscriber");
+                debug!(?bound, ?digest, "registering subscriber");
             }
             SubscriptionKey::Commitment(commitment) => {
-                debug!(?round, ?commitment, ?digest, "registering subscriber");
+                debug!(?bound, ?commitment, ?digest, "registering subscriber");
             }
         }
         self.block_subscriptions
-            .insert(span, key, response, waiters, buffer);
+            .insert(span, key, response, bound, waiters, buffer);
     }
 
     /// Verifies and installs a floor, fetching the anchor block if needed.
@@ -1361,9 +1371,12 @@ where
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;
 
-        // Intentionally keep existing block subscriptions alive. Canceling
-        // waiters can have catastrophic consequences (nodes can get stuck in
-        // different views) as actors do not retry subscriptions on failed channels.
+        // Intentionally keep local-only (Wait) block subscriptions alive.
+        // Canceling waiters that can still be satisfied has catastrophic
+        // consequences (nodes can get stuck in different views) as actors do
+        // not retry subscriptions on failed channels. Fetch-bounded waiters at
+        // or below the floor can never be satisfied and were already closed
+        // when the processed floor advanced (see [Subscriptions::prune_below]).
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {
@@ -2326,8 +2339,13 @@ where
             .processed_height
             .try_set(self.floor.processed_height().get());
 
-        // Prune any existing requests below the new floor.
+        // Prune any existing requests below the new floor, and close local
+        // waiters whose fetch bound fell below it: their block was either
+        // already delivered or is pruned with the floor, so the closed channel
+        // is the caller's signal that it will never arrive.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+        self.block_subscriptions
+            .prune_below(self.floor.processed_round(), self.floor.processed_height());
     }
 
     /// Returns the latest known finalization round at or below the processed height.
@@ -2388,10 +2406,15 @@ where
         );
         self.cache = self.cache.prune_by_view(prune_round).await;
 
-        // Prune round-bound requests at or below the processed round.
+        // Prune round-bound requests at or below the processed round, and
+        // close local waiters whose fetch bound fell below it: their block was
+        // either already delivered or is pruned with the floor, so the closed
+        // channel is the caller's signal that it will never arrive.
         resolver.retain(handler::above_round_floor::<V::Commitment>(
             self.floor.processed_round(),
         ));
+        self.block_subscriptions
+            .prune_below(self.floor.processed_round(), self.floor.processed_height());
         self
     }
 

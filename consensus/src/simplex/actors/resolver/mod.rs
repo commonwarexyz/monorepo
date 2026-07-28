@@ -39,7 +39,10 @@
 //! accepted without faulting the peer, and the voter reruns the full ancestry check before voting.
 //! Malformed, key-incompatible, or cryptographically invalid evidence is rejected. Notarizations
 //! additionally remain pending until application certification, whose terminal failure also
-//! produces a negative verdict. A later proposal can request the view again.
+//! produces a negative verdict. A pending verdict parks the fetch: the resolver engine sends no
+//! further request for a view whose response is still being validated, so repairing the view waits
+//! on certification terminating (see the certification section of [the Simplex
+//! overview](crate::simplex)). A later proposal can request the view again.
 //!
 //! Local fetch purposes govern retention, not response validity. A nullification removes background
 //! and targeted-nullification demand throughout its term. A terminal certification verdict removes

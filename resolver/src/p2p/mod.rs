@@ -48,6 +48,13 @@
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
 //! is in progress are delivered the same accepted response locally.
 //!
+//! A response being validated parks its key: no further request is sent, and new fetches for the
+//! key only attach subscribers or targets, until the consumer's verdict arrives (acceptance
+//! completes the fetch; rejection blocks the serving peer and retries). A consumer that withholds
+//! a verdict indefinitely therefore stalls that key's fetch indefinitely: consumers whose
+//! validation can wait on external input (say, an application decision) must guarantee it
+//! eventually concludes.
+//!
 //! # Peer Selection
 //!
 //! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound

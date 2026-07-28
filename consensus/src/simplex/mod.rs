@@ -110,8 +110,12 @@
 //! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
 //! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
 //!
-//! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
-//! liveness._
+//! _The decision returned by `certify` must be deterministic and consistent across all honest participants, and a live
+//! request must eventually produce `true` or `false`, to ensure liveness. Certification may be arbitrarily slow, but a
+//! verdict that never arrives can stall more than the certified view: certificate repair holds a fetched notarization
+//! until its verdict (see [Fetching Missing Certificates](#fetching-missing-certificates)), so a participant whose only
+//! evidence for a view is an uncertified notarization cannot repair that view until certification concludes. A request
+//! made obsolete by a covering finalization is dropped and requires no verdict._
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -337,8 +341,13 @@
 //! delivered, even when its certificate kind does not satisfy an older proposal; the response still communicates the
 //! producer's current deterministic ancestry preference. A kind mismatch alone is neither a validation failure nor a
 //! fault by the serving peer. Only malformed, key-incompatible, or cryptographically invalid evidence, or a
-//! notarization whose application certification terminates unsuccessfully, receives a failure verdict. Finalization
-//! at or above the requested view retires every subscriber and prevents delayed proposal work from recreating it.
+//! notarization whose application certification terminates unsuccessfully, receives a failure verdict. While that
+//! verdict is outstanding, the request is parked: no further request is sent for the view, and later demand for it
+//! (including targeted requests from new proposals) attaches to the parked fetch without reaching the network. Repair
+//! of the view therefore waits on the certification verdict, relying on the termination assumption stated in
+//! [Certification](#certification): a success raises the floor, and a failure blocks the serving peer and retries the
+//! request (an honest peer can then supply the covering nullification). Finalization at or above the requested view
+//! retires every subscriber and prevents delayed proposal work from recreating it.
 //!
 //! For demand that remains unsatisfied, finalization is deliberately the lifecycle boundary rather than the age of the
 //! proposal that triggered it. During an interval without finalization, distinct Byzantine proposals can therefore

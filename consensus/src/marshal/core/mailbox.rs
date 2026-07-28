@@ -733,6 +733,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
     ///
+    /// A fetch fallback bounded at or below the processed floor closes the channel instead: the
+    /// request is refused at subscribe time, and a registered subscription is closed when the
+    /// floor later advances past its bound. Data at or below the floor was either already
+    /// delivered or is pruned with the floor, so a closed channel means the block will never be
+    /// delivered. Local-only waits carry no bound and are never closed by the floor.
+    ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     /// Digest-keyed subscriptions only support waiting locally or fetching by round.
     ///
@@ -763,6 +769,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// If the block is not available locally, the subscription will be registered and the caller
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
+    ///
+    /// A fetch fallback bounded at or below the processed floor closes the channel instead: the
+    /// request is refused at subscribe time, and a registered subscription is closed when the
+    /// floor later advances past its bound. Data at or below the floor was either already
+    /// delivered or is pruned with the floor, so a closed channel means the block will never be
+    /// delivered. Local-only waits carry no bound and are never closed by the floor.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     ///
