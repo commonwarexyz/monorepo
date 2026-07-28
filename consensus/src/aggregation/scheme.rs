@@ -17,16 +17,22 @@
 
 use super::types::Item;
 use commonware_cryptography::{Digest, certificate};
+use commonware_utils::N3f1;
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
-/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type used
-/// by the aggregation protocol. It is automatically implemented for any scheme
-/// whose subject type matches `&'a Item<D>`.
-pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {}
+/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type and
+/// [`N3f1`] fault model used by the aggregation protocol. It is automatically
+/// implemented for any compatible scheme.
+pub trait Scheme<D: Digest>:
+    for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>, Faults = N3f1>
+{
+}
 
-impl<D: Digest, S> Scheme<D> for S where S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>>
-{}
+impl<D: Digest, S> Scheme<D> for S where
+    S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>, Faults = N3f1>
+{
+}
 
 pub mod bls12381_multisig {
     //! BLS12-381 multi-signature implementation of the

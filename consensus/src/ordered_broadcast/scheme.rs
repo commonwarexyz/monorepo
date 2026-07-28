@@ -17,19 +17,24 @@
 
 use super::types::AckSubject;
 use commonware_cryptography::{Digest, PublicKey, certificate};
+use commonware_utils::N3f1;
 
 /// Marker trait for signing schemes compatible with `ordered_broadcast`.
 ///
 /// This trait binds a [`certificate::Scheme`] to the [`AckSubject`] subject
-/// type used by the ordered broadcast protocol. It is automatically implemented
-/// for any scheme whose subject type matches `AckSubject<'a, P, D>`.
+/// type and [`N3f1`] fault model used by the ordered broadcast protocol. It is
+/// automatically implemented for any compatible scheme.
 pub trait Scheme<P: PublicKey, D: Digest>:
-    for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
+    for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P, Faults = N3f1>
 {
 }
 
 impl<P: PublicKey, D: Digest, S> Scheme<P, D> for S where
-    S: for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
+    S: for<'a> certificate::Scheme<
+            Subject<'a, D> = AckSubject<'a, P, D>,
+            PublicKey = P,
+            Faults = N3f1,
+        >
 {
 }
 
