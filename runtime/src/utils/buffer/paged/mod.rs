@@ -317,11 +317,16 @@ impl Checksum {
         let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
         let mut crc_bytes = &buf[crc_start_idx..];
         let crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
+
+        // Prefer the authoritative slot: when both slots are valid, it covers the most recently
+        // committed contents of the page.
         let authoritative = crc_record.authoritative();
         if let Some(checksum) = crc_record.validate_slot(authoritative, buf, crc_start_idx) {
             return Some(checksum);
         }
 
+        // An interrupted write can corrupt only the slot it was rewriting. The other slot still
+        // covers the page's previously committed contents.
         debug!("Invalid authoritative CRC, using fallback CRC");
         let checksum = crc_record.validate_slot(authoritative.other(), buf, crc_start_idx);
         if checksum.is_none() {
