@@ -111,12 +111,16 @@ stability_scope!(BETA {
         PartitionCreationFailed(String),
         #[error("partition missing: {0}")]
         PartitionMissing(String),
+        #[error("partition removal failed: {0} error: {1}")]
+        PartitionRemovalFailed(String, Arc<IoError>),
         #[error("partition corrupt: {0}")]
         PartitionCorrupt(String),
         #[error("blob open failed: {0}/{1} error: {2}")]
         BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
         BlobMissing(String, String),
+        #[error("blob remove failed: {0}/{1} error: {2}")]
+        BlobRemoveFailed(String, String, Arc<IoError>),
         #[error("blob resize failed: {0}/{1} error: {2}")]
         BlobResizeFailed(String, String, Arc<IoError>),
         #[error("blob sync failed: {0}/{1} error: {2}")]
@@ -658,6 +662,13 @@ stability_scope!(BETA {
         /// If no `name` is provided, the entire partition is removed.
         ///
         /// An Ok result indicates the blob is durably removed.
+        ///
+        /// # Errors
+        ///
+        /// Returns [Error::BlobMissing] (or [Error::PartitionMissing] when removing an
+        /// entire partition) only when the target does not exist. Any other failure to
+        /// remove surfaces as [Error::BlobRemoveFailed] (or
+        /// [Error::PartitionRemovalFailed]), and the target may still exist.
         ///
         /// # Read-after-remove
         ///

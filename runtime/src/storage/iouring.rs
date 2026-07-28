@@ -31,7 +31,7 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, Read, Seek, SeekFrom, Write},
+    io::{Error as IoError, ErrorKind, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::Arc,
@@ -202,13 +202,18 @@ impl crate::Storage for Storage {
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            fs::remove_file(blob_path).map_err(|e| match e.kind() {
+                ErrorKind::NotFound => Error::BlobMissing(partition.into(), hex(name)),
+                _ => Error::BlobRemoveFailed(partition.into(), hex(name), e.into()),
+            })?;
 
             // Sync the partition directory to ensure the removal is durable.
             sync_dir(&path)?;
         } else {
-            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            fs::remove_dir_all(&path).map_err(|e| match e.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => Error::PartitionRemovalFailed(partition.into(), e.into()),
+            })?;
 
             // Sync the storage directory to ensure the removal is durable.
             sync_dir(&self.storage_directory)?;
@@ -830,6 +835,33 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "blob missing: partition/6d697373696e67");
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_remove_distinguishes_missing_from_failed() {
+        // A removal that fails with the target still present must not be
+        // reported as missing.
+        let (storage, storage_directory) = create_test_storage();
+
+        // A directory at the blob path makes `remove_file` fail with a
+        // non-NotFound error.
+        std::fs::create_dir_all(storage_directory.join("partition").join(hex(b"blob"))).unwrap();
+        let err = storage
+            .remove("partition", Some(b"blob"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::BlobRemoveFailed(_, _, _)), "{err:?}");
+
+        // A file at the partition path makes `remove_dir_all` fail the same
+        // way.
+        std::fs::write(storage_directory.join("filepart"), b"x").unwrap();
+        let err = storage.remove("filepart", None).await.unwrap_err();
+        assert!(
+            matches!(err, Error::PartitionRemovalFailed(_, _)),
+            "{err:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
