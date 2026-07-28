@@ -14,7 +14,7 @@ DOCS_ROOT = Path(__file__).resolve().parent
 BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
-EXTRA_FILES = ["llms.txt", "robots.txt"]
+EXTRA_FILES = ["llms.txt", "robots.txt", "feed.xml"]
 
 
 def get_versions() -> list[str]:
