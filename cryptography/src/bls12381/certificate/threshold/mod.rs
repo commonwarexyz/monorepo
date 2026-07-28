@@ -102,7 +102,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         );
         assert_eq!(
             polynomial.degree_exact(),
-            polynomial.required::<M>() - 1,
+            polynomial.required::<M>().saturating_sub(1),
             "polynomial degree must equal quorum minus one"
         );
         #[cfg(feature = "std")]
@@ -149,7 +149,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         );
         assert_eq!(
             polynomial.degree_exact(),
-            polynomial.required::<M>() - 1,
+            polynomial.required::<M>().saturating_sub(1),
             "polynomial degree must equal quorum minus one"
         );
         #[cfg(feature = "std")]

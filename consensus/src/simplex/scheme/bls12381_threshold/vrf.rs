@@ -76,7 +76,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, N3f1, ordered::Set};
+use commonware_utils::{N3f1, ordered::Set};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{
@@ -157,7 +157,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         );
         assert_eq!(
             polynomial.degree_exact(),
-            N3f1::quorum(participants.len()) - 1,
+            polynomial.required::<N3f1>().saturating_sub(1),
             "polynomial degree must equal quorum minus one"
         );
         polynomial.precompute_partial_publics();
@@ -200,7 +200,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         );
         assert_eq!(
             polynomial.degree_exact(),
-            N3f1::quorum(participants.len()) - 1,
+            polynomial.required::<N3f1>().saturating_sub(1),
             "polynomial degree must equal quorum minus one"
         );
         polynomial.precompute_partial_publics();
