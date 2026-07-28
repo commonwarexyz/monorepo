@@ -254,7 +254,7 @@ impl Slot {
     }
 }
 
-/// The checksum slot selected after validating a page footer.
+/// The checksum covering a page's logical bytes and the footer slot that holds it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveChecksum {
     slot: Slot,
@@ -273,7 +273,6 @@ impl ActiveChecksum {
 /// The CRC accompanied by the larger length is the one that should be treated as authoritative for
 /// the page. Two checksums are stored so that partial pages can be written without overwriting a
 /// valid checksum for a previously committed partial page.
-#[derive(Clone)]
 struct Checksum {
     len1: u16,
     crc1: u32,
@@ -285,24 +284,11 @@ impl Checksum {
     /// Create a new CRC record with the given length and CRC.
     /// The new CRC is stored in the first slot (len1/crc1), with the second slot zeroed.
     const fn new(len: u16, crc: u32) -> Self {
-        Self::in_slot(Slot::First, len, crc)
-    }
-
-    /// A record carrying `(len, crc)` in `slot`, with the other slot zeroed.
-    const fn in_slot(slot: Slot, len: u16, crc: u32) -> Self {
-        match slot {
-            Slot::First => Self {
-                len1: len,
-                crc1: crc,
-                len2: 0,
-                crc2: 0,
-            },
-            Slot::Second => Self {
-                len1: 0,
-                crc1: 0,
-                len2: len,
-                crc2: crc,
-            },
+        Self {
+            len1: len,
+            crc1: crc,
+            len2: 0,
+            crc2: 0,
         }
     }
 
@@ -353,8 +339,20 @@ impl Checksum {
     ) -> Option<ActiveChecksum> {
         let (len, crc) = self.get_slot(slot);
         let len_usize = len as usize;
-        if len_usize == 0 || len_usize > crc_start_idx || Crc32::checksum(&buf[..len_usize]) != crc
-        {
+
+        // A zero length marks an inactive checksum slot (committed pages are never empty).
+        // This also rejects zero-filled physical pages from unwritten storage.
+        if len_usize == 0 {
+            return None;
+        }
+
+        // The checksum must cover only logical page bytes, not the checksum footer itself.
+        if len_usize > crc_start_idx {
+            return None;
+        }
+
+        // The recorded checksum must match the claimed logical prefix.
+        if Crc32::checksum(&buf[..len_usize]) != crc {
             return None;
         }
         Some(ActiveChecksum::new(slot, len, crc))

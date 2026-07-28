@@ -677,6 +677,9 @@ impl<B: Blob> Writer<B> {
     /// * `old_checksum` - The active checksum from a previously committed partial page, if any.
     ///   When present, the first page's CRC record will preserve it in its original slot and place
     ///   the new checksum in the other slot.
+    ///
+    /// Returns the physical pages to write and, for any included partial page, the active
+    /// checksum future flushes must protect.
     fn to_physical_pages(
         &self,
         buffer: &Buffer,
