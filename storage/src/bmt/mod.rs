@@ -89,8 +89,16 @@ impl<H: Hasher> Builder<H> {
     /// Adds a leaf to the Binary Merkle Tree.
     ///
     /// When added, the leaf is hashed with its position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tree already has `u32::MAX` leaves.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
+        // The count after this add must fit in Proof::leaf_count, a u32, so the
+        // maximum position is u32::MAX - 1.
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
+        assert!(position < u32::MAX, "too many leaves");
+
         let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
         self.leaves.push(digest);
         position
