@@ -12,7 +12,10 @@ use crate::stateful::{
         processor::Processor,
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{
+        AttachableResolverSet, ConfigOf, DatabaseSet, Publisher, SnapshotOf, StateSyncSet,
+        SyncEngineConfig,
+    },
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -91,7 +94,7 @@ where
     pub application: A,
 
     /// Configuration used to construct the database set.
-    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
+    pub db_config: ConfigOf<A::Databases, E>,
 
     /// Provider cloned into each proposal.
     pub provider: A::Provider,
@@ -147,7 +150,7 @@ where
     marshal: MarshalMailbox<S, V>,
 
     /// Configuration used to initialize the database set at startup.
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: ConfigOf<A::Databases, E>,
 
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
@@ -169,7 +172,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Sources>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -204,18 +207,29 @@ where
     }
 
     async fn run(self) {
+        // One publication slot spans the actor's whole life: its member sources attach to
+        // the resolvers here, once, and serve nothing until the first installation. Both
+        // startup paths install their initial durable snapshot into this publisher.
+        let (publisher, set_source) = Publisher::new(self.context.as_present());
+        self.resolvers
+            .attach_sources(A::Databases::member_sources(set_source))
+            .await;
         if let Some(floor) = self.plan.floor().cloned() {
-            self.start_state_sync(floor).await;
+            self.start_state_sync(floor, publisher).await;
         } else if self.plan.requires_state_sync_floor() {
             panic!("interrupted state sync is missing its persisted floor");
         } else {
-            self.start_from_marshal().await;
+            self.start_from_marshal(publisher).await;
         }
     }
 
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+    async fn start_state_sync(
+        self,
+        floor: Finalization<S, V::Commitment>,
+        publisher: Publisher<SnapshotOf<A::Databases, E>>,
+    ) {
         let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = self
             .plan
@@ -227,7 +241,7 @@ where
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
-            resolvers: self.resolvers.clone(),
+            resolvers: self.resolvers,
             finalization: floor,
             marshal: self.marshal.clone(),
             sync_complete,
@@ -241,18 +255,17 @@ where
             sync_metadata,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
-            database_subscribers: Vec::new(),
             artifact: None,
-            resolvers: self.resolvers,
             sync_completed,
             prune_config: self.prune_config,
             metrics,
+            publisher,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self) {
+    async fn start_from_marshal(self, mut publisher: Publisher<SnapshotOf<A::Databases, E>>) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
@@ -264,11 +277,10 @@ where
         )
         .await;
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs. The
-        // resolver handles can be dropped after this: serving runs on the resolver
-        // actors' own contexts.
-        self.resolvers.attach_databases(databases.clone()).await;
+        // Install the recovered committed state as generation zero so serving can begin
+        // before the first finalization; committed state is durable by construction.
+        let (databases, initial) = databases.snapshot().await;
+        publisher.install_durable(initial);
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
@@ -285,6 +297,7 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            publisher,
             skip_finalized_until,
         }
         .start()
@@ -297,8 +310,8 @@ mod tests {
     use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
-        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant, archive_config},
     };
     use commonware_consensus::{
         Application as _, CertifiableBlock as _,
@@ -325,8 +338,8 @@ mod tests {
     #[derive(Clone)]
     struct NoopResolver;
 
-    impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<TestDb>) {}
+    impl<Src: crate::stateful::db::ServeSource> AttachableResolver<Src> for NoopResolver {
+        async fn attach_source(&self, _source: Src) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
@@ -343,28 +356,6 @@ mod tests {
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
-        }
-    }
-
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
         }
     }
 

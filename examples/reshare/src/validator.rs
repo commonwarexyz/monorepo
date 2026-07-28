@@ -185,8 +185,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .await
     .expect("blocks archive");
 
-    let genesis_target =
-        <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
+    let genesis_target = types::Database::<tokio::Context>::initial_sync_targets();
     let genesis = Block::genesis(
         network.participants[0].clone(),
         genesis_info.clone(),
@@ -258,7 +257,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
         qmdb_resolver::Config {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
-            database: None,
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
             initial: Duration::from_secs(1),

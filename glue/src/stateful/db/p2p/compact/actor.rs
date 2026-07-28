@@ -1,16 +1,16 @@
 //! Actor for compact QMDB sync over P2P.
 
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
-use crate::stateful::db::Shared;
+use crate::stateful::db::ServeSource;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::metrics::status,
+    telemetry::metrics::{GaugeExt as _, status},
 };
 use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
@@ -22,13 +22,14 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info};
 
-type DbOp<DB> = <Shared<DB> as compact::Resolver>::Op;
+type Serve<Src> = <Src as ServeSource>::Serve;
+type DbOp<Src> = <Serve<Src> as compact::Resolver>::Op;
 type Pending<F, Op, D> =
     oneshot::Sender<Result<compact::FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<Pending<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
-pub struct Config<P, D, B, DB>
+pub struct Config<P, D, B>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
@@ -39,9 +40,6 @@ where
 
     /// Blocker used when peers send invalid data.
     pub blocker: B,
-
-    /// Local database used to serve incoming requests when available.
-    pub database: Option<Shared<DB>>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -65,9 +63,9 @@ where
     pub priority_responses: bool,
 }
 
-enum State<DB> {
-    NoDb,
-    HasDb(Shared<DB>),
+enum State<Src> {
+    NoSource,
+    HasSource(Src),
 }
 
 enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
@@ -77,7 +75,7 @@ enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
 }
 
 /// Runs a compact QMDB sync resolver service over P2P.
-pub struct Actor<E, P, D, B, F, DB, H>
+pub struct Actor<E, P, D, B, F, Src, H>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -85,18 +83,19 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
-    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
-    DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    Src: ServeSource,
+    Serve<Src>: compact::Resolver<Family = F, Digest = H::Digest>,
+    DbOp<Src>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     context: ContextCell<E>,
-    config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, DbOp<DB>, H::Digest>>,
-    state: State<DB>,
+    config: Config<P, D, B>,
+    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<Src, F, DbOp<Src>, H::Digest>>,
+    state: State<Src>,
+    pending: PendingSubs<F, DbOp<Src>, H::Digest>,
     metrics: ResolverMetrics,
-    pending: PendingSubs<F, DbOp<DB>, H::Digest>,
 }
 
-impl<E, P, D, B, F, DB, H> Actor<E, P, D, B, F, DB, H>
+impl<E, P, D, B, F, Src, H> Actor<E, P, D, B, F, Src, H>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -104,13 +103,13 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
-    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
-    DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    Src: ServeSource,
+    Serve<Src>: compact::Resolver<Family = F, Digest = H::Digest>,
+    DbOp<Src>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     /// Create a new compact resolver actor and mailbox.
-    pub fn new(context: E, mut config: Config<P, D, B, DB>) -> (Self, Mailbox<DB, F, DbOp<DB>, H>) {
+    pub fn new(context: E, config: Config<P, D, B>) -> (Self, Mailbox<Src, F, DbOp<Src>, H>) {
         let metrics = ResolverMetrics::new(&context);
-        let state = config.database.take().map_or(State::NoDb, State::HasDb);
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
@@ -118,9 +117,9 @@ where
             context: ContextCell::new(context),
             config,
             mailbox_rx,
-            state,
-            metrics,
+            state: State::NoSource,
             pending: BTreeMap::new(),
+            metrics,
         };
         (actor, mailbox)
     }
@@ -208,13 +207,17 @@ where
 
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, F, DbOp<DB>, H::Digest>,
+        message: mailbox::Message<Src, F, DbOp<Src>, H::Digest>,
     ) -> MailboxAction<F, H::Digest> {
         match message {
-            mailbox::Message::AttachDatabase(db) => {
-                let replacing_existing = matches!(self.state, State::HasDb(_));
-                info!(replacing_existing, "attached compact resolver database");
-                self.state = State::HasDb(db);
+            mailbox::Message::AttachSource(source) => {
+                let replacing_existing = matches!(self.state, State::HasSource(_));
+                info!(
+                    replacing_existing,
+                    "attached compact resolver serving source"
+                );
+                self.state = State::HasSource(source);
+                let _ = self.metrics.has_source.try_set(1i64);
                 MailboxAction::None
             }
             mailbox::Message::GetState { request, response } => {
@@ -266,7 +269,7 @@ where
             (),
             MAX_PROOF_DIGESTS_PER_ELEMENT,
         );
-        let state = match compact::State::<F, DbOp<DB>, H::Digest>::decode_cfg(value, &cfg) {
+        let state = match compact::State::<F, DbOp<Src>, H::Digest>::decode_cfg(value, &cfg) {
             Ok(state) => state,
             Err(_) => {
                 self.pending.insert(key, subscribers);
@@ -312,7 +315,7 @@ where
 
     fn valid_state_response(
         key: &handler::Request<F, H::Digest>,
-        state: &compact::State<F, DbOp<DB>, H::Digest>,
+        state: &compact::State<F, DbOp<Src>, H::Digest>,
     ) -> bool {
         let target = key.to_target();
         if state.leaf_count != target.leaf_count || state.leaf_count == Location::new(0) {
@@ -333,13 +336,31 @@ where
     async fn handle_produce(
         &mut self,
         key: handler::Request<F, H::Digest>,
-        response: oneshot::Sender<bytes::Bytes>,
+        mut response: oneshot::Sender<bytes::Bytes>,
     ) {
-        let State::HasDb(database) = &self.state else {
+        let State::HasSource(source) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
-        let fetch = match compact::Resolver::get_compact_state(database, key.to_target()).await {
+        let Some(state) = source.serve() else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
+            return;
+        };
+        let serve = compact::Resolver::get_compact_state(&state, key.to_target());
+        futures::pin_mut!(serve);
+        let mut shutdown = self.context.stopped();
+        let result = select! {
+            result = serve.as_mut() => result,
+            _ = response.closed() => {
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+            _ = &mut shutdown => {
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+        };
+        let fetch = match result {
             Ok(fetch) => fetch,
             Err(err) => {
                 // Declines and storage failures are indistinguishable to the requester, which
@@ -357,6 +378,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{ManagedDb, MemberSource, Publisher};
     use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
@@ -408,18 +430,18 @@ mod tests {
         DummyProvider,
         DummyBlocker,
         mmr::Family,
-        TestDb,
+        TestSrc,
         Sha256,
     >;
     type TestOp = KeylessOp<mmr::Family, U64>;
+    type TestSnapshot =
+        <TestDb as crate::stateful::db::ManagedDb<deterministic::Context>>::Snapshot;
+    type TestSrc = crate::stateful::db::MemberSource<TestSnapshot, TestSnapshot>;
 
-    fn test_config(
-        database: Option<Shared<TestDb>>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
+    fn test_config() -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker> {
         Config {
             peer_provider: DummyProvider,
             blocker: DummyBlocker,
-            database,
             mailbox_size: NZUsize!(16),
             me: None,
             initial: Duration::from_millis(10),
@@ -471,7 +493,10 @@ mod tests {
         let db = db.sync().await.unwrap();
 
         let target = db.target();
-        let fetch = compact::Resolver::get_compact_state(&Shared::new("test", db), target.clone())
+        let (_db, snapshot) = ManagedDb::snapshot(db)
+            .await
+            .expect("snapshot should succeed");
+        let fetch = compact::Resolver::get_compact_state(&snapshot, target.clone())
             .await
             .expect("compact state should be available");
         (target, fetch)
@@ -480,7 +505,7 @@ mod tests {
     #[test]
     fn invalid_proof_is_rejected() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let target = compact::Target {
                 root: sha256::Digest::from([7; 32]),
                 leaf_count: mmr::Location::new(1),
@@ -513,7 +538,7 @@ mod tests {
     #[test]
     fn invalid_pinned_node_count_is_rejected() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, mut fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
             let (pending_tx, _pending_rx) = oneshot::channel();
@@ -533,7 +558,7 @@ mod tests {
     #[test]
     fn valid_state_after_invalid_proof_completes_request() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
@@ -579,12 +604,18 @@ mod tests {
     }
 
     #[test]
-    fn produce_serves_attached_database() {
+    fn produce_serves_attached_source() {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
             let target = db.target();
-            let db = Shared::new("test", db);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
+            let (_db, snapshot) = ManagedDb::snapshot(db)
+                .await
+                .expect("snapshot should succeed");
+            let (mut publisher, raw_source) = Publisher::new(&context);
+            publisher.install_durable(snapshot);
+            let source = MemberSource::new(raw_source, |s| s);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
+            let _ = actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();
 
@@ -603,18 +634,23 @@ mod tests {
         });
     }
 
-    /// A target the database cannot serve is indistinguishable from a storage failure to the
-    /// requester, so the actor must at least record it locally.
+    /// A target the snapshot cannot serve is indistinguishable from a storage failure to
+    /// the requester, so the actor must at least record it locally.
     #[test]
     fn produce_records_unservable_target() {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
             let target = db.target();
-            let db = Shared::new("test", db);
-            let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(Some(db)));
+            let (_db, snapshot) = ManagedDb::snapshot(db)
+                .await
+                .expect("snapshot should succeed");
+            let (mut publisher, raw_source) = Publisher::new(&context);
+            publisher.install_durable(snapshot);
+            let source = MemberSource::new(raw_source, |s| s);
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
+            let _ = actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
 
-            // A target past the tip is declined by the source.
+            // A target past the tip is declined by the snapshot.
             let ahead = compact::Target::new(target.root, Location::new(*target.leaf_count + 1));
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -630,10 +666,54 @@ mod tests {
         });
     }
 
+    /// A published snapshot serves a target one commit below its captured tip, so a
+    /// syncing peer whose selected floor lags this provider is not starved.
+    #[test]
+    fn produce_serves_below_tip_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("db")).await;
+            let below = db.target();
+
+            // Advance one commit so `below` sits under the captured tip.
+            let batch = db
+                .new_batch()
+                .append(U64::new(9))
+                .merkleize(&db, None, db.inactivity_floor_loc())
+                .await;
+            let (db, _) = db.apply_batch(batch).expect("apply should succeed");
+            let db = db.sync().await.expect("sync should succeed");
+            assert_ne!(db.target(), below);
+
+            let (_db, snapshot) = ManagedDb::snapshot(db)
+                .await
+                .expect("snapshot should succeed");
+            let (mut publisher, raw_source) = Publisher::new(&context);
+            publisher.install_durable(snapshot);
+            let source = MemberSource::new(raw_source, |s| s);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
+            let _ = actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
+            let request = handler::Request::from_target(below.clone());
+            let (response_tx, response_rx) = oneshot::channel();
+
+            actor.handle_produce(request, response_tx).await;
+
+            let encoded = response_rx.await.expect("response should be served");
+            let cfg = (
+                (..=MAX_PINNED_NODES).into(),
+                (),
+                MAX_PROOF_DIGESTS_PER_ELEMENT,
+            );
+            let state =
+                compact::State::<mmr::Family, TestOp, sha256::Digest>::decode_cfg(encoded, &cfg)
+                    .expect("served state should decode");
+            assert_eq!(state.leaf_count, below.leaf_count);
+        });
+    }
+
     #[test]
     fn downstream_rejection_marks_peer_invalid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 
@@ -664,7 +744,7 @@ mod tests {
     #[test]
     fn dropped_downstream_feedback_does_not_mark_peer_invalid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, fetch) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 
@@ -691,7 +771,7 @@ mod tests {
     #[test]
     fn cancel_state_cancels_last_subscriber() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, _) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 
@@ -711,7 +791,7 @@ mod tests {
     #[test]
     fn cancel_state_keeps_shared_request_alive() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
             let (target, _) = compact_state(context.child("state")).await;
             let request = handler::Request::from_target(target);
 

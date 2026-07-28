@@ -4,6 +4,7 @@ use crate::stateful::{
         core::mailbox::Message,
         processor::{Applied, Processor},
     },
+    db::{Publisher, SnapshotOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -17,7 +18,7 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt, futures::Pool};
+use commonware_utils::{Acknowledgement, futures::Pool};
 use futures::{
     future::{Either, ready},
     poll,
@@ -54,6 +55,10 @@ where
 
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
+
+    /// Installs each finalized generation's snapshot for serving once its barrier
+    /// proves durable; dropping it detaches snapshot serving.
+    pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
@@ -172,57 +177,67 @@ where
                     acknowledgement,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
-                    async {
-                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                            self.processor
-                                .notify_finalized(self.context.as_present(), block.as_ref())
-                                .await;
-                            acknowledgement.acknowledge();
-                            return;
-                        }
-                        let Some(Applied { barrier, prune }) =
-                            self.processor.finalize(&self.context, block.as_ref()).await
-                        else {
+                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        self.processor
+                            .notify_finalized(self.context.as_present(), block.as_ref())
+                            .instrument(process)
+                            .await;
+                        acknowledgement.acknowledge();
+                    } else {
+                        // The processor owns the databases, so finalize consumes it and
+                        // hands it back alongside the applied artifacts.
+                        let (processor, applied) = self
+                            .processor
+                            .finalize(&self.context, block.as_ref())
+                            .instrument(process.clone())
+                            .await;
+                        self.processor = processor;
+                        // Keep the publication bookkeeping under the same span.
+                        let _process = process.entered();
+                        if let Some(Applied {
+                            snapshot,
+                            barrier,
+                            prune,
+                        }) = applied
+                        {
+                            debug!(
+                                height = block.height().get(),
+                                "applied finalized database batch"
+                            );
+
+                            // Acknowledge marshal only once the batch's flush
+                            // completes, so marshal's processed floor never runs
+                            // ahead of flushed database state (the startup rewind
+                            // contract), without blocking the loop on the flush.
+                            // Marshal's ack window bounds the flush backlog. On
+                            // runtime teardown the acknowledgement is dropped
+                            // instead: marshal redelivers the block after restart.
+                            let staged = self.publisher.stage(snapshot);
+                            syncs.push(async move {
+                                if barrier.durable().await {
+                                    staged.install();
+                                    acknowledgement.acknowledge();
+                                }
+                            });
+                            if let Some(prune) = prune {
+                                pending_prune = Some(prune);
+                            }
+                        } else {
                             // Duplicate report: marshal redelivers a processed
                             // height only after a restart, where startup aligned
                             // the databases to durable state.
                             acknowledgement.acknowledge();
-                            return;
-                        };
-                        debug!(
-                            height = block.height().get(),
-                            "applied finalized database batch"
-                        );
-
-                        // Acknowledge marshal only once the batch's flush
-                        // completes, so marshal's processed floor never runs
-                        // ahead of flushed database state (the startup rewind
-                        // contract), without blocking the loop on the flush.
-                        // Marshal's ack window bounds the flush backlog. On
-                        // runtime teardown the acknowledgement is dropped
-                        // instead: marshal redelivers the block after restart.
-                        syncs.push(async move {
-                            if barrier.durable().await {
-                                acknowledgement.acknowledge();
-                            }
-                        });
-                        if let Some(prune) = prune {
-                            pending_prune = Some(prune);
                         }
                     }
-                    .instrument(process)
-                    .await;
-                }
-                Step::Message(Message::SubscribeDatabases { response }) => {
-                    response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
                     // Flushes may still be pending: database pruning waits on
                     // them only when the prune target is not yet durably
                     // justified (see `DatabaseSet::prune`), and marshal
                     // pruning follows it.
-                    prune
-                        .run(self.processor.databases_mut(), &self.marshal)
+                    self.processor = self
+                        .processor
+                        .prune_databases(prune, &self.marshal)
                         .await;
                 }
             },
@@ -250,118 +265,75 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
-            core::mailbox::Mailbox, metrics::Metrics as StatefulMetrics, processor::Processor,
+            core::mailbox::{Mailbox, Message},
+            metrics::Metrics as StatefulMetrics,
+            processor::Processor,
         },
-        db::{DatabaseSet, ManagedDb, Shared},
+        db::{MerkleizedOf, SyncTargetsOf, UnmerkleizedOf},
         tests::mocks::{
-            TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor,
+            FlushControl, GatedFlushDb, TestBlock, TestMerkleized, TestScheme, TestVariant, anchor,
+            marshal_archives, marshal_config,
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Heightable as _, Reporter as _,
-        marshal::{self, Update, ancestry::Ancestry, core::Actor as MarshalActor},
+        Application as ConsensusApplication, CertifiableBlock as _, Heightable as _, Reporter as _,
+        marshal::{
+            Update,
+            ancestry::{self, Ancestry, BoxedAncestry},
+            core::Actor as MarshalActor,
+        },
         simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
-        types::{FixedEpocher, Height, ViewDelta},
+        types::Height,
     };
     use commonware_cryptography::{
         certificate::ConstantProvider, ed25519, sha256::Digest as Sha256Digest,
     };
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock as _, ContextCell, Error as RuntimeError, Runner as _, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic,
     };
-    use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        NZU16, NZUsize,
         acknowledgement::{Acknowledgement as _, Exact},
         channel::oneshot,
         sync::Mutex,
     };
     use futures::poll;
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
-    /// Completes one parked flush when released by the test.
-    type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
+    /// Parks one application execution: the app signals entry on the sender,
+    /// then waits on the receiver while holding the turn's batch.
+    type ExecutionGate = (oneshot::Sender<()>, oneshot::Receiver<()>);
 
-    /// Shared observer for [`GatedFlushDb`]: parked flush releases and
-    /// recorded prune targets.
+    /// Application that declines every propose and verify, parking mid-call
+    /// first whenever a test armed the execution gate.
     #[derive(Clone, Default)]
-    struct FlushControl {
-        flushes: Arc<Mutex<Vec<FlushRelease>>>,
-        pruned: Arc<Mutex<Vec<u64>>>,
+    struct GatedApp {
+        execution_gate: Arc<Mutex<Option<ExecutionGate>>>,
     }
 
-    /// Database whose finalize flush completes only when the test releases it.
-    ///
-    /// Its `prune` records immediately, eliding the impl-side barrier real
-    /// databases provide (pruning waits for pending flushes, pinned in
-    /// `stateful::db::any` tests), so the actor's own scheduling is exposed.
-    struct GatedFlushDb {
-        control: FlushControl,
-    }
-
-    impl<E: Send> ManagedDb<E> for GatedFlushDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = u64;
-
-        fn initial_sync_target() -> Self::SyncTarget {
-            unreachable!("GatedFlushDb is constructed directly in tests")
-        }
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            unreachable!("GatedFlushDb is constructed directly in tests")
-        }
-
-        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            let (release, released) = oneshot::channel();
-            self.control.flushes.lock().push(release);
-            Ok((self, Handle::from_receiver(released)))
-        }
-
-        async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
-            self.control.pruned.lock().push(*target);
-            Ok(self)
-        }
-
-        fn sync_target(&self) -> Self::SyncTarget {
-            0
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
+    impl GatedApp {
+        async fn pause(&self) {
+            let gate = self.execution_gate.lock().take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
         }
     }
-
-    #[derive(Clone)]
-    struct GatedApp;
 
     impl Application<deterministic::Context> for GatedApp {
         type SigningScheme = TestScheme;
         type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
         type Block = TestBlock;
-        type Databases = Shared<GatedFlushDb>;
+        type Databases = crate::stateful::db::Single<GatedFlushDb>;
         type Provider = ();
         type Input = ();
 
         fn sync_targets(
             block: &Self::Block,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+        ) -> SyncTargetsOf<Self::Databases, deterministic::Context> {
             block.height().get()
         }
 
@@ -373,9 +345,11 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _databases: &Self::Databases,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
+            self.pause().await;
             None
         }
 
@@ -383,8 +357,10 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            _databases: &Self::Databases,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> Option<MerkleizedOf<Self::Databases, deterministic::Context>> {
+            self.pause().await;
             None
         }
 
@@ -392,112 +368,80 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            TestMerkleized
+            _databases: &Self::Databases,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> MerkleizedOf<Self::Databases, deterministic::Context> {
+            TestMerkleized::new()
         }
     }
 
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
-        }
+    /// A running [`Processing`] loop over a [`GatedFlushDb`] and the handles
+    /// tests observe and steer it through.
+    struct Spawned {
+        mailbox: Mailbox<deterministic::Context, GatedApp>,
+        /// Raw ingress, for tests that must hold or drop a response receiver.
+        sender: actor_mailbox::Sender<Message<deterministic::Context, GatedApp>>,
+        /// The loop's application; arm its gate to park an execution.
+        app: GatedApp,
+        control: FlushControl,
+        source: crate::stateful::db::SetSource<()>,
+        /// Keeps the (never-started) marshal actor's mailbox open.
+        _marshal: Box<dyn std::any::Any>,
     }
 
-    /// Spawn a [`Processing`] loop over a [`GatedFlushDb`], returning its
-    /// mailbox, the flush controls, and a guard keeping the (never-started)
-    /// marshal actor's mailbox open.
+    /// Spawn a [`Processing`] loop over a [`GatedFlushDb`].
     async fn spawn_processing(
         context: &deterministic::Context,
         prefix: &str,
         prune_config: Option<PruneConfig>,
-    ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
-        FlushControl,
-        Box<dyn std::any::Any>,
-    ) {
+    ) -> Spawned {
         let mut signing = context.child("signing");
         let fixture = scheme_mocks::fixture(&mut signing, b"gated", 1);
         let provider = ConstantProvider::new(fixture.schemes[0].clone());
         let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
+        let (finalizations_by_height, finalized_blocks) =
+            marshal_archives(context, page_cache.clone(), prefix).await;
         let (marshal_actor, marshal, _height) =
             MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
                 context.child("marshal"),
                 finalizations_by_height,
                 finalized_blocks,
-                marshal::Config {
-                    provider,
-                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                    start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                    partition_prefix: format!("{prefix}-marshal"),
-                    mailbox_size: NZUsize!(8),
-                    view_retention: ViewDelta::new(1),
-                    prunable_items_per_section: NZU64!(4),
-                    page_cache,
-                    replay_buffer: NZUsize!(64),
-                    key_write_buffer: NZUsize!(64),
-                    value_write_buffer: NZUsize!(64),
-                    block_codec_config: (),
-                    max_repair: NZUsize!(1),
-                    max_pending_acks: NZUsize!(1),
-                    strategy: Sequential,
-                },
+                marshal_config(provider, page_cache, prefix),
             )
             .await;
 
         let control = FlushControl::default();
-        let databases = Shared::new(
-            "test",
-            GatedFlushDb {
-                control: control.clone(),
-            },
-        );
+        let databases = crate::stateful::db::Single::from(GatedFlushDb {
+            control: control.clone(),
+        });
+        let app = GatedApp::default();
         let processor = Processor::new(
-            GatedApp,
+            app.clone(),
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             prune_config,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let (publisher, source) = crate::stateful::db::Publisher::new(context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal,
             processor,
+            publisher,
             skip_finalized_until: None,
         };
         context.child("loop").spawn(move |_| processing.start());
-        (Mailbox::new(sender), control, Box::new(marshal_actor))
+        Spawned {
+            mailbox: Mailbox::new(sender.clone()),
+            sender,
+            app,
+            control,
+            source,
+            _marshal: Box::new(marshal_actor),
+        }
     }
 
     /// The loop keeps applying finalized blocks while earlier flushes are
@@ -509,7 +453,11 @@ mod tests {
     fn acks_wait_for_flushes_while_prune_runs() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
-            let (mut mailbox, control, _marshal) = spawn_processing(
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(
                 &context,
                 "gated-prune",
                 Some(PruneConfig {
@@ -576,8 +524,11 @@ mod tests {
     #[test]
     fn idle_acks_follow_flush_outcome() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) =
-                spawn_processing(&context, "gated-idle", None).await;
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-idle", None).await;
 
             // Park the loop idle with block 1's flush pending.
             let (acknowledgement, mut waiter1) = Exact::handle();
@@ -617,14 +568,199 @@ mod tests {
         });
     }
 
+    /// Publication follows durability under pipelining: applied generations
+    /// stay invisible while their flushes are pending, and each completed
+    /// flush installs exactly the next generation.
+    #[test]
+    fn publication_follows_durability_under_pipelining() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                control,
+                source,
+                ..
+            } = spawn_processing(&context, "gated-publish", None).await;
+
+            // Apply blocks 1 and 2 with both flushes parked.
+            let (acknowledgement, _waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            let (acknowledgement, _waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(2, 2)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().len() < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Both generations are applied but neither is durable, so there
+            // is nothing to serve.
+            assert!(
+                source.latest().is_none(),
+                "no generation may install before its flush completes",
+            );
+
+            // Each release installs exactly the next generation.
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            while source.latest().is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(source.latest().unwrap().generation(), 0);
+
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            while source.latest().unwrap().generation() == 0 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(source.latest().unwrap().generation(), 1);
+        });
+    }
+
+    /// Await a parked finalize flush, release it, and require the block's
+    /// acknowledgement, proving the databases survived whatever came before.
+    async fn assert_set_serviceable(
+        context: &deterministic::Context,
+        mailbox: &mut Mailbox<deterministic::Context, GatedApp>,
+        control: &FlushControl,
+    ) {
+        let (acknowledgement, waiter) = Exact::handle();
+        let _ = mailbox.report(Update::Block(
+            Arc::new(TestBlock::new(1, 1)),
+            acknowledgement,
+        ));
+        while control.flushes.lock().is_empty() {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        let release = control.flushes.lock().remove(0);
+        let _ = release.send(Ok(()));
+        waiter.await.expect("finalize must acknowledge");
+    }
+
+    /// A propose abandoned by consensus mid-execution must cancel the
+    /// application future, dropping only that turn's batches: the databases
+    /// stay with the loop and keep finalizing.
+    #[test]
+    fn cancelled_propose_leaves_the_set_serviceable() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                sender,
+                app,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-cancel-propose", None).await;
+
+            // Park the application mid-propose, holding the turn's batches.
+            let (entered, entered_rx) = oneshot::channel();
+            let (_release, release_rx) = oneshot::channel();
+            *app.execution_gate.lock() = Some((entered, release_rx));
+            let parent = Arc::new(TestBlock::new(0, 0));
+            let (response, receiver) = oneshot::channel();
+            let _ = sender.enqueue(Message::Propose {
+                span: tracing::Span::current(),
+                context: (context.child("propose"), TestBlock::new(1, 1).context()),
+                ancestry: BoxedAncestry::new(ancestry::from_iter([parent])),
+                upstream: (),
+                response,
+            });
+            entered_rx
+                .await
+                .expect("the application must reach propose");
+
+            // Consensus abandons the request: the loop must cancel the parked
+            // propose rather than wait for it.
+            drop(receiver);
+
+            assert_set_serviceable(&context, &mut mailbox, &control).await;
+        });
+    }
+
+    /// A verify abandoned by consensus mid-execution must cancel the
+    /// application future, dropping only that turn's batches: the databases
+    /// stay with the loop and keep finalizing.
+    #[test]
+    fn cancelled_verify_leaves_the_set_serviceable() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                sender,
+                app,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-cancel-verify", None).await;
+
+            // Park the application mid-verify, holding the turn's batches.
+            let (entered, entered_rx) = oneshot::channel();
+            let (_release, release_rx) = oneshot::channel();
+            *app.execution_gate.lock() = Some((entered, release_rx));
+            let block = Arc::new(TestBlock::new(1, 1));
+            let parent = Arc::new(TestBlock::new(0, 0));
+            let (response, receiver) = oneshot::channel();
+            let _ = sender.enqueue(Message::Verify {
+                span: tracing::Span::current(),
+                context: (context.child("verify"), block.context()),
+                ancestry: BoxedAncestry::new(ancestry::from_iter([block, parent])),
+                response,
+            });
+            entered_rx.await.expect("the application must reach verify");
+
+            // Consensus abandons the request: the loop must cancel the parked
+            // verify rather than wait for it.
+            drop(receiver);
+
+            assert_set_serviceable(&context, &mut mailbox, &control).await;
+        });
+    }
+
+    /// Declined turns consume only their batches: propose resolves `None`,
+    /// verify resolves `false`, and the databases keep finalizing.
+    #[test]
+    fn declined_turns_leave_the_set_serviceable() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-decline", None).await;
+
+            let block = Arc::new(TestBlock::new(1, 1));
+            let parent = Arc::new(TestBlock::new(0, 0));
+            let proposed = mailbox
+                .propose(
+                    (context.child("propose"), block.context()),
+                    ancestry::from_iter([parent.clone()]),
+                    (),
+                )
+                .await;
+            assert!(proposed.is_none(), "GatedApp declines every propose");
+
+            let verified = mailbox
+                .verify(
+                    (context.child("verify"), block.context()),
+                    ancestry::from_iter([block, parent]),
+                )
+                .await;
+            assert!(!verified, "GatedApp declines every verify");
+
+            assert_set_serviceable(&context, &mut mailbox, &control).await;
+        });
+    }
+
     /// A flush failure must panic the processing loop with the database
     /// identified (the fatal policy), rather than acknowledging the block.
     #[test]
     #[should_panic(expected = "database finalize flush failed (type")]
     fn flush_failure_panics_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) =
-                spawn_processing(&context, "gated-failure", None).await;
+            let Spawned {
+                mut mailbox,
+                control,
+                ..
+            } = spawn_processing(&context, "gated-failure", None).await;
 
             let (acknowledgement, _waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(

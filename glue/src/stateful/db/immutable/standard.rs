@@ -2,11 +2,11 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture a [`Shared`] database handle
-//! so the batch API can read through to applied state.
+//! deletions. Keyed batch reads borrow the owning database because the
+//! immutable proof snapshot carries no keyed index.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -16,14 +16,15 @@ use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
     journal::contiguous::{
-        Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
+        Mutable, Snapshot as JournalSnapshot, fixed::Journal as FixedJournal,
+        variable::Journal as VariableJournal,
     },
     merkle::{Family, Location},
     qmdb::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
-            Immutable, Operation,
+            self, Immutable, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
@@ -33,13 +34,10 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
-use std::{ops::Deref, sync::Arc};
+use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
-/// Shared handle to an immutable database.
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
-
-/// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// Wraps an immutable [`UnmerkleizedBatch`], implementing the
+/// [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -53,7 +51,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
-    db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+    _phantom: PhantomData<fn(E, C, T)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -104,18 +102,24 @@ where
         self
     }
 
-    /// Read a value by key, falling back to applied state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get(key, &db).await
+    /// Read a value by key, falling back to the owning database's committed state.
+    pub async fn get(
+        &self,
+        key: &K,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Option<V::Value>, Error<F>> {
+        self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to the owning database's committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.batch.get_many(keys, &db).await
+    pub async fn get_many(
+        &self,
+        keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.batch.get_many(keys, db).await
     }
 
     /// Set `key` to `value` in the speculative batch.
@@ -125,8 +129,8 @@ where
     }
 }
 
-/// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// Wraps an immutable [`MerkleizedBatch`], implementing the
+/// [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -140,7 +144,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+    _phantom: PhantomData<fn(E, C, T)>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -174,18 +178,24 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
-        self.inner.get(key, &db).await
+    /// Read a value by key, falling back to the owning database's committed state.
+    pub async fn get(
+        &self,
+        key: &K,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Option<V::Value>, Error<F>> {
+        self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to the owning database's committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
-        self.inner.get_many(keys, &db).await
+    pub async fn get_many(
+        &self,
+        keys: &[&K],
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.inner.get_many(keys, db).await
     }
 }
 
@@ -202,21 +212,17 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     type Merkleized = ImmutableMerkleized<F, E, K, V, C, H, T, S>;
+    type Db = Immutable<F, E, K, V, C, H, T, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
+    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
+            .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
             .await;
         Ok(ImmutableMerkleized {
             inner: merkleized,
-            db: self.db.clone(),
+            _phantom: PhantomData,
         })
     }
 }
@@ -235,6 +241,13 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = ImmutableUnmerkleized<F, E, K, V, C, H, T, S>;
+    type SyncTarget = AnySyncTarget<F, H::Digest>;
+
+    fn matches(&self, target: &Self::SyncTarget) -> bool {
+        self.root() == target.root
+            && *target.range.start() == self.bounds().inactivity_floor
+            && *target.range.end() == Location::<F>::new(self.bounds().total_size)
+    }
 
     fn root(&self) -> H::Digest {
         self.inner.root()
@@ -243,7 +256,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            db: self.db.clone(),
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -283,6 +296,16 @@ where
     type Error = Error<F>;
     type Config = fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = Arc<
+        immutable::Snapshot<
+            F,
+            E,
+            K,
+            FixedEncoding<V>,
+            <FixedJournal<E, fixed::Operation<F, K, V>> as JournalSnapshot>::Reader,
+            H,
+        >,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -295,26 +318,26 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: Self::new_batch(self),
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
     }
 
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, snapshot, handle) = self.finalize(batch.inner).await?;
+        Ok((db, Arc::new(snapshot), handle))
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -376,6 +399,16 @@ where
     type Error = Error<F>;
     type Config = variable::Config<T, <variable::Operation<F, K, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = Arc<
+        immutable::Snapshot<
+            F,
+            E,
+            K,
+            VariableEncoding<V>,
+            <VariableJournal<E, variable::Operation<F, K, V>> as JournalSnapshot>::Reader,
+            H,
+        >,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -388,26 +421,26 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: Self::new_batch(self),
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
     }
 
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, snapshot, handle) = self.finalize(batch.inner).await?;
+        Ok((db, Arc::new(snapshot), handle))
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {

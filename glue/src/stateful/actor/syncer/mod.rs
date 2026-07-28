@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet},
+    db::{Anchor, ConfigOf, DatabaseSet, SyncTargetsOf},
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
@@ -25,7 +25,7 @@ mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::Mailbox;
+pub(crate) use mailbox::{Artifact, Mailbox};
 
 mod plan;
 pub use plan::SyncPlan;
@@ -131,23 +131,10 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The database handle set.
+    /// The owned database set.
     pub databases: A::Databases,
     /// The anchor at which state sync completed.
     pub anchor: Anchor<BlockDigest<A, E>>,
-}
-
-impl<E, A> Clone for SyncResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            databases: self.databases.clone(),
-            anchor: self.anchor,
-        }
-    }
 }
 
 /// Resolved state sync floor data derived from the selected finalization.
@@ -157,7 +144,7 @@ where
     A: Application<E>,
 {
     pub anchor: Anchor<BlockDigest<A, E>>,
-    pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
+    pub targets: SyncTargetsOf<A::Databases, E>,
 }
 
 /// Durable state-sync metadata.
@@ -340,7 +327,7 @@ where
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: ConfigOf<A::Databases, E>,
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
 ) -> StartupResult<E, A>
 where
@@ -371,7 +358,7 @@ where
         V::into_inner(marshal_block)
     };
 
-    let databases = A::Databases::init(context.child("db_set"), db_config).await;
+    let mut databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
 
     // In the case that the applied targets do not match the marshal floor, we may
@@ -379,9 +366,9 @@ where
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
     // if the databases were corrupted or pruned too aggressively.
-    if databases.applied_targets().await != processed_targets {
-        databases.rewind_to_targets(processed_targets.clone()).await;
-        let rewound_targets = databases.applied_targets().await;
+    if databases.applied_targets() != processed_targets {
+        databases = databases.rewind_to_targets(processed_targets.clone()).await;
+        let rewound_targets = databases.applied_targets();
         assert!(
             rewound_targets == processed_targets,
             "databases must be consistent with marshal floor after rewind"
@@ -404,8 +391,28 @@ where
     }
 }
 
-#[cfg(all(test, feature = "arbitrary"))]
+#[cfg(test)]
 mod tests {
+    use super::{StateSyncMetadata, init_databases_from_marshal};
+    use crate::stateful::{
+        Application, Input, Proposed,
+        db::{ManagedDb, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf},
+        tests::mocks::{
+            TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, start_marshal,
+        },
+    };
+    use commonware_consensus::{
+        Heightable as _,
+        marshal::ancestry::Ancestry,
+        simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+        types::Height,
+    };
+    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::sync::Mutex;
+    use std::{convert::Infallible, sync::Arc};
+
+    #[cfg(feature = "arbitrary")]
     mod conformance {
         use crate::stateful::{actor::syncer::SyncState, tests::mocks::TestScheme};
         use commonware_codec::conformance::CodecConformance;
@@ -414,5 +421,179 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<SyncState<TestScheme, Sha256Digest>>,
         }
+    }
+
+    /// Database whose applied sync target is set by config, recording every
+    /// rewind. A stubborn instance ignores rewinds, modeling state that cannot
+    /// converge on the marshal floor.
+    struct RewindDb {
+        target: u64,
+        stubborn: bool,
+        rewinds: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl ManagedDb<deterministic::Context> for RewindDb {
+        type Unmerkleized = TestUnmerkleized<Self>;
+        type Merkleized = TestMerkleized<Self>;
+        type Error = Infallible;
+        type Config = (u64, bool, Arc<Mutex<Vec<u64>>>);
+        type SyncTarget = u64;
+        type Snapshot = ();
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            0
+        }
+
+        async fn init(
+            _context: deterministic::Context,
+            (target, stubborn, rewinds): Self::Config,
+        ) -> Result<Self, Self::Error> {
+            Ok(Self {
+                target,
+                stubborn,
+                rewinds,
+            })
+        }
+
+        fn new_batch(&self) -> Self::Unmerkleized {
+            TestUnmerkleized::new()
+        }
+
+        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            Ok((self, ()))
+        }
+
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Self::Snapshot, commonware_runtime::Handle<()>), Self::Error> {
+            unreachable!("startup reconciliation never finalizes")
+        }
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            self.target
+        }
+
+        async fn rewind_to_target(mut self, target: Self::SyncTarget) -> Result<Self, Self::Error> {
+            self.rewinds.lock().push(target);
+            if !self.stubborn {
+                self.target = target;
+            }
+            Ok(self)
+        }
+    }
+
+    /// Application binding [`RewindDb`] for startup reconciliation; only
+    /// `sync_targets` is ever called.
+    #[derive(Clone)]
+    struct RewindApp;
+
+    impl Application<deterministic::Context> for RewindApp {
+        type SigningScheme = TestScheme;
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+        type Block = TestBlock;
+        type Databases = crate::stateful::db::Single<RewindDb>;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(
+            block: &Self::Block,
+        ) -> SyncTargetsOf<Self::Databases, deterministic::Context> {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            unreachable!("startup reconciliation never proposes")
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            unreachable!("startup reconciliation never proposes")
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> Option<MerkleizedOf<Self::Databases, deterministic::Context>> {
+            unreachable!("startup reconciliation never verifies")
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _databases: &Self::Databases,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> MerkleizedOf<Self::Databases, deterministic::Context> {
+            unreachable!("startup reconciliation never applies")
+        }
+    }
+
+    /// Run startup reconciliation for a [`RewindDb`] whose applied target is
+    /// `target`, returning the recorded rewinds and the startup anchor height.
+    async fn reconcile(
+        context: deterministic::Context,
+        target: u64,
+        stubborn: bool,
+    ) -> (Vec<u64>, Height) {
+        let mut marshal_context = context.child("marshal");
+        let fixture = scheme_mocks::fixture(&mut marshal_context, b"syncer-harness", 1);
+        let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            marshal_context,
+            fixture.schemes[0].clone(),
+            &TestBlock::new(0, 0),
+            None,
+        )
+        .await;
+        let sync_metadata = StateSyncMetadata::init(&context, "syncer-test").await;
+        let rewinds: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let result = init_databases_from_marshal::<_, RewindApp, TestScheme, TestVariant>(
+            &context,
+            &marshal,
+            (target, stubborn, rewinds.clone()),
+            sync_metadata,
+        )
+        .await;
+        let recorded = rewinds.lock().clone();
+        (recorded, result.sync.anchor.height)
+    }
+
+    /// Databases ahead of the marshal floor are rewound back to it, repairing
+    /// a crash between a database flush and its marshal acknowledgement.
+    #[test]
+    fn startup_rewinds_databases_ahead_of_the_marshal_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let (rewinds, anchor_height) = reconcile(context, 5, false).await;
+            assert_eq!(rewinds, vec![0], "the set must rewind to the floor");
+            assert_eq!(anchor_height, Height::zero());
+        });
+    }
+
+    /// Databases already consistent with the marshal floor start as-is.
+    #[test]
+    fn startup_leaves_consistent_databases_untouched() {
+        deterministic::Runner::default().start(|context| async move {
+            let (rewinds, anchor_height) = reconcile(context, 0, false).await;
+            assert!(rewinds.is_empty(), "a consistent set must not rewind");
+            assert_eq!(anchor_height, Height::zero());
+        });
+    }
+
+    /// A rewind that fails to converge on the marshal floor is unrecoverable.
+    #[test]
+    #[should_panic(expected = "databases must be consistent with marshal floor after rewind")]
+    fn startup_panics_when_rewind_cannot_reach_the_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let _ = reconcile(context, 5, true).await;
+        });
     }
 }

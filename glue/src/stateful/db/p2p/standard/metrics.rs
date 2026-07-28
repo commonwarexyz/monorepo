@@ -24,8 +24,11 @@ pub(super) struct Metrics {
     /// Incoming serve requests by outcome.
     pub serve_requests: status::Counter,
 
-    /// Whether a database is currently attached (1) or not (0).
-    pub has_database: Registered<Gauge>,
+    /// Serves aborted because the requester stopped waiting or the actor shut down.
+    pub serve_cancelled: Registered<Counter>,
+
+    /// Whether a serving source is attached (1) or not (0).
+    pub has_source: Registered<Gauge>,
 }
 
 impl Metrics {
@@ -48,9 +51,14 @@ impl Metrics {
         );
         let deliveries = context.family("deliveries", "Deliveries from peers by outcome");
         let serve_requests = context.family("serve_requests", "Incoming serve requests by outcome");
-        let has_database = context.register(
-            "has_database",
-            "Whether a database is currently attached",
+        let serve_cancelled = context.register(
+            "serve_cancelled",
+            "Serves aborted because the requester stopped waiting or the actor shut down",
+            Counter::default(),
+        );
+        let has_source = context.register(
+            "has_source",
+            "Whether a serving source is attached",
             Gauge::default(),
         );
 
@@ -60,7 +68,8 @@ impl Metrics {
             cancel_requests,
             deliveries,
             serve_requests,
-            has_database,
+            serve_cancelled,
+            has_source,
         }
     }
 }

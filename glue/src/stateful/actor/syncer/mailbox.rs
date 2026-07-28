@@ -3,7 +3,7 @@
 use super::SyncResult;
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet, TipUpdate},
+    db::{Anchor, SyncTargetsOf, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::Digestible;
@@ -11,7 +11,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 
-type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+type SyncTargets<E, A> = SyncTargetsOf<<A as Application<E>>::Databases, E>;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 pub(crate) enum Message<E, A>
@@ -21,8 +21,22 @@ where
 {
     UpdateTargets {
         update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
-        response: oneshot::Sender<Option<SyncResult<E, A>>>,
+        response: oneshot::Sender<Option<Artifact<E, A>>>,
     },
+}
+
+/// How a completed sync's artifact reaches the stateful actor.
+///
+/// The database set is owned by value, so exactly one channel carries it.
+pub(crate) enum Artifact<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The artifact travels with this response.
+    Delivered(SyncResult<E, A>),
+    /// The artifact already went out on the completion channel.
+    Announced,
 }
 
 impl<E, A> Overflow<Message<E, A>> for Option<Message<E, A>>
@@ -78,13 +92,13 @@ where
 
     /// Sends a target update and waits until the live sync coordinator records it.
     ///
-    /// If sync already completed before the update could be observed, returns the
-    /// completed artifact instead.
+    /// If sync already completed before the update could be observed, returns how the
+    /// completed artifact reaches the caller instead.
     pub async fn update_targets(
         &self,
         anchor: Anchor<BlockDigest<E, A>>,
         targets: SyncTargets<E, A>,
-    ) -> Option<SyncResult<E, A>> {
+    ) -> Option<Artifact<E, A>> {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
@@ -117,7 +131,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Mailbox, Message};
+    use super::{Artifact, Mailbox, Message};
     use crate::stateful::{
         actor::syncer::SyncResult,
         tests::mocks::{TestApp, anchor, test_databases},
@@ -147,23 +161,24 @@ mod tests {
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
+            let expected_anchor = anchor(8, 10);
             let expected = SyncResult::<deterministic::Context, TestApp> {
                 databases: test_databases(),
-                anchor: anchor(8, 10),
+                anchor: expected_anchor,
             };
             let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
                 panic!("dropped observation should trigger a retry");
             };
             assert!(
-                response.send(Some(expected.clone())).is_ok(),
+                response.send(Some(Artifact::Delivered(expected))).is_ok(),
                 "response receiver should be alive"
             );
 
             let result = update_targets.await;
-            assert_eq!(
-                result.expect("retry should return artifact").anchor,
-                expected.anchor
-            );
+            let Some(Artifact::Delivered(result)) = result else {
+                panic!("retry should return the delivered artifact");
+            };
+            assert_eq!(result.anchor, expected_anchor);
         });
     }
 
