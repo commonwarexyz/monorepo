@@ -332,6 +332,13 @@ impl<V: Variant> Sharing<V> {
         M::quorum(self.total.get())
     }
 
+    /// Return the exact degree of the public polynomial.
+    ///
+    /// See [`Poly::degree_exact`] for details.
+    pub fn degree_exact(&self) -> u32 {
+        self.poly.degree_exact()
+    }
+
     /// Return the total number of participants in this sharing.
     pub const fn total(&self) -> NonZeroU32 {
         self.total

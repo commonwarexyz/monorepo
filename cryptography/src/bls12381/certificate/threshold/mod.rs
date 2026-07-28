@@ -70,7 +70,8 @@ pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
 }
 
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
-    /// Constructs a signer instance with a private share and evaluated public polynomial.
+    /// Constructs a signer instance with a private share and evaluated public polynomial
+    /// compatible with the specified fault model.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
     /// The polynomial can be evaluated to obtain public verification keys for partial
@@ -78,11 +79,17 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial's participant count or degree does not match the
+    /// committee and fault model, or if the share index does not identify a committee
+    /// participant.
+    ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(
+    pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
@@ -92,6 +99,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.degree_exact(),
+            polynomial.required::<M>() - 1,
+            "polynomial degree must equal quorum minus one"
         );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
@@ -110,20 +122,35 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
     }
 
-    /// Produces a verifier that can authenticate signatures but does not hold signing state.
+    /// Produces a verifier for the specified fault model that can authenticate signatures
+    /// but does not hold signing state.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial's participant count or degree does not match the committee
+    /// and fault model.
+    ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier<M: Faults>(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.degree_exact(),
+            polynomial.required::<M>() - 1,
+            "polynomial degree must equal quorum minus one"
         );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
@@ -516,7 +543,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             V: $crate::bls12381::primitives::variant::Variant,
             R: rand_core::CryptoRng,
         {
-            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _, $faults>(
                 rng,
                 namespace,
                 n,
@@ -538,7 +565,8 @@ macro_rules! impl_certificate_bls12381_threshold {
             P: $crate::PublicKey,
             V: $crate::bls12381::primitives::variant::Variant,
         > Scheme<P, V> {
-            /// Creates a new signer instance with a private share and evaluated public polynomial.
+            /// Creates a new signer instance with a private share and evaluated public polynomial
+            /// compatible with the configured fault model.
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
@@ -546,7 +574,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 share: $crate::bls12381::primitives::group::Share,
             ) -> Option<Self> {
                 Some(Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::signer(
+                    generic: $crate::bls12381::certificate::threshold::Generic::signer::<$faults>(
                         namespace,
                         participants,
                         polynomial,
@@ -555,14 +583,15 @@ macro_rules! impl_certificate_bls12381_threshold {
                 })
             }
 
-            /// Creates a verifier that can authenticate partial signatures.
+            /// Creates a verifier for the configured fault model that can authenticate partial
+            /// signatures.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
             ) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::verifier(
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<$faults>(
                         namespace,
                         participants,
                         polynomial,
@@ -738,7 +767,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, NZU32, TryCollect, ordered::Set, test_rng};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, TryCollect, ordered::Set, test_rng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -1368,6 +1397,59 @@ mod tests {
             .map(|_| Ed25519PrivateKey::random(&mut *rng).public_key())
             .try_collect()
             .expect("participants are unique")
+    }
+
+    fn signer_validates_polynomial_degree<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = make_participants(&mut rng, 4);
+
+        // For four participants, N5f1 produces a degree 3 polynomial while this
+        // N3f1 scheme requires degree 2.
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+
+        Scheme::<ed25519::PublicKey, V>::signer(
+            NAMESPACE,
+            participants,
+            polynomial,
+            shares[0].clone(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_signer_validates_polynomial_degree_min_pk() {
+        signer_validates_polynomial_degree::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_signer_validates_polynomial_degree_min_sig() {
+        signer_validates_polynomial_degree::<MinSig>();
+    }
+
+    fn verifier_validates_polynomial_degree<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = make_participants(&mut rng, 4);
+
+        // For four participants, N5f1 produces a degree 3 polynomial while this
+        // N3f1 scheme requires degree 2.
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+
+        Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_verifier_validates_polynomial_degree_min_pk() {
+        verifier_validates_polynomial_degree::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    fn test_verifier_validates_polynomial_degree_min_sig() {
+        verifier_validates_polynomial_degree::<MinSig>();
     }
 
     fn signer_polynomial_threshold_must_equal_quorum<V: Variant>() {
