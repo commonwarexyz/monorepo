@@ -382,55 +382,48 @@ where
                     }
                 };
 
-                // Start the candidate store immediately: it depends on neither the
-                // parent fetch (which may hit the network) nor the verdict below.
-                // Storing before validation is intentional: these caches provide
-                // candidate availability/recovery, not a validity decision. This
-                // task gates the finalize vote by resolving true only after both
-                // app verification succeeds and the store is durable.
+                // Await and validate the parent before admitting the candidate
+                // to marshal's durable caches and fork tree.
+                let parent = select! {
+                    _ = tx.closed() => {
+                        debug!(reason = "consensus dropped receiver", "skipping verification");
+                        return;
+                    },
+                    result = parent_request => match result {
+                        Ok(parent) => parent,
+                        Err(_) => {
+                            debug!(reason = "failed to fetch parent", "skipping verification");
+                            return;
+                        }
+                    },
+                };
+
+                if let Err(err) = validate_block::<H, _, _>(
+                    &epocher,
+                    block.as_ref(),
+                    parent.as_ref(),
+                    &consensus_context,
+                    commitment,
+                    parent_commitment,
+                ) {
+                    debug!(
+                        ?err,
+                        expected_commitment = %commitment,
+                        block_commitment = %block.commitment(),
+                        expected_parent_commitment = %parent_commitment,
+                        parent_commitment = %parent.commitment(),
+                        expected_parent = %parent.digest(),
+                        block_parent = %block.parent(),
+                        parent_height = %parent.height(),
+                        block_height = %block.height(),
+                        "block failed coded invariant validation"
+                    );
+                    tx.send_lossy(GateOutcome::Ready(false));
+                    return;
+                }
+
                 let store = stage.store(&marshal, round, Arc::clone(&block));
                 let verify = async {
-                    // Await the parent fetch we started above.
-                    let parent = select! {
-                        _ = tx.closed() => {
-                            debug!(
-                                reason = "consensus dropped receiver",
-                                "skipping verification"
-                            );
-                            return None;
-                        },
-                        result = parent_request => match result {
-                            Ok(parent) => parent,
-                            Err(_) => {
-                                debug!(reason = "failed to fetch parent", "skipping verification");
-                                return None;
-                            }
-                        },
-                    };
-
-                    if let Err(err) = validate_block::<H, _, _>(
-                        &epocher,
-                        block.as_ref(),
-                        parent.as_ref(),
-                        &consensus_context,
-                        commitment,
-                        parent_commitment,
-                    ) {
-                        debug!(
-                            ?err,
-                            expected_commitment = %commitment,
-                            block_commitment = %block.commitment(),
-                            expected_parent_commitment = %parent_commitment,
-                            parent_commitment = %parent.commitment(),
-                            expected_parent = %parent.digest(),
-                            block_parent = %block.parent(),
-                            parent_height = %parent.height(),
-                            block_height = %block.height(),
-                            "block failed coded invariant validation"
-                        );
-                        return Some(false);
-                    }
-
                     let ancestry_stream = marshal.ancestor_stream(
                         Arc::new(runtime_context.child("ancestor_stream")),
                         [block.inner_shared(), parent.inner_shared()],
@@ -469,9 +462,7 @@ where
                 };
                 let (verdict, durable) = futures::join!(verify, store);
 
-                // Publish only when the block is both valid and durable. App-invalid
-                // candidates may already be in the cache from the concurrent store above,
-                // so the gate verdict is the authority for consensus progress.
+                // Publish only when the block is both valid and durable.
                 if let Some(application_valid) = gates::resolve(verdict, durable) {
                     tx.send_lossy(GateOutcome::Ready(application_valid));
                 }

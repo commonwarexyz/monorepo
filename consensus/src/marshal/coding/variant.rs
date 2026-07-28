@@ -201,6 +201,17 @@ where
     + 'static {
         self.resolve_descendant(start, tip)
     }
+
+    #[allow(clippy::type_complexity)]
+    fn get_descendants(
+        &self,
+        start: BlockID<<Self::Block as Digestible>::Digest>,
+        tip: BlockID<<Self::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Option<(Vec<Arc<Self::Block>>, <Self::Block as Digestible>::Digest)>>
+    + Send
+    + 'static {
+        self.resolve_descendants(start, tip)
+    }
 }
 
 #[cfg(test)]

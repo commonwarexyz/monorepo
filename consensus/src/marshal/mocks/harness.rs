@@ -3895,7 +3895,10 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
 /// Regression test: commitment-fetched blocks must wake subscribers and cache by
 /// decoded height even when the local pruning hint is far ahead.
-pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
+pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>()
+where
+    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+{
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {
@@ -3980,6 +3983,16 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             .await
             .expect("height-hint-mismatched fetch should cache by decoded height");
         assert_eq!(cached.height(), actual_height);
+        assert!(
+            BlockProvider::get_descendant(
+                &victim_handle.mailbox,
+                actual_height.into(),
+                (&received.digest()).into(),
+            )
+            .await
+            .is_none(),
+            "height-hint-mismatched fetch must not enter the fork tree"
+        );
     });
 }
 

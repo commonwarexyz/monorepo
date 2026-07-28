@@ -119,7 +119,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         tip: BlockID<<V::Block as Digestible>::Digest>,
         /// A channel to send the resolved block and tip digest.
         #[allow(clippy::type_complexity)]
-        response: oneshot::Sender<Option<(Arc<V::Block>, <V::Block as Digestible>::Digest)>>,
+        response: oneshot::Sender<
+            Option<(Vec<Arc<V::Block>>, <V::Block as Digestible>::Digest)>,
+        >,
     },
     /// A hint to fetch a notarized block by round without adding another local subscriber.
     ///
@@ -821,6 +823,26 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> impl Future<Output = Option<(Arc<V::ApplicationBlock>, <V::Block as Digestible>::Digest)>>
     + Send
     + 'static {
+        let descendants = self.resolve_descendants(start, tip);
+        async move {
+            let (blocks, tip) = descendants.await?;
+            Some((blocks.into_iter().next()?, tip))
+        }
+    }
+
+    /// Retrieves the next contiguous batch from `start` toward `tip`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn resolve_descendants(
+        &self,
+        start: BlockID<<V::Block as Digestible>::Digest>,
+        tip: BlockID<<V::Block as Digestible>::Digest>,
+    ) -> impl Future<
+        Output = Option<(
+            Vec<Arc<V::ApplicationBlock>>,
+            <V::Block as Digestible>::Digest,
+        )>,
+    > + Send
+    + 'static {
         let mailbox = self.clone();
         async move {
             let (response, receiver) = oneshot::channel();
@@ -830,8 +852,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
                 tip,
                 response,
             });
-            let (block, tip) = receiver.await.ok().flatten()?;
-            Some((V::into_inner_shared(block), tip))
+            let (blocks, tip) = receiver.await.ok().flatten()?;
+            Some((blocks.into_iter().map(V::into_inner_shared).collect(), tip))
         }
     }
 

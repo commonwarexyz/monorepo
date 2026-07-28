@@ -62,6 +62,9 @@ use tracing::{Instrument as _, Span, debug, info_span, warn};
 // may differ from the block digest for coded variants.
 type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 
+// Bounds archive work performed by one descendant mailbox request.
+const DESCENDANT_BATCH_SIZE: usize = 64;
+
 // A resolver delivery plus the peer-validity response channel. Local
 // annotations on the delivery decide how accepted data is used.
 struct ResolverDelivery<V: Variant> {
@@ -678,6 +681,7 @@ where
             Message::Certified {
                 round, block, ack, ..
             } => {
+                self.track_candidate(&block);
                 (self, _) = self
                     .ingest(Arc::clone(&block), buffer, application, resolver)
                     .await;
@@ -737,6 +741,7 @@ where
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    self.track_candidate(&block);
                     (self, _) = self
                         .ingest(Arc::clone(&block), buffer, application, resolver)
                         .await;
@@ -1248,6 +1253,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
+        self.track_candidate(&block);
         (self, _) = self
             .ingest(Arc::clone(&block), buffer, application, resolver)
             .await;
@@ -1282,10 +1288,6 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(Arc::clone(&block));
-
-        // Track the block as a fork candidate until a finalization decides
-        // its fate.
-        self.track_candidate(&block);
 
         if !self.floor.matches_pending_anchor(V::commitment(&block)) {
             return (self, false);
@@ -1455,6 +1457,18 @@ where
                 let annotations = subscribers
                     .map_into(|(annotation, _)| annotation)
                     .into_vec();
+                let certified = annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }));
+                let admitted = annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Certified { height: expected } if *expected == height
+                    )
+                });
+                if admitted {
+                    self.track_candidate(&block);
+                }
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1479,9 +1493,7 @@ where
                             application,
                         )
                         .await;
-                } else if annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                } else if certified
                     && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
                 {
@@ -1731,6 +1743,7 @@ where
                     // bookkeeping below never runs ahead of storage.
                     let height = block.height();
                     let block = Arc::new(block);
+                    self.track_candidate(&block);
                     let block_sync;
                     (self.cache, block_sync) = self
                         .cache
@@ -2258,12 +2271,18 @@ where
                 tree.insert(&Arc::new(block));
             })
             .await;
+        self.cache
+            .visit_certified_blocks(|stored| {
+                let block: V::Block = stored.into();
+                tree.insert_parent(&Arc::new(block));
+            })
+            .await;
         let _ = self.pending_blocks.try_set(self.tree.len() as u64);
         debug!(blocks = self.tree.len(), "rebuilt fork tree");
     }
 
-    /// Resolves the block at `start` within the locally known ancestry of
-    /// `tip`, returning it with the resolved tip digest.
+    /// Resolves the next bounded batch of locally known ancestry from `start`
+    /// toward `tip`, returning it with the resolved tip digest.
     ///
     /// Returns `None` when `tip` is unknown locally, `start` does not lie on
     /// the tip's chain, or the block at `start` is not locally available.
@@ -2272,7 +2291,7 @@ where
         &self,
         start: BlockID<<V::Block as Digestible>::Digest>,
         tip: BlockID<<V::Block as Digestible>::Digest>,
-    ) -> Option<(Arc<V::Block>, <V::Block as Digestible>::Digest)> {
+    ) -> Option<(Vec<Arc<V::Block>>, <V::Block as Digestible>::Digest)> {
         // Resolve the tip to a digest. Height-identified tips can only name
         // finalized blocks.
         let tip = match tip {
@@ -2305,8 +2324,11 @@ where
         let (start_height, located) = match start {
             BlockID::Height(height) => (height, None),
             BlockID::Digest(digest) => {
-                if let Some(block) = candidates.iter().find(|block| block.digest() == digest) {
-                    return Some((Arc::clone(block), tip));
+                if let Some(position) = candidates
+                    .iter()
+                    .position(|block| block.digest() == digest)
+                {
+                    return Some((candidates[position..].to_vec(), tip));
                 }
                 let block = self.get_finalized_block_by_digest(&digest).await?;
                 (block.height(), Some(block))
@@ -2332,18 +2354,41 @@ where
                 .delta_from(first.height())
                 .expect("start height must be at or above the first candidate")
                 .get() as usize;
-            return Some((Arc::clone(&candidates[offset]), tip));
+            return Some((candidates[offset..].to_vec(), tip));
         }
 
         // At or below the finalized boundary: the candidate segment must
         // connect to the finalized chain, and the block must be stored (a
         // digest-identified start was already located above).
-        boundary?;
-        let block = match located {
-            Some(block) => block,
-            None => self.get_finalized_block(start_height).await?,
-        };
-        Some((Arc::new(block), tip))
+        let boundary = boundary?;
+        let mut blocks = Vec::new();
+        let mut height = start_height;
+        let mut located = located;
+        let reached_boundary;
+        loop {
+            let block = if height == start_height {
+                match located.take() {
+                    Some(block) => block,
+                    None => self.get_finalized_block(height).await?,
+                }
+            } else {
+                self.get_finalized_block(height).await?
+            };
+            blocks.push(Arc::new(block));
+            if height == boundary {
+                reached_boundary = true;
+                break;
+            }
+            if blocks.len() == DESCENDANT_BATCH_SIZE {
+                reached_boundary = false;
+                break;
+            }
+            height = height.get().checked_add(1).map(Height::new)?;
+        }
+        if reached_boundary {
+            blocks.extend(candidates);
+        }
+        Some((blocks, tip))
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total

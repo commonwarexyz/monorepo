@@ -631,18 +631,16 @@ where
         None
     }
 
-    /// Visits every block held by the prunable caches (verified, notarized,
-    /// and certified) across all initialized epochs.
+    /// Visits every locally admitted block held by the verified and notarized
+    /// caches across all initialized epochs.
     ///
     /// Used to rebuild in-memory candidate state on startup. The same block
     /// may be visited more than once if it is present in multiple archives.
     pub(crate) async fn visit_blocks(&self, mut visit: impl FnMut(V::StoredBlock)) {
         for cache in self.caches.values() {
-            let archives = [
-                &cache.verified_blocks,
-                &cache.notarized_blocks,
-                &cache.certified_blocks,
-            ];
+            // Certified ancestry responses require structural admission during
+            // the separate child-first pass below.
+            let archives = [&cache.verified_blocks, &cache.notarized_blocks];
             for archive in archives {
                 let ranges: Vec<_> = archive.ranges().collect();
                 for (start, end) in ranges {
@@ -655,6 +653,35 @@ where
                             visit(value);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Visits cached certified ancestry blocks from highest to lowest height.
+    ///
+    /// These responses require a tracked child to prove structural admission
+    /// during fork-tree reconstruction, so children must be visited first.
+    pub(crate) async fn visit_certified_blocks(&self, mut visit: impl FnMut(V::StoredBlock)) {
+        for cache in self.caches.values().rev() {
+            let ranges: Vec<_> = cache.certified_blocks.ranges().collect();
+            for (start, end) in ranges.into_iter().rev() {
+                let mut index = end;
+                loop {
+                    let values = cache
+                        .certified_blocks
+                        .get_all(index)
+                        .await
+                        .expect("failed to read cached certified blocks");
+                    for value in values.into_iter().flatten() {
+                        visit(value);
+                    }
+                    if index == start {
+                        break;
+                    }
+                    index = index
+                        .checked_sub(1)
+                        .expect("certified block range must be ordered");
                 }
             }
         }

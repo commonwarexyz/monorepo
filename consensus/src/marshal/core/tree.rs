@@ -43,6 +43,8 @@ pub(crate) struct ForkTree<B: Block> {
     nodes: BTreeMap<B::Digest, Arc<B>>,
     /// Candidate blocks at each height.
     by_height: BTreeMap<Height, Vec<Arc<B>>>,
+    /// Parent digests referenced by candidates at each child height.
+    parents_by_height: BTreeMap<Height, BTreeSet<B::Digest>>,
 }
 
 impl<B: Block> ForkTree<B> {
@@ -55,6 +57,7 @@ impl<B: Block> ForkTree<B> {
             root: None,
             nodes: BTreeMap::new(),
             by_height: BTreeMap::new(),
+            parents_by_height: BTreeMap::new(),
         }
     }
 
@@ -87,7 +90,7 @@ impl<B: Block> ForkTree<B> {
             // A candidate directly above the root must extend it, and a
             // candidate claiming the root as its parent must sit directly
             // above it. Either mismatch is a provable lie.
-            if (height == root_height.next()) != (parent == *root_digest) {
+            if (height.previous() == Some(*root_height)) != (parent == *root_digest) {
                 return false;
             }
         }
@@ -95,7 +98,7 @@ impl<B: Block> ForkTree<B> {
         // A candidate whose tracked parent is not exactly one height below
         // lies about its height or its parent.
         if let Some(tracked) = self.nodes.get(&parent)
-            && tracked.height().next() != height
+            && height.previous() != Some(tracked.height())
         {
             return false;
         }
@@ -105,7 +108,28 @@ impl<B: Block> ForkTree<B> {
             .entry(height)
             .or_default()
             .push(Arc::clone(block));
+        self.parents_by_height
+            .entry(height)
+            .or_default()
+            .insert(parent);
         true
+    }
+
+    /// Inserts a cached ancestry block only when it is the structurally valid
+    /// parent of an already tracked candidate.
+    pub(crate) fn insert_parent(&mut self, block: &Arc<B>) -> bool {
+        let Some(child_height) = block.height().get().checked_add(1).map(Height::new) else {
+            return false;
+        };
+        let digest = block.digest();
+        if !self
+            .parents_by_height
+            .get(&child_height)
+            .is_some_and(|parents| parents.contains(&digest))
+        {
+            return false;
+        }
+        self.insert(block)
     }
 
     /// Records a newly finalized block, pruning every candidate it supersedes.
@@ -124,8 +148,13 @@ impl<B: Block> ForkTree<B> {
         self.root = Some((height, digest));
 
         // Drop candidates at or below the new root.
-        let above = self.by_height.split_off(&height.next());
+        let mut above = self.by_height.split_off(&height);
         for blocks in self.by_height.values() {
+            for stale in blocks {
+                self.nodes.remove(&stale.digest());
+            }
+        }
+        if let Some(blocks) = above.remove(&height) {
             for stale in blocks {
                 self.nodes.remove(&stale.digest());
             }
@@ -140,14 +169,13 @@ impl<B: Block> ForkTree<B> {
         // exactly one below) makes a single pass complete. Candidates whose
         // parents were never tracked cannot be classified and survive.
         let nodes = &mut self.nodes;
-        let boundary = height.next();
         let mut conflicting = BTreeSet::new();
         for (&level, blocks) in self.by_height.iter_mut() {
             blocks.retain(|candidate| {
                 let parent = candidate.parent();
                 let conflicts = if parent == digest {
-                    level != boundary
-                } else if level == boundary {
+                    level.previous() != Some(height)
+                } else if level.previous() == Some(height) {
                     true
                 } else {
                     conflicting.contains(&parent)
@@ -160,6 +188,13 @@ impl<B: Block> ForkTree<B> {
             });
         }
         self.by_height.retain(|_, blocks| !blocks.is_empty());
+        self.parents_by_height.clear();
+        for (&level, blocks) in &self.by_height {
+            self.parents_by_height
+                .entry(level)
+                .or_default()
+                .extend(blocks.iter().map(|block| block.parent()));
+        }
     }
 
     /// Returns the chain of candidate blocks ending at `tip`, walking parent
@@ -181,7 +216,7 @@ impl<B: Block> ForkTree<B> {
                 break None;
             };
             if let Some(lowest) = blocks.last()
-                && block.height().next() != lowest.height()
+                && lowest.height().previous() != Some(block.height())
             {
                 break None;
             }
@@ -383,6 +418,36 @@ mod tests {
         // The truthful equivalents are accepted.
         assert!(tree.insert(&block(child.digest(), 7, 4)));
         assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    fn maximum_height_is_handled_without_overflow() {
+        let mut tree = ForkTree::<TestBlock>::new();
+        let root = block(Sha256Digest::EMPTY, 0, 0);
+        tree.finalize(root.height(), root.digest());
+
+        let maximum = block(Sha256Digest::EMPTY, u64::MAX, 1);
+        assert!(tree.insert(&maximum));
+        assert!(!tree.insert(&block(maximum.digest(), u64::MAX, 2)));
+
+        tree.finalize(maximum.height(), maximum.digest());
+        assert_eq!(tree.len(), 0);
+        assert!(!tree.insert(&block(maximum.digest(), u64::MAX, 3)));
+    }
+
+    #[test]
+    fn cached_parent_requires_a_tracked_child() {
+        let mut tree = ForkTree::<TestBlock>::new();
+        let root = block(Sha256Digest::EMPTY, 0, 0);
+        tree.finalize(root.height(), root.digest());
+
+        let parent = block(root.digest(), 1, 1);
+        assert!(!tree.insert_parent(&parent));
+
+        let child = block(parent.digest(), 2, 2);
+        assert!(tree.insert(&child));
+        assert!(tree.insert_parent(&parent));
+        assert!(tree.branch(&child.digest()).unwrap().root.is_some());
     }
 
     #[test]
