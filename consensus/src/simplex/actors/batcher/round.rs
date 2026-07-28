@@ -1,4 +1,4 @@
-use super::Verifier;
+use super::{Verifier, verifier::ProposalSource};
 use crate::{
     Reporter,
     simplex::{
@@ -95,30 +95,20 @@ impl<
         self.verifier.has_certificate(kind)
     }
 
-    /// Records that a certificate of `kind` exists, dropping its buffered votes.
-    fn record_certificate(&mut self, kind: Kind) {
-        self.verifier.record_certificate(kind);
-    }
-
-    /// Records a verified notarization, dropping its buffered votes and
-    /// adopting its authoritative proposal, which replaces any conflicting
-    /// proposal learned from the leader's vote.
-    ///
-    /// Returns whether the proposal changed.
-    pub fn record_notarization(&mut self, proposal: &Proposal<D>) -> bool {
-        let changed = self.verifier.set_proposal(proposal.clone());
-        self.record_certificate(Kind::Notarization);
-        changed
-    }
-
-    /// Records a verified nullification, dropping its buffered votes.
-    pub fn record_nullification(&mut self) {
-        self.record_certificate(Kind::Nullification);
-    }
-
-    /// Records a verified finalization, dropping its buffered votes.
-    pub fn record_finalization(&mut self) {
-        self.record_certificate(Kind::Finalization);
+    /// Records a verified certificate and returns whether the round's
+    /// proposal changed.
+    pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
+        let proposal_changed = match certificate {
+            Certificate::Notarization(notarization) => {
+                // Adopt the notarization's proposal, replacing any conflicting proposal learned
+                // from the leader's vote.
+                self.verifier
+                    .set_proposal(ProposalSource::Notarization(notarization.proposal.clone()))
+            }
+            Certificate::Nullification(_) | Certificate::Finalization(_) => false,
+        };
+        self.verifier.record_certificate(certificate.kind());
+        proposal_changed
     }
 
     /// Adds a vote from the network to this round's verifier.

@@ -154,6 +154,23 @@ impl<V> Certification<V> {
     }
 }
 
+/// The round's proposal and how it was learned.
+pub(super) enum ProposalSource<D: Digest> {
+    /// The leader's notarize vote. May be replaced by a notarization.
+    Leader(Proposal<D>),
+    /// A verified notarization. Never replaced.
+    Notarization(Proposal<D>),
+}
+
+impl<D: Digest> ProposalSource<D> {
+    /// Returns the proposal.
+    const fn proposal(&self) -> &Proposal<D> {
+        match self {
+            Self::Leader(proposal) | Self::Notarization(proposal) => proposal,
+        }
+    }
+}
+
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
 /// For schemes where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable)
@@ -187,7 +204,7 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// A known leader's notarize vote may supply the initial proposal. A
     /// verified notarization is authoritative and may replace it, or establish
     /// the proposal before the leader is identified.
-    proposal: Option<Proposal<D>>,
+    proposal: Option<ProposalSource<D>>,
 
     /// Notarize certification progress.
     notarize: Certification<Notarize<S, D>>,
@@ -234,8 +251,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Returns the round's proposal, once known.
-    pub const fn proposal(&self) -> Option<&Proposal<D>> {
-        self.proposal.as_ref()
+    pub fn proposal(&self) -> Option<&Proposal<D>> {
+        self.proposal.as_ref().map(ProposalSource::proposal)
     }
 
     /// Attempts to construct a certificate from verified votes: the first kind
@@ -324,7 +341,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         if self.proposal.is_some() || self.leader != Some(notarize.signer()) {
             return;
         }
-        self.set_proposal(notarize.proposal.clone());
+        self.set_proposal(ProposalSource::Leader(notarize.proposal.clone()));
     }
 
     /// Adopts the proposal to which notarize and finalize votes are filtered,
@@ -332,19 +349,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// other proposal.
     ///
     /// Returns whether the proposal changed.
-    pub(super) fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
-        if self.proposal.as_ref() == Some(&proposal) {
-            return false;
+    pub(super) fn set_proposal(&mut self, proposal: ProposalSource<D>) -> bool {
+        let new = proposal.proposal();
+        let changed = self.proposal() != Some(new);
+        if changed {
+            self.notarize.retain(|n| &n.proposal == new);
+            self.finalize.retain(|f| &f.proposal == new);
         }
-
-        // The leader-vote path calls this only while the proposal is unknown.
-        // The verified-notarization path may replace a conflicting proposal
-        // because its certificate is authoritative.
-        self.notarize.retain(|n| n.proposal == proposal);
-        self.finalize.retain(|f| f.proposal == proposal);
         self.proposal = Some(proposal);
-
-        true
+        changed
     }
 
     /// Adds a [Vote] message to the batch for later verification.
@@ -367,7 +380,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 self.try_set_proposal_from_leader(&notarize);
 
                 // If the proposal is known and the message is not for it, drop it
-                if let Some(proposal) = &self.proposal
+                if let Some(proposal) = self.proposal()
                     && proposal != &notarize.proposal
                 {
                     return;
@@ -379,7 +392,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             }
             Vote::Finalize(finalize) => {
                 // If the proposal is known and the message is not for it, drop it
-                if let Some(proposal) = &self.proposal
+                if let Some(proposal) = self.proposal()
                     && proposal != &finalize.proposal
                 {
                     return;
@@ -763,14 +776,16 @@ mod tests {
         verifier2.set_leader(leader, Some(&leader_notarize));
         assert_eq!(verifier2.leader(), Some(leader));
         assert_eq!(verifier2.proposal(), Some(&leader_notarize.proposal));
-        assert!(!verifier2.set_proposal(leader_notarize.proposal.clone()));
 
         // A verified notarization supersedes a conflicting proposal learned
         // from the leader's vote.
-        let certified_proposal = Proposal::new(round, View::new(0), sample_digest(2));
-        assert_ne!(certified_proposal, leader_notarize.proposal);
-        assert!(verifier2.set_proposal(certified_proposal.clone()));
-        assert_eq!(verifier2.proposal(), Some(&certified_proposal));
+        let notarized_proposal = Proposal::new(round, View::new(0), sample_digest(2));
+        assert_ne!(notarized_proposal, leader_notarize.proposal);
+        assert!(verifier2.set_proposal(ProposalSource::Notarization(notarized_proposal.clone())));
+        assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
+
+        // Re-adopting the same proposal reports no change.
+        assert!(!verifier2.set_proposal(ProposalSource::Notarization(notarized_proposal.clone())));
 
         // If the notarization arrives first, setting the leader cannot replace
         // its proposal with a conflicting buffered leader vote.
@@ -779,12 +794,12 @@ mod tests {
             schemes[0].clone(),
             quorum,
         );
-        assert!(verifier3.set_proposal(certified_proposal.clone()));
+        assert!(verifier3.set_proposal(ProposalSource::Notarization(notarized_proposal.clone())));
         assert!(verifier3.leader().is_none());
-        assert_eq!(verifier3.proposal(), Some(&certified_proposal));
+        assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
         verifier3.set_leader(leader, Some(&leader_notarize));
         assert_eq!(verifier3.leader(), Some(leader));
-        assert_eq!(verifier3.proposal(), Some(&certified_proposal));
+        assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
     }
 
     #[test]
@@ -1383,7 +1398,7 @@ mod tests {
 
         let (mut verifier, finalize) = test_verifier_finalize();
 
-        verifier.set_proposal(finalize.proposal.clone());
+        verifier.set_proposal(ProposalSource::Notarization(finalize.proposal.clone()));
         assert!(verifier.leader.is_none());
         assert!(
             verifier
