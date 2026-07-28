@@ -43,8 +43,9 @@ pub mod bls12381_multisig {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_bls12381_multisig;
+    use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>, AckNamespace);
+    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>, AckNamespace, N3f1);
 }
 
 pub mod bls12381_threshold {
@@ -58,8 +59,9 @@ pub mod bls12381_threshold {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_bls12381_threshold;
+    use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>, AckNamespace);
+    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>, AckNamespace, N3f1);
 }
 
 pub mod ed25519 {
@@ -72,8 +74,9 @@ pub mod ed25519 {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::{ed25519, impl_certificate_ed25519};
+    use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>, AckNamespace);
+    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>, AckNamespace, N3f1);
 }
 
 pub mod secp256r1 {
@@ -86,6 +89,7 @@ pub mod secp256r1 {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_secp256r1;
+    use commonware_utils::N3f1;
 
-    impl_certificate_secp256r1!(AckSubject<'a, P, D>, AckNamespace);
+    impl_certificate_secp256r1!(AckSubject<'a, P, D>, AckNamespace, N3f1);
 }
