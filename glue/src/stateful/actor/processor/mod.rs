@@ -929,7 +929,7 @@ mod tests {
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
-        marshal::ancestry::{Ancestry, BlockProvider}, marshal::{BlockID, ancestry::BlockProvider},
+        marshal::{BlockID, ancestry::{Ancestry, BlockProvider}},
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
     };

@@ -572,16 +572,22 @@ mod tests {
         type Block = T::Block;
         type Error = T::Error;
 
-        async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-            self.inner.put(block).await
+        async fn put(mut self, block: Self::Block) -> Result<Self, Self::Error> {
+            self.inner = self.inner.put(block).await?;
+            Ok(self)
         }
 
-        async fn sync(&mut self) -> Result<(), Self::Error> {
-            self.inner.sync().await
+        async fn sync(mut self) -> Result<Self, Self::Error> {
+            self.inner = self.inner.sync().await?;
+            Ok(self)
         }
 
-        async fn start_sync(&mut self) -> Result<commonware_runtime::Handle<()>, Self::Error> {
-            self.inner.start_sync().await
+        async fn start_sync(
+            mut self,
+        ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
+            let handle;
+            (self.inner, handle) = self.inner.start_sync().await?;
+            Ok((self, handle))
         }
 
         async fn get(
@@ -596,8 +602,9 @@ mod tests {
             self.inner.get(id).await
         }
 
-        async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
-            self.inner.prune(min).await
+        async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
+            self.inner = self.inner.prune(min).await?;
+            Ok(self)
         }
 
         fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {

@@ -122,6 +122,13 @@ impl<B: Block> Ancestry<B> for BoxedAncestry<B> {
     fn peek(&self) -> Option<&B> {
         self.0.peek_erased()
     }
+
+    fn descendants(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
+        self.0.descendants_erased(start)
+    }
 }
 
 impl<B: Block> Stream for BoxedAncestry<B> {
@@ -135,6 +142,11 @@ impl<B: Block> Stream for BoxedAncestry<B> {
 trait ErasedAncestry<B: Block>: Stream<Item = Arc<B>> + Send + Unpin + 'static {
     fn peek_erased(&self) -> Option<&B>;
 
+    fn descendants_erased(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> BoxFuture<'_, Option<BoxedAncestry<B>>>;
+
     fn clone_box(&self) -> Box<dyn ErasedAncestry<B>>;
 }
 
@@ -145,6 +157,15 @@ where
 {
     fn peek_erased(&self) -> Option<&B> {
         Ancestry::peek(self)
+    }
+
+    fn descendants_erased(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> BoxFuture<'_, Option<BoxedAncestry<B>>> {
+        Ancestry::descendants(self, start)
+            .map(|ancestry| ancestry.map(BoxedAncestry::new))
+            .boxed()
     }
 
     fn clone_box(&self) -> Box<dyn ErasedAncestry<B>> {
@@ -207,6 +228,13 @@ where
             .front()
             .map(Arc::as_ref)
             .or_else(|| self.tail.peek())
+    }
+
+    fn descendants(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
+        self.tail.descendants(start)
     }
 }
 
@@ -423,6 +451,8 @@ where
 
         Self {
             buffered: self.buffered.clone(),
+            chain: self.chain.clone(),
+            tip: self.tip,
             marshal,
             fetch_duration,
             clock,
@@ -619,6 +649,8 @@ pub struct DescendantStream<M: BlockProvider, C: Clock> {
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
+    /// The block whose child is currently being fetched.
+    pending_parent: Option<Arc<M::Block>>,
     #[pin]
     pending: OptionFuture<PendingDescendantFetch<M::Block>>,
 }
@@ -643,6 +675,7 @@ impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
             marshal,
             fetch_duration,
             clock,
+            pending_parent: None,
             pending: None.into(),
         }
     }
@@ -666,6 +699,7 @@ impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
             marshal,
             fetch_duration,
             clock,
+            pending_parent: None,
             pending: None.into(),
         }
     }
@@ -675,6 +709,36 @@ impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
     /// exhausted.
     pub fn peek(&self) -> Option<&M::Block> {
         self.buffered.front().map(Arc::as_ref)
+    }
+}
+
+impl<M, C> Clone for DescendantStream<M, C>
+where
+    M: BlockProvider,
+    C: Clock,
+{
+    fn clone(&self) -> Self {
+        let marshal = self.marshal.clone();
+        let fetch_duration = self.fetch_duration.clone();
+        let clock = self.clock.clone();
+        let pending = self
+            .pending_parent
+            .as_ref()
+            .map(|parent| {
+                timed_descendant_fetch(&clock, &marshal, parent, self.tip, &fetch_duration)
+            })
+            .into();
+
+        Self {
+            buffered: self.buffered.clone(),
+            chain: self.chain.clone(),
+            tip: self.tip,
+            marshal,
+            fetch_duration,
+            clock,
+            pending_parent: self.pending_parent.clone(),
+            pending,
+        }
     }
 }
 
@@ -732,6 +796,7 @@ where
                     *this.tip,
                     this.fetch_duration,
                 );
+                *this.pending_parent = Some(block.clone());
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If
@@ -740,15 +805,21 @@ where
                     Poll::Ready(Some(Some((link, child)))) => {
                         assert_extends(&link, child.as_ref());
                         this.buffered.push_back(child);
+                        *this.pending_parent = None;
                     }
                     Poll::Ready(Some(None)) => {
                         *this.pending.as_mut() = None.into();
+                        *this.pending_parent = None;
                     }
-                    Poll::Ready(None) | Poll::Pending => {}
+                    Poll::Ready(None) => {
+                        *this.pending_parent = None;
+                    }
+                    Poll::Pending => {}
                 }
             } else {
                 // The tip has been reached; finish the stream.
                 *this.pending.as_mut() = None.into();
+                *this.pending_parent = None;
             }
 
             return Poll::Ready(Some(block));
@@ -758,10 +829,12 @@ where
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) | Poll::Ready(Some(None)) => {
                 *this.pending.as_mut() = None.into();
+                *this.pending_parent = None;
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Some((link, block)))) => {
                 assert_extends(&link, block.as_ref());
+                *this.pending_parent = None;
                 if block.digest() != *this.tip {
                     let future = timed_descendant_fetch(
                         this.clock,
@@ -770,6 +843,7 @@ where
                         *this.tip,
                         this.fetch_duration,
                     );
+                    *this.pending_parent = Some(block.clone());
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch.
@@ -778,15 +852,21 @@ where
                         Poll::Ready(Some(Some((link, child)))) => {
                             assert_extends(&link, child.as_ref());
                             this.buffered.push_back(child);
+                            *this.pending_parent = None;
                         }
                         Poll::Ready(Some(None)) => {
                             *this.pending.as_mut() = None.into();
+                            *this.pending_parent = None;
                         }
-                        Poll::Ready(None) | Poll::Pending => {}
+                        Poll::Ready(None) => {
+                            *this.pending_parent = None;
+                        }
+                        Poll::Pending => {}
                     }
                 } else {
                     // The tip has been reached; finish the stream.
                     *this.pending.as_mut() = None.into();
+                    *this.pending_parent = None;
                 }
 
                 Poll::Ready(Some(block))
@@ -828,6 +908,32 @@ mod test {
                     .map(Arc::new),
             )
         }
+
+        fn get_descendant(
+            &self,
+            start: BlockID<Sha256Digest>,
+            tip: BlockID<Sha256Digest>,
+        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
+        {
+            let result = (|| {
+                let BlockID::Digest(tip) = tip else {
+                    return None;
+                };
+                let mut cursor = tip;
+                loop {
+                    let block = self.0.iter().find(|block| block.digest() == cursor)?;
+                    let found = match start {
+                        BlockID::Height(height) => block.height() == height,
+                        BlockID::Digest(digest) => block.digest() == digest,
+                    };
+                    if found {
+                        return Some((Arc::new(block.clone()), tip));
+                    }
+                    cursor = block.parent;
+                }
+            })();
+            std::future::ready(result)
+        }
     }
 
     type TestBlock = Block<Sha256Digest, ()>;
@@ -865,30 +971,11 @@ mod test {
 
         fn get_descendant(
             &self,
-            start: BlockID<Sha256Digest>,
-            tip: BlockID<Sha256Digest>,
+            _start: BlockID<Sha256Digest>,
+            _tip: BlockID<Sha256Digest>,
         ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
         {
-            // Walk parent links from the tip down to locate the start on
-            // the tip's chain.
-            let result = (|| {
-                let BlockID::Digest(tip) = tip else {
-                    return None;
-                };
-                let mut cursor = tip;
-                loop {
-                    let block = self.0.iter().find(|b| b.digest() == cursor)?;
-                    let found = match start {
-                        BlockID::Height(height) => block.height() == height,
-                        BlockID::Digest(digest) => block.digest() == digest,
-                    };
-                    if found {
-                        return Some((Arc::new(block.clone()), tip));
-                    }
-                    cursor = block.parent;
-                }
-            })();
-            std::future::ready(result)
+            std::future::ready(None)
         }
     }
 

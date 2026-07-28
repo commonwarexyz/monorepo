@@ -5233,7 +5233,7 @@ where
 
         // Finalize blocks at heights 1-5.
         let genesis = (
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(participants.len() as u16),
         );
         let blocks = finalize_chain::<H>(
@@ -5328,7 +5328,7 @@ where
             BlockProvider::get_descendant(
                 &handle.mailbox,
                 Height::new(1).into(),
-                (&Sha256::hash(b"unknown")).into(),
+                (&Sha256::hash(&[b"unknown"])).into(),
             )
             .await
             .is_none()
@@ -5392,7 +5392,7 @@ where
 
         // Finalize blocks at heights 1-3.
         let genesis = (
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(participants.len() as u16),
         );
         let blocks = finalize_chain::<H>(
