@@ -1,13 +1,12 @@
 use crate::{
     CertifiableBlock,
     marshal::{
-        BlockID,
-        ancestry::BlockProvider,
+        ancestry::{BlockProvider, DescendantPage, DescendantProvider, DescendantRequest},
         coding::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
         },
-        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+        core::{Buffer, CommitmentFallback, DescendantCursor, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
@@ -191,26 +190,24 @@ where
         async move { receiver?.await.ok().map(|block| block.inner_shared()) }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn get_descendant(
-        &self,
-        start: BlockID<<Self::Block as Digestible>::Digest>,
-        tip: BlockID<<Self::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<(Arc<Self::Block>, <Self::Block as Digestible>::Digest)>>
-    + Send
-    + 'static {
-        self.resolve_descendant(start, tip)
-    }
+}
 
-    #[allow(clippy::type_complexity)]
+impl<S, B, C, H, P> DescendantProvider for Mailbox<S, Coding<B, C, H, P>>
+where
+    S: Scheme,
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    type Cursor = DescendantCursor<Coding<B, C, H, P>>;
+
     fn get_descendants(
         &self,
-        start: BlockID<<Self::Block as Digestible>::Digest>,
-        tip: BlockID<<Self::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<(Vec<Arc<Self::Block>>, <Self::Block as Digestible>::Digest)>>
-    + Send
-    + 'static {
-        self.resolve_descendants(start, tip)
+        request: DescendantRequest<<Self::Block as Digestible>::Digest, Self::Cursor>,
+    ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static
+    {
+        self.resolve_descendants(request)
     }
 }
 

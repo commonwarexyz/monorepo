@@ -11,7 +11,8 @@ use commonware_macros::stability;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
-    future::{BoxFuture, Either, OptionFuture},
+    future::{BoxFuture, OptionFuture},
+    stream::{BoxStream, StreamExt as _},
 };
 use pin_project::pin_project;
 use std::{
@@ -39,7 +40,7 @@ pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'st
     fn descendants(
         &self,
         start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send;
+    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send;
 }
 
 fn sort_and_validate_chain<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> Vec<Arc<B>> {
@@ -82,29 +83,8 @@ fn chain_suffix<B: Block>(chain: &[Arc<B>], start: BlockID<B::Digest>) -> Option
 /// Panics if the blocks do not form a contiguous chain.
 pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Ancestry<B> {
     let blocks: VecDeque<_> = blocks.into_iter().collect();
-    let chain = sort_and_validate_chain(blocks.iter().cloned());
+    let chain = Arc::from(sort_and_validate_chain(blocks.iter().cloned()));
     BoundedAncestry { blocks, chain }
-}
-
-/// Prepends a fixed sequence of blocks to an existing ancestry stream.
-///
-/// Blocks are yielded in iterator order before the tail is polled.
-///
-/// # Panics
-///
-/// Panics if the prefixed blocks do not form a contiguous chain.
-pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = Arc<B>>, tail: S) -> impl Ancestry<B>
-where
-    B: Block,
-    S: Ancestry<B>,
-{
-    let blocks: VecDeque<_> = blocks.into_iter().collect();
-    let chain = sort_and_validate_chain(blocks.iter().cloned());
-    PrefixedAncestry {
-        blocks,
-        chain,
-        tail,
-    }
 }
 
 /// Type-erased ancestry stream that preserves cloneability.
@@ -133,7 +113,7 @@ impl<B: Block> Ancestry<B> for BoxedAncestry<B> {
     fn descendants(
         &self,
         start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
+    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send {
         self.0.descendants_erased(start)
     }
 }
@@ -152,7 +132,7 @@ trait ErasedAncestry<B: Block>: Stream<Item = Arc<B>> + Send + Unpin + 'static {
     fn descendants_erased(
         &self,
         start: BlockID<B::Digest>,
-    ) -> BoxFuture<'_, Option<BoxedAncestry<B>>>;
+    ) -> BoxFuture<'_, Option<BoxStream<'static, Arc<B>>>>;
 
     fn clone_box(&self) -> Box<dyn ErasedAncestry<B>>;
 }
@@ -169,9 +149,9 @@ where
     fn descendants_erased(
         &self,
         start: BlockID<B::Digest>,
-    ) -> BoxFuture<'_, Option<BoxedAncestry<B>>> {
+    ) -> BoxFuture<'_, Option<BoxStream<'static, Arc<B>>>> {
         Ancestry::descendants(self, start)
-            .map(|ancestry| ancestry.map(BoxedAncestry::new))
+            .map(|ancestry| ancestry.map(|stream| stream.boxed()))
             .boxed()
     }
 
@@ -186,7 +166,7 @@ struct BoundedAncestry<B: Block> {
     blocks: VecDeque<Arc<B>>,
     /// The chain fixed at construction, ascending in height, serving forward
     /// walks regardless of how much of the stream has been consumed.
-    chain: Vec<Arc<B>>,
+    chain: Arc<[Arc<B>]>,
 }
 
 impl<B: Block> Unpin for BoundedAncestry<B> {}
@@ -199,13 +179,10 @@ impl<B: Block> Ancestry<B> for BoundedAncestry<B> {
     fn descendants(
         &self,
         start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
+    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send {
         // A bounded ancestry is fully in memory: serve the chain fixed at
         // construction from the start onward, in ascending height order.
-        std::future::ready(chain_suffix(&self.chain, start).map(|chain| Self {
-            blocks: chain.clone().into(),
-            chain,
-        }))
+        std::future::ready(chain_suffix(&self.chain, start).map(futures::stream::iter))
     }
 }
 
@@ -214,200 +191,6 @@ impl<B: Block> Stream for BoundedAncestry<B> {
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.blocks.pop_front())
-    }
-}
-
-#[derive(Clone)]
-struct PrefixedAncestry<B: Block, S> {
-    blocks: VecDeque<Arc<B>>,
-    chain: Vec<Arc<B>>,
-    tail: S,
-}
-
-impl<B: Block, S> Unpin for PrefixedAncestry<B, S> {}
-
-impl<B, S> Ancestry<B> for PrefixedAncestry<B, S>
-where
-    B: Block,
-    S: Ancestry<B>,
-{
-    fn peek(&self) -> Option<&B> {
-        self.blocks
-            .front()
-            .map(Arc::as_ref)
-            .or_else(|| self.tail.peek())
-    }
-
-    fn descendants(
-        &self,
-        start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
-        descendants_with_suffix(&self.tail, &self.chain, start)
-    }
-}
-
-impl<B, S> Stream for PrefixedAncestry<B, S>
-where
-    B: Block,
-    S: Ancestry<B>,
-{
-    type Item = Arc<B>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(block) = self.blocks.pop_front() {
-            return Poll::Ready(Some(block));
-        }
-        Pin::new(&mut self.tail).poll_next(cx)
-    }
-}
-
-/// A forward ancestry stream extended by a fixed chain suffix.
-#[derive(Clone)]
-struct SuffixedAncestry<B: Block, S> {
-    head: S,
-    phase: SuffixPhase,
-    blocks: VecDeque<Arc<B>>,
-    chain: Vec<Arc<B>>,
-    last: Option<(Height, B::Digest)>,
-}
-
-#[derive(Clone, Copy)]
-enum SuffixPhase {
-    Head,
-    Suffix,
-    Done,
-}
-
-impl<B: Block, S> SuffixedAncestry<B, S> {
-    fn new(head: S, chain: Vec<Arc<B>>) -> Self {
-        Self {
-            head,
-            phase: SuffixPhase::Head,
-            blocks: chain.clone().into(),
-            chain,
-            last: None,
-        }
-    }
-}
-
-impl<B: Block, S> Unpin for SuffixedAncestry<B, S> {}
-
-impl<B: Block, S> SuffixedAncestry<B, S> {
-    // Switches to the fixed suffix only when the yielded head proves that the
-    // splice is contiguous. A descendant head may end early when local state
-    // is pruned, in which case the composite stream must end with it.
-    fn attach_suffix(&mut self) {
-        let Some((height, digest)) = self.last else {
-            self.blocks.clear();
-            self.phase = SuffixPhase::Done;
-            return;
-        };
-
-        while self
-            .blocks
-            .front()
-            .is_some_and(|block| block.height() < height)
-        {
-            self.blocks.pop_front();
-        }
-
-        let Some(block) = self.blocks.front() else {
-            self.phase = SuffixPhase::Done;
-            return;
-        };
-        let connected = if block.height() == height {
-            block.digest() == digest
-        } else {
-            block.height().previous() == Some(height) && block.parent() == digest
-        };
-        if !connected {
-            self.blocks.clear();
-            self.phase = SuffixPhase::Done;
-            return;
-        }
-
-        // The overlapping block was already yielded by the head.
-        if block.height() == height {
-            self.blocks.pop_front();
-        }
-        self.phase = if self.blocks.is_empty() {
-            SuffixPhase::Done
-        } else {
-            SuffixPhase::Suffix
-        };
-    }
-}
-
-impl<B, S> Ancestry<B> for SuffixedAncestry<B, S>
-where
-    B: Block,
-    S: Ancestry<B>,
-{
-    fn peek(&self) -> Option<&B> {
-        match self.phase {
-            SuffixPhase::Head => self.head.peek(),
-            SuffixPhase::Suffix => self.blocks.front().map(Arc::as_ref),
-            SuffixPhase::Done => None,
-        }
-    }
-
-    fn descendants(
-        &self,
-        start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
-        descendants_with_suffix(&self.head, &self.chain, start)
-    }
-}
-
-fn descendants_with_suffix<'a, B, S>(
-    head: &'a S,
-    chain: &[Arc<B>],
-    start: BlockID<B::Digest>,
-) -> impl Future<Output = Option<BoxedAncestry<B>>> + Send + 'a
-where
-    B: Block,
-    S: Ancestry<B>,
-{
-    if let Some(suffix) = chain_suffix(chain, start) {
-        return Either::Left(std::future::ready(Some(BoxedAncestry::new(from_iter(
-            suffix,
-        )))));
-    }
-
-    let chain = chain.to_vec();
-    Either::Right(head.descendants(start).map(move |head| {
-        head.map(|head| BoxedAncestry::new(SuffixedAncestry::new(head, chain)))
-    }))
-}
-
-impl<B, S> Stream for SuffixedAncestry<B, S>
-where
-    B: Block,
-    S: Ancestry<B>,
-{
-    type Item = Arc<B>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if matches!(self.phase, SuffixPhase::Head) {
-            match Pin::new(&mut self.head).poll_next(cx) {
-                Poll::Ready(Some(block)) => {
-                    self.last = Some((block.height(), block.digest()));
-                    return Poll::Ready(Some(block));
-                }
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => self.attach_suffix(),
-            }
-        }
-
-        if matches!(self.phase, SuffixPhase::Suffix) {
-            if let Some(block) = self.blocks.pop_front() {
-                self.last = Some((block.height(), block.digest()));
-                return Poll::Ready(Some(block));
-            }
-            self.phase = SuffixPhase::Done;
-        }
-
-        Poll::Ready(None)
     }
 }
 
@@ -432,65 +215,42 @@ pub trait BlockProvider: Clone + Send + 'static {
         &self,
         block: &Self::Block,
     ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static;
+}
 
-    /// Retrieve the block at `start` within the locally known ancestry of
-    /// `tip`, together with the resolved tip digest.
-    ///
-    /// The chain is defined by the ancestry of `tip`, which may be an
-    /// unfinalized candidate (a fork tracked by marshal) or a finalized
-    /// block. Finalized blocks are served from storage and candidates from
-    /// marshal's in-memory fork tree. Unlike [Self::subscribe_parent], this
-    /// lookup never waits and never fetches from the network.
-    ///
-    /// Returns `None` when `tip` is unknown locally, `start` does not lie in
-    /// the tip's locally known ancestry, or the block at `start` is not
-    /// locally available.
-    #[allow(clippy::type_complexity)]
-    fn get_descendant(
-        &self,
-        start: BlockID<<Self::Block as Digestible>::Digest>,
-        tip: BlockID<<Self::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<(Arc<Self::Block>, <Self::Block as Digestible>::Digest)>>
-    + Send
-    + 'static;
+/// An interface for forward walks over locally known block ancestry.
+pub trait DescendantProvider: BlockProvider {
+    /// Opaque state used to continue a forward ancestry walk.
+    type Cursor: Clone + Send + 'static;
 
     /// Retrieves the next non-empty, contiguous batch from `start` toward
     /// `tip`, together with the resolved tip digest.
-    ///
-    /// Providers can override this to amortize lookup work across multiple
-    /// blocks. The default resolves the complete chain through singular
-    /// lookups.
-    #[allow(clippy::type_complexity)]
     fn get_descendants(
         &self,
-        start: BlockID<<Self::Block as Digestible>::Digest>,
-        tip: BlockID<<Self::Block as Digestible>::Digest>,
-    ) -> impl Future<
-        Output = Option<(
-            Vec<Arc<Self::Block>>,
-            <Self::Block as Digestible>::Digest,
-        )>,
-    > + Send
-    + 'static {
-        let provider = self.clone();
-        async move {
-            let (block, tip) = provider.get_descendant(start, tip).await?;
-            let mut blocks = vec![block];
-            while blocks.last()?.digest() != tip {
-                let parent = blocks.last()?;
-                let next = parent.height().get().checked_add(1).map(Height::new)?;
-                let (block, resolved_tip) = provider
-                    .get_descendant(BlockID::Height(next), BlockID::Digest(tip))
-                    .await?;
-                if resolved_tip != tip {
-                    return None;
-                }
-                assert_extends(&(parent.height(), parent.digest()), block.as_ref());
-                blocks.push(block);
-            }
-            Some((blocks, tip))
-        }
-    }
+        request: DescendantRequest<<Self::Block as Digestible>::Digest, Self::Cursor>,
+    ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static;
+}
+
+/// A request to start or continue a forward ancestry walk.
+pub enum DescendantRequest<D: Digest, C> {
+    /// Starts a walk at `start` within the ancestry of `tip`.
+    Start {
+        /// The first block to return.
+        start: BlockID<D>,
+        /// The block whose ancestry defines the chain.
+        tip: BlockID<D>,
+    },
+    /// Continues a previously started walk.
+    Continue(C),
+}
+
+/// One non-empty page of a forward ancestry walk.
+pub struct DescendantPage<B: Block, C> {
+    /// Contiguous blocks in ascending height order.
+    pub blocks: Vec<Arc<B>>,
+    /// The resolved digest of the walk's tip.
+    pub tip: B::Digest,
+    /// State for retrieving the next page, if any.
+    pub cursor: Option<C>,
 }
 
 // Expected parent height and digest for a pending fetch.
@@ -577,13 +337,39 @@ where
     )
 }
 
+fn prefetch_parent<B: Block>(
+    child: Arc<B>,
+    future: PendingFetch<B>,
+    buffered: &mut Vec<Arc<B>>,
+    pending_child: &mut Option<Arc<B>>,
+    mut pending: Pin<&mut OptionFuture<PendingFetch<B>>>,
+    cx: &mut Context<'_>,
+) {
+    *pending_child = Some(child);
+    pending.as_mut().set(Some(future).into());
+
+    match pending.as_mut().poll(cx) {
+        Poll::Ready(Some(Some((expected, parent)))) => {
+            expected.assert_matches(parent.as_ref());
+            buffered.push(parent);
+            *pending_child = None;
+        }
+        Poll::Ready(Some(None)) => {
+            pending.as_mut().set(None.into());
+            *pending_child = None;
+        }
+        Poll::Ready(None) => *pending_child = None,
+        Poll::Pending => {}
+    }
+}
+
 /// Yields the ancestors of a block while prefetching parents, including the
 /// height-zero genesis block if it is available.
 #[pin_project]
 pub struct AncestorStream<M: BlockProvider, C: Clock> {
     buffered: Vec<Arc<M::Block>>,
     /// The initial chain fixed at construction, ascending in height.
-    chain: Vec<Arc<M::Block>>,
+    chain: Arc<[Arc<M::Block>]>,
     /// The digest of the highest initial block, identifying the chain this
     /// stream walks.
     tip: Option<<M::Block as Digestible>::Digest>,
@@ -608,12 +394,12 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         initial: impl IntoIterator<Item = Arc<M::Block>>,
         fetch_duration: Timed,
     ) -> Self {
-        let chain = sort_and_validate_chain(initial);
+        let chain: Arc<[Arc<M::Block>]> = Arc::from(sort_and_validate_chain(initial));
 
         let tip = chain.last().map(|block| block.digest());
         Self {
             marshal,
-            buffered: chain.clone(),
+            buffered: chain.iter().cloned().collect(),
             chain,
             tip,
             fetch_duration,
@@ -660,7 +446,7 @@ where
 
 impl<M, C> Ancestry<M::Block> for AncestorStream<M, C>
 where
-    M: BlockProvider + Clone,
+    M: DescendantProvider + Clone,
     C: Clock,
 {
     fn peek(&self) -> Option<&M::Block> {
@@ -670,7 +456,9 @@ where
     fn descendants(
         &self,
         start: BlockID<<M::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<M::Block>>> + Send {
+    ) -> impl Future<
+        Output = Option<impl Stream<Item = Arc<M::Block>> + Send + Unpin + 'static>,
+    > + Send {
         let chain = chain_suffix(&self.chain, start);
         let tip = self.tip;
         let marshal = self.marshal.clone();
@@ -685,13 +473,19 @@ where
                     fetch_duration,
                 ));
             }
-            let descendants = marshal.get_descendants(start, BlockID::Digest(tip?));
-            let (batch, tip) = timed_fetch(&clock, &fetch_duration, descendants).await?;
-            Some(DescendantStream::from_batch(
+            let tip = tip?;
+            let descendants = marshal.get_descendants(DescendantRequest::Start {
+                start,
+                tip: BlockID::Digest(tip),
+            });
+            let page = timed_fetch(&clock, &fetch_duration, descendants).await?;
+            if page.tip != tip {
+                return None;
+            }
+            Some(DescendantStream::from_page(
                 clock,
                 marshal,
-                batch,
-                tip,
+                page,
                 fetch_duration,
             ))
         }
@@ -716,28 +510,19 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future =
-                    timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
-                *this.pending_child = Some(block.clone());
-                *this.pending.as_mut() = Some(future).into();
-
-                // Explicitly poll the next future to kick off the fetch. If it's already ready,
-                // buffer it for the next poll.
-                match this.pending.as_mut().poll(cx) {
-                    Poll::Ready(Some(Some((expected, parent)))) => {
-                        expected.assert_matches(parent.as_ref());
-                        this.buffered.push(parent);
-                        *this.pending_child = None;
-                    }
-                    Poll::Ready(Some(None)) => {
-                        *this.pending.as_mut() = None.into();
-                        *this.pending_child = None;
-                    }
-                    Poll::Ready(None) => {
-                        *this.pending_child = None;
-                    }
-                    Poll::Pending => {}
-                }
+                prefetch_parent(
+                    block.clone(),
+                    timed_parent_fetch(
+                        this.clock,
+                        this.marshal,
+                        block.as_ref(),
+                        this.fetch_duration,
+                    ),
+                    this.buffered,
+                    this.pending_child,
+                    this.pending.as_mut(),
+                    cx,
+                );
             } else if !should_walk_parent {
                 // No more parents to fetch; Finish the stream.
                 *this.pending.as_mut() = None.into();
@@ -759,28 +544,19 @@ where
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future =
-                        timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
-                    *this.pending_child = Some(block.clone());
-                    *this.pending.as_mut() = Some(future).into();
-
-                    // Explicitly poll the next future to kick off the fetch. If it's already ready,
-                    // buffer it for the next poll.
-                    match this.pending.as_mut().poll(cx) {
-                        Poll::Ready(Some(Some((expected, parent)))) => {
-                            expected.assert_matches(parent.as_ref());
-                            this.buffered.push(parent);
-                            *this.pending_child = None;
-                        }
-                        Poll::Ready(Some(None)) => {
-                            *this.pending.as_mut() = None.into();
-                            *this.pending_child = None;
-                        }
-                        Poll::Ready(None) => {
-                            *this.pending_child = None;
-                        }
-                        Poll::Pending => {}
-                    }
+                    prefetch_parent(
+                        block.clone(),
+                        timed_parent_fetch(
+                            this.clock,
+                            this.marshal,
+                            block.as_ref(),
+                            this.fetch_duration,
+                        ),
+                        this.buffered,
+                        this.pending_child,
+                        this.pending.as_mut(),
+                        cx,
+                    );
                 } else {
                     // No more parents to fetch; Finish the stream.
                     *this.pending.as_mut() = None.into();
@@ -794,8 +570,8 @@ where
 }
 
 // A pending descendant fetch paired with the chain link it must extend.
-type PendingDescendantFetch<B> =
-    BoxFuture<'static, Option<((Height, <B as Digestible>::Digest), Vec<Arc<B>>)>>;
+type PendingDescendantFetch<B, C> =
+    BoxFuture<'static, Option<((Height, <B as Digestible>::Digest), DescendantPage<B, C>)>>;
 
 // Builds a pending fetch for the ancestry batch starting directly above
 // `parent`, recording successful fetch latency and carrying the link the
@@ -804,24 +580,24 @@ fn timed_descendant_fetch<C, M>(
     clock: &Arc<C>,
     marshal: &M,
     parent: &M::Block,
+    cursor: M::Cursor,
     tip: <M::Block as Digestible>::Digest,
     fetch_duration: &Timed,
-) -> PendingDescendantFetch<M::Block>
+) -> PendingDescendantFetch<M::Block, M::Cursor>
 where
     C: Clock,
-    M: BlockProvider,
+    M: DescendantProvider,
 {
     let link = (parent.height(), parent.digest());
-    let Some(next) = link.0.get().checked_add(1).map(Height::new) else {
-        return std::future::ready(None).boxed();
-    };
     timed_fetch(
         clock,
         fetch_duration,
         marshal
-            .get_descendants(BlockID::Height(next), BlockID::Digest(tip))
-            .map(move |blocks| {
-                blocks.and_then(|(blocks, _)| (!blocks.is_empty()).then_some((link, blocks)))
+            .get_descendants(DescendantRequest::Continue(cursor))
+            .map(move |page| {
+                page.and_then(|page| {
+                    (page.tip == tip && !page.blocks.is_empty()).then_some((link, page))
+                })
             }),
     )
 }
@@ -829,6 +605,7 @@ where
 fn buffer_descendants<B: Block>(
     link: &(Height, B::Digest),
     blocks: Vec<Arc<B>>,
+    tip: B::Digest,
     buffered: &mut VecDeque<Arc<B>>,
 ) {
     let blocks = sort_and_validate_chain(blocks);
@@ -839,6 +616,13 @@ fn buffer_descendants<B: Block>(
             .expect("descendant batch must not be empty")
             .as_ref(),
     );
+    if let Some(position) = blocks.iter().position(|block| block.digest() == tip) {
+        assert_eq!(
+            position + 1,
+            blocks.len(),
+            "descendant batch must end at the requested tip"
+        );
+    }
     buffered.extend(blocks);
 }
 
@@ -848,57 +632,29 @@ fn buffer_descendants<B: Block>(
 /// The stream is armed with its first batch and lazily fetches following
 /// batches from the provider (prefetching the next batch while the previous one
 /// is consumed), mirroring [AncestorStream] in the opposite direction. It
-/// finishes once the tip is yielded, and ends early if the next block becomes
-/// unavailable locally (e.g. its branch was pruned by a finalization, or a
-/// finalized block was pruned while iterating).
+/// finishes once the tip is yielded. Candidate ancestry is snapshotted when
+/// the walk starts; finalized archive pages remain lazy and can end early if
+/// they become unavailable locally while iterating.
 ///
 /// # Panics
 ///
 /// Panics if fetched blocks do not form a contiguous chain, which indicates
 /// local storage corruption.
 #[pin_project]
-pub struct DescendantStream<M: BlockProvider, C: Clock> {
+pub struct DescendantStream<M: DescendantProvider, C: Clock> {
     /// Blocks ready to yield in ascending height order.
     buffered: VecDeque<Arc<M::Block>>,
-    /// A complete chain known at construction, when available.
-    chain: Option<Vec<Arc<M::Block>>>,
     /// The digest of the tip; the stream finishes once it is yielded.
     tip: <M::Block as Digestible>::Digest,
     marshal: M,
     fetch_duration: Timed,
     clock: Arc<C>,
-    /// The block whose child is currently being fetched.
-    pending_parent: Option<Arc<M::Block>>,
+    cursor: Option<M::Cursor>,
     #[pin]
-    pending: OptionFuture<PendingDescendantFetch<M::Block>>,
+    pending: OptionFuture<PendingDescendantFetch<M::Block, M::Cursor>>,
 }
 
-impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
-    /// Creates a new [DescendantStream] armed with the first block of the
-    /// walk, ending at `tip`.
-    ///
-    /// `start` must lie in the ancestry of `tip`; providers validate this
-    /// when resolving the anchor (see [BlockProvider::get_descendant]).
-    #[cfg(test)]
-    fn new(
-        clock: Arc<C>,
-        marshal: M,
-        start: Arc<M::Block>,
-        tip: <M::Block as Digestible>::Digest,
-        fetch_duration: Timed,
-    ) -> Self {
-        Self {
-            buffered: [start].into(),
-            chain: None,
-            tip,
-            marshal,
-            fetch_duration,
-            clock,
-            pending_parent: None,
-            pending: None.into(),
-        }
-    }
-
+impl<M: DescendantProvider, C: Clock> DescendantStream<M, C> {
     /// Creates a forward stream from a complete in-memory chain.
     fn from_chain(
         clock: Arc<C>,
@@ -912,36 +668,33 @@ impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
             .expect("descendant chain must not be empty")
             .digest();
         Self {
-            buffered: chain.clone().into(),
-            chain: Some(chain),
+            buffered: chain.into(),
             tip,
             marshal,
             fetch_duration,
             clock,
-            pending_parent: None,
+            cursor: None,
             pending: None.into(),
         }
     }
 
     /// Creates a forward stream from a provider batch that may not yet reach
     /// the resolved tip.
-    fn from_batch(
+    fn from_page(
         clock: Arc<C>,
         marshal: M,
-        batch: Vec<Arc<M::Block>>,
-        tip: <M::Block as Digestible>::Digest,
+        page: DescendantPage<M::Block, M::Cursor>,
         fetch_duration: Timed,
     ) -> Self {
-        let batch = sort_and_validate_chain(batch);
+        let batch = sort_and_validate_chain(page.blocks);
         assert!(!batch.is_empty(), "descendant batch must not be empty");
         Self {
             buffered: batch.into(),
-            chain: None,
-            tip,
+            tip: page.tip,
             marshal,
             fetch_duration,
             clock,
-            pending_parent: None,
+            cursor: page.cursor,
             pending: None.into(),
         }
     }
@@ -954,71 +707,9 @@ impl<M: BlockProvider, C: Clock> DescendantStream<M, C> {
     }
 }
 
-impl<M, C> Clone for DescendantStream<M, C>
-where
-    M: BlockProvider,
-    C: Clock,
-{
-    fn clone(&self) -> Self {
-        let marshal = self.marshal.clone();
-        let fetch_duration = self.fetch_duration.clone();
-        let clock = self.clock.clone();
-        let pending = self
-            .pending_parent
-            .as_ref()
-            .map(|parent| {
-                timed_descendant_fetch(&clock, &marshal, parent, self.tip, &fetch_duration)
-            })
-            .into();
-
-        Self {
-            buffered: self.buffered.clone(),
-            chain: self.chain.clone(),
-            tip: self.tip,
-            marshal,
-            fetch_duration,
-            clock,
-            pending_parent: self.pending_parent.clone(),
-            pending,
-        }
-    }
-}
-
-impl<M, C> Ancestry<M::Block> for DescendantStream<M, C>
-where
-    M: BlockProvider,
-    C: Clock,
-{
-    fn peek(&self) -> Option<&M::Block> {
-        Self::peek(self)
-    }
-
-    fn descendants(
-        &self,
-        start: BlockID<<M::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<impl Ancestry<M::Block>>> + Send {
-        let chain = self
-            .chain
-            .as_ref()
-            .and_then(|chain| chain_suffix(chain, start));
-        let tip = self.tip;
-        let marshal = self.marshal.clone();
-        let clock = self.clock.clone();
-        let fetch_duration = self.fetch_duration.clone();
-        async move {
-            if let Some(chain) = chain {
-                return Some(Self::from_chain(clock, marshal, chain, fetch_duration));
-            }
-            let descendants = marshal.get_descendants(start, BlockID::Digest(tip));
-            let (batch, tip) = timed_fetch(&clock, &fetch_duration, descendants).await?;
-            Some(Self::from_batch(clock, marshal, batch, tip, fetch_duration))
-        }
-    }
-}
-
 impl<M, C> Stream for DescendantStream<M, C>
 where
-    M: BlockProvider,
+    M: DescendantProvider,
     C: Clock,
 {
     type Item = Arc<M::Block>;
@@ -1031,12 +722,11 @@ where
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) | Poll::Ready(Some(None)) => {
                     *this.pending.as_mut() = None.into();
-                    *this.pending_parent = None;
                     return Poll::Ready(None);
                 }
-                Poll::Ready(Some(Some((link, blocks)))) => {
-                    buffer_descendants(&link, blocks, this.buffered);
-                    *this.pending_parent = None;
+                Poll::Ready(Some(Some((link, page)))) => {
+                    buffer_descendants(&link, page.blocks, *this.tip, this.buffered);
+                    *this.cursor = page.cursor;
                 }
             }
         }
@@ -1044,37 +734,37 @@ where
         let Some(block) = this.buffered.pop_front() else {
             return Poll::Ready(None);
         };
-        if let Some(child) = this.buffered.front() {
+        if block.digest() == *this.tip {
+            this.buffered.clear();
+            *this.pending.as_mut() = None.into();
+        } else if let Some(child) = this.buffered.front() {
             assert_extends(&(block.height(), block.digest()), child.as_ref());
-        } else if block.digest() != *this.tip {
+        } else {
+            let Some(cursor) = this.cursor.take() else {
+                return Poll::Ready(Some(block));
+            };
             let future = timed_descendant_fetch(
                 this.clock,
                 this.marshal,
                 &block,
+                cursor,
                 *this.tip,
                 this.fetch_duration,
             );
-            *this.pending_parent = Some(block.clone());
             *this.pending.as_mut() = Some(future).into();
 
             // Kick off the next batch while the current block is consumed.
             match this.pending.as_mut().poll(cx) {
-                Poll::Ready(Some(Some((link, blocks)))) => {
-                    buffer_descendants(&link, blocks, this.buffered);
-                    *this.pending_parent = None;
+                Poll::Ready(Some(Some((link, page)))) => {
+                    buffer_descendants(&link, page.blocks, *this.tip, this.buffered);
+                    *this.cursor = page.cursor;
                 }
                 Poll::Ready(Some(None)) => {
                     *this.pending.as_mut() = None.into();
-                    *this.pending_parent = None;
                 }
-                Poll::Ready(None) => {
-                    *this.pending_parent = None;
-                }
+                Poll::Ready(None) => {}
                 Poll::Pending => {}
             }
-        } else {
-            *this.pending.as_mut() = None.into();
-            *this.pending_parent = None;
         }
 
         Poll::Ready(Some(block))
@@ -1116,25 +806,38 @@ mod test {
             )
         }
 
-        fn get_descendant(
+    }
+
+    impl DescendantProvider for MockProvider {
+        type Cursor = ();
+
+        fn get_descendants(
             &self,
-            start: BlockID<Sha256Digest>,
-            tip: BlockID<Sha256Digest>,
-        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
-        {
+            request: DescendantRequest<Sha256Digest, Self::Cursor>,
+        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static {
             let result = (|| {
+                let DescendantRequest::Start { start, tip } = request else {
+                    return None;
+                };
                 let BlockID::Digest(tip) = tip else {
                     return None;
                 };
                 let mut cursor = tip;
+                let mut blocks = Vec::new();
                 loop {
                     let block = self.0.iter().find(|block| block.digest() == cursor)?;
+                    blocks.push(Arc::new(block.clone()));
                     let found = match start {
                         BlockID::Height(height) => block.height() == height,
                         BlockID::Digest(digest) => block.digest() == digest,
                     };
                     if found {
-                        return Some((Arc::new(block.clone()), tip));
+                        blocks.reverse();
+                        return Some(DescendantPage {
+                            blocks,
+                            tip,
+                            cursor: None,
+                        });
                     }
                     cursor = block.parent;
                 }
@@ -1146,7 +849,6 @@ mod test {
     #[derive(Clone)]
     struct BulkProvider {
         chain: Arc<Vec<Block<Sha256Digest, ()>>>,
-        singular: Arc<AtomicUsize>,
         bulk: Arc<AtomicUsize>,
     }
 
@@ -1160,46 +862,77 @@ mod test {
             std::future::ready(None)
         }
 
-        fn get_descendant(
-            &self,
-            _start: BlockID<Sha256Digest>,
-            _tip: BlockID<Sha256Digest>,
-        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
-        {
-            self.singular.fetch_add(1, Ordering::Relaxed);
-            std::future::ready(None)
-        }
+    }
+
+    impl DescendantProvider for BulkProvider {
+        type Cursor = usize;
 
         fn get_descendants(
             &self,
-            start: BlockID<Sha256Digest>,
-            tip: BlockID<Sha256Digest>,
-        ) -> impl Future<Output = Option<(Vec<Arc<Self::Block>>, Sha256Digest)>> + Send + 'static
-        {
+            request: DescendantRequest<Sha256Digest, Self::Cursor>,
+        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static {
             self.bulk.fetch_add(1, Ordering::Relaxed);
             let chain = self.chain.clone();
             async move {
-                let BlockID::Digest(tip) = tip else {
-                    return None;
+                let position = match request {
+                    DescendantRequest::Start { start, tip } => {
+                        let BlockID::Digest(tip) = tip else {
+                            return None;
+                        };
+                        if tip != chain.last()?.digest() {
+                            return None;
+                        }
+                        chain.iter().position(|block| match start {
+                            BlockID::Height(height) => block.height() == height,
+                            BlockID::Digest(digest) => block.digest() == digest,
+                        })?
+                    }
+                    DescendantRequest::Continue(position) => position,
                 };
-                let position = chain.iter().position(|block| match start {
-                    BlockID::Height(height) => block.height() == height,
-                    BlockID::Digest(digest) => block.digest() == digest,
-                })?;
-                Some((
-                    chain[position..]
+                let end = position.saturating_add(8).min(chain.len());
+                Some(DescendantPage {
+                    blocks: chain[position..end]
                         .iter()
-                        .take(8)
                         .cloned()
                         .map(Arc::new)
                         .collect(),
-                    tip,
-                ))
+                    tip: chain.last()?.digest(),
+                    cursor: (end < chain.len()).then_some(end),
+                })
             }
         }
     }
 
     type TestBlock = Block<Sha256Digest, ()>;
+
+    #[derive(Clone)]
+    struct PageProvider {
+        pages: Arc<Mutex<VecDeque<DescendantPage<TestBlock, ()>>>>,
+    }
+
+    impl BlockProvider for PageProvider {
+        type Block = TestBlock;
+
+        fn subscribe_parent(
+            &self,
+            _block: &Self::Block,
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+            std::future::ready(None)
+        }
+    }
+
+    impl DescendantProvider for PageProvider {
+        type Cursor = ();
+
+        fn get_descendants(
+            &self,
+            _request: DescendantRequest<Sha256Digest, Self::Cursor>,
+        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static
+        {
+            std::future::ready(self.pages.lock().pop_front())
+        }
+    }
+
     type ParentSubscription = oneshot::Sender<Arc<TestBlock>>;
 
     #[derive(Default, Clone)]
@@ -1232,18 +965,11 @@ mod test {
             parent.map(Result::ok)
         }
 
-        fn get_descendant(
-            &self,
-            _start: BlockID<Sha256Digest>,
-            _tip: BlockID<Sha256Digest>,
-        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
-        {
-            std::future::ready(None)
-        }
     }
 
     #[derive(Clone)]
     struct WrongParentProvider(Block<Sha256Digest, ()>);
+
     impl BlockProvider for WrongParentProvider {
         type Block = Block<Sha256Digest, ()>;
 
@@ -1252,18 +978,6 @@ mod test {
             _block: &Self::Block,
         ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             std::future::ready(Some(Arc::new(self.0.clone())))
-        }
-
-        fn get_descendant(
-            &self,
-            _start: BlockID<Sha256Digest>,
-            tip: BlockID<Sha256Digest>,
-        ) -> impl Future<Output = Option<(Arc<Self::Block>, Sha256Digest)>> + Send + 'static
-        {
-            let BlockID::Digest(tip) = tip else {
-                return std::future::ready(None);
-            };
-            std::future::ready(Some((Arc::new(self.0.clone()), tip)))
         }
     }
 
@@ -1394,11 +1108,9 @@ mod test {
     fn test_descendants_use_bounded_bulk_lookups() {
         deterministic::Runner::default().start(|context| async move {
             let chain = make_chain(0, 64);
-            let singular = Arc::new(AtomicUsize::new(0));
             let bulk = Arc::new(AtomicUsize::new(0));
             let provider = BulkProvider {
                 chain: Arc::new(chain.clone()),
-                singular: singular.clone(),
                 bulk: bulk.clone(),
             };
             let ancestry = stream(&context, provider, [chain.last().unwrap().clone()]);
@@ -1411,7 +1123,67 @@ mod test {
                 .await;
             assert_eq!(descendants.len(), chain.len());
             assert_eq!(bulk.load(Ordering::Relaxed), 8);
-            assert_eq!(singular.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    #[test]
+    fn test_descendants_reject_changed_tip() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain = make_chain(0, 3);
+            let wrong_tip = Sha256::fill(0xAB);
+            let provider = PageProvider {
+                pages: Arc::new(Mutex::new(
+                    [
+                        DescendantPage {
+                            blocks: vec![Arc::new(chain[0].clone())],
+                            tip: chain[2].digest(),
+                            cursor: Some(()),
+                        },
+                        DescendantPage {
+                            blocks: vec![Arc::new(chain[1].clone())],
+                            tip: wrong_tip,
+                            cursor: None,
+                        },
+                    ]
+                    .into(),
+                )),
+            };
+            let ancestry = stream(&context, provider, [chain[2].clone()]);
+            let descendants = ancestry
+                .descendants(BlockID::Height(Height::zero()))
+                .await
+                .expect("initial page should resolve")
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(descendants, vec![Arc::new(chain[0].clone())]);
+        });
+    }
+
+    #[test]
+    fn test_descendants_stop_at_tip_with_buffered_child() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain = make_chain(0, 4);
+            let provider = PageProvider {
+                pages: Arc::new(Mutex::new(
+                    [DescendantPage {
+                        blocks: chain.iter().cloned().map(Arc::new).collect(),
+                        tip: chain[2].digest(),
+                        cursor: None,
+                    }]
+                    .into(),
+                )),
+            };
+            let ancestry = stream(&context, provider, [chain[2].clone()]);
+            let descendants = ancestry
+                .descendants(BlockID::Height(Height::zero()))
+                .await
+                .expect("page should resolve")
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(
+                descendants,
+                chain[..3].iter().cloned().map(Arc::new).collect::<Vec<_>>()
+            );
         });
     }
 
@@ -1478,118 +1250,6 @@ mod test {
             assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
             assert_eq!(ancestry.peek(), None);
             assert_eq!(ancestry.next().await, None);
-        });
-    }
-
-    #[test]
-    fn test_with_prefix_peeks_tail_when_prefix_empty() {
-        deterministic::Runner::default().start(|_| async move {
-            let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let mut ancestry = with_prefix([], from_iter([Arc::new(block.clone())]));
-
-            assert_eq!(ancestry.peek(), Some(&block));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&block));
-            assert_eq!(ancestry.peek(), None);
-        });
-    }
-
-    #[test]
-    fn test_with_prefix_peeks_tail_after_prefix_consumed() {
-        deterministic::Runner::default().start(|_| async move {
-            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
-            let mut ancestry = with_prefix(
-                [Arc::new(child.clone())],
-                from_iter([Arc::new(parent.clone())]),
-            );
-
-            assert_eq!(ancestry.peek(), Some(&child));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
-            assert_eq!(ancestry.peek(), Some(&parent));
-            assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
-            assert_eq!(ancestry.peek(), None);
-        });
-    }
-
-    #[test]
-    fn test_with_prefix_descendants_include_prefix() {
-        deterministic::Runner::default().start(|_| async move {
-            let ancestor = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
-            let parent = Block::new::<Sha256>((), ancestor.digest(), Height::new(1), 1);
-            let tip = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
-            let ancestry = with_prefix(
-                [Arc::new(tip.clone()), Arc::new(parent.clone())],
-                from_iter([Arc::new(ancestor.clone())]),
-            );
-
-            let from_tail = ancestry
-                .descendants(BlockID::Digest(ancestor.digest()))
-                .await
-                .expect("tail block should be on chain")
-                .collect::<Vec<_>>()
-                .await;
-            assert_eq!(
-                from_tail,
-                vec![
-                    Arc::new(ancestor.clone()),
-                    Arc::new(parent.clone()),
-                    Arc::new(tip.clone()),
-                ]
-            );
-
-            let from_prefix = ancestry
-                .descendants(BlockID::Digest(parent.digest()))
-                .await
-                .expect("prefix block should be on chain")
-                .collect::<Vec<_>>()
-                .await;
-            assert_eq!(
-                from_prefix,
-                vec![Arc::new(parent.clone()), Arc::new(tip.clone())]
-            );
-
-            let mut tail = from_iter([
-                Arc::new(tip.clone()),
-                Arc::new(parent.clone()),
-                Arc::new(ancestor.clone()),
-            ]);
-            assert_eq!(tail.next().await.as_deref(), Some(&tip));
-            assert_eq!(tail.next().await.as_deref(), Some(&parent));
-            let ancestry = with_prefix(
-                [Arc::new(tip.clone()), Arc::new(parent.clone())],
-                tail,
-            );
-            let overlapping = ancestry
-                .descendants(BlockID::Digest(ancestor.digest()))
-                .await
-                .expect("consumed blocks should remain on the chain")
-                .collect::<Vec<_>>()
-                .await;
-            assert_eq!(
-                overlapping,
-                vec![Arc::new(ancestor), Arc::new(parent), Arc::new(tip)]
-            );
-        });
-    }
-
-    #[test]
-    fn test_with_prefix_descendants_stop_when_tail_ends_before_prefix() {
-        deterministic::Runner::default().start(|_| async move {
-            let start = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
-            let missing = Block::new::<Sha256>((), start.digest(), Height::new(1), 1);
-            let tip = Block::new::<Sha256>((), missing.digest(), Height::new(2), 2);
-            let ancestry = with_prefix(
-                [Arc::new(tip)],
-                from_iter([Arc::new(start.clone())]),
-            );
-
-            let forward = ancestry
-                .descendants(BlockID::Digest(start.digest()))
-                .await
-                .expect("start is present in the tail")
-                .collect::<Vec<_>>()
-                .await;
-            assert_eq!(forward, vec![Arc::new(start)]);
         });
     }
 
@@ -1710,134 +1370,4 @@ mod test {
         blocks
     }
 
-    fn descendant_stream<M>(
-        context: &deterministic::Context,
-        provider: M,
-        start: M::Block,
-        tip: Sha256Digest,
-    ) -> DescendantStream<M, deterministic::Context>
-    where
-        M: BlockProvider<Block = Block<Sha256Digest, ()>>,
-    {
-        let stream_context = context.child("descendant_stream");
-        let fetch_duration = timed(&stream_context);
-        DescendantStream::new(
-            Arc::new(stream_context),
-            provider,
-            Arc::new(start),
-            tip,
-            fetch_duration,
-        )
-    }
-
-    #[test]
-    fn test_descendant_walks_chain_to_tip() {
-        deterministic::Runner::default().start(|context| async move {
-            let chain = make_chain(0, 5);
-            let provider = MockProvider(chain.clone());
-
-            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
-            let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(
-                results,
-                chain.iter().cloned().map(Arc::new).collect::<Vec<_>>()
-            );
-        });
-    }
-
-    #[test]
-    fn test_descendant_single_block_when_start_is_tip() {
-        deterministic::Runner::default().start(|context| async move {
-            let chain = make_chain(3, 1);
-            let provider = MockProvider(chain.clone());
-
-            let mut stream =
-                descendant_stream(&context, provider, chain[0].clone(), chain[0].digest());
-            assert_eq!(stream.peek(), Some(&chain[0]));
-            assert_eq!(stream.next().await.as_deref(), Some(&chain[0]));
-            assert_eq!(stream.peek(), None);
-            assert_eq!(stream.next().await, None);
-        });
-    }
-
-    #[test]
-    fn test_descendant_missing_block_ends_stream() {
-        deterministic::Runner::default().start(|context| async move {
-            let chain = make_chain(0, 5);
-
-            // The block at height 2 is missing locally, so the provider can
-            // no longer connect the tip's chain to the next requested height;
-            // the walk ends after the anchor.
-            let mut stored = chain.clone();
-            stored.remove(2);
-            let provider = MockProvider(stored);
-
-            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
-            let results = stream.collect::<Vec<_>>().await;
-            assert_eq!(results, vec![Arc::new(chain[0].clone())]);
-        });
-    }
-
-    #[test]
-    fn test_descendant_peek_available_through_ancestry_trait() {
-        deterministic::Runner::default().start(|context| async move {
-            fn peek_height(ancestry: impl Ancestry<Block<Sha256Digest, ()>>) -> Option<Height> {
-                ancestry.peek().map(Heightable::height)
-            }
-
-            let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let stream = descendant_stream(
-                &context,
-                MockProvider::default(),
-                block.clone(),
-                block.digest(),
-            );
-            assert_eq!(peek_height(stream), Some(block.height()));
-        });
-    }
-
-    #[test]
-    fn test_descendant_restarts_from_any_position() {
-        deterministic::Runner::default().start(|context| async move {
-            let chain = make_chain(0, 5);
-            let provider = MockProvider(chain.clone());
-
-            // A forward stream can itself be flipped to a new start on the
-            // same chain through the Ancestry trait.
-            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
-            let restarted = stream
-                .descendants(BlockID::Height(Height::new(2)))
-                .await
-                .expect("restart within chain");
-            let results = restarted.collect::<Vec<_>>().await;
-            assert_eq!(
-                results,
-                chain[2..].iter().cloned().map(Arc::new).collect::<Vec<_>>()
-            );
-
-            // A start outside the chain resolves to nothing.
-            let provider = MockProvider(chain.clone());
-            let stream = descendant_stream(&context, provider, chain[0].clone(), chain[4].digest());
-            assert!(
-                stream
-                    .descendants(BlockID::Height(Height::new(9)))
-                    .await
-                    .is_none()
-            );
-        });
-    }
-
-    #[test]
-    #[should_panic = "block must be contiguous in height"]
-    fn test_descendant_panics_on_non_contiguous_fetched_block() {
-        deterministic::Runner::default().start(|context| async move {
-            // The provider serves a block that does not extend the anchor.
-            let anchor = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let lying = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(9), 9);
-            let provider = WrongParentProvider(lying);
-
-            let stream = descendant_stream(&context, provider, anchor, Sha256::fill(0xAB));
-            let _ = stream.collect::<Vec<_>>().await;
-        });
-    }
 }

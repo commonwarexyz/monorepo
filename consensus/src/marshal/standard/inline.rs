@@ -1563,9 +1563,9 @@ mod tests {
     /// Inline analog of the deferred equivocation test. A proposal that names
     /// the certified view-1 parent for a block built on the view-2 block
     /// fails structural parent validation and is rejected for voting. The
-    /// candidate is nevertheless stored durably, and certification of the
-    /// honest notarization for the same `(round, digest)` must use that
-    /// durability result rather than the context-scoped verification verdict.
+    /// candidate is not admitted, and certification of the honest notarization
+    /// for the same `(round, digest)` must recover it independently rather than
+    /// reuse the context-scoped verification verdict.
     #[test_traced("WARN")]
     fn test_certify_not_poisoned_by_equivocating_parent_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

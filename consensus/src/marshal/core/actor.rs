@@ -5,7 +5,7 @@ use super::{
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
     floor::Floor,
-    mailbox::{CommitmentFallback, Mailbox, Message},
+    mailbox::{CommitmentFallback, DescendantCursor, Mailbox, Message},
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
     tree::ForkTree,
@@ -15,6 +15,7 @@ use crate::{
     Block, Epochable, Heightable, Reporter,
     marshal::{
         BlockID, Config, Identifier, Start, Update,
+        ancestry::{DescendantPage, DescendantRequest},
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
     },
@@ -851,14 +852,13 @@ where
             Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
             }
-            Message::GetDescendant {
-                start,
-                tip,
+            Message::GetDescendants {
+                request,
                 response,
                 ..
             } => {
-                let block = self.resolve_descendant(start, tip).await;
-                response.send_lossy(block);
+                let page = self.resolve_descendants(request).await;
+                response.send_lossy(page);
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -1467,7 +1467,7 @@ where
                     )
                 });
                 if admitted {
-                    self.track_candidate(&block);
+                    self.track_parent(&block);
                 }
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
@@ -2233,6 +2233,13 @@ where
         }
     }
 
+    /// Tracks `block` only when an admitted child references it as its parent.
+    fn track_parent(&mut self, block: &Arc<V::Block>) {
+        if self.tree.insert_parent(block) {
+            let _ = self.pending_blocks.try_set(self.tree.len() as u64);
+        }
+    }
+
     /// Records a newly finalized block, pruning fork candidates it
     /// supersedes.
     fn finalize_forks(&mut self, height: Height, digest: <V::Block as Digestible>::Digest) {
@@ -2281,17 +2288,29 @@ where
         debug!(blocks = self.tree.len(), "rebuilt fork tree");
     }
 
-    /// Resolves the next bounded batch of locally known ancestry from `start`
-    /// toward `tip`, returning it with the resolved tip digest.
-    ///
-    /// Returns `None` when `tip` is unknown locally, `start` does not lie on
-    /// the tip's chain, or the block at `start` is not locally available.
-    #[allow(clippy::type_complexity)]
-    async fn resolve_descendant(
+    /// Resolves the next bounded page of a descendant walk.
+    async fn resolve_descendants(
+        &self,
+        request: DescendantRequest<
+            <V::Block as Digestible>::Digest,
+            DescendantCursor<V>,
+        >,
+    ) -> Option<DescendantPage<V::Block, DescendantCursor<V>>> {
+        let cursor = match request {
+            DescendantRequest::Start { start, tip } => {
+                self.start_descendants(start, tip).await?
+            }
+            DescendantRequest::Continue(cursor) => cursor,
+        };
+        self.continue_descendants(cursor).await
+    }
+
+    /// Resolves a walk's endpoints and snapshots its candidate suffix once.
+    async fn start_descendants(
         &self,
         start: BlockID<<V::Block as Digestible>::Digest>,
         tip: BlockID<<V::Block as Digestible>::Digest>,
-    ) -> Option<(Vec<Arc<V::Block>>, <V::Block as Digestible>::Digest)> {
+    ) -> Option<DescendantCursor<V>> {
         // Resolve the tip to a digest. Height-identified tips can only name
         // finalized blocks.
         let tip = match tip {
@@ -2321,17 +2340,23 @@ where
         // Resolve the starting position to a height. A digest names a
         // specific block: it is served directly when it is a candidate on
         // this branch, and located in the finalized store otherwise.
-        let (start_height, located) = match start {
-            BlockID::Height(height) => (height, None),
+        let (start_height, located, next_candidate) = match start {
+            BlockID::Height(height) => (height, None, 0),
             BlockID::Digest(digest) => {
                 if let Some(position) = candidates
                     .iter()
                     .position(|block| block.digest() == digest)
                 {
-                    return Some((candidates[position..].to_vec(), tip));
+                    return Some(DescendantCursor {
+                        tip,
+                        next_finalized: None,
+                        finalized_end: None,
+                        candidates: Arc::from(candidates),
+                        next_candidate: position,
+                    });
                 }
                 let block = self.get_finalized_block_by_digest(&digest).await?;
-                (block.height(), Some(block))
+                (block.height(), Some(block), 0)
             }
         };
         if start_height > tip_height {
@@ -2354,41 +2379,76 @@ where
                 .delta_from(first.height())
                 .expect("start height must be at or above the first candidate")
                 .get() as usize;
-            return Some((candidates[offset..].to_vec(), tip));
+            return Some(DescendantCursor {
+                tip,
+                next_finalized: None,
+                finalized_end: None,
+                candidates: Arc::from(candidates),
+                next_candidate: offset,
+            });
         }
 
         // At or below the finalized boundary: the candidate segment must
         // connect to the finalized chain, and the block must be stored (a
         // digest-identified start was already located above).
         let boundary = boundary?;
-        let mut blocks = Vec::new();
-        let mut height = start_height;
-        let mut located = located;
-        let reached_boundary;
-        loop {
-            let block = if height == start_height {
-                match located.take() {
-                    Some(block) => block,
-                    None => self.get_finalized_block(height).await?,
-                }
+        // A digest-identified finalized start was located above; height starts
+        // are verified lazily when the first page is read.
+        if let Some(block) = located
+            && block.height() != start_height
+        {
+            return None;
+        }
+        Some(DescendantCursor {
+            tip,
+            next_finalized: Some(start_height),
+            finalized_end: Some(boundary),
+            candidates: Arc::from(candidates),
+            next_candidate,
+        })
+    }
+
+    /// Advances a resolved descendant cursor by at most one actor-sized page.
+    async fn continue_descendants(
+        &self,
+        mut cursor: DescendantCursor<V>,
+    ) -> Option<DescendantPage<V::Block, DescendantCursor<V>>> {
+        let mut blocks = Vec::with_capacity(DESCENDANT_BATCH_SIZE);
+
+        while let (Some(height), Some(end)) = (cursor.next_finalized, cursor.finalized_end) {
+            blocks.push(Arc::new(self.get_finalized_block(height).await?));
+            cursor.next_finalized = if height == end {
+                None
             } else {
-                self.get_finalized_block(height).await?
+                height.get().checked_add(1).map(Height::new)
             };
-            blocks.push(Arc::new(block));
-            if height == boundary {
-                reached_boundary = true;
-                break;
-            }
             if blocks.len() == DESCENDANT_BATCH_SIZE {
-                reached_boundary = false;
                 break;
             }
-            height = height.get().checked_add(1).map(Height::new)?;
         }
-        if reached_boundary {
-            blocks.extend(candidates);
+
+        let remaining = DESCENDANT_BATCH_SIZE - blocks.len();
+        let end = cursor
+            .next_candidate
+            .saturating_add(remaining)
+            .min(cursor.candidates.len());
+        blocks.extend(
+            cursor.candidates[cursor.next_candidate..end]
+                .iter()
+                .cloned(),
+        );
+        cursor.next_candidate = end;
+
+        if blocks.is_empty() {
+            return None;
         }
-        Some((blocks, tip))
+        let has_more = cursor.next_finalized.is_some()
+            || cursor.next_candidate < cursor.candidates.len();
+        Some(DescendantPage {
+            blocks,
+            tip: cursor.tip,
+            cursor: has_more.then_some(cursor),
+        })
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total

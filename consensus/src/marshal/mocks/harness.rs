@@ -7,7 +7,7 @@ use crate::{
     Heightable, Reporter,
     marshal::{
         Identifier,
-        ancestry::{Ancestry, BlockProvider},
+        ancestry::{Ancestry, DescendantProvider, DescendantRequest},
         coding::{
             Coding, shards,
             types::{CodedBlock, coding_config_for_participants, hash_context},
@@ -3897,7 +3897,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 /// decoded height even when the local pruning hint is far ahead.
 pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>()
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
@@ -3984,10 +3984,12 @@ where
             .expect("height-hint-mismatched fetch should cache by decoded height");
         assert_eq!(cached.height(), actual_height);
         assert!(
-            BlockProvider::get_descendant(
+            DescendantProvider::get_descendants(
                 &victim_handle.mailbox,
-                actual_height.into(),
-                (&received.digest()).into(),
+                DescendantRequest::Start {
+                    start: actual_height.into(),
+                    tip: (&received.digest()).into(),
+                },
             )
             .await
             .is_none(),
@@ -5020,7 +5022,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 /// Test ancestry stream.
 pub fn ancestry_stream<H: TestHarness>()
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
@@ -5105,7 +5107,7 @@ where
 
 /// Asserts that `stream` yields exactly `expected` in order, comparing digests.
 async fn assert_stream_yields<H: TestHarness>(
-    stream: impl Ancestry<H::ApplicationBlock>,
+    stream: impl futures::Stream<Item = Arc<H::ApplicationBlock>> + Unpin,
     expected: &[&H::TestBlock],
 ) {
     let collected = stream.collect::<Vec<_>>().await;
@@ -5125,7 +5127,7 @@ async fn ancestry_at<H: TestHarness>(
     tip: D,
 ) -> impl Ancestry<H::ApplicationBlock>
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
 {
     let block = handle.mailbox.get_block(&tip).await.expect("tip block");
     handle.mailbox.ancestor_stream(
@@ -5215,7 +5217,7 @@ async fn finalize_chain<H: TestHarness>(
 /// Test forward ancestry iteration across finalized storage and fork candidates.
 pub fn ancestry_from_stream<H: TestHarness>()
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
@@ -5259,11 +5261,12 @@ where
         )
         .await;
 
-        // Build two competing forks above the finalized tip: fork A at
-        // heights 6-8 and fork B at heights 6-7. Both extend block 5.
+        // Build two competing forks above the finalized tip: fork A is long
+        // enough to cross the descendant page boundary, while fork B remains
+        // a short sibling. Both extend block 5.
         let tip = (H::digest(&blocks[4]), H::commitment(&blocks[4]));
         let fork_a =
-            propose_chain::<H>(&mut handle, tip, 6..=8, 0, 0, participants.len() as u16).await;
+            propose_chain::<H>(&mut handle, tip, 6..=70, 0, 0, participants.len() as u16).await;
         let fork_b =
             propose_chain::<H>(&mut handle, tip, 6..=7, 100, 10, participants.len() as u16).await;
 
@@ -5276,11 +5279,37 @@ where
 
         // Anchor an ancestry at each tip, as an application would hold them.
         let fork_a_ancestry =
-            ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&fork_a[2])).await;
+            ancestry_at::<H>(
+                &handle,
+                &clock,
+                &fetch_duration,
+                H::digest(fork_a.last().unwrap()),
+            )
+            .await;
         let fork_b_ancestry =
             ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&fork_b[1])).await;
         let finalized_ancestry =
             ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&blocks[3])).await;
+
+        // The provider bounds the combined finalized and candidate portions
+        // of every page and continues from a candidate snapshot.
+        let mut request = DescendantRequest::Start {
+            start: Height::new(1).into(),
+            tip: (&H::digest(fork_a.last().unwrap())).into(),
+        };
+        let mut page_sizes = Vec::new();
+        loop {
+            let page = DescendantProvider::get_descendants(&handle.mailbox, request)
+                .await
+                .expect("descendant page");
+            page_sizes.push(page.blocks.len());
+            assert!(page.blocks.len() <= 64);
+            let Some(cursor) = page.cursor else {
+                break;
+            };
+            request = DescendantRequest::Continue(cursor);
+        }
+        assert_eq!(page_sizes, vec![64, 6]);
 
         // Walk the full chain from height 1 to fork A's tip.
         let stream = fork_a_ancestry
@@ -5333,15 +5362,17 @@ where
         // at the provider.
         assert!(
             fork_a_ancestry
-                .descendants(Height::new(9).into())
+                .descendants(Height::new(100).into())
                 .await
                 .is_none()
         );
         assert!(
-            BlockProvider::get_descendant(
+            DescendantProvider::get_descendants(
                 &handle.mailbox,
-                Height::new(1).into(),
-                (&Sha256::hash(&[b"unknown"])).into(),
+                DescendantRequest::Start {
+                    start: Height::new(1).into(),
+                    tip: (&Sha256::hash(&[b"unknown"])).into(),
+                },
             )
             .await
             .is_none()
@@ -5374,7 +5405,7 @@ where
 /// Test that the fork tree is rebuilt from cached candidates on startup.
 pub fn ancestry_from_rebuild<H: TestHarness>()
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {

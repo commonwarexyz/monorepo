@@ -46,7 +46,7 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
-            ancestry::BlockProvider,
+            ancestry::{BlockProvider, DescendantProvider, DescendantRequest},
             application::gates::{GateOutcome, Gates},
             config::{Config, Start},
             core::{
@@ -683,14 +683,16 @@ mod tests {
                 )
                 .await;
 
-            let descendant = BlockProvider::get_descendant(
+            let descendants = DescendantProvider::get_descendants(
                 &mailbox,
-                Height::new(3).into(),
-                (&block_four.digest()).into(),
+                DescendantRequest::Start {
+                    start: Height::new(3).into(),
+                    tip: (&block_four.digest()).into(),
+                },
             )
             .await
             .expect("cached candidate should remain connected to the finalized tip");
-            assert_eq!(descendant.0.digest(), block_three.digest());
+            assert_eq!(descendants.blocks[0].digest(), block_three.digest());
         });
     }
 
@@ -1501,20 +1503,17 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_ancestry_stream() {
-        harness::ancestry_stream::<InlineHarness>();
-        harness::ancestry_stream::<DeferredHarness>();
+        harness::ancestry_stream::<StandardHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_ancestry_from_stream() {
-        harness::ancestry_from_stream::<InlineHarness>();
-        harness::ancestry_from_stream::<DeferredHarness>();
+        harness::ancestry_from_stream::<StandardHarness>();
     }
 
     #[test_traced("WARN")]
     fn test_standard_ancestry_from_rebuild() {
-        harness::ancestry_from_rebuild::<InlineHarness>();
-        harness::ancestry_from_rebuild::<DeferredHarness>();
+        harness::ancestry_from_rebuild::<StandardHarness>();
     }
 
     #[test_traced("WARN")]

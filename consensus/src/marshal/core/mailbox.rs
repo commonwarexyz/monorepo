@@ -1,7 +1,10 @@
 use super::{Variant, durability::Durable as _};
 use crate::{
     Reporter,
-    marshal::{BlockID, Identifier},
+    marshal::{
+        Identifier,
+        ancestry::{DescendantPage, DescendantRequest},
+    },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
 };
@@ -19,6 +22,27 @@ use std::{
     sync::Arc,
 };
 use tracing::{Span, info_span};
+
+/// Opaque continuation for a locally known descendant walk.
+pub struct DescendantCursor<V: Variant> {
+    pub(crate) tip: <V::Block as Digestible>::Digest,
+    pub(crate) next_finalized: Option<Height>,
+    pub(crate) finalized_end: Option<Height>,
+    pub(crate) candidates: Arc<[Arc<V::Block>]>,
+    pub(crate) next_candidate: usize,
+}
+
+impl<V: Variant> Clone for DescendantCursor<V> {
+    fn clone(&self) -> Self {
+        Self {
+            tip: self.tip,
+            next_finalized: self.next_finalized,
+            finalized_end: self.finalized_end,
+            candidates: Arc::clone(&self.candidates),
+            next_candidate: self.next_candidate,
+        }
+    }
+}
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -110,18 +134,16 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A request to retrieve the block at `start` within the locally known
     /// ancestry of `tip`, together with the resolved tip digest.
-    GetDescendant {
+    GetDescendants {
         /// The span carried with this request.
         span: Span,
-        /// The position of the block within the tip's ancestry.
-        start: BlockID<<V::Block as Digestible>::Digest>,
-        /// The block whose ancestry defines the chain.
-        tip: BlockID<<V::Block as Digestible>::Digest>,
-        /// A channel to send the resolved block and tip digest.
-        #[allow(clippy::type_complexity)]
-        response: oneshot::Sender<
-            Option<(Vec<Arc<V::Block>>, <V::Block as Digestible>::Digest)>,
+        /// A request to start or continue the walk.
+        request: DescendantRequest<
+            <V::Block as Digestible>::Digest,
+            DescendantCursor<V>,
         >,
+        /// A channel to send the next page.
+        response: oneshot::Sender<Option<DescendantPage<V::Block, DescendantCursor<V>>>>,
     },
     /// A hint to fetch a notarized block by round without adding another local subscriber.
     ///
@@ -303,7 +325,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
             | Self::GetProcessedHeight { span, .. }
-            | Self::GetDescendant { span, .. }
+            | Self::GetDescendants { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -318,7 +340,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessedHeight { .. } => "get_processed_height",
-            Self::GetDescendant { .. } => "get_descendant",
+            Self::GetDescendants { .. } => "get_descendants",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -346,8 +368,12 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
-            | Self::GetDescendant {
-                start: BlockID::Height(height),
+            | Self::GetDescendants {
+                request:
+                    DescendantRequest::Start {
+                        start: crate::marshal::BlockID::Height(height),
+                        ..
+                    },
                 ..
             }
             | Self::GetFinalization { height, .. } => Some(*height) < current,
@@ -364,8 +390,13 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetDescendant {
-                start: BlockID::Digest(_),
+            | Self::GetDescendants {
+                request:
+                    DescendantRequest::Start {
+                        start: crate::marshal::BlockID::Digest(_),
+                        ..
+                    }
+                    | DescendantRequest::Continue(_),
                 ..
             }
             | Self::GetProcessedHeight { .. } => false,
@@ -389,7 +420,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response, .. } => response.is_closed(),
-            Self::GetDescendant { response, .. } => response.is_closed(),
+            Self::GetDescendants { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -804,56 +835,34 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Retrieves the block at `start` within the locally known ancestry of
-    /// `tip`, together with the resolved tip digest.
-    ///
-    /// The chain is defined by the ancestry of `tip`, which may be a candidate
-    /// block above the last finalization (a fork tracked by marshal) or a
-    /// finalized block. This never fetches from the network: it serves
-    /// finalized blocks from storage and fork candidates from marshal's
-    /// in-memory ancestry tree.
-    ///
-    /// Backs the [BlockProvider::get_descendant] implementations of every
-    /// variant.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn resolve_descendant(
-        &self,
-        start: BlockID<<V::Block as Digestible>::Digest>,
-        tip: BlockID<<V::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<(Arc<V::ApplicationBlock>, <V::Block as Digestible>::Digest)>>
-    + Send
-    + 'static {
-        let descendants = self.resolve_descendants(start, tip);
-        async move {
-            let (blocks, tip) = descendants.await?;
-            Some((blocks.into_iter().next()?, tip))
-        }
-    }
-
-    /// Retrieves the next contiguous batch from `start` toward `tip`.
-    #[allow(clippy::type_complexity)]
+    /// Retrieves the next contiguous page of a descendant walk.
     pub(crate) fn resolve_descendants(
         &self,
-        start: BlockID<<V::Block as Digestible>::Digest>,
-        tip: BlockID<<V::Block as Digestible>::Digest>,
-    ) -> impl Future<
-        Output = Option<(
-            Vec<Arc<V::ApplicationBlock>>,
+        request: DescendantRequest<
             <V::Block as Digestible>::Digest,
-        )>,
-    > + Send
+            DescendantCursor<V>,
+        >,
+    ) -> impl Future<Output = Option<DescendantPage<V::ApplicationBlock, DescendantCursor<V>>>>
+    + Send
     + 'static {
         let mailbox = self.clone();
         async move {
             let (response, receiver) = oneshot::channel();
-            let _ = mailbox.sender.enqueue(Message::GetDescendant {
-                span: info_span!("marshal.mailbox.get_descendant", tip = ?tip),
-                start,
-                tip,
+            let _ = mailbox.sender.enqueue(Message::GetDescendants {
+                span: info_span!("marshal.mailbox.get_descendants"),
+                request,
                 response,
             });
-            let (blocks, tip) = receiver.await.ok().flatten()?;
-            Some((blocks.into_iter().map(V::into_inner_shared).collect(), tip))
+            let page = receiver.await.ok().flatten()?;
+            Some(DescendantPage {
+                blocks: page
+                    .blocks
+                    .into_iter()
+                    .map(V::into_inner_shared)
+                    .collect(),
+                tip: page.tip,
+                cursor: page.cursor,
+            })
         }
     }
 
@@ -997,7 +1006,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 }
 
 commonware_macros::stability_scope!(ALPHA {
-    use crate::marshal::ancestry::{AncestorStream, Ancestry, BlockProvider};
+    use crate::marshal::ancestry::{AncestorStream, Ancestry, DescendantProvider};
     use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 
     impl<S: Scheme, V: Variant> Mailbox<S, V> {
@@ -1017,7 +1026,7 @@ commonware_macros::stability_scope!(ALPHA {
             fetch_duration: Timed,
         ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
         where
-            Self: BlockProvider<Block = V::ApplicationBlock>,
+            Self: DescendantProvider<Block = V::ApplicationBlock>,
             I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
             C: Clock,
         {

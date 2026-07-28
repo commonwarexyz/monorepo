@@ -6,9 +6,8 @@
 use crate::{
     Block,
     marshal::{
-        BlockID,
-        ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+        ancestry::{BlockProvider, DescendantPage, DescendantProvider, DescendantRequest},
+        core::{Buffer, CommitmentFallback, DescendantCursor, Mailbox, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
@@ -142,25 +141,20 @@ where
         async move { receiver?.await.ok() }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn get_descendant(
-        &self,
-        start: BlockID<<Self::Block as Digestible>::Digest>,
-        tip: BlockID<<Self::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<(Arc<Self::Block>, <Self::Block as Digestible>::Digest)>>
-    + Send
-    + 'static {
-        self.resolve_descendant(start, tip)
-    }
+}
 
-    #[allow(clippy::type_complexity)]
+impl<S, B> DescendantProvider for Mailbox<S, Standard<B>>
+where
+    S: Scheme,
+    B: Block,
+{
+    type Cursor = DescendantCursor<Standard<B>>;
+
     fn get_descendants(
         &self,
-        start: BlockID<<Self::Block as Digestible>::Digest>,
-        tip: BlockID<<Self::Block as Digestible>::Digest>,
-    ) -> impl Future<Output = Option<(Vec<Arc<Self::Block>>, <Self::Block as Digestible>::Digest)>>
-    + Send
-    + 'static {
-        self.resolve_descendants(start, tip)
+        request: DescendantRequest<<Self::Block as Digestible>::Digest, Self::Cursor>,
+    ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static
+    {
+        self.resolve_descendants(request)
     }
 }
