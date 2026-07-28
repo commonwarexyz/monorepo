@@ -893,13 +893,9 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold::recover_pair(
-            quorum,
-            vote_partials.iter(),
-            seed_partials.iter(),
-            strategy,
-        )
-        .ok()?;
+        let (vote_signature, seed_signature) =
+            threshold::recover_pair(quorum, vote_partials.iter(), seed_partials.iter(), strategy)
+                .ok()?;
 
         Some(
             Signature {
