@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
+    db::{ManagedDb, Merkleized, MerkleizedOf, SyncTargetsOf, Unmerkleized, UnmerkleizedOf},
 };
 use commonware_actor::Feedback;
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -241,7 +241,7 @@ impl<
     type Provider = ();
     type Input = ();
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
         block.height().get()
     }
 
@@ -254,7 +254,7 @@ impl<
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _databases: &Self::Databases,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         None
@@ -265,8 +265,8 @@ impl<
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _databases: &Self::Databases,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         None
     }
 
@@ -275,8 +275,8 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _databases: &Self::Databases,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
         TestMerkleized::new()
     }
 }

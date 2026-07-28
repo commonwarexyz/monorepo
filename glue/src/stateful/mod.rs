@@ -93,7 +93,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::DatabaseSet;
+use db::{DatabaseSet, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -112,7 +112,7 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     pub block: A::Block,
 
     /// The merkleized database batches produced during execution.
-    pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
+    pub merkleized: MerkleizedOf<A::Databases, E>,
 }
 
 /// Aggregated per-proposal input a [`Stateful`] application hands its inner
@@ -185,7 +185,7 @@ where
     ///
     /// The returned targets are handed to the state sync coordinator so the
     /// sync engines can track the latest finalized state root and range.
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
+    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E>;
 
     /// Block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
@@ -215,7 +215,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
@@ -258,8 +258,8 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> impl Future<Output = Option<MerkleizedOf<Self::Databases, E>>> + Send;
 
     /// Apply a previously certified block to reconstruct its merkleized state.
     ///
@@ -289,8 +289,8 @@ where
         context: (E, Self::Context),
         block: &Self::Block,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> impl Future<Output = MerkleizedOf<Self::Databases, E>> + Send;
 
     /// Observe a finalized block after it is reflected in the database set.
     ///

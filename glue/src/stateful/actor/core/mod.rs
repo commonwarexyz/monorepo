@@ -12,7 +12,10 @@ use crate::stateful::{
         processor::Processor,
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{AttachableResolverSet, DatabaseSet, Publisher, StateSyncSet, SyncEngineConfig},
+    db::{
+        AttachableResolverSet, ConfigOf, DatabaseSet, Publisher, SnapshotOf, StateSyncSet,
+        SyncEngineConfig,
+    },
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -91,7 +94,7 @@ where
     pub application: A,
 
     /// Configuration used to construct the database set.
-    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
+    pub db_config: ConfigOf<A::Databases, E>,
 
     /// Provider cloned into each proposal.
     pub provider: A::Provider,
@@ -147,7 +150,7 @@ where
     marshal: MarshalMailbox<S, V>,
 
     /// Configuration used to initialize the database set at startup.
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: ConfigOf<A::Databases, E>,
 
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
@@ -209,9 +212,7 @@ where
         // startup paths install their initial durable snapshot into this publisher.
         let (publisher, snapshot_source) = Publisher::new(self.context.as_present());
         self.resolvers
-            .attach_sources(<A::Databases as DatabaseSet<E>>::member_sources(
-                snapshot_source,
-            ))
+            .attach_sources(A::Databases::member_sources(snapshot_source))
             .await;
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor, publisher).await;
@@ -227,7 +228,7 @@ where
     async fn start_state_sync(
         self,
         floor: Finalization<S, V::Commitment>,
-        publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
+        publisher: Publisher<SnapshotOf<A::Databases, E>>,
     ) {
         let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = self
@@ -264,10 +265,7 @@ where
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(
-        self,
-        mut publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
-    ) {
+    async fn start_from_marshal(self, mut publisher: Publisher<SnapshotOf<A::Databases, E>>) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,

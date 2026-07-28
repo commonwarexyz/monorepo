@@ -6,7 +6,7 @@ use crate::stateful::{
         processor::{Applied, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, DatabaseSet, Publisher},
+    db::{Anchor, DatabaseSet, Publisher, SnapshotOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -90,7 +90,7 @@ where
 
     /// The actor's one publication handle; the synced initial snapshot installs here at
     /// transition, and it moves into [`Processing`] afterward.
-    pub(super) publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
+    pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 }
 
 impl<E, A, S, V> Syncing<E, A, S, V>

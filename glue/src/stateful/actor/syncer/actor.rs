@@ -5,7 +5,7 @@ use super::{
 };
 use crate::stateful::{
     Application,
-    db::{DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{ConfigOf, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -38,7 +38,7 @@ where
     pub context: E,
 
     /// Database configuration for the managed set.
-    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
+    pub db_config: ConfigOf<A::Databases, E>,
 
     /// Per-database sync engine parameters.
     pub sync_config: SyncEngineConfig,
@@ -74,7 +74,7 @@ where
     delivered: bool,
 
     /// Database configuration for the managed set.
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: ConfigOf<A::Databases, E>,
 
     /// Per-database sync engine parameters.
     sync_config: SyncEngineConfig,

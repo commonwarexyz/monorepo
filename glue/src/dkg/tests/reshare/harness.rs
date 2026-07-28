@@ -20,8 +20,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
-            p2p::standard as qmdb_resolver,
+            Merkleized as _, MerkleizedOf, SyncEngineConfig, SyncTargetsOf, Unmerkleized as _,
+            UnmerkleizedOf, p2p::standard as qmdb_resolver,
         },
     },
 };
@@ -230,8 +230,8 @@ impl App {
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
         databases: &Database<E>,
-        batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Database<E>, E>,
+    ) -> MerkleizedOf<Database<E>, E> {
         let mut batch = batches;
         let key = Sha256::hash(&[b"height"]);
         batch = batch.write(key, Some(u64_to_digest(height.get())));
@@ -256,7 +256,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let parent = ancestry.peek()?.clone();
@@ -281,8 +281,8 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         // Reshare final-block payload validation is enforced by the surrounding
         // reshare::Application wrapper; this inner app only executes state.
         let tip = ancestry.peek()?.clone();
@@ -295,8 +295,8 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         block: &Self::Block,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
         Self::execute(block.height(), databases, batches).await
     }
 
@@ -318,7 +318,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         }
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
         Target::new(block.state_root, block.range.clone())
     }
 }

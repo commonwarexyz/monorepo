@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet},
+    db::{Anchor, ConfigOf, DatabaseSet, SyncTargetsOf},
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
@@ -144,7 +144,7 @@ where
     A: Application<E>,
 {
     pub anchor: Anchor<BlockDigest<A, E>>,
-    pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
+    pub targets: SyncTargetsOf<A::Databases, E>,
 }
 
 /// Durable state-sync metadata.
@@ -327,7 +327,7 @@ where
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: ConfigOf<A::Databases, E>,
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
 ) -> StartupResult<E, A>
 where
@@ -396,7 +396,7 @@ mod tests {
     use super::{StateSyncMetadata, init_databases_from_marshal};
     use crate::stateful::{
         Application, Input, Proposed,
-        db::{DatabaseSet, ManagedDb},
+        db::{ManagedDb, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf},
         tests::mocks::{
             TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, start_marshal,
         },
@@ -502,7 +502,7 @@ mod tests {
 
         fn sync_targets(
             block: &Self::Block,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+        ) -> SyncTargetsOf<Self::Databases, deterministic::Context> {
             block.height().get()
         }
 
@@ -515,7 +515,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _databases: &Self::Databases,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             unreachable!("startup reconciliation never proposes")
@@ -526,8 +526,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _databases: &Self::Databases,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> Option<MerkleizedOf<Self::Databases, deterministic::Context>> {
             unreachable!("startup reconciliation never verifies")
         }
 
@@ -536,8 +536,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _databases: &Self::Databases,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> MerkleizedOf<Self::Databases, deterministic::Context> {
             unreachable!("startup reconciliation never applies")
         }
     }

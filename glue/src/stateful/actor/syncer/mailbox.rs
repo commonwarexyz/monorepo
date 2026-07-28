@@ -3,7 +3,7 @@
 use super::SyncResult;
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet, TipUpdate},
+    db::{Anchor, SyncTargetsOf, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::Digestible;
@@ -11,7 +11,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 
-type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+type SyncTargets<E, A> = SyncTargetsOf<<A as Application<E>>::Databases, E>;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 pub(crate) enum Message<E, A>

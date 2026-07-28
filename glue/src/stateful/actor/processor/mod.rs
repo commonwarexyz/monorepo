@@ -26,7 +26,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, Barrier, DatabaseSet},
+    db::{Anchor, Barrier, DatabaseSet, MerkleizedOf, SnapshotOf, SyncTargetsOf, UnmerkleizedOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -55,10 +55,9 @@ use std::{
 use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
-type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
+type PendingBatches<A, E> = MerkleizedOf<<A as Application<E>>::Databases, E>;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
-type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-type SnapshotOf<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Snapshot;
+type PendingSyncTargets<A, E> = SyncTargetsOf<<A as Application<E>>::Databases, E>;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -543,7 +542,7 @@ where
         marshal: MarshalMailbox<S, V>,
         parent: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
-    ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
+    ) -> Result<UnmerkleizedOf<A::Databases, E>, PrepareBatchesError>
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -565,11 +564,9 @@ where
     pub(super) fn fork_batches(
         &mut self,
         parent: &<A::Block as Digestible>::Digest,
-    ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
+    ) -> Result<UnmerkleizedOf<A::Databases, E>, PrepareBatchesError> {
         if let Some(entry) = self.pending.get(parent) {
-            return Ok(<A::Databases as DatabaseSet<E>>::fork_batches(
-                &entry.merkleized,
-            ));
+            return Ok(A::Databases::fork_batches(&entry.merkleized));
         }
         if &self.last_processed.digest == parent {
             return Ok(self.databases.new_batches());
@@ -709,7 +706,7 @@ where
         block: &A::Block,
     ) -> (
         Self,
-        Option<Applied<PendingSyncTargets<A, E>, SnapshotOf<A, E>>>,
+        Option<Applied<PendingSyncTargets<A, E>, SnapshotOf<A::Databases, E>>>,
     ) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
@@ -946,7 +943,7 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _},
+        db::{Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -1146,9 +1143,8 @@ mod tests {
             height: Height,
             view: View,
             databases: &DbSet<deterministic::Context>,
-            batches: <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized
-        {
+            batches: UnmerkleizedOf<DbSet<deterministic::Context>, deterministic::Context>,
+        ) -> MerkleizedOf<DbSet<deterministic::Context>, deterministic::Context> {
             let mut batch = batches;
             let current_counter = batch
                 .get(&counter_key(), databases)
@@ -1180,7 +1176,7 @@ mod tests {
             context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             databases: &Self::Databases,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let mut ancestry = Box::pin(ancestry);
@@ -1207,8 +1203,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             databases: &Self::Databases,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> Option<MerkleizedOf<Self::Databases, deterministic::Context>> {
             let mut ancestry = Box::pin(ancestry);
             let block = ancestry.next().await?;
             let merkleized = Self::execute(
@@ -1229,8 +1225,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             databases: &Self::Databases,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> MerkleizedOf<Self::Databases, deterministic::Context> {
             Self::execute(
                 block.height(),
                 block.context.round.view(),
@@ -1260,7 +1256,7 @@ mod tests {
 
         fn sync_targets(
             block: &Self::Block,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+        ) -> SyncTargetsOf<Self::Databases, deterministic::Context> {
             Target::new(block.state_root, block.range.clone())
         }
     }
@@ -1381,14 +1377,10 @@ mod tests {
             app: ExecutionApp,
             prune_config: Option<PruneConfig>,
         ) -> Self {
-            let databases = <DbSet<deterministic::Context> as DatabaseSet<
-                deterministic::Context,
-            >>::init(context.child("db_set"), config.clone())
-            .await;
-            let (databases, _genesis) = <DbSet<deterministic::Context> as DatabaseSet<
-                deterministic::Context,
-            >>::snapshot(databases)
-            .await;
+            let databases =
+                DbSet::<deterministic::Context>::init(context.child("db_set"), config.clone())
+                    .await;
+            let (databases, _genesis) = DbSet::<deterministic::Context>::snapshot(databases).await;
             let metrics = StatefulMetrics::new(&context);
             Self {
                 context_cell: ContextCell::new(context),
@@ -1548,14 +1540,8 @@ mod tests {
             block: Block,
         ) -> (
             Self,
-            Option<
-                Prune<
-                    <DbSet<deterministic::Context> as DatabaseSet<
-                        deterministic::Context,
-                    >>::SyncTargets,
-                >,
-            >,
-        ){
+            Option<Prune<SyncTargetsOf<DbSet<deterministic::Context>, deterministic::Context>>>,
+        ) {
             let (processor, applied) = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)

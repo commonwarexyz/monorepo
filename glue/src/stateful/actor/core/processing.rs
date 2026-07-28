@@ -4,7 +4,7 @@ use crate::stateful::{
         core::mailbox::Message,
         processor::{Applied, Processor},
     },
-    db::{DatabaseSet, Publisher},
+    db::{Publisher, SnapshotOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -58,7 +58,7 @@ where
 
     /// Installs each finalized generation's snapshot for serving once its barrier
     /// proves durable; dropping it detaches snapshot serving.
-    pub(super) publisher: Publisher<<A::Databases as DatabaseSet<E>>::Snapshot>,
+    pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
@@ -269,7 +269,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::Processor,
         },
-        db::DatabaseSet,
+        db::{MerkleizedOf, SyncTargetsOf, UnmerkleizedOf},
         tests::mocks::{
             FlushControl, GatedFlushDb, TestBlock, TestMerkleized, TestScheme, TestVariant, anchor,
             archive_config,
@@ -335,7 +335,7 @@ mod tests {
 
         fn sync_targets(
             block: &Self::Block,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+        ) -> SyncTargetsOf<Self::Databases, deterministic::Context> {
             block.height().get()
         }
 
@@ -348,7 +348,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _databases: &Self::Databases,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             self.pause().await;
@@ -360,8 +360,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _databases: &Self::Databases,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> Option<MerkleizedOf<Self::Databases, deterministic::Context>> {
             self.pause().await;
             None
         }
@@ -371,8 +371,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _databases: &Self::Databases,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            _batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
+        ) -> MerkleizedOf<Self::Databases, deterministic::Context> {
             TestMerkleized::new()
         }
     }

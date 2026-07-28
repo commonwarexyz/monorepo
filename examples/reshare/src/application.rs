@@ -11,7 +11,7 @@ use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
         Application, Input, Proposed,
-        db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
+        db::{Merkleized as _, MerkleizedOf, SyncTargetsOf, Unmerkleized as _, UnmerkleizedOf},
     },
 };
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
@@ -37,8 +37,8 @@ impl App {
     async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
         databases: &Database<E>,
-        batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Database<E>, E>,
+    ) -> MerkleizedOf<Database<E>, E> {
         batches
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
             .merkleize(databases.as_ref())
@@ -67,7 +67,7 @@ where
         context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         // The `reshare::Application` wrapper selected and fetched the payload.
@@ -92,8 +92,8 @@ where
         _context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         // Validation from higher layers:
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
@@ -109,12 +109,12 @@ where
         _context: (E, Self::Context),
         block: &Self::Block,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
         Target::new(block.state_root, block.range.clone())
     }
 }

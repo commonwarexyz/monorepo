@@ -403,6 +403,21 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     fn rewind_to_targets(self, targets: Self::SyncTargets) -> impl Future<Output = Self> + Send;
 }
 
+/// Syntactic sugar for the type of unmerkleized batches used by a given [DatabaseSet] D.
+pub type UnmerkleizedOf<D, E> = <D as DatabaseSet<E>>::Unmerkleized;
+
+/// Syntactic sugar for the type of merkleized batches used by a given [DatabaseSet] D.
+pub type MerkleizedOf<D, E> = <D as DatabaseSet<E>>::Merkleized;
+
+/// Syntactic sugar for the type of published snapshot used by a given [DatabaseSet] D.
+pub type SnapshotOf<D, E> = <D as DatabaseSet<E>>::Snapshot;
+
+/// Syntactic sugar for the type of configuration used by a given [DatabaseSet] D.
+pub type ConfigOf<D, E> = <D as DatabaseSet<E>>::Config;
+
+/// Syntactic sugar for the type of sync targets used by a given [DatabaseSet] D.
+pub type SyncTargetsOf<D, E> = <D as DatabaseSet<E>>::SyncTargets;
+
 /// The one-database set: the single spelling for applications that own exactly one
 /// database. Every associated value stays scalar, and reads reach the database through
 /// [`Deref`].

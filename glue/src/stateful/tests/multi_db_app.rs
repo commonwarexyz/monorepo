@@ -8,7 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotOf, SyncEngineConfig,
+            SyncTargetsOf, Unmerkleized as _, UnmerkleizedOf,
             p2p::{compact as compact_resolver, standard as qmdb_resolver},
         },
         probe::{Config as ProbeConfig, Probe},
@@ -76,7 +77,7 @@ type QmdbB<E> =
 pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
 /// Serving sources projected from the set's published snapshots, one per member.
-type SetSnapshot<E> = <MultiDatabaseSet<E> as DatabaseSet<E>>::Snapshot;
+type SetSnapshot<E> = SnapshotOf<MultiDatabaseSet<E>, E>;
 type SrcA<E> = crate::stateful::db::MemberSource<
     SetSnapshot<E>,
     <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
@@ -207,8 +208,8 @@ impl App {
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         databases: &MultiDatabaseSet<E>,
-        batches: <MultiDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <MultiDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<MultiDatabaseSet<E>, E>,
+    ) -> MerkleizedOf<MultiDatabaseSet<E>, E> {
         let (mut batch_a, batch_b) = batches;
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
@@ -254,7 +255,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
@@ -289,8 +290,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let (merkleized_a, merkleized_b) = Self::execute(tip.height(), databases, batches).await;
@@ -317,12 +318,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         block: &Self::Block,
         databases: &Self::Databases,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
         (
             Target::new(block.root_a, block.range_a.clone()),
             compact_sync::Target {
@@ -529,7 +530,7 @@ impl EngineDefinition for MultiDbEngine {
         .expect("failed to initialize blocks archive");
 
         let (initial_a, initial_b) =
-            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+            MultiDatabaseSet::<deterministic::Context>::initial_sync_targets();
         let genesis_block = Block::genesis(
             initial_a.root,
             initial_a.range,
