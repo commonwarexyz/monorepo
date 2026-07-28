@@ -530,6 +530,22 @@ impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> Certificate<S, D> {
+    /// Verifies this certificate against the provided signing scheme.
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    where
+        S: scheme::Scheme<D>,
+    {
+        match self {
+            Self::Notarization(notarization) => notarization.verify(rng, scheme, strategy),
+            Self::Nullification(nullification) => {
+                nullification.verify::<_, D>(rng, scheme, strategy)
+            }
+            Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
+        }
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
 where

@@ -26,7 +26,7 @@
 
 use crate::{
     simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-    types::{Participant, Round, TermLength, View},
+    types::{Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -68,6 +68,8 @@ pub struct Terms {
     length: TermLength,
     /// Term-abandonment timeout (set if and only if `length` exceeds one).
     stall_timeout: Option<Duration>,
+    /// Optimistic intra-term lookahead (zero unless `length` exceeds one).
+    optimistic_views: ViewDelta,
 }
 
 impl Terms {
@@ -77,6 +79,7 @@ impl Terms {
         Self {
             length: TermLength::ONE,
             stall_timeout: None,
+            optimistic_views: ViewDelta::zero(),
         }
     }
 
@@ -98,12 +101,26 @@ impl Terms {
     /// rotation bounds such a stall to one view. With longer terms, this
     /// timeout bounds it instead.
     ///
+    /// `optimistic_views` is how far a participant may optimistically run
+    /// ahead of certified ancestry within a term; zero disables optimistic
+    /// validation entirely, and values wider than `length` are accepted but
+    /// capped by the windows themselves. See [Optimistic Validation] for what
+    /// it governs. Like the stall timeout, this is local policy: mismatched
+    /// values across participants only degrade the optimization, never
+    /// safety.
+    ///
+    /// [Optimistic Validation]: crate::simplex#optimistic-validation
+    ///
     /// # Panics
     ///
     /// Panics if `length` is 1 or if `stall_timeout` is zero. Single-view
     /// terms are [`Terms::rotating`] (the default), where per-view timeouts
-    /// already bound a stall.
-    pub const fn stable(length: TermLength, stall_timeout: Duration) -> Self {
+    /// already bound a stall and no optimistic window exists.
+    pub const fn stable(
+        length: TermLength,
+        stall_timeout: Duration,
+        optimistic_views: ViewDelta,
+    ) -> Self {
         assert!(
             length.get() > 1,
             "stable leaders require a term length greater than 1"
@@ -115,6 +132,7 @@ impl Terms {
         Self {
             length,
             stall_timeout: Some(stall_timeout),
+            optimistic_views,
         }
     }
 
@@ -136,6 +154,13 @@ impl Terms {
     /// Returns `Some` if and only if [`Self::length`] is greater than one.
     pub const fn stall_timeout(&self) -> Option<Duration> {
         self.stall_timeout
+    }
+
+    /// Returns the optimistic intra-term lookahead (see [`Terms::stable`]).
+    ///
+    /// Always zero when [`Self::length`] is one.
+    pub const fn optimistic_views(&self) -> ViewDelta {
+        self.optimistic_views
     }
 }
 
@@ -181,7 +206,11 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Implementations **must** return the same leader for every view within a
     /// stable-leader term (as defined by [`Self::terms`]): nullification
     /// coverage, finalize gating, and leader-inactivity tracking all assume the
-    /// leader is constant for the remainder of a term.
+    /// leader is constant for the remainder of a term. This contract is
+    /// panic-backed: with optimistic views enabled, future in-term rounds are
+    /// stamped with the current term leader, and an elector that later returns
+    /// a different leader for such a round panics in the batcher verifier's
+    /// `set_leader` when the two assignments meet.
     ///
     /// The `certificate` is expected to be `None` only for view 1.
     ///
@@ -227,18 +256,25 @@ impl<H: Hasher> RoundRobin<H> {
     }
 
     /// Enables stable leaders: `term_length` consecutive views share a leader,
-    /// and a term abandoned after `stall_timeout` evicts them (see
+    /// a term abandoned after `stall_timeout` evicts them, and participants
+    /// may run up to `optimistic_views` ahead within a term (see
     /// [`Terms::stable`]).
     ///
     /// The term length is consensus-critical: every participant must configure
-    /// the same value (see [`TermLength`]). The timeout is local policy.
+    /// the same value (see [`TermLength`]). The timeout and lookahead are
+    /// local policy.
     ///
     /// # Panics
     ///
     /// Panics if `term_length` is 1 or `stall_timeout` is zero (see
     /// [`Terms::stable`]).
-    pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
-        self.terms = Terms::stable(term_length, stall_timeout);
+    pub const fn with_term(
+        mut self,
+        term_length: TermLength,
+        stall_timeout: Duration,
+        optimistic_views: ViewDelta,
+    ) -> Self {
+        self.terms = Terms::stable(term_length, stall_timeout, optimistic_views);
         self
     }
 }
@@ -403,6 +439,20 @@ mod tests {
         bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
+    fn stable_terms_preserve_optimistic_views() {
+        let stall = Duration::from_secs(1);
+        let length = TermLength::new(NZU32!(5));
+
+        // The configured lookahead is stored verbatim, including values wider
+        // than the term (bounded by the issuance window, not by config) and
+        // zero (optimistic validation disabled).
+        for requested in [0, 3, 4, 5, 6, u64::MAX] {
+            let terms = Terms::stable(length, stall, ViewDelta::new(requested));
+            assert_eq!(terms.optimistic_views(), ViewDelta::new(requested));
+        }
+    }
+
+    #[test]
     fn round_robin_rotates_through_participants() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
@@ -457,7 +507,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(TermLength::new(NZU32!(5)), Duration::from_secs(10))
+            .with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            )
             .build(&participants);
 
         let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
@@ -476,7 +530,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
+            .with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            )
             .build(&participants);
         let epoch = Epoch::new(0);
 
@@ -500,7 +558,11 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
-            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
+            .with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            )
             .build(&participants);
 
         let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);

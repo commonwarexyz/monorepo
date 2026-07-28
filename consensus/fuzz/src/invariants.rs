@@ -1,5 +1,5 @@
 use crate::{
-    bounds,
+    Configuration, bounds,
     simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
@@ -13,7 +13,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use rand_core::CryptoRng;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 // Intentionally restates View::covers with independent integer arithmetic:
 // the fuzz oracle must not delegate to the production term predicates
@@ -35,29 +35,117 @@ fn nullification_conflicts(
     (nullified_view - 1) / term_length == (finalized_view - 1) / term_length
 }
 
-pub fn check<P: Simplex>(n: u32, term_length: TermLength, replicas: Vec<ReplicaState>) {
-    let threshold = bounds::quorum(n) as usize;
+// Term index and term-start test derived from the same boundaries, kept
+// independent of the production predicates for the same reason. Genesis is its
+// own term, so term indices start at 1 for view 1.
+fn term_of(view: u64, term_length: TermLength) -> u64 {
+    match view {
+        0 => 0,
+        view => 1 + (view - 1) / term_length.get(),
+    }
+}
+
+fn is_term_start(view: u64, term_length: TermLength) -> bool {
+    view == 0 || (view - 1).is_multiple_of(term_length.get())
+}
+
+pub fn check<P: Simplex>(
+    configuration: Configuration,
+    term_length: TermLength,
+    replicas: Vec<ReplicaState>,
+) {
+    let threshold = bounds::quorum(configuration.n) as usize;
 
     // Invariant: agreement
-    // All replicas that finalized a given view must have the same digest for that view.
+    // All replicas that finalized a given view must have the same digest for
+    // that view. The parent is only compared when an honest quorum exists
+    // (can_finalize): a Byzantine quorum can jointly mint a certificate with
+    // a mutated parent view alongside the honest one, which would trip the
+    // parent comparison without a real safety violation.
     let all_views: HashSet<u64> = replicas
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.keys().cloned())
         .collect();
     for view in all_views {
-        let finalizations_for_view: Vec<(usize, Sha256Digest)> = replicas
+        let finalizations_for_view: Vec<(usize, (Sha256Digest, u64))> = replicas
             .iter()
             .enumerate()
             .filter_map(|(idx, (_, _, finalizations))| {
-                finalizations.get(&view).map(|d| (idx, d.payload))
+                finalizations
+                    .get(&view)
+                    .map(|d| (idx, (d.payload, d.parent)))
             })
             .collect();
 
-        if let Some((first_idx, first_digest)) = finalizations_for_view.first() {
-            for (idx, digest) in &finalizations_for_view[1..] {
+        if let Some((first_idx, first_record)) = finalizations_for_view.first() {
+            for (idx, record) in &finalizations_for_view[1..] {
                 assert_eq!(
-                    digest, first_digest,
-                    "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has {digest:?} but replica {first_idx} has {first_digest:?}",
+                    record.0, first_record.0,
+                    "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has {record:?} but replica {first_idx} has {first_record:?}",
+                );
+                if configuration.can_finalize() {
+                    assert_eq!(
+                        record.1, first_record.1,
+                        "Invariant violation: finalized parent mismatch in view {view}: replica {idx} has {record:?} but replica {first_idx} has {first_record:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    // Invariant: finalization_ancestry
+    // A finalized view's parent must be an earlier view, and no view may
+    // finalize strictly between a parent and its child (such a block would be
+    // forked around). A parent may also only skip views the protocol allows to
+    // be skipped. Gated on `can_finalize` for the reason given above.
+    if configuration.can_finalize() {
+        let finalized_parents: BTreeMap<u64, u64> = replicas
+            .iter()
+            .flat_map(|(_, _, finalizations)| {
+                finalizations.iter().map(|(&view, d)| (view, d.parent))
+            })
+            .collect();
+        // Terms any replica nullified. Taking the union across replicas is
+        // deliberately permissive: a skip is accepted when the nullification
+        // that justifies it was observed anywhere, not necessarily by the
+        // replica that finalized. That can only weaken the check below.
+        let nullified_terms: HashSet<u64> = replicas
+            .iter()
+            .flat_map(|(_, nullifications, _)| nullifications.keys())
+            .map(|&view| term_of(view, term_length))
+            .collect();
+
+        // In ascending view order, each parent must be strictly below its
+        // child and at or above the previous finalized view (otherwise that
+        // predecessor was forked around).
+        let mut previous: Option<u64> = None;
+        for (&view, &parent) in &finalized_parents {
+            assert!(
+                parent < view,
+                "Invariant violation: view {view} finalized with parent {parent} not strictly below it",
+            );
+            if let Some(previous) = previous {
+                assert!(
+                    parent >= previous,
+                    "Invariant violation: view {previous} finalized strictly between parent {parent} and finalized child {view}",
+                );
+            }
+            previous = Some(view);
+
+            // Only a term start may skip views, and then only over terms the
+            // network agreed to abandon.
+            if !is_term_start(view, term_length) {
+                assert_eq!(
+                    parent + 1,
+                    view,
+                    "Invariant violation: intra-term view {view} finalized with non-immediate parent {parent}",
+                );
+                continue;
+            }
+            for term in term_of(parent + 1, term_length)..=term_of(view - 1, term_length) {
+                assert!(
+                    nullified_terms.contains(&term),
+                    "Invariant violation: view {view} finalized over term {term} (parent {parent}) with no nullification",
                 );
             }
         }
@@ -264,6 +352,7 @@ where
                         view.get(),
                         Finalization {
                             payload: cert.proposal.payload,
+                            parent: cert.proposal.parent.get(),
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,
@@ -281,7 +370,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::SimplexEd25519;
+    use crate::{N4F1C3, N4F3C1, simplex::SimplexEd25519};
     use commonware_utils::NZU32;
     use std::{collections::HashMap, panic};
 
@@ -308,17 +397,183 @@ mod tests {
             3,
             Finalization {
                 payload,
+                parent: 0,
                 signature_count: Some(3),
             },
         );
 
         let result = panic::catch_unwind(|| {
             check::<SimplexEd25519>(
-                4,
+                N4F1C3,
                 TermLength::new(NZU32!(5)),
                 vec![(notarizations, nullifications, finalizations)],
             );
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parent_mismatch_requires_honest_quorum() {
+        let payload = Sha256Digest::from([9u8; 32]);
+        let replica = |parent| {
+            let mut notarizations = HashMap::new();
+            notarizations.insert(
+                3,
+                Notarization {
+                    payload,
+                    signature_count: Some(3),
+                },
+            );
+            let mut finalizations = HashMap::new();
+            finalizations.insert(
+                3,
+                Finalization {
+                    payload,
+                    parent,
+                    signature_count: Some(3),
+                },
+            );
+            (notarizations, HashMap::new(), finalizations)
+        };
+
+        // A Byzantine quorum can mint a certificate with a mutated parent
+        // alongside the honest one, so a parent mismatch must not fire
+        // without an honest quorum.
+        check::<SimplexEd25519>(
+            N4F3C1,
+            TermLength::new(NZU32!(5)),
+            vec![replica(1), replica(2)],
+        );
+
+        // With an honest quorum, a parent mismatch is a real violation.
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(
+                N4F1C3,
+                TermLength::new(NZU32!(5)),
+                vec![replica(1), replica(2)],
+            );
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn finalization_between_parent_and_child_fires() {
+        let mut notarizations = HashMap::new();
+        let mut finalizations = HashMap::new();
+        for (view, byte, parent) in [(2u64, 2u8, 1u64), (5, 5, 1)] {
+            let payload = Sha256Digest::from([byte; 32]);
+            notarizations.insert(
+                view,
+                Notarization {
+                    payload,
+                    signature_count: Some(3),
+                },
+            );
+            finalizations.insert(
+                view,
+                Finalization {
+                    payload,
+                    parent,
+                    signature_count: Some(3),
+                },
+            );
+        }
+
+        // View 5 finalized with parent 1, but view 2 is also finalized: view 2
+        // is forked around, so the ancestry invariant must fire.
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(
+                N4F1C3,
+                TermLength::ONE,
+                vec![(notarizations, HashMap::new(), finalizations)],
+            );
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn intra_term_parent_skip_fires() {
+        let payload = Sha256Digest::from([4u8; 32]);
+        let state = || {
+            let mut notarizations = HashMap::new();
+            notarizations.insert(
+                4,
+                Notarization {
+                    payload,
+                    signature_count: Some(3),
+                },
+            );
+            let mut finalizations = HashMap::new();
+            finalizations.insert(
+                4,
+                Finalization {
+                    payload,
+                    parent: 2,
+                    signature_count: Some(3),
+                },
+            );
+            vec![(notarizations, HashMap::new(), finalizations)]
+        };
+
+        // View 4 is not a term start, so it must build on view 3.
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state());
+        });
+        assert!(result.is_err());
+
+        // Without an honest quorum the parent is not trustworthy, so the rule
+        // must not fire (see `parent_mismatch_requires_honest_quorum`).
+        check::<SimplexEd25519>(N4F3C1, TermLength::new(NZU32!(5)), state());
+    }
+
+    #[test]
+    fn term_start_skip_requires_nullification() {
+        let payload = Sha256Digest::from([6u8; 32]);
+        // View 11 starts a term under term_length 5, so it may skip back to
+        // view 3 only if the terms it skips (containing views 4 and 6) were
+        // nullified.
+        let state = |nullified: &[u64]| {
+            let mut notarizations = HashMap::new();
+            notarizations.insert(
+                11,
+                Notarization {
+                    payload,
+                    signature_count: Some(3),
+                },
+            );
+            let mut nullifications = HashMap::new();
+            for &view in nullified {
+                nullifications.insert(
+                    view,
+                    Nullification {
+                        signature_count: Some(3),
+                    },
+                );
+            }
+            let mut finalizations = HashMap::new();
+            finalizations.insert(
+                11,
+                Finalization {
+                    payload,
+                    parent: 3,
+                    signature_count: Some(3),
+                },
+            );
+            vec![(notarizations, nullifications, finalizations)]
+        };
+
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[]));
+        });
+        assert!(result.is_err(), "skip over an unnullified term must fire");
+
+        // Nullifying only the first skipped term leaves the second uncovered.
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[4]));
+        });
+        assert!(result.is_err(), "partial coverage must fire");
+
+        // Both skipped terms nullified: the skip is legal.
+        check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[4, 6]));
     }
 }

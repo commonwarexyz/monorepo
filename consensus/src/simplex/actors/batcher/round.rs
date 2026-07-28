@@ -96,6 +96,21 @@ impl<
         self.verifier.record_certificate(kind);
     }
 
+    /// Records a verified certificate, returning true when it may have made
+    /// buffered votes verifiable.
+    ///
+    /// A notarization also informs the verifier of the certified proposal so
+    /// buffered votes for other proposals are dropped and buffered votes for
+    /// the certified proposal become verifiable.
+    pub fn set_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
+        let kind = certificate.kind();
+        if let Certificate::Notarization(notarization) = certificate {
+            self.verifier.set_proposal(notarization.proposal.clone());
+        }
+        self.record_certificate(kind);
+        matches!(kind, Kind::Notarization)
+    }
+
     /// Adds a vote from the network to this round's verifier.
     pub fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
@@ -129,8 +144,7 @@ impl<
                     None => {
                         self.reporter.report(Activity::Notarize(notarize.clone()));
                         self.votes.insert_notarize(notarize.clone());
-                        self.verifier.add(Vote::Notarize(notarize), false);
-                        true
+                        self.verifier.add(Vote::Notarize(notarize), false)
                     }
                 }
             }
@@ -196,8 +210,7 @@ impl<
                     None => {
                         self.reporter.report(Activity::Finalize(finalize.clone()));
                         self.votes.insert_finalize(finalize.clone());
-                        self.verifier.add(Vote::Finalize(finalize), false);
-                        true
+                        self.verifier.add(Vote::Finalize(finalize), false)
                     }
                 }
             }
