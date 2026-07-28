@@ -11,7 +11,7 @@ use commonware_macros::stability;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
-    future::{BoxFuture, OptionFuture},
+    future::{BoxFuture, Either, OptionFuture},
 };
 use pin_project::pin_project;
 use std::{
@@ -89,13 +89,20 @@ pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Anc
 /// Prepends a fixed sequence of blocks to an existing ancestry stream.
 ///
 /// Blocks are yielded in iterator order before the tail is polled.
+///
+/// # Panics
+///
+/// Panics if the prefixed blocks do not form a contiguous chain.
 pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = Arc<B>>, tail: S) -> impl Ancestry<B>
 where
     B: Block,
     S: Ancestry<B>,
 {
+    let blocks: VecDeque<_> = blocks.into_iter().collect();
+    let chain = sort_and_validate_chain(blocks.iter().cloned());
     PrefixedAncestry {
-        blocks: blocks.into_iter().collect(),
+        blocks,
+        chain,
         tail,
     }
 }
@@ -213,6 +220,7 @@ impl<B: Block> Stream for BoundedAncestry<B> {
 #[derive(Clone)]
 struct PrefixedAncestry<B: Block, S> {
     blocks: VecDeque<Arc<B>>,
+    chain: Vec<Arc<B>>,
     tail: S,
 }
 
@@ -234,7 +242,7 @@ where
         &self,
         start: BlockID<B::Digest>,
     ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
-        self.tail.descendants(start)
+        descendants_with_suffix(&self.tail, &self.chain, start)
     }
 }
 
@@ -250,6 +258,114 @@ where
             return Poll::Ready(Some(block));
         }
         Pin::new(&mut self.tail).poll_next(cx)
+    }
+}
+
+/// A forward ancestry stream extended by a fixed chain suffix.
+#[derive(Clone)]
+struct SuffixedAncestry<B: Block, S> {
+    head: S,
+    head_exhausted: bool,
+    blocks: VecDeque<Arc<B>>,
+    chain: Vec<Arc<B>>,
+    last: Option<(Height, B::Digest)>,
+}
+
+impl<B: Block, S> SuffixedAncestry<B, S> {
+    fn new(head: S, chain: Vec<Arc<B>>) -> Self {
+        Self {
+            head,
+            head_exhausted: false,
+            blocks: chain.clone().into(),
+            chain,
+            last: None,
+        }
+    }
+}
+
+impl<B: Block, S> Unpin for SuffixedAncestry<B, S> {}
+
+impl<B, S> Ancestry<B> for SuffixedAncestry<B, S>
+where
+    B: Block,
+    S: Ancestry<B>,
+{
+    fn peek(&self) -> Option<&B> {
+        if !self.head_exhausted {
+            return self.head.peek();
+        }
+        self.blocks.front().map(Arc::as_ref)
+    }
+
+    fn descendants(
+        &self,
+        start: BlockID<B::Digest>,
+    ) -> impl Future<Output = Option<impl Ancestry<B>>> + Send {
+        descendants_with_suffix(&self.head, &self.chain, start)
+    }
+}
+
+fn descendants_with_suffix<'a, B, S>(
+    head: &'a S,
+    chain: &[Arc<B>],
+    start: BlockID<B::Digest>,
+) -> impl Future<Output = Option<BoxedAncestry<B>>> + Send + 'a
+where
+    B: Block,
+    S: Ancestry<B>,
+{
+    if let Some(suffix) = chain_suffix(chain, start) {
+        return Either::Left(std::future::ready(Some(BoxedAncestry::new(from_iter(
+            suffix,
+        )))));
+    }
+
+    let chain = chain.to_vec();
+    Either::Right(head.descendants(start).map(move |head| {
+        head.map(|head| BoxedAncestry::new(SuffixedAncestry::new(head, chain)))
+    }))
+}
+
+impl<B, S> Stream for SuffixedAncestry<B, S>
+where
+    B: Block,
+    S: Ancestry<B>,
+{
+    type Item = Arc<B>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if !self.head_exhausted {
+            match Pin::new(&mut self.head).poll_next(cx) {
+                Poll::Ready(Some(block)) => {
+                    self.last = Some((block.height(), block.digest()));
+                    return Poll::Ready(Some(block));
+                }
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => self.head_exhausted = true,
+            }
+        }
+
+        while let Some(block) = self.blocks.pop_front() {
+            if let Some((height, digest)) = self.last {
+                if block.height() < height {
+                    continue;
+                }
+                if block.height() == height {
+                    assert_eq!(
+                        block.digest(),
+                        digest,
+                        "overlapping blocks must share a digest"
+                    );
+                    continue;
+                }
+                assert_extends(&(height, digest), block.as_ref());
+            }
+
+            self.last = Some((block.height(), block.digest()));
+            return Poll::Ready(Some(block));
+        }
+
+        Poll::Ready(None)
     }
 }
 
@@ -1220,6 +1336,67 @@ mod test {
             assert_eq!(ancestry.peek(), Some(&parent));
             assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
             assert_eq!(ancestry.peek(), None);
+        });
+    }
+
+    #[test]
+    fn test_with_prefix_descendants_include_prefix() {
+        deterministic::Runner::default().start(|_| async move {
+            let ancestor = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+            let parent = Block::new::<Sha256>((), ancestor.digest(), Height::new(1), 1);
+            let tip = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
+            let ancestry = with_prefix(
+                [Arc::new(tip.clone()), Arc::new(parent.clone())],
+                from_iter([Arc::new(ancestor.clone())]),
+            );
+
+            let from_tail = ancestry
+                .descendants(BlockID::Digest(ancestor.digest()))
+                .await
+                .expect("tail block should be on chain")
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(
+                from_tail,
+                vec![
+                    Arc::new(ancestor.clone()),
+                    Arc::new(parent.clone()),
+                    Arc::new(tip.clone()),
+                ]
+            );
+
+            let from_prefix = ancestry
+                .descendants(BlockID::Digest(parent.digest()))
+                .await
+                .expect("prefix block should be on chain")
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(
+                from_prefix,
+                vec![Arc::new(parent.clone()), Arc::new(tip.clone())]
+            );
+
+            let mut tail = from_iter([
+                Arc::new(tip.clone()),
+                Arc::new(parent.clone()),
+                Arc::new(ancestor.clone()),
+            ]);
+            assert_eq!(tail.next().await.as_deref(), Some(&tip));
+            assert_eq!(tail.next().await.as_deref(), Some(&parent));
+            let ancestry = with_prefix(
+                [Arc::new(tip.clone()), Arc::new(parent.clone())],
+                tail,
+            );
+            let overlapping = ancestry
+                .descendants(BlockID::Digest(ancestor.digest()))
+                .await
+                .expect("consumed blocks should remain on the chain")
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(
+                overlapping,
+                vec![Arc::new(ancestor), Arc::new(parent), Arc::new(tip)]
+            );
         });
     }
 
