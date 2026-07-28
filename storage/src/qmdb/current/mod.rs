@@ -1645,6 +1645,8 @@ pub mod tests {
             let batch = batch.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
 
+            // The exposed bitmap must describe the same operation boundary as the DB and surface
+            // both reconstruction chunks that remain outside the grafted tree.
             let end = db.bounds().end;
             let bitmap = db.bitmap();
             assert_eq!(bitmap.len(), *end);
@@ -1663,6 +1665,7 @@ pub mod tests {
             assert!(partial_bits > 0 && partial_bits < CHUNK_BYTES as u64 * 8);
             assert_ne!(partial, [0; CHUNK_BYTES]);
 
+            // Tie the extracted bytes to the digests authenticated by the existing root witness.
             let witness = db.ops_root_witness().await.unwrap();
             assert_eq!(
                 witness.pending_chunk_digest,
@@ -1673,6 +1676,8 @@ pub mod tests {
                 Some((partial_bits, Sha256::hash(&[partial.as_slice()])))
             );
 
+            // The virtual storage remains in ops-tree coordinates even where it substitutes
+            // bitmap-authenticated grafted nodes.
             let storage = db.grafted_storage();
             assert_eq!(
                 storage.size(),
@@ -1685,6 +1690,8 @@ pub mod tests {
             );
             assert!(storage.get_node(ops_pos).await.unwrap().is_some());
 
+            // Reconstruction frontiers use the raw ops-tree pin ordering. The virtual digest at
+            // the grafting boundary must differ because the corresponding bitmap chunk is nonzero.
             let pinned_positions =
                 <mmb::Family as merkle::Family>::nodes_to_pin(end).collect::<Vec<_>>();
             let raw_pinned = db.pinned_nodes_at(end).await.unwrap();
