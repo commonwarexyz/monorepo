@@ -83,7 +83,11 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, 
     fn is_update(&self) -> bool {
         matches!(self, Self::Set(_, _))
     }
+}
 
+impl<F: Family, K: Key, V: ValueEncoding> crate::qmdb::operation::Floored<F>
+    for Operation<F, K, V>
+{
     fn has_floor(&self) -> Option<Location<F>> {
         self.has_floor()
     }
@@ -180,19 +184,19 @@ mod tests {
 
         let set_op = VarOp::Set(key, value.clone());
         assert_eq!(
-            <VarOp as OperationTrait<mmr::Family>>::has_floor(&set_op),
+            <VarOp as crate::qmdb::operation::Floored<mmr::Family>>::has_floor(&set_op),
             None
         );
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as OperationTrait<mmr::Family>>::has_floor(&commit_op),
+            <VarOp as crate::qmdb::operation::Floored<mmr::Family>>::has_floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as OperationTrait<mmr::Family>>::has_floor(&commit_op_none),
+            <VarOp as crate::qmdb::operation::Floored<mmr::Family>>::has_floor(&commit_op_none),
             Some(Location::new(0))
         );
     }

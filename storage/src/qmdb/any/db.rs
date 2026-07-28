@@ -8,12 +8,12 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         Error as JournalError, authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{self, Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Operation as OperationTrait, update_known_loc,
+        Error, bitmap::Shared, delete_known_loc, metrics::Metrics, operation::Floored as _,
+        update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -554,10 +554,7 @@ where
         }
 
         let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size, |op| {
-                op.has_floor()
-            })
-            .await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -801,12 +798,9 @@ where
                     .checked_sub(1)
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
-            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &*log,
-                Location::new(bounds.end),
-                |op| op.has_floor(),
-            )
-            .await?;
+            let inactivity_floor_loc =
+                crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
+                    .await?;
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index
@@ -959,5 +953,67 @@ where
         // retaining the entire `self` in the future.
         let Self { log, .. } = self;
         log.destroy().await.map_err(Into::into)
+    }
+}
+
+/// Owned immutable proof snapshot of an Any database with bounds frozen at capture.
+///
+/// Produced by [Db::snapshot]. It carries neither the keyed index nor the activity bitmap.
+#[commonware_macros::stability(ALPHA)]
+pub type Snapshot<F, E, U, R, H> = crate::qmdb::Snapshot<F, E, Operation<F, U>, R, H>;
+
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: contiguous::Snapshot<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable [Snapshot] of the database.
+    ///
+    /// The snapshot's bounds are frozen at capture, so it does not observe later mutations and stays
+    /// readable across concurrent appends, syncs, and prunes of this database.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, Snapshot<F, E, U, C::Reader, H>), crate::qmdb::Error<F>> {
+        let log;
+        (self.log, log) = self.log.snapshot().await?;
+        let root = self.root;
+        Ok((self, Snapshot::new(log, root)))
+    }
+}
+
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    U: Update + Send + Sync + 'static,
+    C: Mutable<Item = Operation<F, U>> + contiguous::Snapshot<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Apply `batch`, capture the serving [Snapshot], and start persisting the applied
+    /// state, returning the handle that resolves once it is durable.
+    ///
+    /// The snapshot is captured before the sync starts, so the handle proves durable
+    /// exactly the state the snapshot contains. [Self::apply_batch], [Self::snapshot],
+    /// and [Self::start_sync] remain available for callers composing the steps
+    /// themselves.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn finalize(
+        self,
+        batch: std::sync::Arc<super::batch::MerkleizedBatch<F, H::Digest, U, S>>,
+    ) -> Result<(Self, Snapshot<F, E, U, C::Reader, H>, Handle<()>), crate::qmdb::Error<F>> {
+        let (db, _) = self.apply_batch(batch).await?;
+        let (db, snapshot) = db.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, snapshot, handle))
     }
 }

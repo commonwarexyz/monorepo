@@ -551,6 +551,14 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_fixed_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_snapshot(ctx, open::<mmr::Family>).await;
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_fixed_prune() {
         let executor = deterministic::Runner::default();
@@ -906,6 +914,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_proof_verify(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_fixed_snapshot_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_snapshot(ctx, open::<mmb::Family>).await;
         });
     }
 
@@ -1323,6 +1339,30 @@ mod tests {
         executor.start(|ctx| async move {
             test::test_immutable_rewind_after_reopen_mixed_gap_retained(ctx, open::<mmb::Family>)
                 .await;
+        });
+    }
+    /// The handle returned by `finalize` proves durable exactly the state the returned
+    /// snapshot contains: once it completes, a reopen converges on the snapshot.
+    #[test]
+    fn test_immutable_fixed_finalize_handle_covers_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config("finalize-covers", &context);
+            let db: Db<mmr::Family, _, Digest, Digest, Sha256, TwoCap, Sequential> =
+                Db::init(context.child("db"), cfg.clone()).await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[1u8]]), Sha256::fill(9u8))
+                .merkleize(&db, None, floor)
+                .await;
+            let (db, snapshot, handle) = db.finalize(batch).await.unwrap();
+            handle.await.unwrap();
+            drop(db);
+
+            let reopened: Db<mmr::Family, _, Digest, Digest, Sha256, TwoCap, Sequential> =
+                Db::init(context.child("reopen"), cfg).await.unwrap();
+            assert_eq!(reopened.root(), snapshot.root());
+            assert_eq!(reopened.bounds().end, snapshot.op_count());
         });
     }
 }

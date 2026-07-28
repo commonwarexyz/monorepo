@@ -146,10 +146,12 @@ pub(crate) mod test {
                 },
                 unordered::{Update, fixed::Operation},
             },
+            sync::resolver::Resolver as _,
             verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
@@ -161,7 +163,7 @@ pub(crate) mod test {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::oneshot};
     use core::num::NonZeroUsize;
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
@@ -1634,6 +1636,203 @@ pub(crate) mod test {
         });
     }
 
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database updates its keys (index rewrites and bitmap flips), commits, and prunes
+    /// past it — behavioral evidence that the snapshot carries neither the keyed index nor the
+    /// activity bitmap.
+    /// The handle returned by `finalize` proves durable exactly the state the returned
+    /// snapshot contains: once it completes, a reopen converges on the snapshot.
+    #[test]
+    fn test_any_fixed_finalize_handle_covers_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = fixed_db_config::<TwoCap>("finalize-covers", &context);
+            let db = AnyTest::init(context.child("db"), cfg.clone())
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..10u64 {
+                batch = batch.write(key(i), Some(val(i)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, snapshot, handle) = db.finalize(merkleized).await.unwrap();
+            handle.await.unwrap();
+            drop(db);
+
+            let reopened = AnyTest::init(context.child("reopen"), cfg).await.unwrap();
+            assert_eq!(reopened.root(), snapshot.root());
+            assert_eq!(reopened.bounds().end, snapshot.op_count());
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_fixed_db_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let ops = create_test_ops(20);
+            let mut db = apply_ops(db, ops.clone()).await;
+            let root = db.root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            assert_eq!(snapshot.root(), root);
+            assert_eq!(snapshot.op_count(), op_count);
+
+            let (proof, proof_ops) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &proof_ops,
+                &root,
+            ));
+
+            // Update every captured key (rewriting index entries and retroactively flipping
+            // activity bits), commit, and prune the live database past the capture.
+            let mut rng = TestRng::new(7);
+            let updates: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    Operation::Update(Update(key, _)) => {
+                        Some(Operation::Update(Update(*key, Digest::random(&mut rng))))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!updates.is_empty());
+            db = apply_ops(db, updates).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert_ne!(db.root(), root);
+            assert!(db.bounds().start > Location::new(0));
+
+            // The snapshot still serves the identical proof, verifiable against the captured
+            // root, including for operations the live database has since pruned.
+            let (proof2, proof_ops2) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof2,
+                Location::new(0),
+                &proof_ops2,
+                &root,
+            ));
+
+            // Anything above the frozen size is rejected.
+            assert!(
+                snapshot
+                    .historical_proof(op_count + 1, Location::new(0), NZU64!(1))
+                    .await
+                    .is_err()
+            );
+            assert!(snapshot.proof(op_count, NZU64!(1)).await.is_err());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_fixed_snapshot_resolver_matches_live_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let mut db = apply_ops(db, create_test_ops(20)).await;
+            let root = db.root();
+            let op_count = db.bounds().end;
+            let start_loc = Location::new(3);
+            let max_ops = NZU64!(5);
+
+            // Live output at this generation, from the same calls the lock-backed resolvers make.
+            let (live_proof, live_ops) = db
+                .historical_proof(op_count, start_loc, max_ops)
+                .await
+                .unwrap();
+            let live_pins = db.pinned_nodes_at(start_loc).await.unwrap();
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            let resolver = Arc::new(snapshot);
+
+            // Resolver output over the snapshot matches the live database's output.
+            let (_cancel_tx, cancel_rx) = oneshot::channel();
+            let result = resolver
+                .get_operations(op_count, start_loc, max_ops, true, cancel_rx)
+                .await
+                .unwrap();
+            assert_eq!(result.proof.encode(), live_proof.encode());
+            assert_eq!(result.operations, live_ops);
+            assert_eq!(result.pinned_nodes, Some(live_pins));
+            assert!(verify_proof::<Sha256, _, _>(
+                &result.proof,
+                start_loc,
+                &result.operations,
+                &root,
+            ));
+
+            // Advance and prune the live database past the capture, then confirm the
+            // resolver's output is byte-identical to its pre-mutation output.
+            db = apply_ops(db, create_test_ops(30)).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start > start_loc);
+
+            let (_cancel_tx, cancel_rx) = oneshot::channel();
+            let result2 = resolver
+                .get_operations(op_count, start_loc, max_ops, true, cancel_rx)
+                .await
+                .unwrap();
+            assert_eq!(result2.proof.encode(), result.proof.encode());
+            assert_eq!(result2.operations, result.operations);
+            assert_eq!(result2.pinned_nodes, result.pinned_nodes);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_fixed_snapshot_resolver_cancellation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let mut db = apply_ops(db, create_test_ops(20)).await;
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            let resolver = Arc::new(snapshot);
+
+            // A request whose sender is already gone is cancelled before any disk work, and
+            // the serve releases its clone of the snapshot.
+            let serve = Arc::clone(&resolver);
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            drop(cancel_tx);
+            let result = serve
+                .get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx)
+                .await;
+            assert!(matches!(result, Err(crate::qmdb::Error::Cancelled)));
+            drop(serve);
+            assert_eq!(Arc::strong_count(&resolver), 1);
+
+            // Cancelling one in-flight request wedges nothing, so a subsequent serve over
+            // the same resolver succeeds.
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            let pending =
+                resolver.get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx);
+            drop(cancel_tx);
+            assert!(matches!(pending.await, Err(crate::qmdb::Error::Cancelled)));
+
+            let (_cancel_tx, cancel_rx) = oneshot::channel();
+            let result = resolver
+                .get_operations(op_count, Location::new(0), NZU64!(1000), true, cancel_rx)
+                .await
+                .unwrap();
+            assert_eq!(result.operations.len(), *op_count as usize);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
@@ -1781,7 +1980,7 @@ pub(crate) mod test {
             type Merkle = TestMmr;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.merkle, self.log.items)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {

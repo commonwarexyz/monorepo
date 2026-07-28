@@ -59,6 +59,12 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
     }
 }
 
+impl<F: Family, V: ValueEncoding> crate::qmdb::operation::Floored<F> for Operation<F, V> {
+    fn has_floor(&self) -> Option<Location<F>> {
+        self.has_floor()
+    }
+}
+
 impl<F: Family, V: Codec> Write for Operation<F, V> {
     fn write(&self, buf: &mut impl BufMut) {
         V::write_operation(self, buf)

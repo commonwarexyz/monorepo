@@ -14,8 +14,18 @@ impl<T> Key for T where
 {
 }
 
+/// An operation that may declare the inactivity floor of the commit it belongs to.
+///
+/// Separate from [Operation] because keyless operations have no key type, and so cannot
+/// implement it, yet still declare a floor.
+pub trait Floored<F: Family> {
+    /// The inactivity floor location if this operation is a commit operation with a floor value,
+    /// None otherwise.
+    fn has_floor(&self) -> Option<Location<F>>;
+}
+
 /// An operation that can be applied to a database.
-pub trait Operation<F: Family> {
+pub trait Operation<F: Family>: Floored<F> {
     /// The key type for this operation.
     type Key: Key;
 
@@ -30,10 +40,6 @@ pub trait Operation<F: Family> {
 
     /// If this operation deletes its key's value.
     fn is_delete(&self) -> bool;
-
-    /// The inactivity floor location if this operation is a commit operation with a floor value,
-    /// None otherwise.
-    fn has_floor(&self) -> Option<Location<F>>;
 }
 
 /// A trait for operations used by database variants that support commit operations.

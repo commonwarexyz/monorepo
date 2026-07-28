@@ -1,5 +1,6 @@
 use crate::{
     Context,
+    journal::contiguous::Contiguous,
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
@@ -22,12 +23,13 @@ use crate::{
             fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
         },
-        operation::Key,
+        operation::{Floored, Key},
         sync::compact::ServeError,
     },
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Array,
@@ -189,6 +191,22 @@ where
     .await
 }
 
+/// Run `serve` to completion unless `cancel_rx` resolves first.
+///
+/// The corresponding sender is dropped (or signaled) when the caller no longer needs the
+/// result, so serving stops at its next await point and `cancelled` is returned. An
+/// already-cancelled receiver returns `cancelled` without polling `serve`.
+pub(crate) async fn serve_unless_cancelled<T, E>(
+    cancel_rx: oneshot::Receiver<()>,
+    cancelled: E,
+    serve: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    select! {
+        _ = cancel_rx => Err(cancelled),
+        result = serve => result,
+    }
+}
+
 /// Trait for network communication with the sync server.
 pub trait Resolver: Send + Sync + Clone + 'static {
     /// The merkle family backing the resolver's proofs
@@ -248,17 +266,21 @@ macro_rules! impl_resolver {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -290,18 +312,22 @@ macro_rules! impl_resolver {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -329,19 +355,23 @@ macro_rules! impl_resolver {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
+                Ok(serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }
@@ -388,17 +418,21 @@ macro_rules! impl_resolver_immutable {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -430,18 +464,22 @@ macro_rules! impl_resolver_immutable {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -469,19 +507,23 @@ macro_rules! impl_resolver_immutable {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
+                Ok(serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }
@@ -517,17 +559,21 @@ macro_rules! impl_resolver_keyless {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -556,18 +602,22 @@ macro_rules! impl_resolver_keyless {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -592,19 +642,23 @@ macro_rules! impl_resolver_keyless {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
+                Ok(serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }
@@ -617,6 +671,47 @@ impl_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
 
 // Keyless Variable
 impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
+
+// Resolver impls over owned proof snapshots. Serving reads frozen state, never touches the
+// live database or any lock, and stays valid while the source appends, syncs, and prunes.
+// One generic impl per snapshot family covers every backing journal and update type.
+
+impl<F, E, Op, R, H> Resolver for Arc<qmdb::Snapshot<F, E, Op, R, H>>
+where
+    F: Family,
+    E: Context,
+    Op: Floored<F> + Send + Sync + 'static,
+    R: Contiguous<Item = Op> + Send + Sync + 'static,
+    H: Hasher,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Op;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        serve_unless_cancelled(
+            cancel_rx,
+            qmdb::Error::Cancelled,
+            fetch_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                |op_count, start_loc, max_ops| self.historical_proof(op_count, start_loc, max_ops),
+                |start_loc| self.pinned_nodes_at(start_loc),
+            ),
+        )
+        .await
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod tests {

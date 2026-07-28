@@ -62,9 +62,11 @@ use crate::{
             },
         },
         metrics::Metrics as AnyMetrics,
-        operation::{Committable, Key, Operation as _},
+        operation::{Committable, Key},
         sync::{
-            Database, DatabaseConfig as Config, compact::ServeError, resolver::fetch_operations,
+            Database, DatabaseConfig as Config,
+            compact::ServeError,
+            resolver::{fetch_operations, serve_unless_cancelled},
         },
     },
     translator::Translator,
@@ -322,7 +324,6 @@ macro_rules! impl_current_sync_database {
                 let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
                     journal,
                     target.range.end(),
-                    |op| op.has_floor(),
                 )
                 .await?;
 
@@ -403,17 +404,21 @@ macro_rules! impl_current_resolver {
                 start_loc: Location<F>,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.any.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.any.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled,
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            self.any.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| self.any.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -451,18 +456,22 @@ macro_rules! impl_current_resolver {
                 start_loc: Location<F>,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.any.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.any.pinned_nodes_at(start_loc),
+                serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled,
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.any.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.any.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await
             }
@@ -496,19 +505,23 @@ macro_rules! impl_current_resolver {
                 start_loc: Location<F>,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
+                cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.any.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.any.pinned_nodes_at(start_loc),
+                Ok(serve_unless_cancelled(
+                    cancel_rx,
+                    qmdb::Error::Cancelled.into(),
+                    fetch_operations(
+                        op_count,
+                        start_loc,
+                        max_ops,
+                        include_pinned_nodes,
+                        |op_count, start_loc, max_ops| {
+                            db.any.historical_proof(op_count, start_loc, max_ops)
+                        },
+                        |start_loc| db.any.pinned_nodes_at(start_loc),
+                    ),
                 )
                 .await?)
             }
@@ -533,3 +546,45 @@ impl_current_resolver!(
     CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
     OrderedVariableOp<F, K, V>: CodecShared,
 );
+
+// Resolver over the owned proof snapshot. Serving reads frozen ops-level state and never
+// touches the live database or any lock. One generic impl covers every current variant.
+impl<F, E, U, R, H> crate::qmdb::sync::Resolver for Arc<db::Snapshot<F, E, U, R, H>>
+where
+    F: Graftable,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = Operation<F, U>> + Send + Sync + 'static,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = DigestOf<H>;
+    type Op = Operation<F, U>;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<F>,
+        start_loc: Location<F>,
+        max_ops: std::num::NonZeroU64,
+        include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
+        serve_unless_cancelled(
+            cancel_rx,
+            qmdb::Error::Cancelled,
+            fetch_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                |op_count, start_loc, max_ops| {
+                    self.ops().historical_proof(op_count, start_loc, max_ops)
+                },
+                |start_loc| self.ops().pinned_nodes_at(start_loc),
+            ),
+        )
+        .await
+    }
+}

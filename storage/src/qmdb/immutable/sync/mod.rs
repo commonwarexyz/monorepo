@@ -91,7 +91,7 @@ where
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.journal.bounds();
+            let bounds = journal.items.bounds();
             let last_commit_loc = Location::<F>::new(
                 bounds
                     .end
@@ -99,16 +99,15 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &journal.journal,
+                &journal.items,
                 Location::new(bounds.end),
-                |op| op.has_floor(),
             )
             .await?;
 
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &journal.journal,
+                &journal.items,
                 &mut snapshot,
                 db_config.init_buffer,
                 db_config.init_cache_size,
@@ -153,10 +152,7 @@ where
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
         let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
-                op.has_floor()
-            })
-            .await?;
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
         sync::local_boundary_nodes::<F, _, H, S>(
             context,

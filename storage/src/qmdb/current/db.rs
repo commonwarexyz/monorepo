@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         Error as JournalError,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{self, Contiguous, Mutable},
     },
     merkle::{
         self, Graftable, Location, Position, hasher::Hasher as _, mem::Mem,
@@ -25,7 +25,7 @@ use crate::{
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
-        operation::Operation as _,
+        operation::Floored as _,
     },
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
@@ -1295,6 +1295,126 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     Ok((metadata, pruned_chunks, pinned_nodes))
 }
 
+/// Owned immutable ops-proof snapshot of a Current database with bounds frozen at capture.
+///
+/// Produced by [Db::snapshot]. It serves ops-tree proofs (suitable for state sync)
+/// against the captured state while the source database continues to append, sync, and prune,
+/// and it exposes no mutation. It carries neither the keyed index, the activity bitmap, nor
+/// the grafted tree.
+///
+/// There is no snapshot [Db::range_proof] because grafted activity proofs read the live bitmap, which
+/// keeps no history, so they are served only by the live database at its latest root — the
+/// same contract as the live API.
+///
+/// Rewinding the source database in place while a snapshot is alive leaves reads from
+/// the rewound range observing unspecified contents.
+#[commonware_macros::stability(ALPHA)]
+pub struct Snapshot<F, E, U, R, H>
+where
+    F: Graftable,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = Operation<F, U>>,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Ops-level snapshot of the wrapped Any database. Its root is the ops root.
+    ops: any::db::Snapshot<F, E, U, R, H>,
+
+    /// Canonical (grafted) root at capture.
+    root: H::Digest,
+}
+
+impl<F, E, U, R, H> Snapshot<F, E, U, R, H>
+where
+    F: Graftable,
+    E: Context,
+    U: Update,
+    R: Contiguous<Item = Operation<F, U>>,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Return the canonical root of the database at capture.
+    pub const fn root(&self) -> H::Digest {
+        self.root
+    }
+
+    /// Return the ops tree root at capture. Semantics match [Db::ops_root], which sync targets and
+    /// ops-level proofs verify against this root, not the canonical root.
+    pub const fn ops_root(&self) -> H::Digest {
+        self.ops.root()
+    }
+
+    /// Return the number of operations visible to this snapshot.
+    pub fn op_count(&self) -> Location<F> {
+        self.ops.op_count()
+    }
+
+    /// The ops-level snapshot of the wrapped Any database. Sync serving and ops-level
+    /// proofs read through it, and its proofs verify against [Self::ops_root], matching
+    /// [Db::ops_historical_proof].
+    pub const fn ops(&self) -> &any::db::Snapshot<F, E, U, R, H> {
+        &self.ops
+    }
+}
+
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    U: Update,
+    C: contiguous::Snapshot<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable [Snapshot] of the database.
+    ///
+    /// The snapshot's bounds are frozen at capture, so it does not observe later mutations and
+    /// stays readable across concurrent appends, syncs, and prunes of this database.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, U, C::Reader, H>), Error<F>> {
+        let ops;
+        (self.any, ops) = self.any.snapshot().await?;
+        let snapshot = Snapshot {
+            ops,
+            root: self.root,
+        };
+        Ok((self, snapshot))
+    }
+}
+
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    U: Update + 'static,
+    C: Mutable<Item = Operation<F, U>> + contiguous::Snapshot<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Apply `batch`, capture the serving [Snapshot], and start persisting the applied
+    /// state, returning the handle that resolves once it is durable.
+    ///
+    /// The snapshot is captured before the sync starts, so the handle proves durable
+    /// exactly the state the snapshot contains. [Self::apply_batch], [Self::snapshot],
+    /// and [Self::start_sync] remain available for callers composing the steps
+    /// themselves.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn finalize(
+        self,
+        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
+    ) -> Result<(Self, Snapshot<F, E, U, C::Reader, H>, Handle<()>), Error<F>> {
+        let (db, _) = self.apply_batch(batch).await?;
+        let (db, snapshot) = db.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, snapshot, handle))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,6 +1615,80 @@ mod tests {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    /// A proof snapshot's ops proofs stay byte-stable and verifiable against the captured ops
+    /// root while the live database updates keys — retroactively flipping activity bits and
+    /// raising the floor — commits, and prunes past it.
+    #[test_traced]
+    fn test_snapshot_stable_across_bitmap_churn() {
+        use commonware_codec::Encode as _;
+        use commonware_utils::NZU64;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("proof-snapshot-churn", &ctx),
+            )
+            .await
+            .unwrap();
+            let mut db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            let canonical_root = db.root();
+            let ops_root = db.ops_root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            assert_eq!(snapshot.root(), canonical_root);
+            assert_eq!(snapshot.ops_root(), ops_root);
+            assert_eq!(snapshot.op_count(), op_count);
+
+            let (proof, ops) = snapshot
+                .ops()
+                .historical_proof(op_count, Location::new(0), NZU64!(100))
+                .await
+                .unwrap();
+            assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root,
+            ));
+
+            // Update the same keys so the live bitmap retroactively flips the captured
+            // operations' activity bits, the floor rises, and pruning discards captured
+            // operations. The snapshot must not observe any of it.
+            db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert_ne!(db.root(), canonical_root);
+            assert_ne!(db.ops_root(), ops_root);
+
+            let (proof2, ops2) = snapshot
+                .ops()
+                .historical_proof(op_count, Location::new(0), NZU64!(100))
+                .await
+                .unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                &proof2,
+                Location::new(0),
+                &ops2,
+                &ops_root,
+            ));
+
+            // Anything above the frozen size is rejected.
+            assert!(
+                snapshot
+                    .ops()
+                    .historical_proof(op_count + 1, Location::new(0), NZU64!(1))
+                    .await
+                    .is_err()
+            );
+
+            db.destroy().await.unwrap();
+        });
     }
 
     /// State committed via an awaited start_sync handle is recovered on reopen, including the
@@ -2158,6 +2352,31 @@ mod tests {
             let canonical_root = db.root();
 
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
+        });
+    }
+    /// The handle returned by `finalize` proves durable exactly the state the returned
+    /// snapshot contains: once it completes, a reopen converges on the snapshot.
+    #[test]
+    fn test_current_finalize_handle_covers_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let cfg = fixed_config::<OneCap>("finalize-covers", &ctx);
+            let db = MmrDb::init(ctx.child("db"), cfg.clone()).await.unwrap();
+            let mut batch = db.new_batch();
+            for idx in 0..10u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                let value = Sha256::hash(&[&(idx + 10).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, snapshot, handle) = db.finalize(merkleized).await.unwrap();
+            handle.await.unwrap();
+            drop(db);
+
+            let reopened = MmrDb::init(ctx.child("reopen"), cfg).await.unwrap();
+            assert_eq!(reopened.root(), snapshot.root());
+            assert_eq!(reopened.ops_root(), snapshot.ops_root());
+            assert_eq!(reopened.bounds().end, snapshot.op_count());
         });
     }
 }

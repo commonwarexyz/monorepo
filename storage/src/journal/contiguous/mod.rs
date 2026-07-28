@@ -371,6 +371,20 @@ pub trait Mutable: Contiguous + Sized {
     }
 }
 
+/// A [Contiguous] journal that can capture an owned snapshot reader of itself.
+#[commonware_macros::stability(ALPHA)]
+pub trait Snapshot: Contiguous + Sized {
+    /// The owned reader type produced by [Self::snapshot], with bounds frozen at capture.
+    type Reader: Contiguous<Item = Self::Item>;
+
+    /// Capture an owned snapshot reader over the current journal. Bounds are frozen at
+    /// creation, and the reader stays readable across concurrent appends and prunes.
+    ///
+    /// If the journal later rewinds or truncates into the reader's range, subsequent reads
+    /// from that range may observe unspecified contents.
+    fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Reader), Error>> + Send;
+}
+
 /// Scan backwards from the end of `journal` to the last item matching `predicate`, returning
 /// the size the journal must rewind to (and warning if that drops any items).
 async fn scan_rewind_size<C, P>(journal: &C, mut predicate: P) -> Result<u64, Error>

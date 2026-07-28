@@ -65,7 +65,7 @@ use crate::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::Operation,
+    qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
 use commonware_codec::Encode;
@@ -84,7 +84,7 @@ use thiserror::Error;
 pub mod any;
 pub mod batch_chain;
 pub(crate) mod bitmap;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
@@ -92,10 +92,12 @@ pub mod immutable;
 pub mod keyless;
 mod metrics;
 pub mod operation;
+mod snapshot;
 pub mod store;
 pub mod sync;
 pub mod verify;
 
+pub use snapshot::Snapshot;
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
@@ -127,7 +129,7 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 /// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
 ///
 /// `op_count` must be a non-zero commit-boundary historical size: the operation at `op_count - 1`
-/// must itself be a commit op (one for which `floor_of` returns `Some`).
+/// must itself be a commit op (one for which [`Floored::has_floor`] returns `Some`).
 ///
 /// # Errors
 ///
@@ -138,11 +140,10 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,
     op_count: Location<F>,
-    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
 ) -> Result<Location<F>, Error<F>>
 where
     F: Family,
-    R: Contiguous,
+    R: Contiguous<Item: Floored<F>>,
 {
     let Some(last_op) = op_count.checked_sub(1) else {
         return Err(Error::HistoricalFloorPruned(op_count));
@@ -154,7 +155,9 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let floor = op
+        .has_floor()
+        .ok_or(Error::HistoricalFloorPruned(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
@@ -167,17 +170,16 @@ where
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,
-    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous,
+    R: Contiguous<Item: Floored<F>>,
 {
     if op_count == Location::new(0) {
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count, floor_of).await?;
+    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
     Ok(F::inactive_peaks(F::location_to_position(op_count), floor))
 }
 
@@ -201,6 +203,10 @@ pub enum Error<F: Family> {
 
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
+
+    /// The caller cancelled the operation before it completed.
+    #[error("operation cancelled")]
+    Cancelled,
 
     /// The requested key was not found in the snapshot.
     #[error("key not found")]

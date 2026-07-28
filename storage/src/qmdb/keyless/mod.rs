@@ -47,7 +47,7 @@ use crate::{
     Context,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{self, Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
@@ -370,8 +370,7 @@ where
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
-                .await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
 
         Ok(self
             .journal
@@ -496,6 +495,10 @@ where
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
     /// guarantee none is needed. A new sync waits for the prior sync before starting.
+    /// Failures of the deferred durability work surface on the returned handle. A failed
+    /// data sync also fails the next durability operation. A failed recovery-watermark
+    /// sync is not observed by [Self::commit], and a failed merkle-node sync may not be.
+    /// Both resurface on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();
@@ -605,6 +608,64 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
+    }
+}
+
+/// Owned immutable proof snapshot of a [Keyless] database with bounds frozen at capture.
+///
+/// Produced by [Keyless::snapshot].
+#[commonware_macros::stability(ALPHA)]
+pub type Snapshot<F, E, V, R, H> = crate::qmdb::Snapshot<F, E, Operation<F, V>, R, H>;
+
+impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: contiguous::Snapshot<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    /// Capture an owned immutable [Snapshot] of the database.
+    ///
+    /// The snapshot's bounds are frozen at capture, so it does not observe later mutations and
+    /// stays readable across concurrent appends, syncs, and prunes of this database.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, V, C::Reader, H>), Error<F>> {
+        let log;
+        (self.journal, log) = self.journal.snapshot().await?;
+        let root = self.root;
+        Ok((self, Snapshot::new(log, root)))
+    }
+}
+
+impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>> + contiguous::Snapshot<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    /// Apply `batch`, capture the serving [Snapshot], and start persisting the applied
+    /// state, returning the handle that resolves once it is durable.
+    ///
+    /// The snapshot is captured before the sync starts, so the handle proves durable
+    /// exactly the state the snapshot contains. [Self::apply_batch], [Self::snapshot],
+    /// and [Self::start_sync] remain available for callers composing the steps
+    /// themselves.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn finalize(
+        self,
+        batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
+    ) -> Result<(Self, Snapshot<F, E, V, C::Reader, H>, Handle<()>), Error<F>> {
+        let (db, _) = self.apply_batch(batch).await?;
+        let (db, snapshot) = db.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, snapshot, handle))
     }
 }
 
@@ -908,6 +969,84 @@ pub(crate) mod tests {
             &root,
         ));
         assert_eq!(ops.len(), 5);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database applies batches, commits, and prunes past it.
+    #[boxed]
+    pub(crate) async fn test_keyless_db_snapshot<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + contiguous::Snapshot<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared + std::fmt::Debug,
+    {
+        use commonware_codec::Encode as _;
+
+        const ELEMENTS: u64 = 50;
+
+        {
+            let mut batch = db.new_batch();
+            for i in 0..ELEMENTS {
+                batch = batch.append(V::Value::make(i));
+            }
+            let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let root = db.root();
+        let op_count = db.bounds().end;
+
+        let snapshot;
+        (db, snapshot) = db.snapshot().await.unwrap();
+        assert_eq!(snapshot.root(), root);
+        assert_eq!(snapshot.op_count(), op_count);
+
+        let (proof, ops) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
+
+        // Advance the live database past the capture by applying another batch with a raised
+        // inactivity floor, commit, and prune.
+        {
+            let mut batch = db.new_batch();
+            for i in 0..ELEMENTS {
+                batch = batch.append(V::Value::make(i + ELEMENTS));
+            }
+            let merkleized = batch.merkleize(&db, None, Location::new(40)).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        db = db.prune(boundary).await.unwrap();
+        assert_ne!(db.root(), root);
+        assert!(db.bounds().start > Location::new(0));
+
+        // The snapshot still serves the identical proof, verifiable against the captured
+        // root, including for operations the live database has since pruned.
+        let (proof2, ops2) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
+        assert_eq!(proof.encode(), proof2.encode());
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof2,
+            Location::new(0),
+            &ops2,
+            &root,
+        ));
+
+        // Anything above the frozen size is rejected.
+        assert!(
+            snapshot
+                .historical_proof(op_count + 1, Location::new(0), NZU64!(1))
+                .await
+                .is_err()
+        );
+        assert!(snapshot.proof(op_count, NZU64!(1)).await.is_err());
 
         db.destroy().await.unwrap();
     }

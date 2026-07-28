@@ -490,6 +490,14 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    fn test_keyless_fixed_snapshot() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("storage")).await;
+            tests::test_keyless_db_snapshot(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_keyless_fixed_proof_comprehensive() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("storage")).await;
@@ -1277,6 +1285,31 @@ mod test {
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
             target_db.destroy().await.unwrap();
+        });
+    }
+    /// The handle returned by `finalize` proves durable exactly the state the returned
+    /// snapshot contains: once it completes, a reopen converges on the snapshot.
+    #[test]
+    fn test_keyless_fixed_finalize_handle_covers_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = db_config("finalize-covers", &context, Sequential);
+            let db: TestDb<mmr::Family> = TestDb::init(context.child("db"), cfg.clone())
+                .await
+                .unwrap();
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(3))
+                .merkleize(&db, None, floor)
+                .await;
+            let (db, snapshot, handle) = db.finalize(batch).await.unwrap();
+            handle.await.unwrap();
+            drop(db);
+
+            let reopened: TestDb<mmr::Family> =
+                TestDb::init(context.child("reopen"), cfg).await.unwrap();
+            assert_eq!(reopened.root(), snapshot.root());
+            assert_eq!(reopened.bounds().end, snapshot.op_count());
         });
     }
 }
