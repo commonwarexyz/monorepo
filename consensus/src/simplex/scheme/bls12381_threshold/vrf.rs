@@ -76,7 +76,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, ordered::Set};
+use commonware_utils::{Faults, N3f1, ordered::Set};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{
@@ -320,7 +320,7 @@ where
     V: Variant,
     R: rand_core::CryptoRng,
 {
-    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _, N3f1>(
         rng,
         namespace,
         n,
@@ -572,10 +572,11 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
 
 impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
+    type Faults = N3f1;
     type PublicKey = P;
     type Certificate = Certificate<V>;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Subject<'_, D>,
@@ -585,7 +586,6 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
     where
         R: CryptoRng,
         D: Digest,
-        M: Faults,
     {
         let Some(cert) = certificate.get() else {
             return false;
@@ -605,7 +605,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
     }
 
-    fn verify_certificates<'a, R, D, I, M>(
+    fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -615,7 +615,6 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
     {
         let identity = self.identity();
         let namespace = self.namespace();
@@ -839,11 +838,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
-        M: Faults,
     {
         let (partials, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
@@ -868,11 +866,11 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
-        if vote_partials.len() < quorum.required::<M>() as usize {
+        if vote_partials.len() < quorum.required::<Self::Faults>() as usize {
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, M>(
+        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, Self::Faults>(
             quorum,
             vote_partials.iter(),
             seed_partials.iter(),
@@ -1193,7 +1191,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble::<_, N3f1>(votes, &Sequential).is_none());
+        assert!(schemes[0].assemble(votes, &Sequential).is_none());
     }
 
     #[test]
@@ -1220,10 +1218,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut test_rng(),
             Subject::Finalize {
                 proposal: &proposal,
@@ -1258,10 +1256,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1276,7 +1274,7 @@ mod tests {
             seed_signature: cert.seed_signature,
         }
         .into();
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1310,7 +1308,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
         let encoded = certificate.encode();
@@ -1342,7 +1340,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
         let cert = certificate.get().unwrap();
 
@@ -1377,7 +1375,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
         let cert = certificate.get().unwrap();
 
@@ -1481,7 +1479,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
         let certificate_verifier =
@@ -1494,16 +1492,14 @@ mod tests {
                 .is_none(),
             "certificate verifier should not produce votes"
         );
-        assert!(
-            certificate_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut test_rng(),
-                Subject::Finalize {
-                    proposal: &proposal,
-                },
-                &certificate,
-                &Sequential,
-            )
-        );
+        assert!(certificate_verifier.verify_certificate::<_, Sha256Digest>(
+            &mut test_rng(),
+            Subject::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -1563,7 +1559,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
         let cert = certificate.get().unwrap();
 
@@ -1595,7 +1591,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
         let mut encoded = certificate.encode();
@@ -1667,10 +1663,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Nullify {
                 round: proposal.round,
@@ -1685,7 +1681,7 @@ mod tests {
             seed_signature: cert.vote_signature,
         }
         .into();
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Nullify {
                 round: proposal.round,
@@ -1896,10 +1892,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1923,7 +1919,7 @@ mod tests {
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         assert!(
-            !verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+            !verifier.verify_certificate::<_, Sha256Digest>(
                 &mut rng,
                 Subject::Notarize {
                     proposal: &proposal,
@@ -1972,14 +1968,14 @@ mod tests {
             .collect();
 
         let certificate1 = schemes[0]
-            .assemble::<_, N3f1>(votes1, &Sequential)
+            .assemble(votes1, &Sequential)
             .expect("assemble certificate1");
         let certificate2 = schemes[0]
-            .assemble::<_, N3f1>(votes2, &Sequential)
+            .assemble(votes2, &Sequential)
             .expect("assemble certificate2");
 
         assert!(
-            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2025,7 +2021,7 @@ mod tests {
         );
 
         assert!(
-            !verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            !verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2066,7 +2062,7 @@ mod tests {
             .collect();
 
         schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble notarization certificate")
     }
 
@@ -2082,7 +2078,7 @@ mod tests {
             .collect();
 
         schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble finalization certificate")
     }
 
@@ -2094,7 +2090,7 @@ mod tests {
         let finalization_certificate = assemble_finalization_certificate(&schemes, &proposal);
 
         assert!(
-            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2132,7 +2128,7 @@ mod tests {
         let certificate2 = assemble_notarization_certificate(&schemes, &proposal2);
 
         assert!(
-            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2161,7 +2157,7 @@ mod tests {
         }
         .into();
 
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal2,
@@ -2185,17 +2181,13 @@ mod tests {
             ),
         ];
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
             batch.iter().copied(),
             &Sequential,
         ));
         assert_eq!(
-            verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                &batch,
-                &Sequential,
-            ),
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &batch, &Sequential,),
             vec![true, false],
         );
     }

@@ -12,7 +12,6 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::N3f1;
 use rand_core::CryptoRng;
 use std::{collections::HashSet, fmt::Debug, hash::Hash, iter::once};
 
@@ -981,7 +980,7 @@ where
     S: CertificateVerifier<D>,
     D: Digest,
 {
-    scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
+    scheme.verify_certificates_bisect::<_, D>(rng, certificates, strategy)
 }
 
 /// Aggregated notarization certificate recovered from notarize votes.
@@ -1016,7 +1015,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
             attestation,
         } = notarizes.next()?;
         let attestations = once(attestation).chain(notarizes.map(|n| n.attestation));
-        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+        let certificate = scheme.assemble(attestations, strategy)?;
 
         Some(Self {
             proposal,
@@ -1042,7 +1041,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
-        scheme.verify_certificate::<_, D, N3f1>(
+        scheme.verify_certificate::<_, D>(
             rng,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -1267,7 +1266,7 @@ impl<S: Scheme> Nullification<S> {
         let mut nullifies = nullifies.into_iter();
         let Nullify { round, attestation } = nullifies.next()?;
         let attestations = once(attestation).chain(nullifies.map(|n| n.attestation));
-        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+        let certificate = scheme.assemble(attestations, strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1290,7 +1289,7 @@ impl<S: Scheme> Nullification<S> {
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
-        scheme.verify_certificate::<_, D, N3f1>(
+        scheme.verify_certificate::<_, D>(
             rng,
             Subject::Nullify { round: self.round },
             &self.certificate,
@@ -1526,7 +1525,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
             attestation,
         } = finalizes.next()?;
         let attestations = once(attestation).chain(finalizes.map(|f| f.attestation));
-        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+        let certificate = scheme.assemble(attestations, strategy)?;
 
         Some(Self {
             proposal,
@@ -1552,7 +1551,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
-        scheme.verify_certificate::<_, D, N3f1>(
+        scheme.verify_certificate::<_, D>(
             rng,
             Subject::Finalize {
                 proposal: &self.proposal,
@@ -1843,11 +1842,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _, N3f1>(
-            rng,
-            notarizations.chain(nullifications),
-            strategy,
-        )
+        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications), strategy)
     }
 }
 
