@@ -253,9 +253,11 @@ impl<B: Blob> Writer<B> {
             blob.write_at(slot_offset, Checksum::slot_bytes(0, 0).to_vec())
                 .await?;
 
-            // One barrier covers both: either write alone surviving a crash already defeats
-            // resurrection (scrubbed bytes fail the slot's CRC, a zeroed slot is never chosen),
-            // and it completes before any append can build on the freed range.
+            // One barrier covers both writes: reopen re-arms this repair on any slot residue
+            // other than a clean tombstone, and a clean tombstone is never chosen and retains
+            // no record bytes a torn later write could complete into a record describing the
+            // unscrubbed suffix. The barrier completes before any append can build on the
+            // freed range.
             blob.sync().await?;
         }
 
@@ -3141,6 +3143,79 @@ mod tests {
                 reopened.read_at(0, 2).await.unwrap().coalesce().as_ref(),
                 b"AB"
             );
+        });
+    }
+
+    /// A crash during [`Writer::new`]'s slot repair can persist the retirement while losing the
+    /// suffix scrub, leaving a clean tombstone over stale payload bytes. That state must be
+    /// inert: the tombstone is never chosen, and a torn later slot write finds no record residue
+    /// to complete into one describing the stale suffix (contrast
+    /// `test_reopen_retires_failed_slot_before_reusing_tail`, where surviving CRC bytes make the
+    /// same torn write dangerous).
+    #[test_traced("DEBUG")]
+    fn test_reopen_ignores_retired_slot_over_unscrubbed_suffix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            writer.append(b"A").await.unwrap();
+            writer.sync().await.unwrap();
+            writer.append(b"B").await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            // Tombstone the longer slot while its payload byte stays durable: the repair's
+            // retirement persisted and its scrub did not.
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
+            let ab_page = blob
+                .read_at(0, physical_page_size)
+                .await
+                .unwrap()
+                .coalesce();
+            let ab_crc = read_crc_record_from_page(ab_page.as_ref());
+            let retired_slot = ab_crc.authoritative();
+            let slot_offset = PAGE_SIZE.get() as usize + retired_slot.offset();
+            blob.write_at_sync(slot_offset as u64, Checksum::slot_bytes(0, 0).to_vec())
+                .await
+                .unwrap();
+
+            // The tombstone is never chosen: reopen recovers the short slot's prefix.
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 1);
+
+            // Extend over the stale byte, then persist only the replacement record's length
+            // byte. Over a tombstone that torn write yields no valid record, so the stale
+            // suffix stays discarded.
+            writer.append(b"C").await.unwrap();
+            drop(writer.snapshot().await.unwrap());
+            let (mut crash_page, _, _, _) = blob.snapshot();
+            let ac_page = blob
+                .read_at(0, physical_page_size)
+                .await
+                .unwrap()
+                .coalesce();
+            drop(writer);
+
+            let length = Checksum::slot_len_bytes(2);
+            let length_byte = length.iter().position(|byte| *byte != 0).unwrap();
+            let length_offset = slot_offset + length_byte;
+            crash_page[length_offset] = ac_page.as_ref()[length_offset];
+            blob.write_at(0, crash_page).await.unwrap();
+            blob.sync().await.unwrap();
+
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let reopened = Writer::new(blob, physical_page_size as u64, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), 1);
+            assert_eq!(reopened.read_at(0, 1).await.unwrap().coalesce(), b"A");
         });
     }
 
