@@ -48,8 +48,13 @@ enum FinalizedHandoff<B> {
     Apply(B),
 }
 
+/// A retarget window that gives the active state sync attempt time to complete while newer
+/// finalizations accumulate.
 pub(super) struct PendingRetarget<B> {
+    /// Deadline for forwarding the newest buffered block as the next sync target.
     timeout: BoxFuture<'static, ()>,
+    /// Target updates may be coalesced, but each finalized block must still be applied or
+    /// reported. Retain the blocks here to avoid sequential archive reads during handoff.
     finalized: VecDeque<Arc<B>>,
 }
 

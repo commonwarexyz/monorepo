@@ -141,13 +141,12 @@ pub(crate) struct MarshalFixture {
     pub(crate) guards: Box<dyn std::any::Any>,
 }
 
-/// Initializes a marshal actor whose archives are pre-seeded with `seed`'s block and
-/// finalization.
+/// Initializes a marshal actor whose finalization archive is pre-seeded with `seed`.
 ///
 /// When `start` is set, the actor runs with a reporter that acknowledges every dispatched
-/// block and a resolver that ignores every fetch, so `get_finalization` and block
-/// subscriptions serve the seeded state without any peer fetching. Otherwise the actor is
-/// returned unstarted inside [`MarshalFixture::guards`].
+/// block and a resolver that ignores every fetch, so `get_finalization` serves the seeded
+/// finalization without any peer fetching. Otherwise the actor is returned unstarted
+/// inside [`MarshalFixture::guards`].
 pub(crate) async fn marshal_fixture(
     context: deterministic::Context,
     prefix: &str,
@@ -163,7 +162,7 @@ pub(crate) async fn marshal_fixture(
     )
     .await
     .expect("failed to initialize finalizations archive");
-    let mut finalized_blocks = immutable::Archive::init(
+    let finalized_blocks = immutable::Archive::init(
         context.child("finalized_blocks"),
         archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
     )
@@ -177,13 +176,6 @@ pub(crate) async fn marshal_fixture(
             .sync()
             .await
             .expect("failed to sync finalizations archive");
-        finalized_blocks = finalized_blocks
-            .put(block.height().get(), block.digest(), block.clone())
-            .await
-            .expect("failed to seed block")
-            .sync()
-            .await
-            .expect("failed to sync blocks archive");
     }
 
     let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(

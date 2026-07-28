@@ -377,8 +377,8 @@ mod tests {
     fn stranded_tip_update_resolves_to_artifact() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-wedge", 1);
-            let block = TestBlock::new(8, 10);
-            let finalization = fixtures::finalization(&fixture, 8, Sha256::fill(10));
+            let block = TestBlock::new(0, 0);
+            let finalization = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
@@ -415,15 +415,15 @@ mod tests {
             // stranded observation must resolve through a retry that returns the artifact.
             let update = context
                 .child("update")
-                .spawn(move |_| async move { mailbox.update_targets(anchor(9, 11), 9).await });
+                .spawn(move |_| async move { mailbox.update_targets(anchor(1, 1), 1).await });
             let result = update.await.expect("update task failed");
             assert!(
-                matches!(&result, Some(artifact) if artifact.anchor.height == Height::new(8)),
+                matches!(&result, Some(artifact) if artifact.anchor.height == Height::zero()),
                 "stranded update must resolve to the completed artifact",
             );
 
             let artifact = sync_completed.await.expect("artifact must publish");
-            assert_eq!(artifact.anchor.height, Height::new(8));
+            assert_eq!(artifact.anchor.height, Height::zero());
             actor.await.expect("syncer actor failed");
         });
     }
