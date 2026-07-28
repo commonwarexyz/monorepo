@@ -569,6 +569,7 @@ mod tests {
                 );
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
+            // Register the batcher's vote and certificate channels.
             let (_vote_sender, vote_receiver) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -680,6 +681,187 @@ mod tests {
         certificate_forwarding_from_network(bls12381_multisig::fixture::<MinSig, _>);
         certificate_forwarding_from_network(ed25519::fixture);
         certificate_forwarding_from_network(secp256r1::fixture);
+    }
+
+    /// Regression: a notarization for a future view must unlock already-buffered
+    /// finalize votes even though that view's leader is not yet known.
+    fn notarization_unlocks_future_finalizes<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum_size = quorum(n) as usize;
+        let namespace = b"batcher_notarization_unlocks_future_finalizes".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Get participants.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+
+            // Setup reporter mock.
+            let reporter = test_reporter(&mut context, &schemes[0]);
+
+            // Initialize batcher actor.
+            let me = participants[0].clone();
+            let batcher_cfg = test_config(
+                schemes[0].clone(),
+                oracle.control(me.clone()),
+                reporter,
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to.
+            let (voter_sender, mut voter_receiver) =
+                mailbox::new::<voter::Message<S, Sha256Digest>>(
+                    context.child("mailbox"),
+                    NZUsize!(1024),
+                );
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Register finalize-vote senders and link them to the batcher.
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let mut finalize_senders = Vec::new();
+            for (i, participant) in participants
+                .iter()
+                .enumerate()
+                .skip(1)
+                .take(quorum_size - 1)
+            {
+                let (sender, _receiver) = oracle
+                    .control(participant.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(participant.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                finalize_senders.push((i, sender));
+            }
+
+            // Register a sender for the notarization certificate.
+            let (mut notarization_sender, _receiver) = oracle
+                .control(participants[1].clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Start the batcher.
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Initialize the batcher. The future view's leader remains unknown.
+            let current = View::new(1);
+            batcher_mailbox.update(
+                Span::none(),
+                current,
+                Participant::new(0),
+                View::zero(),
+                None,
+            );
+
+            // Build a proposal for the future view.
+            let future = current.next();
+            let proposal = Proposal::new(
+                Round::new(epoch, future),
+                current,
+                Sha256::hash(&[b"future_payload"]),
+            );
+
+            // Buffer a finalize quorum before the notarization. The future
+            // round has no leader yet, so these votes cannot be verified.
+            let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox.constructed(Vote::Finalize(finalize));
+            for (i, mut sender) in finalize_senders {
+                let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
+                sender
+                    .send(
+                        Recipients::One(me.clone()),
+                        Vote::Finalize(finalize).encode(),
+                        true,
+                    );
+            }
+
+            // Allow all finalize votes to arrive before the notarization.
+            context.sleep(Duration::from_millis(50)).await;
+
+            // The notarization authenticates the proposal without announcing
+            // the future round's leader.
+            let notarization = build_notarization(&schemes, &proposal, quorum_size);
+            notarization_sender
+                .send(
+                    Recipients::One(me),
+                    Certificate::Notarization(notarization).encode(),
+                    true,
+                );
+
+            // The notarization is forwarded before the recovered finalization.
+            let mut saw_notarization = false;
+            loop {
+                let message = select! {
+                    message = voter_receiver.recv() => message,
+                    _ = context.sleep(Duration::from_millis(100)) => {
+                        panic!("timed out waiting for finalization");
+                    },
+                };
+                match message.unwrap() {
+                    voter::Message::Verified {
+                        certificate: Certificate::Notarization(notarization),
+                        ..
+                    } => {
+                        assert_eq!(notarization.proposal, proposal);
+                        saw_notarization = true;
+                    }
+                    voter::Message::Verified {
+                        certificate: Certificate::Finalization(finalization),
+                        ..
+                    } => {
+                        assert!(saw_notarization);
+                        assert_eq!(finalization.proposal, proposal);
+                        break;
+                    },
+                    _ => {}
+                }
+            };
+        });
+    }
+
+    #[test_traced]
+    fn test_notarization_unlocks_future_finalizes() {
+        notarization_unlocks_future_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        notarization_unlocks_future_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        notarization_unlocks_future_finalizes(bls12381_threshold_std::fixture::<MinPk, _>);
+        notarization_unlocks_future_finalizes(bls12381_threshold_std::fixture::<MinSig, _>);
+        notarization_unlocks_future_finalizes(bls12381_multisig::fixture::<MinPk, _>);
+        notarization_unlocks_future_finalizes(bls12381_multisig::fixture::<MinSig, _>);
+        notarization_unlocks_future_finalizes(ed25519::fixture);
+        notarization_unlocks_future_finalizes(secp256r1::fixture);
     }
 
     /// Regression: an old notarization for view `V` is still forwarded to voter even
