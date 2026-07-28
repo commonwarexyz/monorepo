@@ -496,10 +496,19 @@ where
                         }
 
                         // Store and forward to voter
-                        work.entry(view)
+                        let proposal_changed = work
+                            .entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .record_certificate(kind);
+                            .record_notarization(&notarization.proposal);
                         voter.recovered(Certificate::Notarization(notarization));
+
+                        // Reprocess buffered votes only if the notarization changed the
+                        // proposal filter.
+                        if !proposal_changed {
+                            continue;
+                        }
+
+                        updated_view = view;
                     }
                     Certificate::Nullification(nullification) => {
                         // Verify the certificate
@@ -515,8 +524,11 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .record_certificate(kind);
+                            .record_nullification();
                         voter.recovered(Certificate::Nullification(nullification));
+
+                        // Certificates are already forwarded to voter, no need for construction.
+                        continue;
                     }
                     Certificate::Finalization(finalization) => {
                         // Verify the certificate
@@ -532,13 +544,13 @@ where
                         // Store and forward to voter
                         work.entry(view)
                             .or_insert_with(|| self.new_round(view))
-                            .record_certificate(kind);
+                            .record_finalization();
                         voter.recovered(Certificate::Finalization(finalization));
+
+                        // Certificates are already forwarded to voter, no need for construction.
+                        continue;
                     }
                 }
-
-                // Certificates are already forwarded to voter, no need for construction
-                continue;
             },
             // Handle votes from the network
             Ok((sender, message)) = vote_receiver.recv() else break => {

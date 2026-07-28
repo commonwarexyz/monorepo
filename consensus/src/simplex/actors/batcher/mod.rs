@@ -413,11 +413,10 @@ mod tests {
         });
     }
 
-    /// A certificate observed before the leader is known must not lose the
-    /// leader's buffered vote: the round discovers the proposal from its vote
-    /// tracker even after certification drops the verifier's buffers.
+    /// A notarization observed before the leader is known establishes a
+    /// proposal that can be forwarded immediately.
     #[test]
-    fn test_set_leader_after_certification() {
+    fn test_forward_proposal_from_notarization_without_leader() {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -437,11 +436,47 @@ mod tests {
         let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
         assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
 
-        // A notarization certificate drops the verifier's notarize buffers
-        round.record_certificate(Kind::Notarization);
+        // A verified notarization establishes the proposal and drops the
+        // verifier's notarize buffers
+        assert!(round.record_notarization(&proposal));
         assert!(round.has_certificate(Kind::Notarization));
 
-        // The leader's proposal is still discovered when the leader is set
+        // The proposal can be forwarded before the leader is known
+        assert_eq!(
+            round.try_forward_proposal(Participant::from_usize(1)),
+            Some(proposal)
+        );
+    }
+
+    /// A finalization observed before the leader is known does not establish
+    /// the proposal. Setting the leader still discovers it from the leader's
+    /// buffered notarize vote.
+    #[test]
+    fn test_set_leader_after_finalization() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[1].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+        );
+
+        // The leader's notarize arrives before the leader is known
+        let proposal = Proposal::new(round_id, View::new(0), Sha256::hash(&[b"payload"]));
+        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+        assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
+
+        // A finalization does not establish the proposal
+        round.record_finalization();
+        assert!(round.has_certificate(Kind::Finalization));
+
+        // Setting the leader discovers the proposal from its buffered vote
         round.set_leader(Participant::from_usize(0));
         assert_eq!(
             round.try_forward_proposal(Participant::from_usize(1)),

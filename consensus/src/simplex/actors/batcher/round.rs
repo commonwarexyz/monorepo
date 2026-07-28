@@ -28,9 +28,13 @@ pub struct Round<
 > {
     blocker: B,
     reporter: R,
-    /// Verifier only attempts to recover a certificate from votes for the first proposal
-    /// we see from a leader. If we are on the wrong side of an equivocation, the verifier
-    /// will not produce anything of value (and we'll only participate by forwarding certificates).
+    /// The verifier attempts to recover notarizations and finalizations only
+    /// from votes for one proposal. It initially filters to the first proposal
+    /// observed from the known leader. If the leader equivocates, a node that
+    /// observed the losing proposal cannot recover a proposal certificate
+    /// locally, but can still forward certificates recovered elsewhere. A
+    /// verified notarization is authoritative and switches the filter to its
+    /// proposal.
     verifier: Verifier<S, D>,
     /// Votes received from network (may not be verified yet).
     /// Used for duplicate detection and conflict reporting.
@@ -92,8 +96,29 @@ impl<
     }
 
     /// Records that a certificate of `kind` exists, dropping its buffered votes.
-    pub fn record_certificate(&mut self, kind: Kind) {
+    fn record_certificate(&mut self, kind: Kind) {
         self.verifier.record_certificate(kind);
+    }
+
+    /// Records a verified notarization, dropping its buffered votes and
+    /// adopting its authoritative proposal, which replaces any conflicting
+    /// proposal learned from the leader's vote.
+    ///
+    /// Returns whether the proposal changed.
+    pub fn record_notarization(&mut self, proposal: &Proposal<D>) -> bool {
+        let changed = self.verifier.set_proposal(proposal.clone());
+        self.record_certificate(Kind::Notarization);
+        changed
+    }
+
+    /// Records a verified nullification, dropping its buffered votes.
+    pub fn record_nullification(&mut self) {
+        self.record_certificate(Kind::Nullification);
+    }
+
+    /// Records a verified finalization, dropping its buffered votes.
+    pub fn record_finalization(&mut self) {
+        self.record_certificate(Kind::Finalization);
     }
 
     /// Adds a vote from the network to this round's verifier.
@@ -261,16 +286,15 @@ impl<
             .set_leader(leader, self.votes.notarize(leader));
     }
 
-    /// Returns the leader's proposal to forward to the voter, marking it sent
-    /// (at most once per round). Returns `None` if we already forwarded one,
-    /// the leader's proposal is unknown, or we are the leader (leaders don't
-    /// need to forward their own proposal).
+    /// Returns the proposal to forward to the voter, marking it sent (at most
+    /// once per round). Returns `None` if we already forwarded one, the
+    /// proposal is unknown, or the known leader is us.
     pub fn try_forward_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
-        let (leader, proposal) = self.verifier.get_leader_proposal()?;
-        if leader == me {
+        let proposal = self.verifier.proposal()?;
+        if self.verifier.leader() == Some(me) {
             return None;
         }
         let proposal = proposal.clone();
