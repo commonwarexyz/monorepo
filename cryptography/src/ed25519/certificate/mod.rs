@@ -399,7 +399,8 @@ impl Read for Certificate {
 ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
 ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
 ///
-/// - `$faults`: The `commonware_utils::Faults` implementation used to compute certificate quorums.
+/// - `$faults`: The [`Faults`](commonware_utils::Faults) implementation used to compute certificate
+///   quorums.
 ///
 /// # Example
 /// ```ignore
