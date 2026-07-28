@@ -318,9 +318,8 @@ impl Random {
 
         let Some(seed_signature) = seed_signature else {
             // Standard round-robin for view 1
-            return Participant::new(
-                (round.epoch().get().wrapping_add(round.view().get())) as u32 % n,
-            );
+            let idx = round.epoch().get().wrapping_add(round.view().get()) % u64::from(n);
+            return Participant::new(u32::try_from(idx).expect("leader index fits in u32"));
         };
 
         // Use the seed signature as a source of randomness
@@ -627,6 +626,26 @@ mod tests {
             seen[usize::from(*leader)] = true;
         }
         assert!(seen.iter().all(|x| *x));
+    }
+
+    #[test]
+    fn random_fallback_does_not_truncate_before_modulo() {
+        // Five participants make truncation observable:
+        // 2^32 % 5 is 1, while (2^32 as u32) % 5 is 0
+        let mut rng = test_rng();
+        let Fixture { participants, .. } =
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let random: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let round_robin: RoundRobinElector<ThresholdScheme> =
+            RoundRobin::<Sha256>::default().build(&participants);
+
+        // View 1 exercises Random's round-robin fallback
+        let round = Round::new(Epoch::new(u64::from(u32::MAX)), View::new(1));
+
+        // Both electors must preserve the full u64 sum through the modulo
+        assert_eq!(round_robin.elect(round, None), Participant::new(1));
+        assert_eq!(random.elect(round, None), Participant::new(1));
     }
 
     #[test]
