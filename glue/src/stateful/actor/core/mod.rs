@@ -204,7 +204,7 @@ where
     }
 
     async fn run(self) {
-        // One publication cell spans the actor's whole life: its member sources attach to
+        // One publication slot spans the actor's whole life: its member sources attach to
         // the resolvers here, once, and serve nothing until the first installation. Both
         // startup paths install their initial durable snapshot into this publisher.
         let (publisher, snapshot_source) = Publisher::new(self.context.as_present());

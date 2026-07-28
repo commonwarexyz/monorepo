@@ -53,12 +53,12 @@ enum State<S> {
 }
 
 /// Shared between the [`Publisher`], its [`Staged`] tokens, and every source.
-struct Cell<S> {
+struct Slot<S> {
     state: Mutex<State<S>>,
     metrics: Metrics,
 }
 
-impl<S> Cell<S> {
+impl<S> Slot<S> {
     /// Install `snapshot` unless a newer generation is already live.
     fn install(&self, snapshot: Arc<SetSnapshot<S>>) {
         let generation = snapshot.generation();
@@ -103,7 +103,7 @@ impl Metrics {
 ///
 /// Owned by actor orchestration. Dropping it detaches every source.
 pub(crate) struct Publisher<S> {
-    cell: Arc<Cell<S>>,
+    slot: Arc<Slot<S>>,
     next_generation: u64,
 }
 
@@ -111,15 +111,15 @@ impl<S> Publisher<S> {
     /// Create a publisher and its source. The source serves nothing until the first staged
     /// generation installs.
     pub(crate) fn new<E: RuntimeMetrics>(context: &E) -> (Self, SnapshotSource<S>) {
-        let cell = Arc::new(Cell {
+        let slot = Arc::new(Slot {
             state: Mutex::new(State::Empty),
             metrics: Metrics::register(context),
         });
         let publisher = Self {
-            cell: cell.clone(),
+            slot: slot.clone(),
             next_generation: 0,
         };
-        (publisher, SnapshotSource { cell })
+        (publisher, SnapshotSource { slot })
     }
 
     /// Stage `members` as the next generation, returning the token that installs it.
@@ -131,7 +131,7 @@ impl<S> Publisher<S> {
         let generation = self.next_generation;
         self.next_generation += 1;
         Staged {
-            cell: self.cell.clone(),
+            slot: self.slot.clone(),
             snapshot: Arc::new(SetSnapshot {
                 generation,
                 members,
@@ -149,7 +149,7 @@ impl<S> Publisher<S> {
 impl<S> Drop for Publisher<S> {
     fn drop(&mut self) {
         // Detach serving so new requests decline while held snapshots drain.
-        *self.cell.state.lock() = State::Detached;
+        *self.slot.state.lock() = State::Detached;
     }
 }
 
@@ -158,14 +158,14 @@ impl<S> Drop for Publisher<S> {
 /// Dropping the token without installing simply skips this generation, as on a runtime
 /// shutdown before its flush completed. Later generations still install.
 pub(crate) struct Staged<S> {
-    cell: Arc<Cell<S>>,
+    slot: Arc<Slot<S>>,
     snapshot: Arc<SetSnapshot<S>>,
 }
 
 impl<S> Staged<S> {
     /// Install the staged generation unless a newer one already installed.
     pub(crate) fn install(self) {
-        self.cell.install(self.snapshot);
+        self.slot.install(self.snapshot);
     }
 }
 
@@ -175,13 +175,13 @@ impl<S> Staged<S> {
 /// generation for its whole lifetime. Public only so set implementations can name it in
 /// [`super::DatabaseSet::member_sources`]; everything it can do is crate-internal.
 pub struct SnapshotSource<S> {
-    cell: Arc<Cell<S>>,
+    slot: Arc<Slot<S>>,
 }
 
 impl<S> Clone for SnapshotSource<S> {
     fn clone(&self) -> Self {
         Self {
-            cell: self.cell.clone(),
+            slot: self.slot.clone(),
         }
     }
 }
@@ -190,7 +190,7 @@ impl<S> SnapshotSource<S> {
     /// The latest installed generation, or `None` before the first installation and after
     /// the publisher drops.
     pub(crate) fn latest(&self) -> Option<Arc<SetSnapshot<S>>> {
-        match &*self.cell.state.lock() {
+        match &*self.slot.state.lock() {
             State::Live(snapshot) => Some(snapshot.clone()),
             State::Empty | State::Detached => None,
         }
@@ -199,7 +199,7 @@ impl<S> SnapshotSource<S> {
 
 /// A source projected to one member of the set.
 ///
-/// Reads the set atomically (one cell load), then clones the member's snapshot Arc, so
+/// Reads the set atomically (one slot load), then clones the member's snapshot Arc, so
 /// per-member serving still can never observe a torn cross-member generation.
 pub struct MemberSource<S, M> {
     source: SnapshotSource<S>,
