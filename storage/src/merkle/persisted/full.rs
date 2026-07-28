@@ -3456,4 +3456,99 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
     }
+
+    /// Nodes still resident in memory: the deque a held [View] forces mutators to clone.
+    fn retained_nodes<F: Family>(
+        mmr: &Merkle<F, deterministic::Context, Digest, Sequential>,
+    ) -> u64 {
+        let boundary =
+            Position::<F>::try_from(mmr.mem.bounds().start).expect("valid pruning boundary");
+        *mmr.mem.size() - *boundary
+    }
+
+    /// Commit `commits` batches of `LEAVES_PER_COMMIT`, holding the view captured after each
+    /// one so every mutation copies, then leave a final batch un-synced. Returns the retained
+    /// node count and the total leaf count.
+    async fn commit_holding_views<F: Family>(
+        context: deterministic::Context,
+        partition: &str,
+        commits: usize,
+    ) -> (u64, u64) {
+        const LEAVES_PER_COMMIT: usize = 8;
+
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let config = Config {
+            journal_partition: format!("{partition}-journal"),
+            metadata_partition: format!("{partition}-metadata"),
+            ..test_config(&context)
+        };
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, config)
+            .await
+            .unwrap();
+
+        let mut views = Vec::new();
+        let mut leaf = 0usize;
+        let commit = |mmr: Merkle<F, _, Digest, Sequential>, leaf: &mut usize| {
+            let mut batch = mmr.new_batch();
+            for _ in 0..LEAVES_PER_COMMIT {
+                batch = batch.add(&hasher, &test_digest(*leaf));
+                *leaf += 1;
+            }
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap()
+        };
+
+        for _ in 0..commits {
+            mmr = commit(mmr, &mut leaf);
+            let view;
+            (mmr, view) = mmr.view().await.unwrap();
+            views.push(view);
+            mmr = mmr.sync().await.unwrap();
+        }
+
+        // A final un-synced batch: the state a mid-block capture sees, and what keeps the
+        // measurement from reading zero either way.
+        mmr = commit(mmr, &mut leaf);
+
+        let measured = (retained_nodes(&mmr), *mmr.leaves());
+        assert_eq!(views.len(), commits);
+        mmr.destroy().await.unwrap();
+        measured
+    }
+
+    /// A held [View] makes the next mutation clone `mem`, so that clone stays affordable only
+    /// while `mem` holds the un-synced tail alone — [Merkle::flush_internal] prunes nodes out
+    /// of memory as soon as the journal holds them. Were that pruning to move or disappear,
+    /// every clone would scale with the structure instead of the commit.
+    async fn full_retained_nodes_track_commit_delta_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let (small, small_leaves) =
+            commit_holding_views::<F>(context.child("small"), "small", 4).await;
+        let (large, large_leaves) =
+            commit_holding_views::<F>(context.child("large"), "large", 32).await;
+
+        assert!(small > 0, "no nodes retained: measurement is vacuous");
+        assert!(
+            large_leaves > small_leaves,
+            "scales must differ: {small_leaves} vs {large_leaves} leaves"
+        );
+        assert_eq!(
+            large, small,
+            "retained nodes must track the commit delta, not the structure: \
+             {small} at {small_leaves} leaves, {large} at {large_leaves}"
+        );
+    }
+
+    #[test_traced]
+    fn test_retained_nodes_track_commit_delta_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_retained_nodes_track_commit_delta_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_retained_nodes_track_commit_delta_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_retained_nodes_track_commit_delta_inner::<mmb::Family>);
+    }
 }
