@@ -1623,8 +1623,6 @@ pub mod tests {
 
     #[test_traced]
     fn test_reconstruction_views_expose_all_chunk_states() {
-        const CHUNK_BYTES: usize = 32;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = UnorderedFixedMmbDb::init(
@@ -1652,18 +1650,20 @@ pub mod tests {
             assert_eq!(bitmap.len(), *end);
             assert_eq!(bitmap.pruned_chunks(), 0);
 
-            let grafting_height = grafting::height::<CHUNK_BYTES>();
+            let first = bitmap.get_chunk(0);
+            let chunk_bits = first.len() as u64 * 8;
+            let grafting_height = chunk_bits.trailing_zeros();
             let complete = bitmap.complete_chunks() as u64;
             let graftable =
                 grafting::graftable_chunks::<mmb::Family>(*end, grafting_height).min(complete);
             assert_eq!(complete - graftable, 1, "expected one pending chunk");
-            assert_ne!(bitmap.get_chunk(0), [0; CHUNK_BYTES]);
+            assert!(first.iter().any(|byte| *byte != 0));
             let pending = bitmap.get_chunk(graftable as usize);
-            assert_ne!(pending, [0; CHUNK_BYTES]);
+            assert!(pending.iter().any(|byte| *byte != 0));
 
             let (partial, partial_bits) = bitmap.last_chunk();
-            assert!(partial_bits > 0 && partial_bits < CHUNK_BYTES as u64 * 8);
-            assert_ne!(partial, [0; CHUNK_BYTES]);
+            assert!(partial_bits > 0 && partial_bits < chunk_bits);
+            assert!(partial.iter().any(|byte| *byte != 0));
 
             // Tie the extracted bytes to the digests authenticated by the existing root witness.
             let witness = db.ops_root_witness().await.unwrap();
