@@ -326,9 +326,8 @@ mod tests {
                 .chain(next_players.iter())
                 .cloned(),
         );
-        let (output, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, dealers)
-                .expect("trusted deal");
+        let (output, _) = deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, dealers)
+            .expect("trusted deal");
         let info = EpochInfo {
             outcome: EpochOutcome::Success,
             epoch: Epoch::new(2),

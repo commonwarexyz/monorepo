@@ -113,8 +113,7 @@ impl<P: PublicKey> Read for Addresses<P> {
 
 impl<P: PublicKey> Directory<P> for Addresses<P> {
     fn matches(&self, peers: &Set<P>) -> bool {
-        self.0.len() == peers.len()
-            && peers.iter().all(|peer| self.0.get_value(peer).is_some())
+        self.0.len() == peers.len() && peers.iter().all(|peer| self.0.get_value(peer).is_some())
     }
 }
 
