@@ -729,7 +729,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         let view = self.view;
-        let (leader, proposal) = self.views.get(&view)?.should_verify()?;
+        let (leader, proposal) = self.views.get(&view)?.pending_verification()?;
         let parent_payload = match self.parent_payload(&proposal) {
             Ok(parent_payload) => parent_payload,
             Err(err) => {
@@ -747,7 +747,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 return None;
             }
         };
-        if !self.views.get_mut(&view)?.try_verify() {
+        if !self.views.get_mut(&view)?.request_verify() {
             return None;
         }
         let context = Context {

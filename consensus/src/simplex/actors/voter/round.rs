@@ -128,16 +128,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    /// Returns the leader key and proposal when the view is ready for verification.
+    /// Returns the leader key and proposal ready for verification, without
+    /// recording the request. Resolve ancestry before calling
+    /// [`Self::request_verify`], which retires the round from later offers.
     #[allow(clippy::type_complexity)]
-    pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
+    pub fn pending_verification(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
         Some((leader.clone(), proposal))
     }
 
     /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
-    pub fn try_verify(&mut self) -> bool {
+    pub fn request_verify(&mut self) -> bool {
         if self.verify_ready().is_none() {
             return false;
         }
@@ -1108,7 +1110,7 @@ mod tests {
 
         // No verification request should be emitted.
         assert!(
-            !round.try_verify(),
+            !round.request_verify(),
             "leader-owned replay should not request verification again"
         );
 
