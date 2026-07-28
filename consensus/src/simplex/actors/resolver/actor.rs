@@ -1056,8 +1056,7 @@ mod tests {
             // Honest certification at the requester may still reject it.
             first_responder_mailbox.certified(notarization.round(), true);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, requested);
-            nullification_holder_mailbox
-                .updated(Certificate::Nullification(nullification.clone()));
+            nullification_holder_mailbox.updated(Certificate::Nullification(nullification.clone()));
             context.sleep(Duration::from_millis(10)).await;
 
             // A later nullification exposes a gap and starts an unrestricted
@@ -1228,11 +1227,7 @@ mod tests {
             );
             assert_eq!(
                 resolver.subscriptions(3),
-                vec![
-                    Purpose::Backfill,
-                    Purpose::Nullification,
-                    Purpose::Parent,
-                ]
+                vec![Purpose::Backfill, Purpose::Nullification, Purpose::Parent,]
             );
 
             // A covering nullification completes both background repair and
