@@ -235,8 +235,9 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        marshal::ancestry::Ancestry, simplex::mocks::scheme as scheme_mocks,
-        simplex::types::Context as SimplexContext, types::Height,
+        marshal::ancestry::Ancestry,
+        simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+        types::Height,
     };
     use commonware_cryptography::{
         ed25519,
@@ -245,7 +246,10 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_utils::{NZU64, NZUsize, channel::{oneshot, ring}};
+    use commonware_utils::{
+        NZU64, NZUsize,
+        channel::{oneshot, ring},
+    };
     use std::{convert::Infallible, time::Duration};
 
     /// Database set whose sync holds the tip-update ring receiver without draining it, then
@@ -388,8 +392,8 @@ mod tests {
             .await;
 
             let (sync_complete, sync_completed) = oneshot::channel();
-            let (syncer, mailbox) = Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(
-                Config {
+            let (syncer, mailbox) =
+                Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(Config {
                     context: context.child("syncer"),
                     db_config: (),
                     sync_config: SyncEngineConfig {
@@ -403,16 +407,15 @@ mod tests {
                     finalization,
                     marshal,
                     sync_complete,
-                },
-            );
+                });
             let actor = syncer.start();
 
             // The update is forwarded into the ring buffer and its observation parks before
             // the sync task completes (the task's clock only advances at quiescence). The
             // stranded observation must resolve through a retry that returns the artifact.
-            let update = context.child("update").spawn(move |_| async move {
-                mailbox.update_targets(anchor(9, 11), 9).await
-            });
+            let update = context
+                .child("update")
+                .spawn(move |_| async move { mailbox.update_targets(anchor(9, 11), 9).await });
             let result = update.await.expect("update task failed");
             assert!(
                 matches!(&result, Some(artifact) if artifact.anchor.height == Height::new(8)),
