@@ -26,7 +26,10 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, Participant, ordered::Set};
+use commonware_utils::{
+    Faults, Participant,
+    ordered::{Quorum, Set},
+};
 use core::fmt::Debug;
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -101,9 +104,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.degree_exact(),
-            polynomial.required::<M>().saturating_sub(1),
-            "polynomial degree must equal quorum minus one"
+            polynomial.required(),
+            participants.quorum::<M>(),
+            "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
@@ -148,9 +151,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.degree_exact(),
-            polynomial.required::<M>().saturating_sub(1),
-            "polynomial degree must equal quorum minus one"
+            polynomial.required(),
+            participants.quorum::<M>(),
+            "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
@@ -352,11 +355,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         let quorum = self.polynomial();
-        if partials.len() < quorum.required::<S::Faults>() as usize {
+        if partials.len() < quorum.required() as usize {
             return None;
         }
 
-        threshold::recover::<V, _, S::Faults>(quorum, partials.iter(), strategy)
+        threshold::recover(quorum, partials.iter(), strategy)
             .ok()
             .map(Certificate::new)
     }
@@ -1417,13 +1420,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_signer_validates_polynomial_degree_min_pk() {
         signer_validates_polynomial_degree::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_signer_validates_polynomial_degree_min_sig() {
         signer_validates_polynomial_degree::<MinSig>();
     }
@@ -1441,13 +1444,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_validates_polynomial_degree_min_pk() {
         verifier_validates_polynomial_degree::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_validates_polynomial_degree_min_sig() {
         verifier_validates_polynomial_degree::<MinSig>();
     }

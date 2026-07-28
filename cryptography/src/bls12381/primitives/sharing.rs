@@ -10,7 +10,7 @@ use commonware_macros::stability;
 use commonware_math::algebra::{FieldNTT, Ring};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
-use commonware_utils::{Faults, NZU32, Participant, ordered::Set};
+use commonware_utils::{NZU32, Participant, ordered::Set};
 #[stability(ALPHA)]
 use commonware_utils::{TryFromIterator, ordered::BiMap};
 #[cfg(feature = "std")]
@@ -326,17 +326,13 @@ impl<V: Variant> Sharing<V> {
         self.mode.all_scalars(self.total)
     }
 
-    /// Return the number of participants required to recover the secret
-    /// using the given fault model.
-    pub fn required<M: Faults>(&self) -> u32 {
-        M::quorum(self.total.get())
-    }
-
-    /// Return the exact degree of the public polynomial.
+    /// Return the number of participants required to recover the secret.
     ///
-    /// See [`Poly::degree_exact`] for details.
-    pub fn degree_exact(&self) -> u32 {
-        self.poly.degree_exact()
+    /// This is one more than the polynomial's [`Poly::degree_exact`].
+    pub fn required(&self) -> u32 {
+        // A polynomial has at most u32::MAX coefficients, so its exact degree
+        // is at most u32::MAX - 1.
+        self.poly.degree_exact() + 1
     }
 
     /// Return the total number of participants in this sharing.
@@ -448,6 +444,7 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::variant::MinSig;
     use commonware_invariants::minifuzz;
     use commonware_utils::{TestRng, ordered::Map};
 
@@ -489,6 +486,21 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_required_uses_exact_degree() {
+        // Subtraction preserves the three coefficient slots while setting every
+        // coefficient to zero.
+        let polynomial = Poly::<Scalar>::new(TestRng::new(0), 2);
+        let padded_zero = polynomial.clone() - &polynomial;
+        assert_eq!(padded_zero.required().get(), 3);
+
+        // The padded zero polynomial has exact degree zero, so recovering its
+        // secret requires only one share.
+        let sharing =
+            Sharing::<MinSig>::new(Mode::NonZeroCounter, NZU32!(4), Poly::commit(padded_zero));
+        assert_eq!(sharing.required(), 1);
     }
 
     #[test]
@@ -552,7 +564,7 @@ mod tests {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{N3f1, NZU32, TestRng};
+    use commonware_utils::{Faults, N3f1, NZU32, TestRng};
 
     impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {

@@ -76,7 +76,10 @@ use commonware_cryptography::{
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{N3f1, ordered::Set};
+use commonware_utils::{
+    N3f1,
+    ordered::{Quorum, Set},
+};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{
@@ -156,9 +159,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.degree_exact(),
-            polynomial.required::<N3f1>().saturating_sub(1),
-            "polynomial degree must equal quorum minus one"
+            polynomial.required(),
+            participants.quorum::<N3f1>(),
+            "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
@@ -199,9 +202,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.degree_exact(),
-            polynomial.required::<N3f1>().saturating_sub(1),
-            "polynomial degree must equal quorum minus one"
+            polynomial.required(),
+            participants.quorum::<N3f1>(),
+            "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
 
@@ -886,11 +889,11 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
-        if vote_partials.len() < quorum.required::<Self::Faults>() as usize {
+        if vote_partials.len() < quorum.required() as usize {
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, Self::Faults>(
+        let (vote_signature, seed_signature) = threshold::recover_pair(
             quorum,
             vote_partials.iter(),
             seed_partials.iter(),
@@ -1053,13 +1056,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_signer_validates_polynomial_degree_min_pk() {
         signer_validates_polynomial_degree::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_signer_validates_polynomial_degree_min_sig() {
         signer_validates_polynomial_degree::<MinSig>();
     }
@@ -1077,13 +1080,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_validates_polynomial_degree_min_pk() {
         verifier_validates_polynomial_degree::<MinPk>();
     }
 
     #[test]
-    #[should_panic(expected = "polynomial degree must equal quorum minus one")]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_validates_polynomial_degree_min_sig() {
         verifier_validates_polynomial_degree::<MinSig>();
     }
