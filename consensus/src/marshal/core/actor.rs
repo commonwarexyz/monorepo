@@ -907,11 +907,11 @@ where
 
                 self = self.prune_finalized_archives(height).await;
 
-                // Intentionally keep local-only (Wait) block subscriptions
-                // alive: they carry no floor bound, and actors do not retry
-                // subscriptions on failed channels. Fetch-bounded waiters at or
-                // below the floor were already closed when the processed floor
-                // advanced (see [Subscriptions::prune_below]).
+                // Keep local-only (`Wait`) block subscriptions alive. They
+                // carry no floor bound. Actors do not retry when a subscription
+                // channel closes. Fetch-bounded waiters at or below the floor
+                // were already closed when the processed floor advanced. See
+                // [Subscriptions::prune_below].
             }
         }
         self
@@ -1371,12 +1371,12 @@ where
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;
 
-        // Intentionally keep local-only (Wait) block subscriptions alive.
-        // Canceling waiters that can still be satisfied has catastrophic
-        // consequences (nodes can get stuck in different views) as actors do
-        // not retry subscriptions on failed channels. Fetch-bounded waiters at
-        // or below the floor can never be satisfied and were already closed
-        // when the processed floor advanced (see [Subscriptions::prune_below]).
+        // Keep local-only (`Wait`) block subscriptions alive. Actors do not
+        // retry when a subscription channel closes. Canceling a waiter that
+        // could still resolve can leave nodes stuck in different views.
+        // Fetch-bounded waiters at or below the floor are obsolete. They were
+        // already closed when the processed floor advanced. See
+        // [Subscriptions::prune_below].
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {
@@ -2339,10 +2339,9 @@ where
             .processed_height
             .try_set(self.floor.processed_height().get());
 
-        // Prune any existing requests below the new floor, and close local
-        // waiters whose fetch bound fell below it: their block was either
-        // already delivered or is pruned with the floor, so the closed channel
-        // is the caller's signal that it will never arrive.
+        // Prune existing requests below the new floor and close local waiters
+        // whose fetch bound is now obsolete. Local-only waits remain eligible
+        // for later availability of the same block.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
         self.block_subscriptions
             .prune_below(self.floor.processed_round(), self.floor.processed_height());
@@ -2406,10 +2405,9 @@ where
         );
         self.cache = self.cache.prune_by_view(prune_round).await;
 
-        // Prune round-bound requests at or below the processed round, and
-        // close local waiters whose fetch bound fell below it: their block was
-        // either already delivered or is pruned with the floor, so the closed
-        // channel is the caller's signal that it will never arrive.
+        // Prune round-bound requests at or below the processed round and close
+        // local waiters whose fetch bound is now obsolete. Local-only waits
+        // remain eligible for later availability of the same block.
         resolver.retain(handler::above_round_floor::<V::Commitment>(
             self.floor.processed_round(),
         ));

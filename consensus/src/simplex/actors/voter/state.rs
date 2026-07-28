@@ -3822,9 +3822,9 @@ mod tests {
             assert_eq!(state.current_view(), child_view);
 
             // A proposal built below the finalization floor is invalid and
-            // draws no request: an honest proposer reaches this state only
+            // draws no request. An honest proposer reaches this state only
             // while holding a nullification that same-term vote safety rules
-            // out alongside our finalization, so there is no honest peer to
+            // out alongside our finalization. There is no honest peer to
             // converge with.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
@@ -3843,10 +3843,10 @@ mod tests {
             let (fixture, mut state) = setup_follower_state(&mut context);
             let (schemes, verifier) = (fixture.schemes, fixture.verifier);
 
-            // Certify view 3 from gossip without ever covering views 1 and 2
-            // (a notarization needs no ancestry, and certification advances
-            // the view), then track a nullification for view 4 to reach view
-            // 5 as a follower.
+            // Certify view 3 from gossip without covering views 1 and 2. A
+            // notarization needs no ancestry. Certification advances the view.
+            // Then track a nullification for view 4 to reach view 5 as a
+            // follower.
             let displaced_view = View::new(3);
             let displaced_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), displaced_view),
@@ -3976,7 +3976,7 @@ mod tests {
             state.set_leader(child_view, None);
 
             // The leader's proposal is enough evidence to request the missing
-            // view; no conflicting local certificate is required.
+            // view. No conflicting local certificate is required.
             let child_proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), child_view),
                 View::new(1),
@@ -4006,9 +4006,9 @@ mod tests {
     fn resolution_requests_named_parent_with_term_cover() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            // Stable leaders with three-view terms: a nullification covers
-            // the rest of its term, so the covering certificate for a parent
-            // may sit at an earlier view.
+            // Stable leaders use three-view terms. A nullification covers the
+            // rest of its term. The covering certificate for a parent may sit
+            // at an earlier view.
             let (fixture, mut state) = setup_state(&mut context, 4, 1, 10, 3);
             let (schemes, verifier) = (fixture.schemes, fixture.verifier);
 

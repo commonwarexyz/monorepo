@@ -48,8 +48,8 @@ use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 
 /// Certificate accepted in the current iteration and whether to re-gossip it.
 ///
-/// Accepted batcher certificates are forwarded to the resolver immediately;
-/// resolver deliveries are already known there. This marker prevents either
+/// Accepted batcher certificates are forwarded to the resolver immediately.
+/// Resolver deliveries are already known there. This marker prevents either
 /// path from being forwarded again during certificate construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Received {

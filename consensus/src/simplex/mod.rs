@@ -110,12 +110,12 @@
 //! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
 //! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
 //!
-//! _The decision returned by `certify` must be deterministic and consistent across all honest participants, and a live
-//! request must eventually produce `true` or `false`, to ensure liveness. Certification may be arbitrarily slow, but a
-//! verdict that never arrives can stall more than the certified view: certificate repair holds a fetched notarization
-//! until its verdict (see [Fetching Missing Certificates](#fetching-missing-certificates)), so a participant whose only
-//! evidence for a view is an uncertified notarization cannot repair that view until certification concludes. A request
-//! made obsolete by a covering finalization is dropped and requires no verdict._
+//! _The decision returned by `certify` must be deterministic and consistent across all honest participants. A live
+//! request must eventually produce `true` or `false` to ensure liveness. Certification may be arbitrarily slow. A
+//! verdict that never arrives can stall more than the certified view. Certificate repair holds a fetched notarization
+//! until its verdict. See [Fetching Missing Certificates](#fetching-missing-certificates). A participant whose only
+//! evidence for a view is an uncertified notarization cannot repair that view until certification finishes. A covering
+//! finalization makes the request obsolete. Consensus then drops the request without requiring a verdict._
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -319,78 +319,83 @@
 //! and cannot initially verify each other's proposals.
 //!
 //! A proposal makes this otherwise invisible split actionable. An honest leader that skips a view must hold a
-//! covering nullification, and an honest leader that names a parent must hold its certified notarization or
-//! finalization. A participant missing either certificate requests its exact view from that leader. The request is
-//! targeted with no fallback, and later proposals needing the same view can add their leaders as targets. A Byzantine
-//! proposal therefore adds only resolver work directed at its leader: the targeted request itself has no fallback to
-//! unrelated peers. Resolver work is deduplicated by view, however: if background repair is already subscribed to the
-//! same key when a response is delivered, the shared fetch remains unrestricted and its delivery follows the normal
-//! background path. Delivery classification is not changed retroactively if background demand arrives while a
-//! targeted-only response is being validated. A certificate delivered only to targeted subscribers is recorded
-//! normally but is not immediately re-gossiped merely because it was fetched. Existing timeout-retry logic may later
-//! include it as a view-entry certificate; every honest participant missing it can also make the same direct request
-//! from the proposal that exposed the gap.
+//! covering nullification. An honest leader that names a parent must hold its certified notarization or finalization.
+//! A participant missing either certificate requests its exact view from that leader. An ancestry-only request
+//! targets the leader and has no fallback. Later ancestry-only requests for the same view can add their leaders as
+//! targets. A Byzantine proposal cannot make the request fall back to unrelated peers.
 //!
-//! The local fetch purpose records why the view was requested, without adding that distinction to the wire. Every
-//! admitted certificate, including gossip verified by the batcher, updates this resolver state. A covering
-//! nullification retires background repair and targeted nullification demand throughout its term, but preserves a
-//! targeted request for a certified parent. A terminal certification verdict retires only targeted parent demand at
-//! that exact view: success supplies the parent, while failure permanently rules it out and starts background
-//! nullification repair. A certified-floor increase alone retires neither kind because it does not prove that the
-//! ancestry a proposal exposed is now available. A valid resolver response completes the subscribers to which it was
-//! delivered, even when its certificate kind does not satisfy an older proposal; the response still communicates the
-//! producer's current deterministic ancestry preference. A kind mismatch alone is neither a validation failure nor a
-//! fault by the serving peer. Only malformed, key-incompatible, or cryptographically invalid evidence, or a
-//! notarization whose application certification terminates unsuccessfully, receives a failure verdict. While that
-//! verdict is outstanding, the request is parked: no further request is sent for the view, and later demand for it
-//! (including targeted requests from new proposals) attaches to the parked fetch without reaching the network. Repair
-//! of the view therefore waits on the certification verdict, relying on the termination assumption stated in
-//! [Certification](#certification): a success raises the floor, and a failure blocks the serving peer and retries the
-//! request (an honest peer can then supply the covering nullification). Finalization at or above the requested view
-//! retires every subscriber and prevents delayed proposal work from recreating it.
+//! Resolver work is deduplicated by view. If unrestricted background repair already owns the key, ancestry demand
+//! attaches as another subscriber. It does not restrict the shared fetch or install its leader as a target. The shared
+//! delivery follows the normal background path. Background demand that arrives during validation does not reclassify
+//! a targeted-only delivery. A certificate delivered only to targeted subscribers is recorded normally. Fetching it
+//! does not cause immediate gossip. Timeout retry may later include it as a view-entry certificate. Every honest
+//! participant missing the certificate can also request it directly from the proposal's leader.
 //!
-//! For demand that remains unsatisfied, finalization is deliberately the lifecycle boundary rather than the age of the
-//! proposal that triggered it. During an interval without finalization, distinct Byzantine proposals can therefore
-//! leave distinct targeted keys pending. Targets are tracked per resolver key, so a target made obsolete by matching
-//! local evidence can remain attached while another subscriber keeps that key active. There is no independent bound
-//! on this local request state while finalization is stalled. The next finalization removes every target key at or
-//! below its floor. This is the resource cost of preserving useful repair without a timing or view-age heuristic.
+//! The local fetch purpose records why the view was requested. This distinction is not added to the wire. Every
+//! admitted certificate updates resolver state. This includes gossip verified by the batcher. A covering
+//! nullification retires background repair and targeted nullification demand throughout its term. It preserves a
+//! targeted request for a certified parent.
 //!
-//! The request deliberately does not encode a certificate kind. The responder applies the same deterministic
-//! preference used for proposal ancestry: return its certified or finalized floor when that covers the requested
-//! view, otherwise return a covering nullification. The certified floor wins when both certificates exist. This
-//! ensures the response describes the ancestry the leader would use now rather than an ancestry selected by the
-//! requester.
+//! A terminal certification verdict retires targeted parent demand only at its exact view. Success supplies the
+//! parent. Failure permanently rules out the parent and starts background nullification repair. A certified-floor
+//! increase alone retires neither kind of targeted demand. It does not prove that the ancestry exposed by a proposal
+//! is now available.
 //!
-//! Usually the response also justifies the triggering proposal. There is one important race: a leader can construct
-//! a proposal using a nullification and then certify a notarization before handling the request. It then returns the
-//! newly preferred notarization. That response may not make the older proposal verifiable, but it aligns the
-//! requester with the leader's current ancestry for the next proposal. Certification is a property of the proposal,
-//! so another valid aggregate certificate for an already-certified proposal is accepted without waiting for a
-//! second certification result.
+//! A valid resolver response completes the subscribers that received it. This remains true when its certificate kind
+//! does not satisfy an older proposal. The response still communicates the producer's current ancestry preference. A
+//! kind mismatch alone is not a validation failure or a fault by the serving peer. A response receives a failure
+//! verdict only when its evidence is malformed, incompatible with the key, or cryptographically invalid. An
+//! unsuccessfully certified notarization also receives a failure verdict.
 //!
-//! A valid response can also be the wrong kind for ancestry named by a Byzantine proposal. For example, a leader can
-//! name an uncertified parent but serve the nullification it currently prefers for that view. A round requests each
-//! missing view at most once, avoiding a loop against a leader that repeatedly serves the same valid preference. If
-//! the response does not complete the proposal's ancestry, the participant does not vote; a later proposal can arm a
+//! The request is parked while a certification verdict is pending. No further request is sent for the view. Later
+//! demand, including a targeted request from a new proposal, attaches to the parked fetch without reaching the
+//! network. Repair therefore waits for the certification verdict. This relies on the termination assumption in
+//! [Certification](#certification). Success raises the floor. Failure blocks the serving peer and requeues the pending
+//! request. An eligible honest peer can then supply the covering nullification. Finalization at or above the requested
+//! view retires every subscriber. It also prevents delayed proposal work from recreating the request.
+//!
+//! Finalization is the lifecycle boundary for unsatisfied demand. The age of the triggering proposal is not. Distinct
+//! Byzantine proposals can leave distinct targeted keys pending while finalization stalls. Targets are tracked per
+//! resolver key. A target made obsolete by local evidence can remain attached while another subscriber keeps that key
+//! active. This local request state has no independent bound while finalization is stalled. The next finalization
+//! removes every target key at or below its floor. This is the resource cost of preserving useful repair without a
+//! timing or view-age heuristic.
+//!
+//! The request deliberately does not encode a certificate kind. The responder applies the deterministic preference
+//! used for proposal ancestry. It returns its certified or finalized floor when that floor covers the requested view.
+//! Otherwise, it returns a covering nullification. The certified floor wins when both certificates exist. The
+//! response therefore describes the ancestry the leader would use now. The requester does not select the ancestry.
+//!
+//! Usually the response also justifies the triggering proposal. One important race can prevent this. A leader may
+//! construct a proposal using a nullification and then certify a notarization before handling the request. It returns
+//! the newly preferred notarization. That response may not make the older proposal verifiable. It does align the
+//! requester with the leader's current ancestry for the next proposal. Certification is a property of the proposal.
+//! Another valid aggregate certificate for an already-certified proposal is accepted without waiting for a second
+//! certification result.
+//!
+//! A valid response can be the wrong kind for ancestry named by a Byzantine proposal. For example, a leader can name
+//! an uncertified parent but serve the nullification it currently prefers for that view. A round requests each missing
+//! view at most once. This prevents a loop against a leader that repeatedly serves the same valid preference. The
+//! participant does not vote if the response fails to complete the proposal's ancestry. A later proposal can arm a
 //! new request for the same view.
 //!
 //! Targeted repair trades latency after detection for lower fanout. Broadcasting conflicting evidence can put the
-//! holder's certificate in front of every participant after one additional network delay; a request and response take
-//! two. That broadcast, however, carries evidence the requester already has and generally cannot make the triggering
-//! proposal valid. When the fetch remains targeted, its response retrieves the ancestry evidence the leader currently
-//! prefers and requires only point-to-point traffic between each requester and that leader. It can
-//! rescue the triggering proposal only if both the response and subsequent application verification complete before
-//! the timer expires. Same-view recovery is an optimization, not a liveness assumption. If the timer wins while the
-//! response is outstanding, the request remains active unless matching local evidence or finalization retires it. If
-//! the response has completed but application verification loses the race, its evidence remains locally available
-//! even though the fetch is complete. Either way, an honest later proposal can benefit. This avoids turning many
-//! simultaneous discrepancies into all-peer certificate broadcasts. Absent a coincident background request for the
-//! same view, a silent Byzantine leader consumes only resolver capacity directed at itself.
+//! holder's certificate in front of every participant after one additional network delay. A request and response take
+//! two network delays. The broadcast carries evidence the requester already has. It generally cannot make the
+//! triggering proposal valid. A targeted fetch instead retrieves the ancestry evidence the leader currently prefers.
+//! It uses only point-to-point traffic between each requester and that leader.
 //!
-//! A parent below the verifier's finalized view is refused without a request. An honest proposer only names
-//! such a parent while holding a nullification that same-term vote safety rules out alongside that finalization,
-//! so the state is unreachable without more than `f` participants double-signing, and there is no honest peer
+//! Targeted repair can rescue the triggering proposal only if the response and application verification finish before
+//! the timer expires. Same-view recovery is an optimization, not a liveness assumption. The request remains active if
+//! the timer wins while the response is outstanding. Matching local evidence or finalization can retire it. If
+//! application verification loses the race after the response completes, the evidence remains locally available even
+//! though the fetch is complete. An honest later proposal can benefit in either case. This avoids turning many
+//! simultaneous discrepancies into all-peer certificate broadcasts. Without a background request for the same view,
+//! a silent Byzantine leader consumes only resolver capacity directed at itself.
+//!
+//! A parent below the verifier's finalized view is refused without a request. An honest proposer names such a
+//! parent only when it holds a nullification for the same term. Vote safety rules out that nullification alongside
+//! the finalization. Reaching this state requires more than `f` participants to double-sign. There is no honest peer
 //! to converge with.
 //!
 //! ## Pluggable Hashing and Cryptography
@@ -5698,13 +5703,13 @@ mod tests {
     /// - Views 4..=9: nullifications seen by all honest participants.
     /// - The remaining validator is Byzantine and stays silent forever.
     ///
-    /// Once connected, group leaders build on parent 2, which `lone` cannot
-    /// verify because it lacks Nullification(3) (a nullification at or below
-    /// its certified-notarization floor, which its resolver never requests).
-    /// The proposal identifies a holder, so `lone` fetches Nullification(3)
-    /// directly from that group leader and verifies the same proposal. The
-    /// first group-led view after GST therefore finalizes, before `lone`'s
-    /// first leader turn. See the module documentation on fetching missing
+    /// Once connected, group leaders build on parent 2. `lone` cannot verify
+    /// it because it lacks Nullification(3). Its resolver never requests a
+    /// nullification at or below its certified-notarization floor. The
+    /// proposal identifies a holder, so `lone` fetches Nullification(3)
+    /// directly from that group leader. It then verifies the same proposal.
+    /// The first group-led view after GST finalizes before `lone`'s first
+    /// leader turn. See the module documentation on fetching missing
     /// certificates for the recovery design.
     fn certified_split_heals_without_lone_leader_turn<S, F, L>(mut fixture: F)
     where
@@ -5735,13 +5740,12 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Assign roles from the leader schedule so the heal window is
-            // deterministic: everyone enters view 10 from the injected
-            // certificates, the view-10 leader is the silent Byzantine, the
-            // view-11 and view-12 leaders are the group, and the view-13
-            // leader is `lone`. The elector must ignore the entry
-            // certificate (like round-robin) for this precomputation to be
-            // valid.
+            // Assign roles from the leader schedule. Everyone enters view 10
+            // from the injected certificates. The silent Byzantine leads
+            // view 10. The group leads views 11 and 12. `lone` leads view 13.
+            // This makes the heal window deterministic. The elector must
+            // ignore the entry certificate, as round-robin does, for this
+            // precomputation to be valid.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -5753,12 +5757,12 @@ mod tests {
             let lone_leader_view = View::new(13);
             assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
 
-            // Build the certificates manually. Signatures come from the
-            // first `quorum` fixture keys regardless of role: certificates
-            // are self-certifying, and the scenario's story (the group
-            // notarized view 3 before timing out, and a Byzantine nullify
-            // vote completed Nullification(3)) constrains only who HOLDS
-            // each certificate.
+            // Build the certificates manually. Signatures use the first
+            // `quorum` fixture keys regardless of role. Certificates are
+            // self-certifying. The scenario constrains only who holds each
+            // certificate. In that scenario, the group notarized view 3
+            // before timing out. A Byzantine nullify vote then completed
+            // Nullification(3).
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
@@ -5841,11 +5845,11 @@ mod tests {
                 injector_sender.send(Recipients::All, msg, true);
             }
 
-            // Start engines for the honest participants only (the Byzantine
-            // stays silent). Participants are not linked to each other yet,
-            // so the one-shot certificate rebroadcasts triggered while
-            // consuming the preload are lost, exactly like broadcasts
-            // during the partition that produced the split.
+            // Start engines for the honest participants only. The Byzantine
+            // stays silent. The participants are not linked to each other yet.
+            // One-shot certificate rebroadcasts triggered by the preload are
+            // therefore lost. This mirrors broadcasts during the partition
+            // that produced the split.
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
@@ -5991,7 +5995,7 @@ mod tests {
             assert!(View::new(11) < lone_leader_view);
 
             // Only the targeted response can initially deliver this
-            // certificate to `lone`; background repair considers view 3
+            // certificate to `lone`. Background repair considers view 3
             // complete on both sides.
             assert!(
                 honest_reporters[&lone]
@@ -6057,11 +6061,10 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Assign roles from the leader schedule: the view-10 leader is
-            // the silent Byzantine, the view-11 leader is `lone`, and the
-            // view-12 and view-13 leaders are the group. The elector must
-            // ignore the entry certificate (like round-robin) for this
-            // precomputation to be valid.
+            // Assign roles from the leader schedule. The silent Byzantine
+            // leads view 10. `lone` leads view 11. The group leads views 12
+            // and 13. The elector must ignore the entry certificate, as
+            // round-robin does, for this precomputation to be valid.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -6156,11 +6159,11 @@ mod tests {
                 injector_sender.send(Recipients::All, msg, true);
             }
 
-            // Start engines for the honest participants only (the Byzantine
-            // stays silent). Participants are not linked to each other yet,
-            // so the one-shot certificate rebroadcasts triggered while
-            // consuming the preload are lost, exactly like broadcasts
-            // during the partition that produced the split.
+            // Start engines for the honest participants only. The Byzantine
+            // stays silent. The participants are not linked to each other yet.
+            // One-shot certificate rebroadcasts triggered by the preload are
+            // therefore lost. This mirrors broadcasts during the partition
+            // that produced the split.
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
@@ -6383,13 +6386,12 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Assign roles from the leader schedule so the heal window is
-            // deterministic: everyone enters view 10 from the injected
-            // certificates, the view-10 leader is the silent Byzantine, the
-            // view-11 and view-12 leaders are the group, and the view-13
-            // leader is `lone`. The elector must ignore the entry
-            // certificate (like round-robin) for this precomputation to be
-            // valid.
+            // Assign roles from the leader schedule. Everyone enters view 10
+            // from the injected certificates. The silent Byzantine leads
+            // view 10. The group leads views 11 and 12. `lone` leads view 13.
+            // This makes the heal window deterministic. The elector must
+            // ignore the entry certificate, as round-robin does, for this
+            // precomputation to be valid.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -6487,11 +6489,11 @@ mod tests {
                 injector_sender.send(Recipients::All, msg, true);
             }
 
-            // Start engines for the honest participants only (the Byzantine
-            // stays silent). Participants are not linked to each other yet,
-            // so the one-shot certificate rebroadcasts triggered while
-            // consuming the preload are lost, exactly like broadcasts
-            // during the partition that produced the split.
+            // Start engines for the honest participants only. The Byzantine
+            // stays silent. The participants are not linked to each other yet.
+            // One-shot certificate rebroadcasts triggered by the preload are
+            // therefore lost. This mirrors broadcasts during the partition
+            // that produced the split.
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
@@ -6623,8 +6625,8 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // Each targeted response exposes the next missing nullification;
-            // all three arrive soon enough to finalize the first group-led
+            // Each targeted response exposes the next missing nullification.
+            // All three arrive soon enough to finalize the first group-led
             // proposal after GST.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {

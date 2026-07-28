@@ -1501,8 +1501,8 @@ mod tests {
             )
             .await;
 
-            // No links are added, so fetch fallbacks can never complete over
-            // the network: waiters resolve only through the buffer or closure.
+            // No links are added. Network fetches cannot complete. Waiters
+            // resolve only through the buffer or closure.
             let setup = StandardHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -1525,9 +1525,8 @@ mod tests {
             let anchor = anchor.unwrap();
             let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
 
-            // Register waiters for a block that never arrives: one per fetch
-            // fallback kind, bounded below the coming floor, plus an unbounded
-            // local-only wait.
+            // Register waiters for a block that never arrives. Add one below-floor
+            // waiter per fetch fallback and one unbounded local-only waiter.
             let missing = Sha256::hash(&[b"missing"]);
             let below_by_round = mailbox.subscribe_by_digest(
                 missing,

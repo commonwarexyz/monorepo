@@ -174,15 +174,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// # Liveness Requirement
         ///
-        /// Pending may be arbitrarily long, but it must be finite while the validator remains live:
-        /// the returned channel must eventually produce `true` or `false`, unless consensus drops
-        /// the receiver after observing a finalization that makes the request obsolete. In
-        /// particular, resolver certificate repair may wait for this verdict before trying another
-        /// peer, so leaving a live request pending forever can halt consensus.
+        /// Pending may be arbitrarily long, but it must be finite while the validator remains live.
+        /// The returned channel must eventually produce `true` or `false`. The only exception is
+        /// when consensus drops the receiver after a finalization makes the request obsolete.
+        /// Resolver certificate repair may wait for this verdict before trying another peer.
+        /// Leaving a live request pending forever can halt consensus.
         ///
-        /// Closing the channel without a verdict does not satisfy this requirement. It should be
-        /// reserved for cases where certification can no longer produce a verdict, such as
-        /// shutdown; after restart, consensus can request certification again.
+        /// Closing the channel without a verdict does not satisfy this requirement. Reserve closure
+        /// for cases where certification can no longer produce a verdict, such as shutdown.
+        /// Consensus can request certification again after restart.
         ///
         /// # Determinism Requirement
         ///

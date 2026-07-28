@@ -20,7 +20,7 @@ struct BlockSubscription<V: Variant> {
 }
 
 /// The fetch bound a subscriber was registered with. When the processed floor
-/// passes the bound, the subscriber is closed (see [Subscriptions::prune_below]).
+/// reaches the bound, the subscriber is closed (see [Subscriptions::prune_below]).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Bound {
     Round(Round),
@@ -81,12 +81,12 @@ impl<V: Variant> Subscriptions<V> {
 
     /// Close subscribers whose fetch bound is at or below the processed floors.
     ///
-    /// Such a bound can never be satisfied: subscribers are notified when a
-    /// block is ingested, before the application acknowledgement that advances
-    /// the floor past it, and data below the floor is pruned. Closing the
-    /// channel signals the caller that the block will never be delivered,
-    /// matching the at-subscribe refusal of a below-floor fetch. Local-only
-    /// waits carry no bound and are never closed here.
+    /// A trusted processed floor makes fetch demand at its bound obsolete.
+    /// Subscribers are notified before the application acknowledgement advances
+    /// that floor. This lets already-available data win the race. Closure matches
+    /// the at-subscribe refusal of a below-floor fetch. It does not prove the block
+    /// can never become locally available. Local-only waits carry no bound and are
+    /// never closed here.
     pub(super) fn prune_below(&mut self, round: Round, height: Height) {
         self.entries.retain(|_, subscription| {
             subscription

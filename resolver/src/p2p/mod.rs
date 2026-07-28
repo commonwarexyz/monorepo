@@ -48,12 +48,11 @@
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
 //! is in progress are delivered the same accepted response locally.
 //!
-//! A response being validated parks its key: no further request is sent, and new fetches for the
-//! key only attach subscribers or targets, until the consumer's verdict arrives (acceptance
-//! completes the fetch; rejection blocks the serving peer and retries). A consumer that withholds
-//! a verdict indefinitely therefore stalls that key's fetch indefinitely: consumers whose
-//! validation can wait on external input (say, an application decision) must guarantee it
-//! eventually concludes.
+//! A response being validated parks its key. No further request is sent while validation is in
+//! progress. New fetches for the key only attach subscribers or targets. Acceptance completes the
+//! fetch. Rejection blocks the serving peer and retries. A consumer that withholds its verdict
+//! stalls the fetch for that key. Consumers that wait on external input must guarantee that
+//! validation eventually concludes.
 //!
 //! # Peer Selection
 //!
@@ -2414,6 +2413,154 @@ mod tests {
             );
             assert_eq!(value, first_response);
             assert_eq!(prod2_observer.remaining(&key), vec![second_response]);
+        });
+    }
+
+    #[test_traced]
+    fn test_late_targeted_subscriber_joins_retry_after_invalid_delivery() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(5);
+            let invalid_response = Bytes::from("invalid data for key 5");
+            let unexpected_refetch = Bytes::from("unexpected refetch for key 5");
+            let mut prod2 = SequencedProducer::default();
+            prod2.insert(
+                key.clone(),
+                [invalid_response, unexpected_refetch.clone()],
+            );
+            let prod2_observer = prod2.clone();
+
+            let valid_response = Bytes::from("valid data for key 5");
+            let mut prod3 = SequencedProducer::default();
+            prod3.insert(key.clone(), [valid_response.clone()]);
+            let prod3_observer = prod3.clone();
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            let first_subscriber = SubscriberTag(49);
+            let second_subscriber = SubscriberTag(50);
+
+            // Start unrestricted repair and park its first response in validation.
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
+            });
+
+            let delivery = started.recv().await.expect("delivery did not start");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
+                }
+            );
+
+            // A targeted objection for the same key attaches to the parked fetch
+            // without issuing another network request.
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key.clone(),
+                    subscriber: second_subscriber.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[2].clone()],
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                prod2_observer.remaining(&key),
+                vec![unexpected_refetch.clone()]
+            );
+            assert_eq!(prod3_observer.remaining(&key), vec![valid_response.clone()]);
+
+            // A terminal rejection retries unrestricted repair with both subscribers.
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+            oracle.manager().track(
+                1,
+                Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+            );
+
+            let delivery = select! {
+                delivery = started.recv() => delivery.expect("retry delivery did not start"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("invalid response was not retried with the late subscriber");
+                },
+            };
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![
+                        (first_subscriber.clone(), tracing::Span::none()),
+                        (second_subscriber.clone(), tracing::Span::none())
+                    ],
+                }
+            );
+
+            second_gate_sender.send(()).unwrap();
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![
+                        (first_subscriber, tracing::Span::none()),
+                        (second_subscriber, tracing::Span::none())
+                    ],
+                }
+            );
+            assert_eq!(value, valid_response);
+            assert_eq!(
+                prod2_observer.remaining(&key),
+                vec![unexpected_refetch]
+            );
+            assert!(prod3_observer.remaining(&key).is_empty());
         });
     }
 

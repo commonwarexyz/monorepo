@@ -1,16 +1,15 @@
-//! The resolver is responsible for ensuring that the voter has all the certificates it needs to
-//! make progress. The voter is voting in a view and has a "floor" view which is the latest
-//! certified (or finalized) view that it knows about. Thus, it either requires covering
-//! nullification evidence for intermediate views, or a higher floor. It will request the required
-//! nullifications from the resolver. Other nodes will either serve such nullifications, or higher floors.
+//! The resolver ensures that the voter has the certificates it needs to make progress. The voter
+//! tracks a floor at its latest certified or finalized view. It needs either nullifications that
+//! cover the intermediate views or evidence of a higher floor. The voter asks the resolver for
+//! this evidence. Peers respond with covering nullifications or higher floors.
 //!
 //! # Fetch Strategy
 //!
-//! A nullification covers the view it was created for and the rest of that view's term, and a
-//! request only accepts nullifications from its own term (see [`crate::types::View::covers`]).
-//! One request per term, at its lowest uncovered view (the term's "anchor"), is therefore
-//! sufficient: whatever answers it covers the rest of the term, and a higher floor moots it. The
-//! fetch scan requests each term's anchor and advances a cursor past everything it scanned:
+//! A nullification covers its own view and the rest of that view's term. A request only accepts
+//! nullifications from its own term. See [`crate::types::View::covers`]. One request at the lowest
+//! uncovered view is enough for each term. This view is the term's "anchor." Its answer covers the
+//! rest of the term. A higher floor makes the request obsolete. The fetch scan requests each
+//! term's anchor and advances a cursor past every view it scanned.
 //!
 //! ```text
 //! term:      [1  2  3  4  5] [6 . . . 10] [11 . . . 15]    current = 14
@@ -20,57 +19,59 @@
 //! nullification@4 for request 6: rejected (wrong term)
 //! ```
 //!
-//! Requests stay pending in the resolver until answered or retained out, so the cursor never
-//! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
-//! pending, which the resolver engine deduplicates).
+//! Requests stay pending until they are answered or removed by retention. The cursor does not
+//! revisit scanned views on its own. A rescan reissues fetches for requests that remain pending.
+//! The resolver engine deduplicates those fetches.
 //!
 //! # Proposal Ancestry
 //!
-//! Background repair cannot detect a split where one participant certified a notarization and
-//! another holds a covering nullification for the same view: both consider that view complete.
-//! A proposal exposes the missing view and a leader that must hold useful evidence, so the voter
-//! adds a targeted purpose to the existing view key. The request and encoded certificate response
-//! are unchanged; see [the Simplex overview](crate::simplex) for the protocol rationale.
+//! Background repair cannot detect every certificate split. One participant may certify a
+//! notarization while another holds a covering nullification for the same view. Both consider the
+//! view complete. A proposal exposes the missing view and a leader that must hold useful evidence.
+//! The voter adds a targeted purpose to the existing view key. The wire request and encoded
+//! certificate response do not change. See [the Simplex overview](crate::simplex) for the protocol
+//! rationale.
 //!
 //! The wire key does not identify a certificate kind. A producer serves its certified or finalized
-//! floor when it covers the key, preferring that floor when a nullification also exists; otherwise
-//! it serves the covering nullification. A late floor change or Byzantine proposal can therefore
-//! produce a valid response that does not repair the triggering proposal. Such a kind mismatch is
-//! accepted without faulting the peer, and the voter reruns the full ancestry check before voting.
-//! Malformed, key-incompatible, or cryptographically invalid evidence is rejected. Notarizations
-//! additionally remain pending until application certification, whose terminal failure also
-//! produces a negative verdict. A pending verdict parks the fetch: the resolver engine sends no
-//! further request for a view whose response is still being validated, so repairing the view waits
-//! on certification terminating (see the certification section of [the Simplex
-//! overview](crate::simplex)). A later proposal can request the view again.
+//! floor when that floor covers the key. The floor takes priority when a nullification also exists.
+//! Otherwise, the producer serves the covering nullification. A late floor change or Byzantine
+//! proposal can produce a valid response that does not repair the triggering proposal. The voter
+//! accepts this kind mismatch without faulting the peer. It reruns the full ancestry check before
+//! voting.
 //!
-//! Local fetch purposes govern retention, not response validity. A nullification removes background
-//! and targeted-nullification demand throughout its term. A terminal certification verdict removes
-//! targeted-parent demand at its exact view. A floor raise alone removes only background demand;
-//! finalization removes all demand at or below its view. Tombstones prevent delayed mailbox work
-//! from recreating demand after matching evidence or finalization.
+//! Malformed, key-incompatible, or cryptographically invalid evidence is rejected. A notarization
+//! remains pending until application certification finishes. A terminal certification failure
+//! produces a negative verdict. A pending verdict parks the fetch. The resolver sends no further
+//! request for that view while validation is pending. Repair therefore waits for certification to
+//! finish. See the certification section of [the Simplex overview](crate::simplex). A later
+//! proposal can request the view again.
 //!
-//! Resolver work is deduplicated by key. A shared background subscriber keeps the fetch unrestricted
-//! and follows the normal gossip path; background demand arriving during validation does not
-//! retroactively reclassify a targeted-only delivery. Targeted-only delivery suppresses immediate
-//! certificate gossip, though timeout retry may later include the certificate as view-entry
+//! Local fetch purposes govern retention. They do not affect response validity. A nullification
+//! removes background and targeted-nullification demand throughout its term. A terminal
+//! certification verdict removes targeted-parent demand at its exact view. A floor raise alone
+//! removes only background demand. Finalization removes all demand at or below its view. Tombstones
+//! prevent delayed mailbox work from recreating demand after matching evidence or finalization.
+//!
+//! Resolver work is deduplicated by key. A shared background subscriber keeps the fetch
+//! unrestricted and follows the normal gossip path. Background demand that arrives during
+//! validation does not reclassify a targeted-only delivery. Targeted-only delivery suppresses
+//! immediate certificate gossip. Timeout retry may later include the certificate as view-entry
 //! evidence.
 //!
-//! Unanswered targeted demand persists until matching evidence or finalization, without an elapsed
-//! time or proposal-age heuristic. Distinct keys can therefore accumulate while finalization
-//! stalls, and a key-scoped target can remain while another subscriber keeps the key active. A
-//! targeted pull costs a request and response instead of one broadcast delay, but avoids all-peer
-//! fanout. It rescues the triggering proposal only if the response and application work complete
-//! before that proposal's timer expires; later proposals still benefit from evidence that arrives
-//! after the timer.
+//! Unanswered targeted demand persists until matching evidence or finalization. It has no elapsed
+//! time or proposal-age cutoff. Distinct keys can accumulate while finalization stalls. A target
+//! for one key can remain while another subscriber keeps that key active. A targeted pull costs a
+//! request and response instead of one broadcast delay. It avoids all-peer fanout. It rescues the
+//! triggering proposal only if the response and application work finish before the proposal's
+//! timer expires. Later proposals still benefit from evidence that arrives after the timer.
 //!
 //! # Mid-Term Floor Raises
 //!
-//! A floor raise landing inside a term (a certified notarization or a finalization at a mid-term
-//! view) strands the term's tail: the anchor request is retained out with the floor, requests in
-//! later terms reject this term's nullifications, and the cursor is already past it. Nothing
-//! would ever re-request the tail, so a validator whose parent chain rests at the floor could
-//! never validate proposals that skip it:
+//! A floor raise inside a term strands the term's tail. The floor may come from a certified
+//! notarization or a mid-term finalization. The anchor request is removed with the floor. Requests
+//! in later terms reject this term's nullifications. The cursor is already past the tail. Nothing
+//! would request it again. A validator whose parent chain rests at the floor could then fail to
+//! validate proposals that skip it.
 //!
 //! ```text
 //! floor raises to 3, mid-term of [1, 5]:
@@ -81,10 +82,9 @@
 //!            (retained out)    (reject term-1 evidence)
 //! ```
 //!
-//! Pruning repairs this by pulling the cursor back to just above the floor, so a later scan
-//! re-requests the tail. Anchors whose requests are still pending are re-issued along the way
-//! and deduplicated by the engine, while anchors with a stored covering nullification are
-//! skipped:
+//! Pruning repairs this gap by pulling the cursor back to just above the floor. A later scan
+//! requests the tail again. The scan also reissues requests for pending anchors. The resolver
+//! engine deduplicates them. The scan skips anchors that already have a covering nullification.
 //!
 //! ```text
 //! pull-back: cursor = min(cursor, floor + 1) = 4
@@ -96,8 +96,8 @@
 //! request:              [4]    [6]          [11]
 //! ```
 //!
-//! With single-view terms every view is its own anchor, a floor raise can never land mid-term,
-//! and the pull-back never fires.
+//! With single-view terms, every view is its own anchor. A floor raise cannot land mid-term. The
+//! pullback never runs.
 
 mod actor;
 mod ingress;

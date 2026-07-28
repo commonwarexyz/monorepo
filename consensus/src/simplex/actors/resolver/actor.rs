@@ -71,7 +71,7 @@ pub struct Actor<
     known_nullifications: BTreeSet<View>,
 
     /// Views whose application certification reached a terminal verdict.
-    /// Success supplies a usable parent; failure permanently rules it out.
+    /// Success supplies a usable parent. Failure permanently rules it out.
     resolved_parents: BTreeSet<View>,
 
     /// Responses to notarization deliveries, keyed by notarization view and
@@ -263,11 +263,11 @@ impl<
         // Success completes those fetches. Failure blocks the peers that
         // served the uncertifiable notarization and the resolver retries the
         // still-pending requests, mirroring how [Self::validate] treats peers
-        // that serve a notarization for a view already marked failed. No copy
-        // of that notarization can certify anywhere, so the view cannot
-        // finalize and honest participants nullify it: the retried request is
-        // eventually answered by that covering nullification (or by a
-        // certificate at a higher view).
+        // that serve a notarization for a view already marked failed. The
+        // notarization cannot certify at an honest participant, so honest
+        // participants continue with nullification. Once an eligible honest
+        // peer is available, its covering nullification (or a certificate at
+        // a higher view) can satisfy the re-queued request.
         if let Some(responses) = self.held.remove(&view) {
             for response in responses {
                 response.send_lossy(success);
@@ -522,8 +522,8 @@ impl<
 
                 // A notarization only answers the request if its proposal
                 // certifies, so hold the response and answer it with the
-                // certification verdict (see [Self::certified]). If its
-                // outcome is already implied by the floor, accept it now:
+                // certification verdict (see [Self::certified]). Accept it
+                // immediately if the floor already implies its outcome. A
                 // duplicate voter delivery will not produce another verdict.
                 // Other certificates are complete answers on their own.
                 match &parsed {
@@ -924,8 +924,8 @@ mod tests {
         });
     }
 
-    /// A terminal certification verdict releases a response that parked both
-    /// background repair and a later proposal-ancestry objection.
+    /// A terminal certification verdict releases a response while background
+    /// repair and a later ancestry objection share the parked view.
     #[test_async]
     async fn certification_failure_unparks_attached_ancestry_fetch() {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1097,9 +1097,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            // A proposal objection for the same view attaches the honest
-            // leader as a target. It deliberately cannot bypass the response
-            // whose certification is still pending.
+            // A proposal objection for the same view attaches another
+            // subscriber. The existing fetch remains unrestricted, so the
+            // leader hint neither narrows it nor bypasses the response whose
+            // certification is still pending.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
@@ -1115,8 +1116,8 @@ mod tests {
 
             // The liveness contract requires a terminal verdict. Failure
             // rejects the parked response, blocks its peer, and retries the
-            // attached request, which the honest leader answers with the
-            // covering nullification.
+            // shared unrestricted request. The now-reachable honest holder
+            // answers with the covering nullification.
             requester_mailbox.certified(notarization.round(), false);
             let recovered = select! {
                 message = requester_voter_receiver.recv() => {
@@ -1232,7 +1233,7 @@ mod tests {
 
             // A covering nullification completes both background repair and
             // the targeted nullification request. It must preserve the
-            // targeted parent request: that opposite evidence is the reason
+            // targeted parent request. That opposite evidence is the reason
             // the parent certificate is still needed.
             actor.updated(
                 &mut resolver,
@@ -1258,7 +1259,7 @@ mod tests {
             assert_eq!(resolver.targeted().len(), 2);
 
             // Exercise the mirror case at another key. Successful
-            // certification completes only the exact parent request; it does
+            // certification completes only the exact parent request. It does
             // not provide the nullification needed to skip that view.
             let second_requested = requested.next_term_start(actor.state.term_length());
             actor.resolve(
@@ -1300,7 +1301,7 @@ mod tests {
             actor.apply_effects(&mut resolver, vec![Effect::RetainAbove(second_requested)]);
             assert_eq!(resolver.outstanding(), vec![3, 6]);
 
-            // Finalization is the universal boundary: no valid proposal can
+            // Finalization is the universal boundary. No valid proposal can
             // require ancestry at or below it. It removes every such key and
             // prevents a delayed mailbox request from recreating stale work.
             let finalized = second_requested;
