@@ -349,10 +349,12 @@
 //!
 //! The request is parked while a certification verdict is pending. No further request is sent for the view. Later
 //! demand, including a targeted request from a new proposal, attaches to the parked fetch without reaching the
-//! network. Repair therefore waits for the certification verdict. This relies on the termination assumption in
-//! [Certification](#certification). Success raises the floor. Failure blocks the serving peer and requeues the pending
-//! request. An eligible honest peer can then supply the covering nullification. Finalization at or above the requested
-//! view retires every subscriber. It also prevents delayed proposal work from recreating the request.
+//! network. Repair therefore waits for the certification verdict. The
+//! [`CertifiableAutomaton`](crate::CertifiableAutomaton) liveness contract requires a live request to finish unless
+//! finalization cancels it. See [Certification](#certification). Success raises the floor. Failure blocks the serving
+//! peer and requeues the pending request. An eligible honest peer can then supply the covering nullification.
+//! Finalization at or above the requested view retires every subscriber. It also prevents delayed proposal work from
+//! recreating the request.
 //!
 //! Finalization is the lifecycle boundary for unsatisfied demand. The age of the triggering proposal is not. Distinct
 //! Byzantine proposals can leave distinct targeted keys pending while finalization stalls. Targets are tracked per
@@ -498,8 +500,9 @@
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
 //! a fast-skip signal and can halt progress because certification requests are not retried during
-//! the same run. The safe way to stop working on certification is to keep the request pending until
-//! Simplex drops it after finalizing the block or a descendant.
+//! the same run. Keep the request pending while its verdict depends on temporary data. A live
+//! implementation must eventually send a verdict. The only exception is when Simplex drops the
+//! receiver after finalizing the block or a descendant.
 
 pub mod elector;
 pub mod scheme;

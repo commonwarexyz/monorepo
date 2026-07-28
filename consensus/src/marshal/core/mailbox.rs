@@ -259,20 +259,19 @@ pub enum CommitmentFallback {
     /// child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
-    /// the in-flight resolver key or pruning bound.
+    /// the in-flight resolver key or retention bound.
     FetchByRound { round: Round },
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this only when no certified parent round is available and the caller
-    /// has a locally validated pruning bound, such as repairing a finalized gap
-    /// or walking an accepted ancestry stream. Do not use it for a candidate's
-    /// immediate parent when the consensus context supplies the parent round.
+    /// Use this only when no certified parent round is available. The caller must have a locally
+    /// validated resolver retention bound. Examples include repairing a finalized gap or walking
+    /// an accepted ancestry stream. Do not use it for a candidate's immediate parent when the
+    /// consensus context supplies the parent round.
     ///
-    /// The height is not sent to peers. It is a local pruning hint for request
-    /// retention, not part of response validity: a fetched block is delivered
-    /// if its commitment matches, and certified storage uses the decoded block
-    /// height.
+    /// The height is not sent to peers. It is a local hint for request retention.
+    /// It is not part of response validity. A fetched block is delivered if its
+    /// commitment matches. Certified storage uses the decoded block height.
     FetchByCommitment { height: Height },
 }
 
@@ -733,11 +732,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
     ///
-    /// A fetch fallback carries a round or height bound. The channel closes if the processed floor
-    /// reaches that bound. A request already below the floor is refused at subscribe time. A
-    /// registered subscription closes when the floor later reaches its bound. Closure means the
-    /// bounded fetch is obsolete. The block may still become locally available. Local-only waits
-    /// carry no bound and are never closed by the floor.
+    /// Resolver fetches and subscriptions have independent lifetimes. The processed floor may deny
+    /// or retire a fetch. The subscription remains open while the block may still arrive through
+    /// local ingress. It closes without delivery only when marshal can no longer obtain the block.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     /// Digest-keyed subscriptions only support waiting locally or fetching by round.
@@ -770,11 +767,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// will be notified when the block is available. If the block is not finalized, it's possible
     /// that it may never become available.
     ///
-    /// A fetch fallback carries a round or height bound. The channel closes if the processed floor
-    /// reaches that bound. A request already below the floor is refused at subscribe time. A
-    /// registered subscription closes when the floor later reaches its bound. Closure means the
-    /// bounded fetch is obsolete. The block may still become locally available. Local-only waits
-    /// carry no bound and are never closed by the floor.
+    /// Resolver fetches and subscriptions have independent lifetimes. The processed floor may deny
+    /// or retire a fetch. The subscription remains open while the block may still arrive through
+    /// local ingress. It closes without delivery only when marshal can no longer obtain the block.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     ///

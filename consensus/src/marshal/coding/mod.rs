@@ -1797,8 +1797,8 @@ mod tests {
             // Verify must not synthesize `false` when the block cannot be fetched.
             let mut verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
 
-            // Ensure the certification gate task has registered its subscription, then
-            // prune the missing commitment's reconstruction state.
+            // Register the certification gate before pruning reconstruction state.
+            // Later ingress can reconstruct and deliver the block.
             context.sleep(Duration::from_millis(100)).await;
             shards.prune(missing_payload);
 
@@ -1829,7 +1829,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_floor_closes_bounded_and_preserves_wait_subscription() {
+    fn test_coding_floor_preserves_registered_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1868,31 +1868,25 @@ mod tests {
                 NUM_VALIDATORS as u16,
             );
             let missing_commitment = CodingHarness::commitment(&missing);
-            shards.discovered(
-                missing_commitment,
-                participants[0].clone(),
-                missing_round,
-            );
+            shards.discovered(missing_commitment, participants[0].clone(), missing_round);
             assert!(shards.get(missing_commitment).await.is_none());
 
-            // Coalesce two floor-bounded fetches and an unbounded local-only
-            // wait onto the same core and shard-buffer subscription.
-            let below_by_round = mailbox.subscribe_by_commitment(
+            // Coalesce two fetch-backed subscriptions and a local wait onto the
+            // same core and shard-buffer subscription.
+            let mut by_round = mailbox.subscribe_by_commitment(
                 missing_commitment,
                 core::CommitmentFallback::FetchByRound {
                     round: missing_round,
                 },
             );
-            let below_by_height = mailbox.subscribe_by_commitment(
+            let mut by_height = mailbox.subscribe_by_commitment(
                 missing_commitment,
                 core::CommitmentFallback::FetchByCommitment {
                     height: Height::new(1),
                 },
             );
-            let mut unbounded = mailbox.subscribe_by_commitment(
-                missing_commitment,
-                core::CommitmentFallback::Wait,
-            );
+            let mut wait =
+                mailbox.subscribe_by_commitment(missing_commitment, core::CommitmentFallback::Wait);
             let _ = mailbox.get_processed_height().await;
 
             // Build a valid floor anchor above the missing reconstruction state.
@@ -1934,10 +1928,7 @@ mod tests {
             );
             mailbox.set_floor(finalization);
             shards.proposed(anchor_round, anchor);
-            assert_eq!(
-                anchor_wait.await.unwrap().commitment(),
-                anchor_commitment
-            );
+            assert_eq!(anchor_wait.await.unwrap().commitment(), anchor_commitment);
 
             // Wait for the application acknowledgement that advances the floors
             // and asks Coding to prune reconstruction state through the anchor.
@@ -1950,25 +1941,27 @@ mod tests {
             );
             let _ = mailbox.get_processed_height().await;
 
-            assert!(below_by_round.await.is_err());
-            assert!(below_by_height.await.is_err());
+            assert!(matches!(
+                by_round.try_recv(),
+                Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                by_height.try_recv(),
+                Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+            ));
             assert!(
                 matches!(
-                    unbounded.try_recv(),
+                    wait.try_recv(),
                     Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
                 ),
-                "local-only wait closed during coding finalization"
+                "local wait closed during coding finalization"
             );
 
-            // Reconstruction after pruning still satisfies the surviving wait.
+            // Reconstruction after pruning satisfies every registered caller.
             shards.proposed(missing_round, missing);
-            let received = select! {
-                result = &mut unbounded => result.expect("local-only wait closed"),
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("local-only wait was not satisfied after reconstruction");
-                },
-            };
-            assert_eq!(received.commitment(), missing_commitment);
+            assert_eq!(by_round.await.unwrap().commitment(), missing_commitment);
+            assert_eq!(by_height.await.unwrap().commitment(), missing_commitment);
+            assert_eq!(wait.await.unwrap().commitment(), missing_commitment);
         })
     }
 

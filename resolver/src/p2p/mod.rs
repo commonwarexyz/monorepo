@@ -2429,10 +2429,7 @@ mod tests {
             let invalid_response = Bytes::from("invalid data for key 5");
             let unexpected_refetch = Bytes::from("unexpected refetch for key 5");
             let mut prod2 = SequencedProducer::default();
-            prod2.insert(
-                key.clone(),
-                [invalid_response, unexpected_refetch.clone()],
-            );
+            prod2.insert(key.clone(), [invalid_response, unexpected_refetch.clone()]);
             let prod2_observer = prod2.clone();
 
             let valid_response = Bytes::from("valid data for key 5");
@@ -2556,10 +2553,7 @@ mod tests {
                 }
             );
             assert_eq!(value, valid_response);
-            assert_eq!(
-                prod2_observer.remaining(&key),
-                vec![unexpected_refetch]
-            );
+            assert_eq!(prod2_observer.remaining(&key), vec![unexpected_refetch]);
             assert!(prod3_observer.remaining(&key).is_empty());
         });
     }

@@ -1050,7 +1050,8 @@ mod tests {
             );
 
             let requested = View::new(1);
-            let notarization = build_notarization(&schemes, &verifier, EPOCH, requested);
+            let notarized = requested.next();
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, notarized);
             first_responder_mailbox.updated(Certificate::Notarization(notarization.clone()));
             // Model the Byzantine peer as willing to serve this notarization.
             // Honest certification at the requester may still reject it.
@@ -1063,10 +1064,7 @@ mod tests {
             // background fetch. The only connected peer answers with a valid
             // notarization, whose resolver verdict waits for certification.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
-                &schemes,
-                &verifier,
-                EPOCH,
-                requested.next(),
+                &schemes, &verifier, EPOCH, notarized,
             )));
             let first = select! {
                 message = requester_voter_receiver.recv() => {
@@ -1114,10 +1112,9 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // The liveness contract requires a terminal verdict. Failure
-            // rejects the parked response, blocks its peer, and retries the
-            // shared unrestricted request. The now-reachable honest holder
-            // answers with the covering nullification.
+            // The nullification at `notarized` leaves the lower request as the
+            // only unsatisfied key. Rejecting the parked response must retry
+            // that key. The honest holder then supplies its nullification.
             requester_mailbox.certified(notarization.round(), false);
             let recovered = select! {
                 message = requester_voter_receiver.recv() => {

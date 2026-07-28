@@ -43,8 +43,10 @@
 //! remains pending until application certification finishes. A terminal certification failure
 //! produces a negative verdict. A pending verdict parks the fetch. The resolver sends no further
 //! request for that view while validation is pending. Repair therefore waits for certification to
-//! finish. See the certification section of [the Simplex overview](crate::simplex). A later
-//! proposal can request the view again.
+//! finish. A live [`CertifiableAutomaton`](crate::CertifiableAutomaton) must eventually return a
+//! verdict unless finalization cancels the request. See the certification section of [the Simplex
+//! overview](crate::simplex). Later proposal demand attaches to the same parked fetch. It does not
+//! bypass the certification wait.
 //!
 //! Local fetch purposes govern retention. They do not affect response validity. A nullification
 //! removes background and targeted-nullification demand throughout its term. A terminal

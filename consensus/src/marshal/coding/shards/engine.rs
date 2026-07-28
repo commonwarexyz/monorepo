@@ -1031,7 +1031,7 @@ where
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
                 self.state.remove(&commitment);
-                self.drop_subscriptions(commitment);
+                self.drop_commitment_subscriptions(commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1140,19 +1140,15 @@ where
         }
     }
 
-    /// Drops all subscriptions after reconstruction proves a commitment unusable.
+    /// Drops subscriptions for an exact commitment that cannot reconstruct a valid block.
     ///
-    /// Removing these entries drops all senders, causing receivers to resolve
-    /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: Commitment) {
+    /// A different commitment can still reconstruct the same block digest.
+    /// Digest subscriptions remain open for that later availability.
+    fn drop_commitment_subscriptions(&mut self, commitment: Commitment) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(
-                commitment.block::<B::Digest>(),
-            ));
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
@@ -4231,8 +4227,9 @@ mod tests {
         // decoded blob has a different digest than what the commitment claims. This triggers
         // Error::DigestMismatch in try_reconstruct. Verify that:
         //   1. The failed commitment's state is cleaned up
-        //   2. Subscriptions for the failed commitment never resolve
-        //   3. A subsequent valid commitment reconstructs successfully
+        //   2. The exact commitment subscription closes
+        //   3. The digest subscription survives for another commitment
+        //   4. A subsequent valid commitment reconstructs successfully
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -4313,14 +4310,15 @@ mod tests {
                     "block should not be available after DigestMismatch"
                 );
 
-                // Block subscription should be closed after failed reconstruction cleanup.
+                // Commitment validity governs the exact-commitment subscription.
+                // The digest subscription accepts another valid commitment.
                 assert!(
                     matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
                     "subscription should close for failed reconstruction"
                 );
                 assert!(
-                    matches!(digest_sub.try_recv(), Err(TryRecvError::Closed)),
-                    "digest subscription should close after failed reconstruction"
+                    matches!(digest_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "digest subscription should survive failed reconstruction"
                 );
 
                 // Now verify the engine is not stuck: send valid shards for block1's real
@@ -4358,6 +4356,10 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
+                let by_digest = digest_sub
+                    .await
+                    .expect("valid commitment should satisfy digest subscription");
+                assert_eq!(by_digest.commitment(), real_commitment1);
             },
         );
     }

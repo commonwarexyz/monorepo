@@ -1,5 +1,4 @@
 use super::{Buffer, Variant};
-use crate::types::{Height, Round};
 use commonware_cryptography::Digestible;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -13,26 +12,20 @@ use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
 ///
+/// The retrieval strategy is not part of subscription ownership. Each caller
+/// remains registered until delivery, caller cancellation, or a backing-buffer
+/// closure that proves the buffer can no longer deliver.
+///
 /// Dropping the subscription aborts the backing buffer waiter, if one exists.
 struct BlockSubscription<V: Variant> {
     subscribers: Vec<Subscriber<V>>,
     _aborter: Option<Aborter>,
 }
 
-/// The fetch bound a subscriber was registered with. When the processed floor
-/// reaches the bound, the subscriber is closed (see [Subscriptions::prune_below]).
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Bound {
-    Round(Round),
-    Height(Height),
-}
-
-/// A waiter for a block, carrying the span of its mailbox request and the
-/// fetch bound it was registered with (`None` for local-only waits).
+/// A waiter for a block, carrying the span of its mailbox request.
 struct Subscriber<V: Variant> {
     span: Span,
     sender: oneshot::Sender<Arc<V::Block>>,
-    bound: Option<Bound>,
 }
 
 /// Delivers a block to a subscriber inside the dequeue-side child of its
@@ -79,27 +72,6 @@ impl<V: Variant> Subscriptions<V> {
         });
     }
 
-    /// Close subscribers whose fetch bound is at or below the processed floors.
-    ///
-    /// A trusted processed floor makes fetch demand at its bound obsolete.
-    /// Subscribers are notified before the application acknowledgement advances
-    /// that floor. This lets already-available data win the race. Closure matches
-    /// the at-subscribe refusal of a below-floor fetch. It does not prove the block
-    /// can never become locally available. Local-only waits carry no bound and are
-    /// never closed here.
-    pub(super) fn prune_below(&mut self, round: Round, height: Height) {
-        self.entries.retain(|_, subscription| {
-            subscription
-                .subscribers
-                .retain(|subscriber| match subscriber.bound {
-                    Some(Bound::Round(bound)) => bound > round,
-                    Some(Bound::Height(bound)) => bound > height,
-                    None => true,
-                });
-            !subscription.subscribers.is_empty()
-        });
-    }
-
     /// Notify subscribers waiting for the provided block.
     pub(super) fn notify(&mut self, block: Arc<V::Block>) {
         let digest_key = Key::Digest(block.digest());
@@ -122,14 +94,12 @@ impl<V: Variant> Subscriptions<V> {
         span: Span,
         key: KeyFor<V>,
         response: oneshot::Sender<Arc<V::Block>>,
-        bound: Option<Bound>,
         waiters: &mut AbortablePool<Result<Arc<V::Block>, KeyFor<V>>>,
         buffer: &Buf,
     ) {
         let subscriber = Subscriber {
             span,
             sender: response,
-            bound,
         };
         match self.entries.entry(key) {
             Entry::Occupied(mut entry) => {
@@ -253,7 +223,6 @@ mod tests {
             Span::none(),
             Key::Digest(block.digest()),
             first_sender,
-            None,
             &mut waiters,
             &buffer,
         );
@@ -262,7 +231,6 @@ mod tests {
             Span::none(),
             Key::Digest(block.digest()),
             second_sender,
-            None,
             &mut waiters,
             &buffer,
         );
@@ -289,7 +257,6 @@ mod tests {
             Span::none(),
             Key::Digest(block.digest()),
             digest_sender,
-            None,
             &mut waiters,
             &buffer,
         );
@@ -298,7 +265,6 @@ mod tests {
             Span::none(),
             Key::Commitment(block.digest()),
             commitment_sender,
-            None,
             &mut waiters,
             &buffer,
         );
@@ -325,7 +291,6 @@ mod tests {
             Span::none(),
             Key::Digest(block.digest()),
             closed_sender,
-            None,
             &mut waiters,
             &buffer,
         );
@@ -334,7 +299,6 @@ mod tests {
             Span::none(),
             Key::Digest(block.digest()),
             open_sender,
-            None,
             &mut waiters,
             &buffer,
         );
@@ -353,76 +317,6 @@ mod tests {
     }
 
     #[test]
-    fn prune_below_closes_bounded_and_keeps_unbounded_subscribers() {
-        let test_buffer = TestBuffer::default();
-        let buffer = test_buffer.clone();
-        let mut waiters = TestWaiters::default();
-        let mut subscriptions = Subscriptions::<TestVariant>::new();
-        let block = block(6, 60);
-
-        let (round_sender, round_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            Key::Digest(block.digest()),
-            round_sender,
-            Some(Bound::Round(Round::new(
-                crate::types::Epoch::zero(),
-                crate::types::View::new(2),
-            ))),
-            &mut waiters,
-            &buffer,
-        );
-        let (height_sender, height_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            Key::Digest(block.digest()),
-            height_sender,
-            Some(Bound::Height(Height::new(2))),
-            &mut waiters,
-            &buffer,
-        );
-        let (unbounded_sender, unbounded_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            Key::Digest(block.digest()),
-            unbounded_sender,
-            None,
-            &mut waiters,
-            &buffer,
-        );
-
-        // Floors below every bound close nothing.
-        subscriptions.prune_below(
-            Round::new(crate::types::Epoch::zero(), crate::types::View::new(1)),
-            Height::new(1),
-        );
-        let subscription = subscriptions
-            .entries
-            .get(&Key::Digest(block.digest()))
-            .expect("subscribers should remain");
-        assert_eq!(subscription.subscribers.len(), 3);
-
-        // Floors at the bounds close both bounded subscribers, keeping the
-        // unbounded local-only wait (and its shared buffer waiter) alive.
-        subscriptions.prune_below(
-            Round::new(crate::types::Epoch::zero(), crate::types::View::new(2)),
-            Height::new(2),
-        );
-        assert!(round_receiver.now_or_never().unwrap().is_err());
-        assert!(height_receiver.now_or_never().unwrap().is_err());
-        let subscription = subscriptions
-            .entries
-            .get(&Key::Digest(block.digest()))
-            .expect("unbounded subscriber should remain");
-        assert_eq!(subscription.subscribers.len(), 1);
-        assert_eq!(test_buffer.digest_subscription_count(), 1);
-
-        subscriptions.notify(Arc::new(block.clone()));
-        assert_receives(unbounded_receiver, &block);
-        assert!(subscriptions.entries.is_empty());
-    }
-
-    #[test]
     fn remove_drops_waiter_and_aborts_buffer_waiter() {
         deterministic::Runner::default().start(|context| async move {
             let buffer = TestBuffer::default();
@@ -432,7 +326,7 @@ mod tests {
             let key = Key::Digest(block.digest());
 
             let (sender, _receiver) = oneshot::channel();
-            subscriptions.insert(Span::none(), key, sender, None, &mut waiters, &buffer);
+            subscriptions.insert(Span::none(), key, sender, &mut waiters, &buffer);
             subscriptions.remove(&key);
 
             select! {
@@ -461,7 +355,6 @@ mod tests {
             Span::none(),
             Key::Digest(block.digest()),
             sender,
-            None,
             &mut waiters,
             &buffer,
         );
