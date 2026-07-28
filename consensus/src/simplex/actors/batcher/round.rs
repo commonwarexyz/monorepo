@@ -1,4 +1,4 @@
-use super::{Verifier, verifier::ProposalSource};
+use super::{Verifier, verifier::ProposalState};
 use crate::{
     Reporter,
     simplex::{
@@ -97,14 +97,15 @@ impl<
 
     /// Records a verified certificate and returns whether the round's
     /// proposal changed.
+    ///
+    /// Only a notarization can change the proposal. Its proposal is authoritative and replaces any
+    /// conflicting proposal learned from the leader's vote. Nullifications and finalizations leave
+    /// the proposal unchanged.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
         let proposal_changed = match certificate {
-            Certificate::Notarization(notarization) => {
-                // Adopt the notarization's proposal, replacing any conflicting proposal learned
-                // from the leader's vote.
-                self.verifier
-                    .set_proposal(ProposalSource::Notarization(notarization.proposal.clone()))
-            }
+            Certificate::Notarization(notarization) => self
+                .verifier
+                .set_proposal(ProposalState::Notarization(notarization.proposal.clone())),
             Certificate::Nullification(_) | Certificate::Finalization(_) => false,
         };
         self.verifier.record_certificate(certificate.kind());
