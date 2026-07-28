@@ -44,7 +44,6 @@ type HeldVerifyRequest<E, A> =
     HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
 
 enum FinalizedHandoff<B> {
-    Covered(B),
     Reflected(B),
     Apply(B),
 }
@@ -205,13 +204,13 @@ where
                     acknowledgement,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
-                    let handoff;
-                    (self, handoff) = self
+                    let handoffs;
+                    (self, handoffs) = self
                         .process_finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
-                    if let Some(handoff) = handoff {
-                        self.transition([handoff]).await;
+                    if let Some(handoffs) = handoffs {
+                        self.transition(handoffs).await;
                         return;
                     }
                 }
@@ -231,7 +230,7 @@ where
         mut self,
         block: Arc<A::Block>,
         acknowledgement: Exact,
-    ) -> (Self, Option<FinalizedHandoff<Arc<A::Block>>>) {
+    ) -> (Self, Option<VecDeque<FinalizedHandoff<Arc<A::Block>>>>) {
         assert!(
             self.artifact.is_none(),
             "cached sync artifact must transition immediately",
@@ -260,11 +259,7 @@ where
         }
 
         let handoffs = self.prepare_handoffs([block]);
-        let handoff = handoffs
-            .into_iter()
-            .next()
-            .expect("one finalized block must produce one handoff");
-        (self, Some(handoff))
+        (self, Some(handoffs))
     }
 
     /// Ensure restart can recover every finalized block through `height`.
@@ -360,22 +355,15 @@ where
             .expect("sync artifact must exist after sync handoff");
         let finalized = finalized.into_iter();
         let mut previous_height = artifact.anchor.height;
-        let mut reflected = false;
         let mut handoffs = VecDeque::with_capacity(finalized.size_hint().0);
 
         for block in finalized {
-            if block.height() < artifact.anchor.height {
-                handoffs.push_back(FinalizedHandoff::Covered(block));
-                continue;
-            }
             if block.height() == artifact.anchor.height {
-                assert!(!reflected, "sync anchor can be reflected only once");
                 assert_eq!(
                     block.digest(),
                     artifact.anchor.digest,
                     "finalized block at sync anchor height must match sync anchor digest",
                 );
-                reflected = true;
                 handoffs.push_back(FinalizedHandoff::Reflected(block));
                 continue;
             }
@@ -383,7 +371,7 @@ where
             assert_eq!(
                 block.height(),
                 previous_height.next(),
-                "finalized block after sync anchor must be the next finalized block",
+                "finalized blocks must ascend consecutively from the sync anchor",
             );
             previous_height = block.height();
             handoffs.push_back(FinalizedHandoff::Apply(block));
@@ -414,7 +402,7 @@ where
 
         for handoff in handoffs {
             match handoff {
-                FinalizedHandoff::Covered(block) | FinalizedHandoff::Reflected(block) => {
+                FinalizedHandoff::Reflected(block) => {
                     processor
                         .notify_finalized(self.context.as_present(), block.as_ref())
                         .await;
@@ -495,44 +483,25 @@ mod tests {
             syncer::{self, StateSyncMetadata, SyncResult},
         },
         db::{Anchor, AttachableResolver, Shared},
-        tests::mocks::{
-            TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor, test_databases,
+        tests::{
+            fixtures::{self, MarshalFixture},
+            mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor, test_databases},
         },
     };
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable, Reporter,
-        marshal::{
-            self, Update, ancestry,
-            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
-            resolver::handler,
-        },
-        simplex::{
-            mocks::scheme as scheme_mocks,
-            types::{Finalization, Finalize, Proposal},
-        },
-        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+        Application as _, CertifiableBlock as _, Heightable, Reporter as _,
+        marshal::{self, Update, ancestry, core::Mailbox as MarshalMailbox},
+        simplex::mocks::scheme as scheme_mocks,
+        types::Height,
     };
-    use commonware_cryptography::{
-        Digestible,
-        certificate::ConstantProvider,
-        ed25519,
-        sha256::{Digest as Sha256Digest, Sha256},
-    };
-    use commonware_parallel::Sequential;
-    use commonware_resolver::{Fetch, Resolver, TargetedResolver};
+    use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _,
-        buffer::paged::CacheRef,
-        deterministic,
+        Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
     };
-    use commonware_storage::archive::{Archive as _, immutable};
-    use commonware_utils::{
-        Acknowledgement, NZU16, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-        vec::NonEmptyVec,
-    };
+    use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
     use std::{collections::VecDeque, sync::Arc, time::Duration};
 
@@ -543,93 +512,6 @@ mod tests {
 
     impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
         async fn attach_database(&self, _db: Shared<DB>) {}
-    }
-
-    /// Reporter for the started marshal fixture that acknowledges every dispatched block.
-    #[derive(Clone)]
-    struct NoopReporter;
-
-    impl Reporter for NoopReporter {
-        type Activity = Update<TestBlock>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let Update::Block(_, ack) = activity {
-                ack.acknowledge();
-            }
-            Feedback::Ok
-        }
-    }
-
-    /// Backfill resolver for the started marshal fixture: its archives are pre-seeded, so
-    /// every fetch is ignored.
-    #[derive(Clone)]
-    struct IgnoreResolver;
-
-    impl Resolver for IgnoreResolver {
-        type Key = handler::Key<Sha256Digest>;
-        type Subscriber = handler::Annotation;
-
-        fn fetch<F>(&mut self, _key: F) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for IgnoreResolver {
-        type PublicKey = ed25519::PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-    }
-
-    /// Builds a finalization for `view` whose payload is the digest `[digest_byte; 32]`.
-    fn finalization(
-        schemes: &[TestScheme],
-        view: u64,
-        digest_byte: u8,
-    ) -> Finalization<TestScheme, Sha256Digest> {
-        let proposal = Proposal {
-            round: Round::new(Epoch::zero(), View::new(view)),
-            parent: View::new(view.saturating_sub(1)),
-            payload: Sha256::fill(digest_byte),
-        };
-        let finalizes = schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
-            .collect::<Vec<_>>();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
-            .expect("recover finalization")
     }
 
     struct TestHarness<E>
@@ -716,6 +598,14 @@ mod tests {
             syncing_context: E,
             anchor: Anchor<Sha256Digest>,
         ) -> Self {
+            let mut marshal_context = context.child("marshal");
+            let scheme = scheme_mocks::fixture(&mut marshal_context, b"syncing-harness", 1).schemes
+                [0]
+            .clone();
+            let marshal =
+                fixtures::marshal_fixture(marshal_context, "syncing-harness", scheme, None, false)
+                    .await
+                    .mailbox;
             let (_mailbox_sender, mailbox) =
                 actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let (syncer_sender, _syncer_receiver) =
@@ -728,7 +618,7 @@ mod tests {
                     mailbox,
                     application: TestApp,
                     provider: (),
-                    marshal: init_marshal_mailbox(context.child("marshal")).await,
+                    marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
@@ -749,140 +639,6 @@ mod tests {
         }
     }
 
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
-        }
-    }
-
-    async fn init_marshal_mailbox(
-        mut context: deterministic::Context,
-    ) -> commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant> {
-        let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
-        let provider = ConstantProvider::new(fixture.schemes[0].clone());
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), "syncing-finalizations"),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), "syncing-blocks"),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
-
-        let (_actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-            context.child("marshal_actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            marshal::Config {
-                provider,
-                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                partition_prefix: "syncing-harness".to_string(),
-                mailbox_size: NZUsize!(8),
-                view_retention: ViewDelta::new(1),
-                prunable_items_per_section: NZU64!(4),
-                page_cache,
-                replay_buffer: NZUsize!(64),
-                key_write_buffer: NZUsize!(64),
-                value_write_buffer: NZUsize!(64),
-                block_codec_config: (),
-                max_repair: NZUsize!(1),
-                max_pending_acks: NZUsize!(1),
-                strategy: Sequential,
-            },
-        )
-        .await;
-        mailbox
-    }
-
-    /// Initializes a marshal actor whose finalization archive is pre-seeded with the given
-    /// block's finalization, then starts it so `get_finalization` serves the finalization
-    /// without any peer fetching. The returned handler and handle must stay alive for the
-    /// marshal to keep running.
-    async fn start_marshal(
-        context: deterministic::Context,
-        scheme: TestScheme,
-        block: &TestBlock,
-        finalization: Option<Finalization<TestScheme, Sha256Digest>>,
-    ) -> (
-        MarshalMailbox<TestScheme, TestVariant>,
-        handler::Handler<Sha256Digest>,
-        Handle<()>,
-    ) {
-        let provider = ConstantProvider::new(scheme);
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-        let mut finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), "syncing-finalizations"),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        if let Some(finalization) = finalization {
-            finalizations_by_height = finalizations_by_height
-                .put(block.height().get(), block.digest(), finalization)
-                .await
-                .expect("failed to seed finalization")
-                .sync()
-                .await
-                .expect("failed to sync finalizations archive");
-        }
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), "syncing-blocks"),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
-
-        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-            context.child("marshal_actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            marshal::Config {
-                provider,
-                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                partition_prefix: "syncing-harness".to_string(),
-                mailbox_size: NZUsize!(8),
-                view_retention: ViewDelta::new(1),
-                prunable_items_per_section: NZU64!(4),
-                page_cache,
-                replay_buffer: NZUsize!(64),
-                key_write_buffer: NZUsize!(64),
-                value_write_buffer: NZUsize!(64),
-                block_codec_config: (),
-                max_repair: NZUsize!(1),
-                max_pending_acks: NZUsize!(1),
-                strategy: Sequential,
-            },
-        )
-        .await;
-        let (resolver_receiver, resolver_handler) =
-            handler::init(context.child("resolver_handler"), NZUsize!(8));
-        let handle = actor.start_unbuffered(NoopReporter, (resolver_receiver, IgnoreResolver));
-        (mailbox, resolver_handler, handle)
-    }
-
     #[test]
     fn handoff_classification_orders_mixed_terminal_sequence() {
         deterministic::Runner::default().start(|context| async move {
@@ -890,20 +646,10 @@ mod tests {
             assert!(harness.syncing.prepare_handoffs(VecDeque::new()).is_empty());
 
             let mut finalized = VecDeque::new();
-            for (height, digest) in [
-                (u64::MAX - 3, 8),
-                (u64::MAX - 2, 9),
-                (u64::MAX - 1, 10),
-                (u64::MAX, 11),
-            ] {
+            for (height, digest) in [(u64::MAX - 2, 9), (u64::MAX - 1, 10), (u64::MAX, 11)] {
                 finalized.push_back(Arc::new(TestBlock::new(height, digest)));
             }
             let mut handoffs = harness.syncing.prepare_handoffs(finalized);
-            assert!(matches!(
-                handoffs.pop_front(),
-                Some(FinalizedHandoff::Covered(block))
-                    if block.height() == Height::new(u64::MAX - 3)
-            ));
             assert!(matches!(
                 handoffs.pop_front(),
                 Some(FinalizedHandoff::Reflected(block))
@@ -932,13 +678,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "next finalized block")]
+    #[should_panic(expected = "ascend consecutively from the sync anchor")]
     fn non_anchor_non_next_block_panics() {
         deterministic::Runner::default().start(|context| async move {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let _ = harness
                 .syncing
                 .prepare_handoffs([Arc::new(TestBlock::new(9, 10))]);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "ascend consecutively from the sync anchor")]
+    fn below_anchor_block_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = TestHarness::new(context, anchor(7, 9)).await;
+            let _ = harness
+                .syncing
+                .prepare_handoffs([Arc::new(TestBlock::new(6, 8))]);
         });
     }
 
@@ -1010,15 +767,19 @@ mod tests {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let block = TestBlock::new(8, 10);
-            let finalization = finalization(&fixture.schemes, 8, 10);
-            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            let finalization = fixtures::finalization(&fixture, 8, Sha256::fill(10));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
                 context.child("marshal"),
+                "syncing-harness",
                 fixture.schemes[0].clone(),
-                &block,
-                Some(finalization),
+                Some((&block, finalization)),
+                true,
             )
             .await;
-            let (harness, mailbox, mut syncer_receiver, _sync_complete) =
+            let (harness, _mailbox, mut syncer_receiver, _sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             let (acknowledgement, waiter) = Exact::handle();
@@ -1047,18 +808,13 @@ mod tests {
             );
             drop(update);
 
-            let (syncing, handoff) = process.await.expect("target update failed");
+            let (_syncing, handoffs) = process.await.expect("target update failed");
+            let handoffs = handoffs.expect("returned artifact must hand off the block");
+            assert_eq!(handoffs.len(), 1);
             assert!(matches!(
-                &handoff,
+                handoffs.front(),
                 Some(FinalizedHandoff::Apply(block)) if block.height() == Height::new(8)
             ));
-            drop(mailbox);
-            syncing.transition(handoff).await;
-
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(8)));
         });
     }
 
@@ -1068,12 +824,16 @@ mod tests {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let block = TestBlock::new(8, 10);
             let newest = TestBlock::new(10, 12);
-            let initial_finalization = finalization(&fixture.schemes, 10, 12);
-            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            let initial_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(12));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
                 context.child("marshal"),
+                "syncing-harness",
                 fixture.schemes[0].clone(),
-                &newest,
-                Some(initial_finalization),
+                Some((&newest, initial_finalization)),
+                true,
             )
             .await;
             let (harness, mut mailbox, mut syncer_receiver, sync_complete) =
@@ -1198,12 +958,16 @@ mod tests {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let newest = TestBlock::new(10, 12);
-            let newest_finalization = finalization(&fixture.schemes, 10, 12);
-            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            let newest_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(12));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
                 context.child("marshal"),
+                "syncing-harness",
                 fixture.schemes[0].clone(),
-                &newest,
-                Some(newest_finalization.clone()),
+                Some((&newest, newest_finalization.clone())),
+                true,
             )
             .await;
             let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
@@ -1298,12 +1062,16 @@ mod tests {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let block = TestBlock::new(8, 10);
-            let finalization = finalization(&fixture.schemes, 8, 10);
-            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            let finalization = fixtures::finalization(&fixture, 8, Sha256::fill(10));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
                 context.child("marshal"),
+                "syncing-harness",
                 fixture.schemes[0].clone(),
-                &block,
-                Some(finalization.clone()),
+                Some((&block, finalization.clone())),
+                true,
             )
             .await;
             let (harness, _mailbox, mut syncer_receiver, _sync_complete) =
@@ -1344,87 +1112,6 @@ mod tests {
         });
     }
 
-    /// A queued retarget is acknowledged only after its certified recovery floor is durable;
-    /// forwarding its target still waits for the batching window.
-    #[test]
-    fn retarget_persists_floor_before_acknowledgement() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
-            let block = TestBlock::new(8, 10);
-            let finalization = finalization(&fixture.schemes, 8, 10);
-            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
-                context.child("marshal"),
-                fixture.schemes[0].clone(),
-                &block,
-                Some(finalization.clone()),
-            )
-            .await;
-            let pending = PendingSyncs::default();
-            let syncing_context = DelayedSyncContext {
-                inner: context.child("delayed"),
-                pending: pending.clone(),
-            };
-            let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
-                TestHarness::new_syncing_on(context.child("harness"), syncing_context, marshal)
-                    .await;
-            harness.syncing.arm_retarget_timer();
-
-            let (acknowledgement, mut waiter) = Exact::handle();
-            pending.arm();
-            let process = context.child("retarget").spawn(move |_| {
-                harness
-                    .syncing
-                    .process_finalized(Arc::new(block), acknowledgement)
-            });
-
-            let gate = next_pending_sync(&pending);
-            gate.blocked.await.expect("retarget must persist its floor");
-            assert!(
-                syncer_receiver.try_recv().is_err(),
-                "a queued target must not be forwarded before its floor is durable",
-            );
-            assert!(
-                poll!(&mut waiter).is_pending(),
-                "marshal must not be acknowledged before its floor is durable",
-            );
-            gate.release
-                .send(Ok(()))
-                .expect("retarget must be waiting on the metadata flush");
-
-            let (syncing, action) = process.await.expect("retarget failed");
-
-            assert!(action.is_none(), "retarget mid-sync must not hand off");
-            assert!(waiter.await.is_ok(), "marshal must be acknowledged");
-            assert!(
-                syncer_receiver.try_recv().is_err(),
-                "only the target change should wait for the batching window",
-            );
-            assert_eq!(
-                syncing.sync_metadata.in_progress_floor(),
-                Some(&finalization),
-                "retargeted floor must be persisted before marshal is acknowledged",
-            );
-            assert!(
-                syncing
-                    .pending_retarget
-                    .as_ref()
-                    .is_some_and(|pending| pending.finalized.len() == 1
-                        && pending.finalized[0].height() == Height::new(8)),
-                "the acknowledged target must remain queued for the next retarget",
-            );
-            assert_eq!(
-                syncing.retarget_delay, TEST_RETARGET_DELAY,
-                "recording a target must not change the configured sync window",
-            );
-            drop(syncing);
-
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
-            assert_eq!(reopened.in_progress_floor(), Some(&finalization));
-        });
-    }
-
     /// A transitively finalized ancestor persists its certifying descendant before marshal is
     /// acknowledged.
     #[test]
@@ -1433,12 +1120,16 @@ mod tests {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let block = TestBlock::new(8, 10);
             let descendant = TestBlock::new(9, 11);
-            let finalization = finalization(&fixture.schemes, 9, 11);
-            let (marshal, _resolver_handler, _marshal_handle) = start_marshal(
+            let finalization = fixtures::finalization(&fixture, 9, Sha256::fill(11));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
                 context.child("marshal"),
+                "syncing-harness",
                 fixture.schemes[0].clone(),
-                &descendant,
-                Some(finalization.clone()),
+                Some((&descendant, finalization.clone())),
+                true,
             )
             .await;
             let pending = PendingSyncs::default();

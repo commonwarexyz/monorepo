@@ -85,7 +85,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
-    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest, Error = compact::ServeError<F, H::Digest>>,
+    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     context: ContextCell<E>,
@@ -344,19 +344,13 @@ where
             Err(err) => {
                 let status = match &err {
                     compact::ServeError::StaleTarget { .. }
-                    | compact::ServeError::DivergentTarget { .. } => {
-                        debug!(?err, "declined compact state request");
-                        status::Status::Dropped
-                    }
-                    compact::ServeError::InvalidTarget(_) => {
-                        debug!(?err, "invalid compact state request");
-                        status::Status::Invalid
-                    }
+                    | compact::ServeError::DivergentTarget { .. } => status::Status::Dropped,
+                    compact::ServeError::InvalidTarget(_) => status::Status::Invalid,
                     compact::ServeError::MissingSource | compact::ServeError::Database(_) => {
-                        debug!(?err, "failed to serve compact state");
                         status::Status::Failure
                     }
                 };
+                debug!(?err, ?status, "unable to serve compact state");
                 self.metrics.serve_requests.inc(status);
                 return;
             }

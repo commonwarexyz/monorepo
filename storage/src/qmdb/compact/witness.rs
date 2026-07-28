@@ -19,7 +19,10 @@ use crate::{
     merkle::{
         self, Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, compact,
     },
-    qmdb::{self, Error, sync::compact::Target},
+    qmdb::{
+        self, Error,
+        sync::compact::{ServeError, State, Target},
+    },
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
@@ -359,12 +362,96 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok(())
     }
 
-    /// The retained witness committing exactly `leaf_count` leaves, if any.
-    pub(crate) async fn entry_at(
+    /// Return the compact-sync state serving `target`, or an error when no retained witness
+    /// authenticates it.
+    ///
+    /// The witness lock is held only long enough to snapshot the tip entry; decoding happens
+    /// outside it so concurrent readers do not contend. The tip carries the root it was
+    /// verified against, so matching the whole target there is free. A target below the tip
+    /// is served from the retained witness journal, whose frontier is rebuilt and verified
+    /// before serving: this authenticates the pins, commit operation, and proof together
+    /// rather than trusting the journal checksum. [`Store::prune`] bounds how far back this
+    /// reaches.
+    pub(crate) async fn compact_state<H, S, Op>(
         &self,
-        leaf_count: Location<F>,
-    ) -> Result<Option<Witness<F, D>>, Error<F>> {
-        Ok(self.position_of(leaf_count).await?.map(|(_, entry)| entry))
+        strategy: S,
+        commit_codec_config: &Op::Cfg,
+        target: Target<F, D>,
+        last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
+    ) -> Result<State<F, Op, D>, ServeError<F, D>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+        Op: Read,
+    {
+        let (current, tip) = self.with(|w| {
+            let current = w.target();
+            let tip = (current == target).then(|| w.witness.clone());
+            (current, tip)
+        });
+        let (entry, op) = match tip {
+            Some(entry) => {
+                // The cached tip was verified when it was adopted, so its bytes must decode.
+                let op = Op::decode_cfg(entry.op_bytes.as_ref(), commit_codec_config)
+                    .expect("cached tip commit operation must decode");
+                (entry, op)
+            }
+
+            // The cached tip proves the only root this source has at its current leaf count.
+            None if target.leaf_count == current.leaf_count => {
+                return Err(ServeError::DivergentTarget {
+                    requested: target,
+                    current,
+                });
+            }
+
+            // While an import is pending the journal still holds the previous partition's
+            // contents, so only the cached tip is servable.
+            None if self.import_pending() => {
+                return Err(ServeError::StaleTarget {
+                    requested: target,
+                    current,
+                });
+            }
+            None => {
+                let entry = self
+                    .position_of(target.leaf_count)
+                    .await
+                    .map_err(ServeError::Database)?
+                    .map(|(_, entry)| entry)
+                    .ok_or_else(|| ServeError::StaleTarget {
+                        requested: target.clone(),
+                        current: current.clone(),
+                    })?;
+
+                let merkle = compact::Merkle::new(strategy);
+                let (verified, op) = rebuild_and_verify::<F, D, H, S, Op>(
+                    entry,
+                    &merkle,
+                    commit_codec_config,
+                    last_commit_floor,
+                )
+                .map_err(ServeError::Database)?;
+                if verified.root != target.root {
+                    return Err(ServeError::DivergentTarget {
+                        requested: target,
+                        current,
+                    });
+                }
+                (verified.witness, op)
+            }
+        };
+        let Witness {
+            proof: last_commit_proof,
+            pinned_nodes,
+            ..
+        } = entry;
+        Ok(State {
+            leaf_count: target.leaf_count,
+            pinned_nodes,
+            last_commit_op: op,
+            last_commit_proof,
+        })
     }
 
     /// Find the journal position and entry committing exactly `target` leaves, or `None` if
@@ -501,7 +588,7 @@ where
 ///
 /// The Merkle is reset to the witness's `(leaf_count, pinned_nodes)`, the root is recomputed
 /// from the rebuilt frontier, and the witness's proof is verified against that root.
-pub(crate) fn rebuild_and_verify<F, D, H, S, Op>(
+fn rebuild_and_verify<F, D, H, S, Op>(
     witness: Witness<F, D>,
     merkle: &compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,

@@ -39,7 +39,7 @@ use crate::{
         sync::compact as compact_sync,
     },
 };
-use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
+use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -428,8 +428,8 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// Return the compact-sync state for `target`, or an error if the target is invalid or no
-    /// retained witness authenticates it.
+    /// Return the compact-sync state for `target`, or an error if no retained witness
+    /// authenticates it.
     pub(crate) async fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
@@ -437,93 +437,14 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        target
-            .validate()
-            .map_err(compact_sync::ServeError::InvalidTarget)?;
-
-        // Hold the witness lock only long enough to snapshot the tip entry; decode outside
-        // it so concurrent readers do not contend. The tip carries the root it was verified
-        // against, so matching the whole target there is free. A target below the tip is
-        // served from the retained witness journal: a syncing client's target trails the
-        // source by its fetch latency. [`witness::Store::prune`] bounds how far back this
-        // reaches.
-        let (current, tip) = self.witness.with(|w| {
-            let current = w.target();
-            let tip = (current == target).then(|| w.witness.clone());
-            (current, tip)
-        });
-        let (entry, op) = match tip {
-            Some(entry) => {
-                let op = Operation::<F, K, V>::decode_cfg(
-                    entry.op_bytes.as_ref(),
-                    &self.commit_codec_config,
-                )
-                .map_err(|_| {
-                    compact_sync::ServeError::Database(Error::DataCorrupted(
-                        "invalid commit operation",
-                    ))
-                })?;
-                (entry, op)
-            }
-
-            // The cached tip proves the only root this source has at its current leaf count.
-            None if target.leaf_count == current.leaf_count => {
-                return Err(compact_sync::ServeError::DivergentTarget {
-                    requested: target,
-                    current,
-                });
-            }
-
-            // While an import is pending the journal still holds the previous partition's
-            // contents, so only the cached tip is servable.
-            None if self.witness.import_pending() => {
-                return Err(compact_sync::ServeError::StaleTarget {
-                    requested: target,
-                    current,
-                });
-            }
-            None => {
-                let entry = self
-                    .witness
-                    .entry_at(target.leaf_count)
-                    .await
-                    .map_err(compact_sync::ServeError::Database)?
-                    .ok_or_else(|| compact_sync::ServeError::StaleTarget {
-                        requested: target.clone(),
-                        current: current.clone(),
-                    })?;
-
-                // Rebuild the retained frontier before serving it. This authenticates the pins,
-                // commit operation, and proof together rather than trusting the journal checksum.
-                let merkle = compact_merkle::Merkle::new(self.merkle.strategy().clone());
-                let (verified, op) =
-                    witness::rebuild_and_verify::<F, H::Digest, H, S, Operation<F, K, V>>(
-                        entry,
-                        &merkle,
-                        &self.commit_codec_config,
-                        Operation::has_floor,
-                    )
-                    .map_err(compact_sync::ServeError::Database)?;
-                if verified.root != target.root {
-                    return Err(compact_sync::ServeError::DivergentTarget {
-                        requested: target,
-                        current,
-                    });
-                }
-                (verified.witness, op)
-            }
-        };
-        let Witness {
-            proof: last_commit_proof,
-            pinned_nodes,
-            ..
-        } = entry;
-        Ok(compact_sync::State {
-            leaf_count: target.leaf_count,
-            pinned_nodes,
-            last_commit_op: op,
-            last_commit_proof,
-        })
+        self.witness
+            .compact_state::<H, S, Operation<F, K, V>>(
+                self.merkle.strategy().clone(),
+                &self.commit_codec_config,
+                target,
+                Operation::has_floor,
+            )
+            .await
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -744,17 +665,10 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_state_rejects_invalid_and_divergent_targets() {
+    fn test_compact_state_rejects_divergent_target() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-invalid-target").await;
             let current = db.target();
-            let invalid_target = compact_sync::Target::new(current.root, Location::new(0));
-
-            assert!(matches!(
-                db.compact_state(invalid_target).await,
-                Err(compact_sync::ServeError::InvalidTarget(_))
-            ));
-
             let divergent_target =
                 compact_sync::Target::new(Digest::from([0xff; 32]), current.leaf_count);
             assert_ne!(divergent_target.root, current.root);

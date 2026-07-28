@@ -128,7 +128,8 @@ where
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
 
-        let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
+        let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
+        let mut tip_updates_tx = Some(tip_updates_tx);
         let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
             self.context.child("state_sync"),
             self.db_config,
@@ -153,6 +154,12 @@ where
                         anchor,
                     );
                     state_sync_task = None.into();
+
+                    // A tip update enqueued after the coordinator's final drain has no
+                    // receiver left to record it or release its observation barrier.
+                    // Dropping the sender frees the ring buffer, so the observer of any
+                    // queued update retries and receives the artifact.
+                    tip_updates_tx = None;
                 }
                 Err(err) => {
                     panic!("state sync task failed: {err:?}");
@@ -170,7 +177,10 @@ where
 
                     // If sync had already completed, the state-sync branch above would
                     // have published `self.artifact` before this mailbox branch ran.
-                    if tip_updates_tx.send(update).await.is_err() {
+                    let tip_updates = tip_updates_tx
+                        .as_mut()
+                        .expect("ring sender lives until the artifact is published");
+                    if tip_updates.send(update).await.is_err() {
                         // Tuple sync closes the live tip-update receiver as soon as the
                         // coordinator converges, before the database tasks have necessarily
                         // finished. Treat that close as "wait for the in-flight sync task to
@@ -189,6 +199,7 @@ where
                                 panic!("state sync task failed: {err:?}");
                             }
                         }
+                        tip_updates_tx = None;
                         response.send_lossy(self.artifact.clone());
                         continue;
                     }

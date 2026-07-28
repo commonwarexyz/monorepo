@@ -292,9 +292,9 @@ where
     /// state sync are reported without reapplying them.
     ///
     /// During peer state sync, finalizations are acknowledged once durable recovery metadata
-    /// covers them. Their target changes may be coalesced; if sync completes before a queued
-    /// target is recorded, the affected blocks are reported during handoff after the database set
-    /// is ready.
+    /// covers them. Their target changes may be coalesced. If sync completes before a queued
+    /// target is recorded, the affected blocks are reported during handoff after the database
+    /// set is ready.
     ///
     /// Inherited from marshal's reporter stream, this is an at-least-once notification:
     /// a crash after this hook runs but before the block's flush and the marshal

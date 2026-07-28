@@ -2323,9 +2323,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
-    /// The retained boundary must be justified by durable data: recovery must not need pruned
-    /// items to explain retained state. If [`Mutable::durable`] already covers the aligned
-    /// boundary, this may skip syncing, so a successful prune does not make newer appends durable.
+    /// The retained boundary must be justified by durable data (see [`Mutable::prune`]): a
+    /// successful prune does not make newer appends durable.
     ///
     /// # Errors
     ///

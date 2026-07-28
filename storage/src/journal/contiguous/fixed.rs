@@ -1372,9 +1372,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// The retained boundary must be justified by durable data: recovery must not need pruned
-    /// items to explain retained state. If [`Mutable::durable`] already covers the aligned
-    /// boundary, this may skip syncing, so a successful prune does not make newer appends durable.
+    /// The retained boundary must be justified by durable data (see [`Mutable::prune`]): a
+    /// successful prune does not make newer appends durable.
     ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.

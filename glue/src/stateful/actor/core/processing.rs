@@ -72,9 +72,7 @@ where
         let mut pending_prune = None;
 
         // Deferred finalize flushes, each releasing its block's marshal
-        // acknowledgement once the flush completes. Flush failures surface
-        // only through these futures (panicking inside `Barrier::durable`),
-        // so every one must be driven here.
+        // acknowledgement once the flush completes (see `Barrier`).
         let mut syncs = Pool::<()>::default();
         select_loop! {
             self.context,
@@ -198,9 +196,9 @@ where
                         // completes, so marshal's processed floor never runs
                         // ahead of flushed database state (the startup rewind
                         // contract), without blocking the loop on the flush.
-                        // Marshal's ack window bounds the flush backlog. On
-                        // runtime teardown the acknowledgement is dropped
-                        // instead: marshal redelivers the block after restart.
+                        // Marshal's ack window bounds the flush backlog. A
+                        // false `Barrier::durable` leaves the block
+                        // unacknowledged, and marshal redelivers it on restart.
                         syncs.push(async move {
                             if barrier.durable().await {
                                 acknowledgement.acknowledge();
@@ -217,10 +215,8 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
-                    // Flushes may still be pending: database pruning waits on
-                    // them only when the prune target is not yet durably
-                    // justified (see `DatabaseSet::prune`), and marshal
-                    // pruning follows it.
+                    // Flushes may still be pending: pruning never discards
+                    // state a restart would need (see `ManagedDb::prune`).
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
@@ -248,178 +244,32 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 mod tests {
     use super::{Processing, skip_finalized_block};
     use crate::stateful::{
-        Application, Input, Proposed, PruneConfig,
+        PruneConfig,
         actor::{
             core::mailbox::Mailbox, metrics::Metrics as StatefulMetrics, processor::Processor,
         },
-        db::{DatabaseSet, ManagedDb, Shared},
-        tests::mocks::{
-            TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor,
+        db::Shared,
+        tests::{
+            fixtures,
+            mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor},
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Heightable as _, Reporter as _,
-        marshal::{self, Update, ancestry::Ancestry, core::Actor as MarshalActor},
-        simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
-        types::{FixedEpocher, Height, ViewDelta},
+        Reporter as _, marshal::Update, simplex::mocks::scheme as scheme_mocks, types::Height,
     };
-    use commonware_cryptography::{
-        certificate::ConstantProvider, ed25519, sha256::Digest as Sha256Digest,
-    };
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock as _, ContextCell, Error as RuntimeError, Runner as _, Spawner as _, Supervisor as _,
+        deterministic,
     };
-    use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        NZUsize,
         acknowledgement::{Acknowledgement as _, Exact},
-        channel::oneshot,
-        sync::Mutex,
     };
     use futures::poll;
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
-    /// Completes one parked flush when released by the test.
-    type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
-
-    /// Shared observer for [`GatedFlushDb`]: parked flush releases and
-    /// recorded prune targets.
-    #[derive(Clone, Default)]
-    struct FlushControl {
-        flushes: Arc<Mutex<Vec<FlushRelease>>>,
-        pruned: Arc<Mutex<Vec<u64>>>,
-    }
-
-    /// Database whose finalize flush completes only when the test releases it.
-    ///
-    /// Its `prune` records immediately without waiting for pending flushes,
-    /// isolating the actor's scheduling behavior.
-    struct GatedFlushDb {
-        control: FlushControl,
-    }
-
-    impl<E: Send> ManagedDb<E> for GatedFlushDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = u64;
-
-        fn initial_sync_target() -> Self::SyncTarget {
-            unreachable!("GatedFlushDb is constructed directly in tests")
-        }
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            unreachable!("GatedFlushDb is constructed directly in tests")
-        }
-
-        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            let (release, released) = oneshot::channel();
-            self.control.flushes.lock().push(release);
-            Ok((self, Handle::from_receiver(released)))
-        }
-
-        async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
-            self.control.pruned.lock().push(*target);
-            Ok(self)
-        }
-
-        fn sync_target(&self) -> Self::SyncTarget {
-            0
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
-    }
-
-    #[derive(Clone)]
-    struct GatedApp;
-
-    impl Application<deterministic::Context> for GatedApp {
-        type SigningScheme = TestScheme;
-        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
-        type Block = TestBlock;
-        type Databases = Shared<GatedFlushDb>;
-        type Provider = ();
-        type Input = ();
-
-        fn sync_targets(
-            block: &Self::Block,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            block.height().get()
-        }
-
-        async fn genesis(&mut self) -> Self::Block {
-            TestBlock::new(0, 0)
-        }
-
-        async fn propose(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-            _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
-            None
-        }
-
-        async fn verify(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            None
-        }
-
-        async fn apply(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
-            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            TestMerkleized
-        }
-    }
-
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
-        }
-    }
-
-    /// Spawn a [`Processing`] loop over a [`GatedFlushDb`], returning its
+    /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
     /// mailbox, the flush controls, and a guard keeping the (never-started)
     /// marshal actor's mailbox open.
     async fn spawn_processing(
@@ -427,60 +277,25 @@ mod tests {
         prefix: &str,
         prune_config: Option<PruneConfig>,
     ) -> (
-        Mailbox<deterministic::Context, GatedApp>,
+        Mailbox<deterministic::Context, TestApp>,
         FlushControl,
         Box<dyn std::any::Any>,
     ) {
         let mut signing = context.child("signing");
-        let fixture = scheme_mocks::fixture(&mut signing, b"gated", 1);
-        let provider = ConstantProvider::new(fixture.schemes[0].clone());
-        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
-        let finalizations_by_height = immutable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
+        let scheme_fixture = scheme_mocks::fixture(&mut signing, b"gated", 1);
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal_fixture"),
+            prefix,
+            scheme_fixture.schemes[0].clone(),
+            None,
+            false,
         )
-        .await
-        .expect("failed to initialize finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
-            context.child("finalized_blocks"),
-            archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
-        )
-        .await
-        .expect("failed to initialize blocks archive");
-        let (marshal_actor, marshal, _height) =
-            MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-                context.child("marshal"),
-                finalizations_by_height,
-                finalized_blocks,
-                marshal::Config {
-                    provider,
-                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                    start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                    partition_prefix: format!("{prefix}-marshal"),
-                    mailbox_size: NZUsize!(8),
-                    view_retention: ViewDelta::new(1),
-                    prunable_items_per_section: NZU64!(4),
-                    page_cache,
-                    replay_buffer: NZUsize!(64),
-                    key_write_buffer: NZUsize!(64),
-                    value_write_buffer: NZUsize!(64),
-                    block_codec_config: (),
-                    max_repair: NZUsize!(1),
-                    max_pending_acks: NZUsize!(1),
-                    strategy: Sequential,
-                },
-            )
-            .await;
+        .await;
 
         let control = FlushControl::default();
-        let databases = Shared::new(
-            "test",
-            GatedFlushDb {
-                control: control.clone(),
-            },
-        );
+        let databases = Shared::new("test", TestDb::gated(control.clone()));
         let processor = Processor::new(
-            GatedApp,
+            TestApp,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
@@ -491,12 +306,12 @@ mod tests {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
-            marshal,
+            marshal: marshal.mailbox,
             processor,
             skip_finalized_until: None,
         };
         context.child("loop").spawn(move |_| processing.start());
-        (Mailbox::new(sender), control, Box::new(marshal_actor))
+        (Mailbox::new(sender), control, marshal.guards)
     }
 
     /// The loop keeps applying finalized blocks while earlier flushes are

@@ -456,7 +456,7 @@ where
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`crate::journal::Error::ItemPruned`] if `start_loc` has been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
+    /// Returns [`Error::NoCommitAtSize`] if `op_count - 1` is retained but is not a
     /// commit op, meaning the caller passed a non-commit-boundary `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(

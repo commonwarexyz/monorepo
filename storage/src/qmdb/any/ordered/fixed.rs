@@ -1441,8 +1441,8 @@ pub(crate) mod test {
                 .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
                 .await;
             assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
+                matches!(result, Err(crate::qmdb::Error::NoCommitAtSize(loc)) if loc == Location::new(5)),
+                "expected NoCommitAtSize(5), got {result:?}"
             );
 
             db.destroy().await.unwrap();

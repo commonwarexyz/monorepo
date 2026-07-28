@@ -238,9 +238,9 @@ mod test {
     }
 
     /// A historical proof whose requested size is not a retained commit boundary returns
-    /// `HistoricalFloorPruned`.
+    /// `NoCommitAtSize`.
     #[test_traced("INFO")]
-    fn test_keyless_historical_proof_floor_pruned() {
+    fn test_keyless_historical_proof_no_commit_at_size() {
         use crate::merkle::Location;
         deterministic::Runner::default().start(|ctx| async move {
             let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
@@ -266,7 +266,7 @@ mod test {
             assert_eq!(*bounds.start, 7);
 
             // op_count = first retained commit (= state just before that commit). Expected:
-            // HistoricalFloorPruned, NOT UnexpectedData.
+            // NoCommitAtSize, NOT UnexpectedData.
             let result = db
                 .historical_proof(Location::new(8), bounds.start, NZU64!(5))
                 .await;
@@ -275,8 +275,8 @@ mod test {
                 "must not surface as UnexpectedData; got {result:?}",
             );
             assert!(
-                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
-                "expected HistoricalFloorPruned(8), got {result:?}",
+                matches!(result, Err(Error::NoCommitAtSize(loc)) if loc == Location::new(8)),
+                "expected NoCommitAtSize(8), got {result:?}",
             );
 
             // Sanity: a commit-boundary size whose floor is retained still works. First retained

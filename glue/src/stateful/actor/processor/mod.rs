@@ -84,8 +84,7 @@ pub(super) enum PrepareBatchesError {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T> {
-    /// Deferred flush for the applied batch, which must be observed
-    /// (see [`Barrier`]).
+    /// Deferred flush for the applied batch (see [`Barrier`]).
     pub(super) barrier: Barrier,
 
     /// Prune made due by this finalization.

@@ -431,6 +431,43 @@ pub(crate) mod test {
         });
     }
 
+    /// A prune whose target is justified by a durable commit completes without starting
+    /// (or waiting on) any sync, even while a newer batch's flush is still in flight.
+    #[test_traced]
+    fn test_start_sync_prune_skips_when_durable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&context, "delayed", "start_sync_prune_skip", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+            db = apply_write(db, key0, Sha256::hash(&[&100u64.to_be_bytes()])).await;
+
+            // Complete the first batch's flush: its floor is durably justified.
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
+
+            // Leave the second batch's flush parked.
+            db = apply_write(db, key0, Sha256::hash(&[&200u64.to_be_bytes()])).await;
+            let parked;
+            (db, parked) = db.start_sync().await.unwrap();
+
+            let starts_before = pending.starts();
+            let db = db.prune(floor).await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "durably justified prune must not start a sync"
+            );
+
+            drive_pending_syncs(&pending, parked).await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
     #[test_traced]
     fn test_get_many_fused_sharded_matches_get() {
@@ -1705,8 +1742,8 @@ pub(crate) mod test {
                 .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
                 .await;
             assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
+                matches!(result, Err(crate::qmdb::Error::NoCommitAtSize(loc)) if loc == Location::new(5)),
+                "expected NoCommitAtSize(5), got {result:?}"
             );
 
             db.destroy().await.unwrap();

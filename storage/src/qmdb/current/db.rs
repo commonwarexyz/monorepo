@@ -523,23 +523,6 @@ where
         Ok(())
     }
 
-    /// Ensure the durable log can rebuild `boundary` before recording it in pruning metadata.
-    ///
-    /// Delayed-merge absorption depends on both the durable floor and operation count, so the
-    /// justified boundary is derived from the durable frontier.
-    async fn ensure_durable(mut self, boundary: Location<F>) -> Result<Self, Error<F>> {
-        let barrier = self.any.barrier();
-        let durable_boundary = self::sync_boundary::<F, N>(
-            *barrier.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *barrier.end,
-        );
-        if durable_boundary < boundary {
-            self.any.log = self.any.log.commit().await?;
-            self.any.mark_commit_durable();
-        }
-        Ok(self)
-    }
-
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -572,7 +555,16 @@ where
         let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
         let bitmap_boundary = Location::new((*prune_loc / chunk_bits) * chunk_bits);
 
-        self = self.ensure_durable(bitmap_boundary).await?;
+        // The durable log must be able to rebuild the recorded boundary. Delayed-merge
+        // absorption depends on both the durable floor and operation count, so the justified
+        // boundary is derived from the durable frontier.
+        let barrier = self.any.barrier();
+        let durable_boundary =
+            self::sync_boundary::<F, N>(*barrier.start / chunk_bits, *barrier.end);
+        if durable_boundary < bitmap_boundary {
+            self.any.log = self.any.log.commit().await?;
+            self.any.mark_commit_durable();
+        }
         self.any.prune_bitmap(bitmap_boundary);
         self.prune_grafted_tree_to_bitmap()?;
 

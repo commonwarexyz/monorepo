@@ -345,7 +345,7 @@ where
     ///   >= `op_count` or `op_count` > number of operations.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
+    /// - Returns [`Error::NoCommitAtSize`] if `op_count - 1` is retained but is not a commit
     ///   op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(

@@ -467,12 +467,8 @@ where
         }
     }
 
-    /// Observe the journal barrier and return the db-level durable frontier: the inactivity
-    /// floor declared by the newest durable commit up to that commit's operation count.
-    ///
-    /// Durable claims (pruning boundaries, watermarks) must be computed from this frontier,
-    /// never from live state: a durably recorded claim the durable log cannot justify
-    /// leaves recovery unable to rebuild it.
+    /// Observe the journal barrier and return [Self::durable]. Durable claims (pruning
+    /// boundaries, watermarks) must be computed from this frontier, never from live state.
     pub(crate) fn barrier(&mut self) -> std::ops::Range<Location<F>> {
         self.advance_durable();
         self.durable.clone()
@@ -520,7 +516,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
+    /// Returns [`crate::qmdb::Error::NoCommitAtSize`] if `historical_size - 1` is retained
     /// but is not a commit op, meaning the caller passed a non-commit-boundary size.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -791,7 +787,7 @@ where
                 bounds
                     .end
                     .checked_sub(1)
-                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+                    .ok_or(Error::NoCommitAtSize(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
                 &*log,

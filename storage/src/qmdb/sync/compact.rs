@@ -266,8 +266,9 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
-    /// The source cannot see the requested leaf count: it is past the source's tip, or fell
-    /// outside the window the source still retains.
+    /// The source cannot see the requested leaf count: it is past the source's tip, fell
+    /// outside the window the source still retains, or (from a witness source) no retained
+    /// witness entry commits exactly that leaf count.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]
     StaleTarget {
         requested: Target<F, D>,
@@ -478,9 +479,8 @@ where
             validated = fetch_validated_state::<DB, R>(&resolver, &target) => validated?,
         };
 
-        // Construction can replace an existing compact witness journal. Once it starts, let it
-        // finish before observing another target update so cancellation cannot leave the journal
-        // between its clear and persist steps.
+        // No target update is observed until persistence returns: it must run to completion
+        // once started (see [`persist_validated_state`]).
         let db = persist_validated_state::<DB, R>(
             &context,
             attempt,
@@ -740,12 +740,12 @@ where
         });
     }
 
-    // The window check rules out pruning, so `HistoricalFloorPruned` here means `leaf_count` is
-    // not a commit boundary.
+    // The window check rules out pruning: a size with no commit here belongs to another
+    // history, never to a pruned prefix.
     let (last_commit_proof, mut operations) =
         match historical_proof(leaf_count, last_commit_loc).await {
             Ok(state) => state,
-            Err(qmdb::Error::HistoricalFloorPruned(_)) => {
+            Err(qmdb::Error::NoCommitAtSize(_)) => {
                 return Err(ServeError::DivergentTarget {
                     requested: target,
                     current,

@@ -355,8 +355,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// whose deferred flush has not landed stays non-durable.
     ///
     /// Implementations must never discard history a restart would need to
-    /// recover unflushed state. Pruning waits on in-flight flushes unless the
-    /// pruned range is already durably justified.
+    /// recover unflushed state.
     fn prune(
         self,
         _target: &Self::SyncTarget,

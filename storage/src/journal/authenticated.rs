@@ -584,9 +584,7 @@ where
     /// Prune both the Merkle structure and journal to the given location.
     ///
     /// Callers must ensure `prune_loc` is justified by durable data (see
-    /// [`crate::journal::contiguous::Mutable::prune`]). Each component
-    /// syncs before removing anything only when its own barrier has not yet covered the
-    /// boundary.
+    /// [`crate::journal::contiguous::Mutable::prune`]).
     ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
@@ -997,13 +995,8 @@ where
     }
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
-        let prune_to = {
-            let bounds = self.journal.bounds();
-            min_position.min(bounds.end)
-        };
-
         let (journal, _, pruned) = self
-            .prune_inner(Location::new(prune_to))
+            .prune_inner(Location::new(min_position))
             .await
             .map_err(Self::map_error)?;
         Ok((journal, pruned))

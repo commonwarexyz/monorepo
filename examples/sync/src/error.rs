@@ -26,7 +26,8 @@ pub enum Error {
     #[error("stale compact target: {0}")]
     StaleTarget(String),
 
-    /// Compact target cannot be authenticated by the source's retained history.
+    /// Compact target reaches its leaf count under a different history (a conflicting root
+    /// or a non-commit boundary), so the source can never serve it.
     #[error("divergent compact target: {0}")]
     DivergentTarget(String),
 

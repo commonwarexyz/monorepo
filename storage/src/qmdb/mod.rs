@@ -131,7 +131,7 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
+/// - [`Error::NoCommitAtSize`] if `op_count` is zero (no preceding commit exists), or if
 ///   `op_count - 1` is retained but is not a commit op, meaning the caller passed a
 ///   non-commit-boundary size.
 /// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
@@ -145,7 +145,7 @@ where
     R: Contiguous,
 {
     let Some(last_op) = op_count.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(op_count));
+        return Err(Error::NoCommitAtSize(op_count));
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -154,7 +154,7 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let floor = floor_of(&op).ok_or(Error::NoCommitAtSize(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
@@ -248,8 +248,8 @@ pub enum Error<F: Family> {
     /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
     /// fires when the size is zero or the caller passes a retained non-commit-boundary size.
     /// Pruned operations are reported separately as [`crate::journal::Error::ItemPruned`].
-    #[error("historical size is not a retained commit boundary: {0}")]
-    HistoricalFloorPruned(Location<F>),
+    #[error("no commit at historical size: {0}")]
+    NoCommitAtSize(Location<F>),
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {

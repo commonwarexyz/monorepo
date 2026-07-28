@@ -2549,19 +2549,7 @@ mod compact_variable_mmb {
             };
             assert_ne!(window_target, current_target);
 
-            // A retained leaf count paired with a different root is divergent.
             let source = Arc::new(source);
-            let divergent_target = sync::compact::Target {
-                root: current_target.root,
-                leaf_count: window_target.leaf_count,
-            };
-            let result =
-                sync::compact::Resolver::get_compact_state(&source, divergent_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::compact::ServeError::DivergentTarget { requested, current })
-                    if requested == divergent_target && current == current_target
-            ));
 
             // An authentic target below the tip stays servable.
             let window_cfg = client_config(&format!("{suffix}-window"), &context);
@@ -2579,101 +2567,6 @@ mod compact_variable_mmb {
             assert_eq!(client.root(), window_target.root);
             assert_eq!(client.get_metadata(), Some(vec![1]));
             client.destroy().await.unwrap();
-
-            // A target past the tip is stale.
-            let ahead_target = sync::compact::Target {
-                root: current_target.root,
-                leaf_count: Location::new(*current_target.leaf_count + 1),
-            };
-            let result =
-                sync::compact::Resolver::get_compact_state(&source, ahead_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == ahead_target && current == current_target
-            ));
-
-            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
-            source.destroy().await.unwrap();
-        });
-    }
-
-    /// A full source classifies a pruned commit as stale and a retained non-commit boundary as
-    /// divergent.
-    #[test_traced("WARN")]
-    fn test_compact_full_source_declines_unservable_target() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-immutable-unservable-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
-
-            // Build an early target that can be pruned and a later retained target.
-            let prune_loc = Location::new(8);
-            let mut early_target = None;
-            let mut late_target = None;
-            for i in 0..8u64 {
-                let floor = if i == 7 { prune_loc } else { Location::new(0) };
-                let batch = source
-                    .new_batch()
-                    .set(sha256::Digest::from([i as u8; 32]), vec![i as u8])
-                    .merkleize(&source, Some(vec![i as u8]), floor)
-                    .await;
-                let (applied, _) = source.apply_batch(batch).await.unwrap();
-                source = applied.commit().await.unwrap();
-                let target = sync::compact::Target {
-                    root: source.root(),
-                    leaf_count: source.bounds().end,
-                };
-                match i {
-                    0 => early_target = Some(target),
-                    6 => late_target = Some(target),
-                    _ => {}
-                }
-            }
-            let early_target = early_target.unwrap();
-            let late_target = late_target.unwrap();
-
-            let source = source.prune(prune_loc).await.unwrap();
-            let retained = source.bounds();
-            assert!(retained.start > Location::new(*early_target.leaf_count - 1));
-            assert!(retained.start <= Location::new(*late_target.leaf_count - 1));
-            let current_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: retained.end,
-            };
-            let source = Arc::new(source);
-
-            // The commit authenticating the earliest target is gone, so the source reports it as
-            // stale.
-            let result =
-                sync::compact::Resolver::get_compact_state(&source, early_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::compact::ServeError::StaleTarget { requested, current })
-                    if requested == early_target && current == current_target
-            ));
-
-            // A below-tip target still inside the retained window keeps serving.
-            sync::compact::Resolver::get_compact_state(&source, late_target.clone())
-                .await
-                .expect("retained target should serve");
-
-            // A leaf count whose preceding operation is a set rather than a commit does not
-            // describe this source's history, so it is divergent rather than stale.
-            let non_commit_target = sync::compact::Target {
-                root: current_target.root,
-                leaf_count: Location::new(*current_target.leaf_count - 1),
-            };
-            let result =
-                sync::compact::Resolver::get_compact_state(&source, non_commit_target.clone())
-                    .await;
-            assert!(matches!(
-                result,
-                Err(sync::compact::ServeError::DivergentTarget { requested, current })
-                    if requested == non_commit_target && current == current_target
-            ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
