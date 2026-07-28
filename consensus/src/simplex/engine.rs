@@ -1,5 +1,4 @@
 use super::{
-    Lookahead,
     actors::{batcher, resolver, voter},
     config::Config,
     elector::{self, Elector as _},
@@ -82,10 +81,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 view_retention: cfg.view_retention,
                 skip_timeout: cfg.skip_timeout,
-                lookahead: Lookahead {
-                    term_length,
-                    optimistic_views: terms.optimistic_views(),
-                },
+                lookahead: terms.lookahead(),
                 forwarding: cfg.forwarding,
                 floor: cfg.floor.view(),
             },

@@ -173,11 +173,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let timeouts = context.family("timeouts", "timed out views");
         let nullifications = context.family("nullifications", "nullifications");
 
-        let terms = cfg.elector.terms();
-        let lookahead = Lookahead {
-            term_length: terms.length(),
-            optimistic_views: terms.optimistic_views(),
-        };
+        let lookahead = cfg.elector.terms().lookahead();
 
         Self {
             context,
@@ -312,30 +308,31 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         true
     }
 
-    /// Sets the leader for the given view if it is not already set.
-    fn set_leader(&mut self, view: View, certificate: Option<&S::Certificate>) {
-        if self
-            .views
+    /// Returns true if the round for `view` exists and has a leader.
+    fn leader_is_set(&self, view: View) -> bool {
+        self.views
             .get(&view)
             .is_some_and(|round| round.leader().is_some())
-        {
+    }
+
+    /// Sets the leader for the given view if it is not already set.
+    fn set_leader(&mut self, view: View, certificate: Option<&S::Certificate>) {
+        if self.leader_is_set(view) {
             return;
         }
         let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
-        let round = self.create_round(view);
-        round.set_leader(leader);
+        self.create_round(view).set_leader(leader);
     }
 
     /// Copies the same-term stable leader into an optimistic successor.
     fn inherit_leader(&mut self, from: View, to: View) {
+        if self.leader_is_set(to) {
+            return;
+        }
         let Some(leader) = self.views.get(&from).and_then(|round| round.leader()) else {
             return;
         };
-        let round = self.create_round(to);
-        if round.leader().is_some() {
-            return;
-        }
-        round.set_leader(leader.idx);
+        self.create_round(to).set_leader(leader.idx);
     }
 
     /// Ensures a round exists for the given view.
@@ -594,14 +591,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// current) the parent's explicit certification. Only meaningful inside
     /// [`Self::in_issuance_window`].
     ///
-    /// This is the weaker sibling of [`Self::explicit_parent_ready`]. It
-    /// throttles notarize issuance rather than gating safety. Signing still
-    /// runs full `parent_payload` resolution plus `verified_parent_matches`.
-    ///
-    /// It must never be *stricter* than
-    /// [`Self::optimistic_ancestry_payload`], because votes are constructed
-    /// once per event, so a gate that rejects at the child's verified event
-    /// loses the vote permanently.
+    /// This throttles notarize issuance (signing still resolves and checks
+    /// full ancestry) and must never be *stricter* than
+    /// [`Self::optimistic_ancestry_payload`]: votes are constructed once per
+    /// event, so a gate that rejects at the child's verified event loses the
+    /// vote permanently.
     fn optimistic_parent_ready(&self, view: View) -> bool {
         let Some(parent) = self.previous_in_term(view) else {
             return true;
@@ -714,8 +708,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.views.get(&view).and_then(|round| round.finalization())
     }
 
-    /// Returns the proposal for `view` if it is eligible for forwarding:
-    /// certified (or finalized), or notarized without a failed certification.
+    /// Returns the proposal for `view` if it is eligible for forwarding
+    /// (see [`Round::forwardable_proposal`]).
     pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
         self.views.get(&view)?.forwardable_proposal().cloned()
     }
@@ -777,14 +771,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// [`Round::latch_timeout`]); the latched reason is delivered back through
     /// [`Self::next_timeout`] when the timeout fires.
     ///
-    /// Views already advanced past are ignored. Failures for tracked
+    /// Views already advanced past are ignored, except for a failed
+    /// certification, which always nullifies. Failures for tracked
     /// optimistic future views latch on their round. The buffered proposal
     /// suppresses the leader timeout and its verification request is consumed,
     /// so a dropped latch would stall the view until certification timeout
     /// once it becomes current. Latching early does not nullify early because
     /// [`Self::next_timeout`] only polls the current round.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
-        if view < self.view {
+        if view < self.view && !matches!(reason, TimeoutReason::FailedCertification) {
             return;
         }
 
@@ -803,22 +798,27 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Attempt to propose a new block.
     pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
+        // Nothing above the next term start is admissible (see
+        // [`Self::peers_admit`]), so bound the scan rather than walking every
+        // tracked future round (certificates can land arbitrarily far ahead).
+        let limit = self.view.next_term_start(self.term_length());
         let mut cursor = self.view;
         while let Some(view) = self.next_tracked_view(cursor) {
+            if view > limit {
+                break;
+            }
             cursor = view.next();
             if view == GENESIS_VIEW {
                 continue;
             }
-            // Check the cheap round-local readiness before the window
-            // arithmetic, matching `try_verify`.
+            if !self.peers_admit(view) {
+                continue;
+            }
             if !self
                 .views
                 .get(&view)
                 .is_some_and(|round| round.should_propose())
             {
-                continue;
-            }
-            if !self.peers_admit(view) {
                 continue;
             }
 
@@ -868,11 +868,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// ask us to fetch junk).
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
+        // Bound the scan as in [`Self::try_propose`].
+        let limit = self.view.next_term_start(self.term_length());
         let mut cursor = self.view;
         while let Some(view) = self.next_tracked_view(cursor) {
+            if view > limit {
+                break;
+            }
             cursor = view.next();
-            // Check the cheap round-local readiness before the ancestry walk
-            // in `parent_payload`.
+            if !self.peers_admit(view) {
+                continue;
+            }
             let Some((leader, proposal)) = self
                 .views
                 .get(&view)
@@ -880,9 +886,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             else {
                 continue;
             };
-            if !self.peers_admit(view) {
-                continue;
-            }
             let parent_payload = match self.parent_payload(&proposal) {
                 Ok(parent_payload) => parent_payload,
                 Err(err) => {
@@ -1001,22 +1004,19 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
-        if !is_success {
-            // Latch directly rather than through `trigger_timeout`. Its
-            // past-views filter must never suppress a failed certification,
-            // which always nullifies even after we advance past `view`.
-            let now = self.context.current();
-            round.latch_timeout(now, TimeoutReason::FailedCertification);
-        }
-
-        // Remove from outstanding since certification is complete
-        self.outstanding_certifications.remove(&view);
 
         // Get notarization before advancing state
         let notarization = round
             .notarization()
             .cloned()
             .expect("notarization must exist for certified view");
+
+        if !is_success {
+            self.trigger_timeout(view, TimeoutReason::FailedCertification);
+        }
+
+        // Remove from outstanding since certification is complete
+        self.outstanding_certifications.remove(&view);
 
         if is_success {
             // Keep the stall deadline armed after certification so the

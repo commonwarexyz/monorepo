@@ -25,7 +25,7 @@
 //! the initialized [`Elector`] with the scheme participants before starting.
 
 use crate::{
-    simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+    simplex::{Lookahead, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf},
     types::{Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_codec::Encode;
@@ -161,6 +161,14 @@ impl Terms {
     /// Always zero when [`Self::length`] is one.
     pub const fn optimistic_views(&self) -> ViewDelta {
         self.optimistic_views
+    }
+
+    /// Returns the term geometry as a [`Lookahead`].
+    pub(crate) const fn lookahead(&self) -> Lookahead {
+        Lookahead {
+            term_length: self.length,
+            optimistic_views: self.optimistic_views,
+        }
     }
 }
 

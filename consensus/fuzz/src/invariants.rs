@@ -77,16 +77,16 @@ pub fn check<P: Simplex>(
             })
             .collect();
 
-        if let Some((first_idx, first_record)) = finalizations_for_view.first() {
-            for (idx, record) in &finalizations_for_view[1..] {
+        if let Some((first_idx, (first_payload, first_parent))) = finalizations_for_view.first() {
+            for (idx, (payload, parent)) in &finalizations_for_view[1..] {
                 assert_eq!(
-                    record.0, first_record.0,
-                    "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has {record:?} but replica {first_idx} has {first_record:?}",
+                    payload, first_payload,
+                    "Invariant violation: finalized digest mismatch in view {view}: replica {idx} has ({payload:?}, {parent}) but replica {first_idx} has ({first_payload:?}, {first_parent})",
                 );
                 if configuration.can_finalize() {
                     assert_eq!(
-                        record.1, first_record.1,
-                        "Invariant violation: finalized parent mismatch in view {view}: replica {idx} has {record:?} but replica {first_idx} has {first_record:?}",
+                        parent, first_parent,
+                        "Invariant violation: finalized parent mismatch in view {view}: replica {idx} has ({payload:?}, {parent}) but replica {first_idx} has ({first_payload:?}, {first_parent})",
                     );
                 }
             }

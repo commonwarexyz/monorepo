@@ -156,7 +156,7 @@ impl Arbitrary<'_> for FuzzInput {
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
         let optimistic_views =
-            ViewDelta::new(u.int_in_range(0..=optimistic_views_domain(term_length) - 1)?);
+            ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -202,15 +202,15 @@ impl Arbitrary<'_> for FuzzInput {
 fn validator_optimistic_views(input: &FuzzInput, validator: usize) -> ViewDelta {
     ViewDelta::new(
         (input.optimistic_views.get() + validator as u64)
-            % optimistic_views_domain(input.term_length),
+            % (max_optimistic_views(input.term_length) + 1),
     )
 }
 
-/// Size of the optimistic-view domain `[0, term_length + 2]`: covers 0
-/// (optimistic validation disabled), the term-length boundary, and values
-/// beyond the term length, which production accepts but caps.
-fn optimistic_views_domain(term_length: TermLength) -> u64 {
-    term_length.get() + 3
+/// Largest fuzzed optimistic-view value: the domain `[0, term_length + 2]`
+/// covers 0 (optimistic validation disabled), the term-length boundary, and
+/// values beyond the term length, which production accepts but caps.
+fn max_optimistic_views(term_length: TermLength) -> u64 {
+    term_length.get() + 2
 }
 
 type NetworkChannels = (

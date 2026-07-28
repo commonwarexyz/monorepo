@@ -1164,14 +1164,13 @@ mod tests {
         leader_proposal_filters_messages(secp256r1::fixture);
     }
 
-    fn set_leader_twice_same_value_is_noop<S, F>(mut fixture: F)
-    where
-        S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
-    {
+    /// Re-stamping the same leader is scheme-independent bookkeeping, so one
+    /// scheme is enough.
+    #[test]
+    fn test_set_leader_twice_same_value_is_noop() {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let mut verifier = Verifier::<S, Sha256>::new(
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 3);
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
             3,
@@ -1179,18 +1178,6 @@ mod tests {
         let leader = Participant::new(0);
         verifier.set_leader(leader, None);
         verifier.set_leader(leader, None);
-    }
-
-    #[test]
-    fn test_set_leader_twice_same_value_is_noop() {
-        set_leader_twice_same_value_is_noop(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        set_leader_twice_same_value_is_noop(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        set_leader_twice_same_value_is_noop(bls12381_threshold_std::fixture::<MinSig, _>);
-        set_leader_twice_same_value_is_noop(bls12381_threshold_std::fixture::<MinPk, _>);
-        set_leader_twice_same_value_is_noop(bls12381_multisig::fixture::<MinSig, _>);
-        set_leader_twice_same_value_is_noop(bls12381_multisig::fixture::<MinPk, _>);
-        set_leader_twice_same_value_is_noop(ed25519::fixture);
-        set_leader_twice_same_value_is_noop(secp256r1::fixture);
     }
 
     fn set_leader_change_panics<S, F>(mut fixture: F)

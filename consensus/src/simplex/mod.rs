@@ -479,10 +479,9 @@ cfg_if::cfg_if! {
         /// at the last directly-notarized view, see [`Self::issuance_floor`]).
         /// See the [module docs] for what each governs.
         ///
-        /// The `current` argument must be a locally derived view, since it
-        /// feeds panicking arithmetic ([`View::term_end`]). Candidate arguments
-        /// (`pending`, `view`) feed only comparisons and non-panicking
-        /// arithmetic, so they may be adversarial.
+        /// `current` arguments must be locally derived views (they feed
+        /// panicking arithmetic in [`View::term_end`]); candidate arguments
+        /// (`pending`, `view`) may be adversarial.
         ///
         /// [module docs]: crate::simplex#optimistic-validation
         #[derive(Clone, Copy)]
@@ -1888,42 +1887,21 @@ mod tests {
                 .all(|reporter| reporter.finalizations.lock().contains_key(&required_view))
             {
                 if context.current() >= deadline {
-                    let progress = reporters
+                    let progress: Vec<_> = reporters
                         .iter()
-                        .enumerate()
-                        .map(|(idx, reporter)| {
-                            let max_finalized = reporter
+                        .map(|reporter| {
+                            let finalized = reporter
                                 .finalizations
                                 .lock()
                                 .keys()
                                 .copied()
                                 .max()
                                 .unwrap_or(View::zero());
-                            let max_notarized = reporter
-                                .notarizations
-                                .lock()
-                                .keys()
-                                .copied()
-                                .max()
-                                .unwrap_or(View::zero());
-                            let max_notarize_vote = reporter
-                                .notarizes
-                                .lock()
-                                .keys()
-                                .copied()
-                                .max()
-                                .unwrap_or(View::zero());
-                            let nullify_votes = reporter.nullifies.lock().len();
-                            let nullification_certs = reporter.nullifications.lock().len();
-                            format!(
-                                "r{idx}: finalized={max_finalized} notarize_vote={max_notarize_vote} notarized={max_notarized} nullify_votes={nullify_votes} nullifications={nullification_certs}"
-                            )
+                            (finalized, reporter.nullifications.lock().len())
                         })
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                        .collect();
                     panic!(
-                        "expected all validators to finalize view {} before {:?}; progress: {}",
-                        required_view, deadline, progress
+                        "expected all validators to finalize view {required_view} before {deadline:?}; (max finalized, nullifications) per reporter: {progress:?}",
                     );
                 }
                 context.sleep(Duration::from_millis(10)).await;

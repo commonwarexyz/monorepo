@@ -286,21 +286,23 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.notarization.is_some() || self.finalization.is_some()
     }
 
-    // `certified_proposal` below requires an explicit certification (or a
-    // finalization). `certified_ancestry_payload` and `forwardable_proposal`
-    // share a weaker rule: finalized, or notarized without a failed
-    // certification. They differ only in source, the certificate versus the
-    // slot's proposal.
+    /// Returns true if this round's certificate supports building on its
+    /// proposal: finalized, or notarized unless our own certification
+    /// rejected it (a finalization overrides the rejection).
+    const fn has_usable_certificate(&self) -> bool {
+        self.finalization.is_some()
+            || (self.notarization.is_some() && !self.is_failed_certification())
+    }
 
-    /// Returns the payload of ancestry this round's certificate supports: the
-    /// finalized proposal's, or the notarized proposal's unless our own
-    /// certification rejected it (a finalization overrides the rejection).
+    /// Returns the payload of ancestry this round's certificate supports
+    /// (see [`Self::has_usable_certificate`]), read from the certificate
+    /// rather than the slot's proposal.
     pub fn certified_ancestry_payload(&self) -> Option<&D> {
+        if !self.has_usable_certificate() {
+            return None;
+        }
         if let Some(finalization) = &self.finalization {
             return Some(&finalization.proposal.payload);
-        }
-        if self.is_failed_certification() {
-            return None;
         }
         self.notarization
             .as_ref()
@@ -325,12 +327,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    /// Returns the proposal if it is eligible for forwarding: certified (or
-    /// finalized), or notarized without a failed certification.
+    /// Returns the proposal if it is eligible for forwarding (see
+    /// [`Self::has_usable_certificate`]).
     pub const fn forwardable_proposal(&self) -> Option<&Proposal<D>> {
-        if self.finalization.is_some()
-            || (self.notarization.is_some() && !self.is_failed_certification())
-        {
+        if self.has_usable_certificate() {
             return self.proposal();
         }
         None
