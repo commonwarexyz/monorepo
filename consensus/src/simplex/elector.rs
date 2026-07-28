@@ -670,9 +670,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0]
-            .assemble::<_, N3f1>(attestations1, &Sequential)
-            .unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -684,9 +682,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0]
-            .assemble::<_, N3f1>(attestations2, &Sequential)
-            .unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -793,9 +789,7 @@ mod tests {
                     .take(quorum)
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
-                let cert = schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap();
+                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
                 // Elect leader using the certificate
                 let leader = elector.elect(round, Some(&cert));
