@@ -110,12 +110,24 @@
 //! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
 //! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
 //!
-//! _The decision returned by `certify` must be deterministic and consistent across all honest participants. A live
-//! request must eventually produce `true` or `false` to ensure liveness. Certification may be arbitrarily slow. A
-//! verdict that never arrives can stall more than the certified view. Certificate repair holds a fetched notarization
-//! until its verdict. See [Fetching Missing Certificates](#fetching-missing-certificates). A participant whose only
-//! evidence for a view is an uncertified notarization cannot repair that view until certification finishes. A covering
-//! finalization makes the request obsolete. Consensus then drops the request without requiring a verdict._
+//! A view timeout and a certification verdict serve different purposes. A timeout lets the voter
+//! leave the current view and emit a nullify vote while application work continues. It does not
+//! establish that the notarized payload is uncertifiable. The notarization remains valid across
+//! views and may be selected as the parent of a later proposal.
+//!
+//! This distinction is required for liveness, not just for certificate fetching. With `3f + 1`
+//! validators and `f` Byzantine validators silent, consensus needs all `2f + 1` honest validators
+//! to form a quorum. If one honest validator leaves a required certification pending forever, only
+//! `2f` responsive validators remain. A covering nullification cannot be assumed to rescue that
+//! validator: one may never form, and a notarization and nullification may coexist without either
+//! invalidating the other.
+//!
+//! Consequently, an indefinitely pending certification is equivalent to losing that validator for
+//! the affected execution. Simplex remains responsive while certification is delayed, but its
+//! liveness guarantee assumes that every live validator eventually returns a deterministic verdict.
+//! Certification may be arbitrarily slow. A covering finalization makes the request obsolete, in
+//! which case consensus drops it without requiring a verdict. See [Fetching Missing
+//! Certificates](#fetching-missing-certificates).
 //!
 //! ### Deviations from Simplex Consensus
 //!

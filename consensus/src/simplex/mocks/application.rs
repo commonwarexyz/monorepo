@@ -139,9 +139,11 @@ pub enum Certifier<D: Digest> {
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
     Cancel,
-    /// Hold the sender alive without ever responding, simulating a certify that
-    /// hangs indefinitely (e.g., block never arrives for reconstruction because
-    /// the proposer is dead and shard gossip didn't deliver enough shards).
+    /// Hold the sender alive without ever responding.
+    ///
+    /// This test-only mode deliberately violates the live-automaton contract. It verifies that
+    /// consensus actors remain responsive while an application request stalls, but it does not
+    /// model a validator covered by the consensus liveness guarantee.
     Pending,
 }
 

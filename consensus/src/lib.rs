@@ -174,15 +174,23 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// # Liveness Requirement
         ///
-        /// Pending may be arbitrarily long, but it must be finite while the validator remains live.
-        /// The returned channel must eventually produce `true` or `false`. The only exception is
-        /// when consensus drops the receiver after a finalization makes the request obsolete.
-        /// Resolver certificate repair may wait for this verdict before trying another peer.
-        /// Leaving a live request pending forever can halt consensus.
+        /// Certification is consensus-critical work. A validator is live only if every
+        /// certification request that remains relevant eventually produces `true` or `false`.
+        /// A request may remain pending for an arbitrarily long time, but not forever.
         ///
-        /// Closing the channel without a verdict does not satisfy this requirement. Reserve closure
-        /// for cases where certification can no longer produce a verdict, such as shutdown.
-        /// Consensus can request certification again after restart.
+        /// Consensus cannot infer a certification verdict from elapsed time. `false` means
+        /// permanently uncertifiable, so returning it because of a local timeout could make honest
+        /// validators disagree about the same payload. Closing the channel is also terminal and is
+        /// reserved for shutdown or another condition that prevents the implementation from ever
+        /// producing a verdict.
+        ///
+        /// If the receiver remains open forever, the validator is unavailable for executions that
+        /// require that verdict. The validator therefore does not count as live for the consensus
+        /// liveness guarantee. Finalization may instead make the request obsolete, in which case
+        /// consensus drops the receiver.
+        ///
+        /// Consensus can request certification again after restart if the previous result was not
+        /// durably recorded.
         ///
         /// # Determinism Requirement
         ///

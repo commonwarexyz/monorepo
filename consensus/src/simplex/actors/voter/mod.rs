@@ -7746,18 +7746,15 @@ mod tests {
         certification_failure_allows_nullify_after_notarize::<_, _>(secp256r1::fixture);
     }
 
-    /// Verify that a voter recovers via timeout when certification hangs indefinitely.
+    /// Verify that a voter remains responsive when certification does not complete.
     ///
-    /// This simulates the scenario where a notarization forms but the block is
-    /// unrecoverable. This includes the restart case where the local block was not
-    /// durable and no peer can provide enough data for reconstruction. In this
-    /// case, `certify()` subscribes to the block
-    /// but the subscription never resolves. The voter must rely on the view timeout
-    /// to emit a nullify vote and advance the chain.
+    /// `Certifier::Pending` deliberately violates the live-automaton contract. This test verifies
+    /// that a pending application request does not block the voter from timing out the current view
+    /// and emitting a nullify vote. It does not assert that the consensus instance can continue
+    /// making progress indefinitely with a non-live application.
     ///
     /// Unlike `Cancel` mode (where the certify receiver errors immediately), `Pending`
-    /// mode holds the certify sender alive so the future never completes, forcing the
-    /// voter to recover purely through its timeout mechanism.
+    /// mode holds the certify sender alive so the future never completes.
     fn pending_certification_nullifies_on_timeout<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
