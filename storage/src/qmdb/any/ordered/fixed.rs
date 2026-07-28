@@ -1059,20 +1059,20 @@ pub(crate) mod test {
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
             }
 
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             // Test that apply_batch + sync w/ pruning will raise the activity floor.
             let db = db.sync().await.unwrap();
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
             db.sync().await.unwrap();
             let db = open_db(context.child("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
@@ -2069,7 +2069,7 @@ pub(crate) mod test {
 
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.snapshot.get(&k);
+        let iter = db.index.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 

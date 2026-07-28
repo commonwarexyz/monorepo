@@ -174,7 +174,7 @@ pub struct Immutable<
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Set].
-    pub(crate) snapshot: Index<T, Location<F>>,
+    pub(crate) index: Index<T, Location<F>>,
 
     /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
@@ -240,7 +240,7 @@ where
             journal = journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.child("snapshot"), translator);
+        let mut index = Index::new(context.child("snapshot"), translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let bounds = journal.items.bounds();
@@ -260,7 +260,7 @@ where
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
                 &journal.items,
-                &mut snapshot,
+                &mut index,
                 init_buffer,
                 cache_size,
                 |_, _| {},
@@ -279,7 +279,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             last_commit_loc,
             inactivity_floor_loc,
             metrics,
@@ -336,7 +336,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        let iter = self.snapshot.get(key);
+        let iter = self.index.get(key);
         let oldest = self.journal.bounds().start;
         let mut result = None;
         for &loc in iter {
@@ -369,7 +369,7 @@ where
         let oldest = self.journal.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
+            for &loc in self.index.get(key) {
                 if loc < oldest {
                     continue;
                 }
@@ -607,7 +607,7 @@ where
         let rewind_loc = Location::<F>::new(rewind_size);
         for key in &rewound_keys {
             // Filter by location to make sure we don't also prune keys that happen to collide.
-            self.snapshot.retain(key, |loc| *loc < rewind_loc);
+            self.index.retain(key, |loc| *loc < rewind_loc);
         }
 
         // If the rewind target has a lower floor than the current snapshot was
@@ -619,7 +619,7 @@ where
             let gap_end = core::cmp::min(*old_floor, rewind_size);
             for loc in *rewind_floor..gap_end {
                 if let Operation::Set(key, _) = self.journal.items.read(loc).await? {
-                    self.snapshot.insert(&key, Location::new(loc));
+                    self.index.insert(&key, Location::new(loc));
                 }
             }
         }
@@ -785,7 +785,7 @@ where
             if track_shadow {
                 seen.insert(key);
             }
-            self.snapshot
+            self.index
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
@@ -794,7 +794,7 @@ where
             }
             for (key, entry) in ancestor_diff.iter() {
                 if seen.insert(key) {
-                    self.snapshot
+                    self.index
                         .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
                 }
             }
@@ -3646,7 +3646,7 @@ pub(super) mod test {
 
         let bad_key = Sha256::fill(99u8);
         let bad_loc = db.last_commit_loc;
-        db.snapshot.insert(&bad_key, bad_loc);
+        db.index.insert(&bad_key, bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();
         assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));

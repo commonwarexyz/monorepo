@@ -646,7 +646,7 @@ pub(crate) mod test {
             let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
-            let snapshot_items = db.snapshot.items();
+            let snapshot_items = db.index.items();
 
             db.sync().await.unwrap();
 
@@ -655,7 +655,7 @@ pub(crate) mod test {
             assert_eq!(root, db.root());
             assert_eq!(db.bounds(), bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
-            assert_eq!(db.snapshot.items(), snapshot_items);
+            assert_eq!(db.index.items(), snapshot_items);
 
             db.destroy().await.unwrap();
         });

@@ -98,13 +98,13 @@ pub struct Db<
     /// inactivity floor up to its operation count.
     pub(crate) pending_commits: VecDeque<std::ops::Range<Location<F>>>,
 
-    /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location in the log containing its most recent update.
+    /// An index of all currently active operations, mapping each key to the location in the
+    /// log containing its most recent update.
     ///
     /// # Invariant
     ///
     /// - Only references `Operation::Update`s.
-    pub(crate) snapshot: I,
+    pub(crate) index: I,
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
@@ -212,7 +212,7 @@ where
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
         let mut result = None;
         for loc in locs {
             let op = self.log.read(*loc).await?;
@@ -313,7 +313,7 @@ where
         // Probe the in-memory index. Each key may map to multiple locations due to hash
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        self.snapshot
+        self.index
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
 
         // Sort by position and deduplicate for the batched cache read.
@@ -710,16 +710,16 @@ where
                         if new_loc < rewind_size {
                             bitmap.set_bit(*new_loc, true);
                         }
-                        update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
+                        update_known_loc(&mut self.index, &key, old_loc, new_loc);
                     }
                     SnapshotUndo::Remove { key, old_loc } => {
-                        delete_known_loc(&mut self.snapshot, &key, old_loc)
+                        delete_known_loc(&mut self.index, &key, old_loc)
                     }
                     SnapshotUndo::Insert { key, new_loc } => {
                         if new_loc < rewind_size {
                             bitmap.set_bit(*new_loc, true);
                         }
-                        self.snapshot.insert(&key, new_loc);
+                        self.index.insert(&key, new_loc);
                     }
                 }
             }
@@ -865,7 +865,7 @@ where
             log,
             root,
             inactivity_floor_loc,
-            snapshot: index,
+            index,
             last_commit_loc,
             durable: inactivity_floor_loc..Location::new(*last_commit_loc + 1),
             pending_commits: VecDeque::new(),

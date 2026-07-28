@@ -87,7 +87,7 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location<F>> =
+        let mut index: Index<T, Location<F>> =
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
@@ -108,7 +108,7 @@ where
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
                 &journal.items,
-                &mut snapshot,
+                &mut index,
                 db_config.init_buffer,
                 db_config.init_cache_size,
                 |_, _| {},
@@ -127,7 +127,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             last_commit_loc,
             inactivity_floor_loc,
             metrics,

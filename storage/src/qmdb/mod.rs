@@ -881,7 +881,7 @@ pub(crate) struct FloorHelper<
     I: Index<Value = Location<F>>,
     C: Mutable<Item: Operation<F>>,
 > {
-    pub snapshot: &'a mut I,
+    pub index: &'a mut I,
     pub log: C,
 }
 
@@ -905,7 +905,7 @@ where
 
         // If we find a snapshot entry corresponding to the operation, we know it's active.
         let active = {
-            let Some(mut cursor) = self.snapshot.get_mut(key) else {
+            let Some(mut cursor) = self.index.get_mut(key) else {
                 return Ok((self, false));
             };
             if cursor.find(|&loc| loc == old_loc) {

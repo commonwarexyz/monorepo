@@ -1453,7 +1453,7 @@ pub(crate) mod test {
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.snapshot.get(&k);
+        let iter = db.index.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 
