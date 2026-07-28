@@ -43,7 +43,7 @@ pub struct StateSnapshot<F: Family, E: Context, D: Digest, Op, Cfg> {
     codec_config: Cfg,
 
     /// Marker for the operation type served by [Self::compact_state].
-    _op: PhantomData<Op>,
+    _phantom: PhantomData<fn() -> Op>,
 }
 
 impl<F, E, D, Op, Cfg> StateSnapshot<F, E, D, Op, Cfg>
@@ -64,7 +64,7 @@ where
             witness,
             retained,
             codec_config,
-            _op: PhantomData,
+            _phantom: PhantomData,
         }
     }
 

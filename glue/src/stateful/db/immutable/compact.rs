@@ -43,7 +43,7 @@ where
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
-    _db: PhantomData<fn(E, C)>,
+    _phantom: PhantomData<fn(E, C)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -112,7 +112,7 @@ where
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    _db: PhantomData<fn(E, C)>,
+    _phantom: PhantomData<fn(E, C)>,
 }
 
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
@@ -158,7 +158,7 @@ where
             .await;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
-            _db: PhantomData,
+            _phantom: PhantomData,
         })
     }
 }
@@ -185,7 +185,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            _db: PhantomData,
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -223,7 +223,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
             batch: Self::new_batch(self),
-            _db: PhantomData,
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -302,7 +302,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnjournaledUnmerkleized {
             batch: Self::new_batch(self),
-            _db: PhantomData,
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }

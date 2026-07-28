@@ -16,6 +16,11 @@
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
 //!
+//! Batch wrappers carry the type parameters of the database they merkleize against, so a
+//! batch cannot be paired with a database that did not create it. They hold no value of
+//! those types: the `PhantomData<fn(..)>` form pins the parameters without tying a
+//! wrapper's `Send`/`Sync` or drop behaviour to them.
+//!
 //! # State Sync
 //!
 //! State sync orchestration is expressed by two traits:
@@ -2071,7 +2076,7 @@ mod tests {
             keyless_compact_variable_config
         )]
         fn initial_sync_target_matches_initialized_database<T>(
-            #[case] _db: PhantomData<T>,
+            #[case] _phantom: PhantomData<T>,
             #[case] config: fn(&Context, &str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,

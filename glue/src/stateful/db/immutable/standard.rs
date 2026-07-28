@@ -51,7 +51,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
-    _db: PhantomData<fn(E, C, T)>,
+    _phantom: PhantomData<fn(E, C, T)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
@@ -144,7 +144,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    _db: PhantomData<fn(E, C, T)>,
+    _phantom: PhantomData<fn(E, C, T)>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -222,7 +222,7 @@ where
             .await;
         Ok(ImmutableMerkleized {
             inner: merkleized,
-            _db: PhantomData,
+            _phantom: PhantomData,
         })
     }
 }
@@ -249,7 +249,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            _db: PhantomData,
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -314,7 +314,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: Self::new_batch(self),
-            _db: PhantomData,
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }
@@ -426,7 +426,7 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: Self::new_batch(self),
-            _db: PhantomData,
+            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
         }

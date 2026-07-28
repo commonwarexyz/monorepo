@@ -64,7 +64,7 @@ where
 {
     batch: UnmerkleizedBatch<F, H, U, N, S>,
     metadata: Option<U::Value>,
-    _db: PhantomData<fn(E, C, I)>,
+    _phantom: PhantomData<fn(E, C, I)>,
 }
 
 /// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
@@ -86,7 +86,7 @@ where
 {
     staged: Staged<F, H, U, N, S>,
     metadata: Option<U::Value>,
-    _db: PhantomData<fn(E, C, I)>,
+    _phantom: PhantomData<fn(E, C, I)>,
 }
 
 /// Key-value operations shared by both `current` update kinds.
@@ -142,7 +142,7 @@ where
             CurrentStaged {
                 staged,
                 metadata: self.metadata,
-                _db: PhantomData,
+                _phantom: PhantomData,
             },
         ))
     }
@@ -168,7 +168,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, N, S>>,
-    _db: PhantomData<fn(E, C, I)>,
+    _phantom: PhantomData<fn(E, C, I)>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, E, C, I, H, U, N, S>
@@ -244,7 +244,7 @@ where
             Self {
                 staged,
                 metadata: self.metadata,
-                _db: PhantomData,
+                _phantom: PhantomData,
             },
         ))
     }
@@ -289,7 +289,7 @@ where
             .await?;
         Ok(CurrentMerkleized {
             inner,
-            _db: PhantomData,
+            _phantom: PhantomData,
         })
     }
 }
@@ -333,7 +333,7 @@ where
             .await?;
         Ok(CurrentMerkleized {
             inner,
-            _db: PhantomData,
+            _phantom: PhantomData,
         })
     }
 }
@@ -393,7 +393,7 @@ where
         let merkleized = self.batch.merkleize(db, self.metadata).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
-            _db: PhantomData,
+            _phantom: PhantomData,
         })
     }
 }
@@ -420,7 +420,7 @@ where
         let merkleized = self.batch.merkleize(db, self.metadata).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
-            _db: PhantomData,
+            _phantom: PhantomData,
         })
     }
 }
@@ -450,7 +450,7 @@ where
         CurrentUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            _db: PhantomData,
+            _phantom: PhantomData,
         }
     }
 }
@@ -524,7 +524,7 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _db: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -644,7 +644,7 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _db: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -842,7 +842,7 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _db: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -967,7 +967,7 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _db: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
