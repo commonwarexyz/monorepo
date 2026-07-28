@@ -985,12 +985,6 @@ where
 
     /// Root of the database at capture.
     root: H::Digest,
-
-    /// Location of the last commit at capture.
-    last_commit_loc: Location<F>,
-
-    /// Inactivity floor at capture.
-    inactivity_floor_loc: Location<F>,
 }
 
 impl<F, E, U, R, H> ProofSnapshot<F, E, U, R, H>
@@ -1010,16 +1004,6 @@ where
     /// Return the number of operations visible to this snapshot.
     pub fn op_count(&self) -> Location<F> {
         self.log.size()
-    }
-
-    /// Return the location of the last commit at capture.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
-    }
-
-    /// Return the inactivity floor at capture.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.inactivity_floor_loc
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and
@@ -1114,8 +1098,6 @@ where
         let snapshot = ProofSnapshot {
             log,
             root: self.root,
-            last_commit_loc: self.last_commit_loc,
-            inactivity_floor_loc: self.inactivity_floor_loc,
         };
         Ok((self, snapshot))
     }

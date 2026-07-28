@@ -1350,22 +1350,6 @@ where
         self.ops.op_count()
     }
 
-    /// Return the location of the last commit at capture.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.ops.last_commit_loc()
-    }
-
-    /// Return the inactivity floor at capture.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.ops.inactivity_floor_loc()
-    }
-
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and
-    /// newest operations visible to this snapshot.
-    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
-        self.ops.bounds()
-    }
-
     /// The ops-level snapshot of the wrapped Any database. Sync serving and ops-level
     /// proofs read through it, and its proofs verify against [Self::ops_root], matching
     /// [Db::ops_historical_proof].

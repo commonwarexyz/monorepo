@@ -1654,8 +1654,6 @@ pub(crate) mod test {
             (db, snapshot) = db.proof_snapshot().await.unwrap();
             assert_eq!(snapshot.root(), root);
             assert_eq!(snapshot.op_count(), op_count);
-            assert_eq!(snapshot.inactivity_floor_loc(), db.inactivity_floor_loc());
-            assert_eq!(snapshot.last_commit_loc(), db.last_commit_loc);
 
             let (proof, proof_ops) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
             assert!(verify_proof::<Sha256, _, _>(

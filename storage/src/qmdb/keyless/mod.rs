@@ -634,12 +634,6 @@ where
 
     /// Root of the database at capture.
     root: H::Digest,
-
-    /// Location of the last commit at capture.
-    last_commit_loc: Location<F>,
-
-    /// Inactivity floor declared by the last committed batch at capture.
-    inactivity_floor_loc: Location<F>,
 }
 
 impl<F, E, V, R, H> ProofSnapshot<F, E, V, R, H>
@@ -659,16 +653,6 @@ where
     /// Return the number of operations visible to this snapshot.
     pub fn op_count(&self) -> Location<F> {
         self.log.size()
-    }
-
-    /// Return the location of the last commit at capture.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
-    }
-
-    /// Return the inactivity floor declared by the last committed batch at capture.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.inactivity_floor_loc
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and
@@ -754,8 +738,6 @@ where
         let snapshot = ProofSnapshot {
             log,
             root: self.root,
-            last_commit_loc: self.last_commit_loc,
-            inactivity_floor_loc: self.inactivity_floor_loc,
         };
         Ok((self, snapshot))
     }
@@ -1095,8 +1077,6 @@ pub(crate) mod tests {
         (db, snapshot) = db.proof_snapshot().await.unwrap();
         assert_eq!(snapshot.root(), root);
         assert_eq!(snapshot.op_count(), op_count);
-        assert_eq!(snapshot.inactivity_floor_loc(), db.inactivity_floor_loc());
-        assert_eq!(snapshot.last_commit_loc(), db.last_commit_loc());
 
         let (proof, ops) = snapshot.proof(Location::new(0), NZU64!(100)).await.unwrap();
         assert!(verify_proof::<Sha256, _, _>(
