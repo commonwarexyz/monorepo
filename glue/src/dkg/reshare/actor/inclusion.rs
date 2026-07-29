@@ -4,7 +4,7 @@ use crate::dkg::{
         Actor, EpochInfoResponse, Message,
         actor::Mode,
         metrics::Phase,
-        store::{Dealer, Store},
+        store::{Dealer, Player, Store},
     },
     types::{EpochInfo, EpochOutcome, Participants, Payload},
 };
@@ -16,7 +16,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
     bls12381::{
-        dkg::feldman_desmedt::{DealerLog, Info, Logs, observe},
+        dkg::feldman_desmedt::{DealerLog, Info, Logs, Output, observe},
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
     certificate::Scheme,
@@ -25,12 +25,13 @@ use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Manager};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage, signal,
+    BufferPooler, Clock, Handle, Metrics, Spawner, Storage as RuntimeStorage, signal,
     telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
     Acknowledgement, N3f1,
     channel::{fallible::OneshotExt, oneshot},
+    futures::OptionFuture,
     ordered::Set,
 };
 use futures::StreamExt;
@@ -42,22 +43,138 @@ use std::{
 };
 use tracing::{Instrument as _, debug, info, info_span, warn};
 
+/// The exact effective dealer-log view used for one verification.
+type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
+
+/// Boundary-block requests waiting for the current verification target.
+///
+/// Retargeting must drain these with [`EpochInfoResponse::Pending`] before
+/// accepting waiters for the replacement.
+type ArtifactWaiters<V, C> = Vec<oneshot::Sender<EpochInfoResponse<V, C>>>;
+
+/// A locally reconstructed boundary artifact and this node's matching share.
+///
+/// This value is phase-local. It becomes durable only after the same
+/// [`EpochInfo`] appears in a finalized boundary block.
 #[derive(Clone)]
 struct Artifact<V: BlsVariant, C: Signer> {
     info: EpochInfo<V, C::PublicKey>,
     share: Option<Share>,
 }
 
-type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
+/// The output of successful dealer-log verification.
+///
+/// `share` is present when this node participated as a player and absent when
+/// it only observed the public ceremony.
+#[derive(Clone)]
+struct Ceremony<V: BlsVariant, C: Signer> {
+    output: Output<V, C::PublicKey>,
+    share: Option<Share>,
+}
 
+/// A verification result bound to the complete log view that produced it.
+///
+/// An absent `ceremony` means the log view proves that the ceremony failed.
+struct VerifiedLogs<V: BlsVariant, C: Signer> {
+    logs: PendingLogs<V, C::PublicKey>,
+    ceremony: Option<Ceremony<V, C>>,
+}
+
+/// Tracks verification for the latest effective dealer-log set.
+///
+/// CPU work is allowed to finish once started. If the target changes while it
+/// runs, only the latest log set is retained and started after the active task
+/// completes. This bounds verification to one shared task at a time. All state
+/// is reconstructable after a crash; no speculative result is persisted.
+struct Verification<V: BlsVariant, C: Signer> {
+    target: PendingLogs<V, C::PublicKey>,
+    task: OptionFuture<Handle<VerifiedLogs<V, C>>>,
+    result: Option<VerifiedLogs<V, C>>,
+}
+
+impl<V: BlsVariant, C: Signer> Verification<V, C> {
+    /// Creates an idle verifier targeting `target`.
+    fn new(target: PendingLogs<V, C::PublicKey>) -> Self {
+        Self {
+            target,
+            task: None.into(),
+            result: None,
+        }
+    }
+
+    /// Selects the latest desired log view without interrupting active work.
+    ///
+    /// Returns whether the target changed. Any completed result for the old
+    /// target is discarded immediately. On change, the caller must also
+    /// invalidate assembled artifacts and resolve old-target waiters.
+    fn retarget(&mut self, target: PendingLogs<V, C::PublicKey>) -> bool {
+        if self.target == target {
+            return false;
+        }
+
+        self.target = target;
+        self.result = None;
+        true
+    }
+
+    /// Installs the sole active task for the current target.
+    fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
+        assert!(self.task.is_none(), "verification task already running");
+        assert!(self.result.is_none(), "verification result already available");
+        self.task = Some(task).into();
+    }
+
+    /// Accepts `result` only when it matches the latest target.
+    ///
+    /// Returns false for obsolete work so the caller can start the latest
+    /// target after the active CPU task has exited.
+    fn complete(&mut self, result: VerifiedLogs<V, C>) -> bool {
+        self.task = None.into();
+        if result.logs != self.target {
+            return false;
+        }
+
+        self.result = Some(result);
+        true
+    }
+
+    /// Returns the ceremony result only for the requested exact log view.
+    ///
+    /// The outer `None` means no matching verification has completed;
+    /// `Some(None)` means verification completed and the ceremony failed.
+    fn ready(
+        &self,
+        logs: &PendingLogs<V, C::PublicKey>,
+    ) -> Option<&Option<Ceremony<V, C>>> {
+        self.result
+            .as_ref()
+            .filter(|result| result.logs == *logs)
+            .map(|result| &result.ceremony)
+    }
+}
+
+impl<V: BlsVariant, C: Signer> Drop for Verification<V, C> {
+    fn drop(&mut self) {
+        // Dropping a runtime handle does not stop its task. Abort explicitly so
+        // work that has not begun polling cannot outlive the inclusion phase.
+        // Synchronous crypto already executing in a poll may still finish.
+        if let Some(task) = self.task.as_ref() {
+            task.abort();
+        }
+    }
+}
+
+/// A fully assembled artifact cached for one exact verified log view.
+///
+/// The cache avoids repeating participant-policy and secret-store lookups for
+/// competing boundary-block requests. It is scoped to one inclusion phase,
+/// never acts as recovery state, and may contain `None` for failed one-shot DKG.
 struct CachedArtifact<V: BlsVariant, C: Signer> {
-    // The cache is valid only for this exact effective view of finalized and
-    // pending logs. It lives for one inclusion phase and never owns durable
-    // protocol state.
     logs: PendingLogs<V, C::PublicKey>,
     artifact: Option<Artifact<V, C>>,
 }
 
+/// Bounds used to extract non-finalized dealer logs from block ancestry.
 struct PendingLogScan<'a, V: BlsVariant, P> {
     epoch: Epoch,
     info: &'a Info<V, P>,
@@ -66,6 +183,66 @@ struct PendingLogScan<'a, V: BlsVariant, P> {
     final_height: Height,
 }
 
+/// An owned, side-effect-free snapshot for dealer-log verification.
+///
+/// The task contains no store, provider, registrar, or metrics handle. It can
+/// therefore be abandoned by a crash or superseded without exposing partial
+/// protocol state.
+struct VerificationTask<V, C, T>
+where
+    V: BlsVariant,
+    C: Signer,
+    T: Strategy,
+{
+    epoch: Epoch,
+    player: Option<Player<V, C>>,
+    logs: Logs<V, C::PublicKey, N3f1>,
+    strategy: T,
+}
+
+impl<V, C, T> VerificationTask<V, C, T>
+where
+    V: BlsVariant,
+    C: Signer,
+    T: Strategy,
+{
+    /// Verifies and selects dealer logs, deriving the public output and local
+    /// share when this node is a player.
+    ///
+    /// Failure is represented by `None` and assembled into the protocol's DKG
+    /// or reshare failure response later on the actor task.
+    fn run<E, BV>(self, mut context: E) -> Option<Ceremony<V, C>>
+    where
+        E: CryptoRng,
+        BV: BatchVerifier<PublicKey = C::PublicKey>,
+    {
+        if let Some(player) = self.player {
+            match player.finalize::<N3f1, BV>(&mut context, self.logs, &self.strategy) {
+                Ok((output, share)) => Some(Ceremony {
+                    output,
+                    share: Some(share),
+                }),
+                Err(error) => {
+                    warn!(epoch = ?self.epoch, ?error, "failed to finalize player");
+                    None
+                }
+            }
+        } else {
+            match observe::<_, _, N3f1, BV>(&mut context, self.logs, &self.strategy) {
+                Ok(output) => Some(Ceremony {
+                    output,
+                    share: None,
+                }),
+                Err(error) => {
+                    warn!(epoch = ?self.epoch, ?error, "failed to observe reshare outcome");
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Rejects participant sets that cannot be embedded in a valid future epoch.
 fn validate_future_participants<V: BlsVariant, P: PublicKey>(
     participants: &Set<P>,
     max_participants: NonZeroU32,
@@ -191,6 +368,11 @@ where
     /// block. At that point, any included final epoch info has been committed to
     /// the store, the registrar has been updated, and the fence has been
     /// unlocked for the next epoch.
+    ///
+    /// Verification tasks and assembled artifacts are intentionally ephemeral.
+    /// Finalized dealer logs are journaled before their reporter is acknowledged,
+    /// and a restart reconstructs the boundary artifact from canonical blocks and
+    /// replayed storage rather than trusting an interrupted task or cache.
     pub(super) async fn inclusion(
         &mut self,
         epoch: Epoch,
@@ -208,11 +390,44 @@ where
         let mut finalized_tip = self.marshal.get_processed_height().await;
         let mut next_players = None;
         let mut artifact_cache = None;
+        let initial_logs = store.logs(epoch);
+        let mut verification = Verification::new(initial_logs);
+        self.start_verification(&mut verification, epoch, info, store);
+        let mut artifact_waiters: ArtifactWaiters<V, C> = Vec::new();
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("shutdown signal received");
                 return ControlFlow::Break(());
+            },
+            completed = &mut verification.task => {
+                let completed = completed.expect("verification task failed");
+                if !verification.complete(completed) {
+                    self.start_verification(&mut verification, epoch, info, store);
+                    continue;
+                }
+                if artifact_waiters.is_empty() {
+                    continue;
+                }
+                let logs = verification.target.clone();
+                let ceremony = verification
+                    .ready(&logs)
+                    .expect("completed verification must have a result")
+                    .clone();
+                let artifact = self
+                    .artifact(
+                        epoch,
+                        store,
+                        logs,
+                        &ceremony,
+                        &mut next_players,
+                        &mut artifact_cache,
+                    )
+                    .await;
+                let result = self.artifact_response(&artifact);
+                for waiter in artifact_waiters.drain(..) {
+                    let _ = waiter.send_lossy(result.clone());
+                }
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
@@ -295,28 +510,39 @@ where
                         if response.is_closed() {
                             return;
                         }
-                        let artifact = self
-                            .artifact(
-                                epoch,
-                                info,
-                                store,
-                                Some(&pending_logs),
-                                &mut next_players,
-                                &mut artifact_cache,
-                            )
-                            .await;
-                        let result = match artifact {
-                            Some(artifact) => {
-                                EpochInfoResponse::Available(Some(Payload::EpochInfo(
-                                    artifact.info,
-                                )))
+                        let mut log_map = store.logs(epoch);
+                        for (dealer, log) in pending_logs {
+                            log_map.entry(dealer).or_insert(log);
+                        }
+                        if self.replace_verification(
+                            &mut verification,
+                            epoch,
+                            info,
+                            store,
+                            log_map.clone(),
+                        ) {
+                            artifact_cache = None;
+                            for waiter in artifact_waiters.drain(..) {
+                                let _ = waiter.send_lossy(EpochInfoResponse::Pending);
                             }
-                            None if matches!(self.mode, Mode::Dkg { .. }) => {
-                                EpochInfoResponse::Available(None)
-                            }
-                            None => EpochInfoResponse::Unavailable,
-                        };
-                        let _ = response.send_lossy(result);
+                        }
+
+                        if let Some(ceremony) = verification.ready(&log_map).cloned() {
+                            let artifact = self
+                                .artifact(
+                                    epoch,
+                                    store,
+                                    log_map,
+                                    &ceremony,
+                                    &mut next_players,
+                                    &mut artifact_cache,
+                                )
+                                .await;
+                            let _ = response.send_lossy(self.artifact_response(&artifact));
+                            return;
+                        }
+                        artifact_waiters.retain(|waiter| !waiter.is_closed());
+                        artifact_waiters.push(response);
                     }
                     .instrument(process)
                     .await;
@@ -358,17 +584,53 @@ where
                         .await;
 
                         let done = block.height() == bounds.last();
+                        let canonical_logs = store.logs(epoch);
+                        if self.replace_verification(
+                            &mut verification,
+                            epoch,
+                            info,
+                            store,
+                            canonical_logs.clone(),
+                        ) {
+                            artifact_cache = None;
+                            for waiter in artifact_waiters.drain(..) {
+                                let _ = waiter.send_lossy(EpochInfoResponse::Pending);
+                            }
+                        }
                         if done {
+                            while verification.ready(&canonical_logs).is_none() {
+                                let task = verification
+                                    .task
+                                    .take()
+                                    .expect("pending verification must have a task");
+                                let completed = task.await.expect("verification task failed");
+                                if !verification.complete(completed) {
+                                    self.start_verification(
+                                        &mut verification,
+                                        epoch,
+                                        info,
+                                        store,
+                                    );
+                                }
+                            }
+                            let ceremony = verification
+                                .ready(&canonical_logs)
+                                .expect("final verification must be cached")
+                                .clone();
                             let artifact = self
                                 .artifact(
                                     epoch,
-                                    info,
                                     store,
-                                    None,
+                                    canonical_logs,
+                                    &ceremony,
                                     &mut next_players,
                                     &mut artifact_cache,
                                 )
                                 .await;
+                            let result = self.artifact_response(&artifact);
+                            for waiter in artifact_waiters.drain(..) {
+                                let _ = waiter.send_lossy(result.clone());
+                            }
                             self.handle_finalized_epoch_info(
                                 epoch,
                                 store,
@@ -458,54 +720,85 @@ where
         }
     }
 
-    /// Build the final epoch artifact from finalized state plus pending logs.
+    /// Retargets asynchronous verification to an exact effective log set.
     ///
-    /// The resulting [`EpochInfo`] is a lookahead for `epoch + 1`: its output is
-    /// the outcome of this epoch's reshare, its players are this epoch's
-    /// next players, and its next players are fetched for the following epoch.
+    /// A running verification is never overlapped with its replacement. The
+    /// active task finishes first, after which only the latest target is run.
+    /// A true return value requires the caller to invalidate the assembled
+    /// artifact and resolve waiters for the old target with `Pending`.
+    fn replace_verification(
+        &mut self,
+        verification: &mut Verification<V, C>,
+        epoch: Epoch,
+        info: &Info<V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey>,
+        log_map: PendingLogs<V, C::PublicKey>,
+    ) -> bool {
+        if !verification.retarget(log_map) {
+            return false;
+        }
+
+        if verification.task.is_none() {
+            self.start_verification(verification, epoch, info, store);
+        }
+        true
+    }
+
+    /// Starts the current verification target on the shared pool.
     ///
-    /// Artifact construction never mutates metrics or durable state. A
-    /// speculative result is cached only for the exact effective dealer-log map
-    /// and becomes authoritative only if a matching final block is finalized.
-    async fn artifact(
+    /// The copied log map tags completion so obsolete results can be rejected
+    /// after retargeting. [`Verification::start`] enforces that no other task or
+    /// completed result is installed.
+    fn start_verification(
+        &mut self,
+        verification: &mut Verification<V, C>,
+        epoch: Epoch,
+        info: &Info<V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey>,
+    ) {
+        let log_map = verification.target.clone();
+        let task = self.verification_task(epoch, info, store, &log_map);
+        let handle = self
+            .context
+            .child("verification")
+            .shared(true)
+            .spawn(move |context| async move {
+                let ceremony = task.run::<E, BV>(context);
+                VerifiedLogs {
+                    logs: log_map,
+                    ceremony,
+                }
+            });
+        verification.start(handle);
+    }
+
+    /// Builds the owned inputs needed to verify one effective dealer-log set.
+    ///
+    /// Player state is reconstructed before spawning because it reads from the
+    /// actor-owned store. The returned task owns everything used by the shared
+    /// CPU worker and cannot mutate durable state or metrics.
+    fn verification_task(
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
-        pending_logs: Option<&PendingLogs<V, C::PublicKey>>,
-        next_players: &mut Option<Set<C::PublicKey>>,
-        artifact_cache: &mut Option<CachedArtifact<V, C>>,
-    ) -> Option<Artifact<V, C>> {
+        store: &Store<E, SS, V, C::PublicKey>,
+        log_map: &PendingLogs<V, C::PublicKey>,
+    ) -> VerificationTask<V, C, T> {
         let current = store.current();
-
-        // DKG mode is the only path that reaches inclusion without a current
-        // EpochInfo. In that case, the configured DKG participants are both the
-        // dealers and players for the one-shot ceremony.
         let dkg_participants = if current.is_none() {
             self.dkg_participants()
         } else {
             None
         };
-        if current.is_none() && dkg_participants.is_none() {
-            return None;
-        }
-
-        let mut log_map = store.logs(epoch);
-        if let Some(pending_logs) = pending_logs {
-            for (dealer, log) in pending_logs {
-                log_map.entry(dealer.clone()).or_insert_with(|| log.clone());
-            }
-        }
-
-        if let Some(cached) = artifact_cache
-            .as_ref()
-            .filter(|cached| cached.logs == log_map)
-        {
-            return cached.artifact.clone();
-        }
+        assert!(
+            current.is_some() || dkg_participants.is_some(),
+            "inclusion must have current epoch or DKG participants"
+        );
 
         let mut logs = Logs::<_, _, N3f1>::new(info.clone());
-        for (dealer, log) in log_map.clone() {
+        for (dealer, log) in log_map {
+            let dealer = dealer.clone();
+            let log = log.clone();
             logs.record(dealer, log);
         }
 
@@ -513,34 +806,55 @@ where
         let players = current
             .as_ref()
             .map(|current| current.players.clone())
-            .or(dkg_participants.clone())
+            .or(dkg_participants)
             .expect("current epoch or DKG mode must provide players");
         let player = players.position(&public_key).and_then(|_| {
             store.create_player_with_logs::<C, N3f1>(
                 epoch,
                 self.signer.clone(),
                 info.clone(),
-                &log_map,
+                log_map,
             )
         });
 
-        let outcome = if let Some(player) = player {
-            match player.finalize::<N3f1, BV>(self.context.as_present_mut(), logs, &self.strategy) {
-                Ok((output, share)) => Some((output, Some(share))),
-                Err(error) => {
-                    warn!(?epoch, ?error, "failed to finalize player");
-                    None
-                }
-            }
+        VerificationTask {
+            epoch,
+            player,
+            logs,
+            strategy: self.strategy.clone(),
+        }
+    }
+
+    /// Assembles final epoch information from an already verified ceremony.
+    ///
+    /// Participant policy and retained-share storage are consulted here, while
+    /// building or finalizing the boundary block, rather than by speculative
+    /// verification. Results are cached only for the exact effective log set.
+    /// A failed reshare carries the prior output and retained local share into a
+    /// failure artifact; a failed one-shot DKG produces no artifact.
+    async fn artifact(
+        &mut self,
+        epoch: Epoch,
+        store: &mut Store<E, SS, V, C::PublicKey>,
+        log_map: PendingLogs<V, C::PublicKey>,
+        ceremony: &Option<Ceremony<V, C>>,
+        next_players: &mut Option<Set<C::PublicKey>>,
+        cache: &mut Option<CachedArtifact<V, C>>,
+    ) -> Option<Artifact<V, C>> {
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.logs == log_map) {
+            return cached.artifact.clone();
+        }
+
+        let current = store.current();
+        let dkg_participants = if current.is_none() {
+            self.dkg_participants()
         } else {
-            match observe::<_, _, N3f1, BV>(self.context.as_present_mut(), logs, &self.strategy) {
-                Ok(output) => Some((output, None)),
-                Err(error) => {
-                    warn!(?epoch, ?error, "failed to observe reshare outcome");
-                    None
-                }
-            }
+            None
         };
+        assert!(
+            current.is_some() || dkg_participants.is_some(),
+            "inclusion must have current epoch or DKG participants"
+        );
 
         let future_players = if current.is_some() {
             match next_players {
@@ -563,49 +877,39 @@ where
                 }
             }
         } else {
-            Default::default()
+            Set::default()
         };
 
-        let artifact = match outcome {
-            Some((output, share)) => match current {
-                Some(current) => {
-                    let next_epoch = epoch.next();
-                    Some(Artifact {
-                        info: EpochInfo {
-                            outcome: EpochOutcome::Success,
-                            epoch: next_epoch,
-                            output,
-                            players: current.next_players,
-                            next_players: future_players,
-                        },
-                        share,
-                    })
-                }
-                None => {
-                    // DKG success emits the genesis threshold artifact directly.
-                    // There is no next committee to prefetch because this
-                    // one-shot chain terminates after epoch zero.
-                    let share = share.expect("DKG participant must receive a share");
-                    Some(Artifact {
-                        info: EpochInfo {
-                            outcome: EpochOutcome::Success,
-                            epoch,
-                            output,
-                            players,
-                            next_players: future_players,
-                        },
-                        share: Some(share),
-                    })
-                }
-            },
-            None => {
-                let Some(current) = current else {
-                    *artifact_cache = Some(CachedArtifact {
-                        logs: log_map,
-                        artifact: None,
-                    });
-                    return None;
-                };
+        let artifact = match (ceremony, current) {
+            (Some(ceremony), Some(current)) => Some(Artifact {
+                info: EpochInfo {
+                    outcome: EpochOutcome::Success,
+                    epoch: epoch.next(),
+                    output: ceremony.output.clone(),
+                    players: current.next_players,
+                    next_players: future_players,
+                },
+                share: ceremony.share.clone(),
+            }),
+            (Some(ceremony), None) => {
+                let share = ceremony
+                    .share
+                    .clone()
+                    .expect("DKG participant must receive a share");
+                Some(Artifact {
+                    info: EpochInfo {
+                        outcome: EpochOutcome::Success,
+                        epoch,
+                        output: ceremony.output.clone(),
+                        players: dkg_participants
+                            .expect("DKG mode must provide participants"),
+                        next_players: future_players,
+                    },
+                    share: Some(share),
+                })
+            }
+            (None, Some(current)) => {
+                let public_key = self.signer.public_key();
                 let share = if current.output.players().position(&public_key).is_some() {
                     store.share(epoch).await
                 } else {
@@ -622,13 +926,29 @@ where
                     share,
                 })
             }
+            (None, None) => None,
         };
 
-        *artifact_cache = Some(CachedArtifact {
+        *cache = Some(CachedArtifact {
             logs: log_map,
             artifact: artifact.clone(),
         });
         artifact
+    }
+
+    /// Maps local reconstruction into the application response contract.
+    ///
+    /// A failed one-shot DKG legitimately produces no boundary artifact. A
+    /// continuous reshare must always carry an artifact, including one that
+    /// records ceremony failure, so local absence is unavailable there.
+    fn artifact_response(&self, artifact: &Option<Artifact<V, C>>) -> EpochInfoResponse<V, C> {
+        match artifact {
+            Some(artifact) => {
+                EpochInfoResponse::Available(Some(Payload::EpochInfo(artifact.info.clone())))
+            }
+            None if matches!(self.mode, Mode::Dkg { .. }) => EpochInfoResponse::Available(None),
+            None => EpochInfoResponse::Unavailable,
+        }
     }
 
     /// Commit finalized epoch info and configure the next epoch.
@@ -707,11 +1027,14 @@ mod tests {
     use crate::dkg::tests::mocks::{TestBlock, TestBlsVariant};
     use commonware_cryptography::{
         Signer,
-        bls12381::primitives::sharing::Mode as SharingMode,
+        bls12381::{
+            dkg::feldman_desmedt::Dealer as CryptoDealer,
+            primitives::sharing::Mode as SharingMode,
+        },
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-    use commonware_utils::{N3f1, NZU32, NZU64, channel::oneshot, ordered::Set};
+    use commonware_utils::{N3f1, NZU32, NZU64, channel::oneshot, ordered::Set, test_rng};
     use futures::{FutureExt, stream};
     use std::sync::Arc;
 
@@ -751,6 +1074,17 @@ mod tests {
             finalized_tip: None,
             final_height: Height::new(3),
         }
+    }
+
+    fn dealer_logs(index: usize) -> PendingLogs<TestBlsVariant, PublicKey> {
+        let info = info();
+        let signer = signers()[index].clone();
+        let (dealer, _, _) =
+            CryptoDealer::start::<N3f1>(test_rng(), info.clone(), signer, None)
+                .expect("dealer should start");
+        let signed = dealer.finalize::<N3f1>();
+        let (public_key, log) = signed.check(&info).expect("dealer log should be valid");
+        BTreeMap::from([(public_key, log)])
     }
 
     #[test]
@@ -829,4 +1163,74 @@ mod tests {
             stop.await.expect("stop task should finish");
         });
     }
+
+    #[test]
+    fn verification_keeps_only_latest_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let first = dealer_logs(0);
+            let second = dealer_logs(1);
+            let latest = dealer_logs(2);
+            let completed_logs = first.clone();
+            let (release_tx, release_rx) = oneshot::channel();
+            let task = context.child("first").spawn(|_| async move {
+                release_rx.await.expect("task should be released");
+                VerifiedLogs::<TestBlsVariant, PrivateKey> {
+                    logs: completed_logs,
+                    ceremony: None,
+                }
+            });
+            let mut verification = Verification::new(first);
+            verification.start(task);
+
+            assert!(verification.retarget(second));
+            assert!(verification.retarget(latest.clone()));
+            release_tx.send(()).expect("task should still be running");
+            let completed = verification
+                .task
+                .take()
+                .expect("task should be present")
+                .await
+                .expect("task should complete");
+
+            assert!(!verification.complete(completed));
+            assert_eq!(verification.target, latest);
+            assert!(verification.task.is_none());
+            assert!(verification.result.is_none());
+        });
+    }
+
+    #[test]
+    fn verification_reuses_active_target_after_retargeting() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let active = dealer_logs(0);
+            let replacement = dealer_logs(1);
+            let completed_logs = active.clone();
+            let (release_tx, release_rx) = oneshot::channel();
+            let task = context.child("active").spawn(|_| async move {
+                release_rx.await.expect("task should be released");
+                VerifiedLogs::<TestBlsVariant, PrivateKey> {
+                    logs: completed_logs,
+                    ceremony: None,
+                }
+            });
+            let mut verification = Verification::new(active.clone());
+            verification.start(task);
+
+            assert!(verification.retarget(replacement));
+            assert!(verification.retarget(active.clone()));
+            release_tx.send(()).expect("task should still be running");
+            let completed = verification
+                .task
+                .take()
+                .expect("task should be present")
+                .await
+                .expect("task should complete");
+
+            assert!(verification.complete(completed));
+            assert!(verification.ready(&active).is_some());
+        });
+    }
+
 }
