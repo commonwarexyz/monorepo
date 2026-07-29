@@ -507,7 +507,7 @@ where
                 }
 
                 // Store and forward to voter
-                let proposal_changed = work
+                let reprocess_votes = work
                     .entry(view)
                     .or_insert_with(|| self.new_round(view))
                     .record_certificate(&message);
@@ -515,7 +515,7 @@ where
 
                 // Reprocess buffered votes only if the notarization changed the
                 // round's proposal.
-                if !proposal_changed {
+                if !reprocess_votes {
                     // Otherwise, certificates are already forwarded to voter,
                     // no need for construction.
                     continue;
@@ -590,7 +590,8 @@ where
                     "updated view must be greater than zero"
                 );
 
-                // Forward leader's proposal to voter (if we're not the leader and haven't already)
+                // Forward the selected proposal to voter if we are not the
+                // leader and have not already forwarded it.
                 if let Some(round) = work.get_mut(&current.view)
                     && let Some(me) = self.scheme.me()
                     && let Some(proposal) = round.try_forward_proposal(me)

@@ -40,7 +40,7 @@ pub struct Round<
     /// proposal-switch recovery.
     votes: VoteTracker<S, D>,
 
-    /// Whether we've already sent the leader's proposal to the voter.
+    /// Whether we've already sent the selected proposal to the voter.
     proposal_sent: bool,
 
     /// Root span of the view, shared with the voter's round.
@@ -107,9 +107,8 @@ impl<
                 self.set_authoritative_proposal(&notarization.proposal)
             }
             Certificate::Finalization(finalization) => {
-                self.verifier.set_proposal(ProposalState::Authoritative(
-                    finalization.proposal.clone(),
-                ));
+                self.verifier
+                    .set_proposal(ProposalState::Authoritative(finalization.proposal.clone()));
                 false
             }
             Certificate::Nullification(_) => false,
@@ -305,7 +304,7 @@ impl<
             }
         }
 
-        // The verifier drops votes for a different proposal than the leader's.
+        // The verifier drops votes for a different proposal than the selected one.
         self.verifier.add(message, true);
     }
 

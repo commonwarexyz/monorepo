@@ -807,21 +807,17 @@ mod tests {
         // from the leader's vote.
         let notarized_proposal = Proposal::new(round, View::new(0), sample_digest(2));
         assert_ne!(notarized_proposal, leader_notarize.proposal);
-        assert!(verifier2.set_proposal(ProposalState::Authoritative(
-            notarized_proposal.clone()
-        )));
+        assert!(verifier2.set_proposal(ProposalState::Authoritative(notarized_proposal.clone())));
         assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
         // Re-adopting the same proposal reports no change.
-        assert!(!verifier2.set_proposal(ProposalState::Authoritative(
-            notarized_proposal.clone()
-        )));
+        assert!(!verifier2.set_proposal(ProposalState::Authoritative(notarized_proposal.clone())));
 
         // The first notarization remains authoritative.
         let conflicting_notarized_proposal = Proposal::new(round, View::new(0), sample_digest(3));
-        assert!(!verifier2.set_proposal(ProposalState::Authoritative(
-            conflicting_notarized_proposal
-        )));
+        assert!(
+            !verifier2.set_proposal(ProposalState::Authoritative(conflicting_notarized_proposal))
+        );
         assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
         // If the notarization arrives first, setting the leader cannot replace
@@ -831,9 +827,7 @@ mod tests {
             schemes[0].clone(),
             quorum,
         );
-        assert!(verifier3.set_proposal(ProposalState::Authoritative(
-            notarized_proposal.clone()
-        )));
+        assert!(verifier3.set_proposal(ProposalState::Authoritative(notarized_proposal.clone())));
         assert!(verifier3.leader().is_none());
         assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
         verifier3.set_leader(leader, Some(&leader_notarize));
