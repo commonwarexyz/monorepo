@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn test_sync_target_read_invalid_bounds() {
-        // Manually encode root + two Locations with reversed bounds.
+        // Manually encode root + two Locations with reversed bounds
         let mut buffer = Vec::new();
         sha256::Digest::from([42; 32]).write(&mut buffer);
         Location::<MmrFamily>::new(100).write(&mut buffer); // start
