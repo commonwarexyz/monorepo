@@ -107,6 +107,8 @@ impl<
                 self.set_authoritative_proposal(&notarization.proposal)
             }
             Certificate::Finalization(finalization) => {
+                // A finalization may replace the leader-selected proposal, but its
+                // certificate makes reprocessing buffered finalize votes unnecessary.
                 self.verifier
                     .set_proposal(ProposalState::Authoritative(finalization.proposal.clone()));
                 false
