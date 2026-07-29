@@ -1,26 +1,37 @@
 //! Fuzz driver for marshal with prunable finalized archives.
 
+use crate::{
+    SimplexCertificateMock,
+    marshal::end_to_end::twins::{PublicKeyOf, SchemeOf},
+    simplex::Simplex as _,
+};
 use arbitrary::Arbitrary;
+use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Heightable,
+    Heightable, Reporter as _,
     marshal::{
-        Identifier,
-        mocks::harness::{
-            B, D, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
-            StandardHarness, TestHarness, V, ValidatorHandle, setup_network_with_participants,
+        Config, Identifier, Start,
+        core::{Actor, Mailbox},
+        mocks::{
+            application::Application,
+            harness::{
+                B, BLOCKS_PER_EPOCH, D, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
+                QUORUM, StandardHarness, TEST_QUOTA, TestHarness, setup_network_with_participants,
+            },
         },
+        resolver::p2p as resolver,
+        standard::Standard,
         store::{Blocks as StoreBlocks, Certificates as StoreCertificates},
     },
-    simplex::{
-        scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-        types::{Finalization, Proposal},
-    },
-    types::{Epoch, Height, Round, View},
+    simplex::types::{Activity, Finalization, Finalize, Proposal},
+    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digestible,
-    certificate::{Verifier as _, mocks::Fixture},
+    certificate::{ConstantProvider, Verifier as _},
 };
+use commonware_p2p::simulated::Oracle;
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     archive::{Identifier as ArchiveIdentifier, prunable},
@@ -28,6 +39,127 @@ use commonware_storage::{
 };
 use commonware_utils::{FuzzRng, NZU64, NZUsize};
 use std::time::Duration;
+
+/// The store fuzzer runs on the cheap certificate mock; `K` is unchanged
+/// (ed25519), so only the certificate scheme differs from the harness default.
+type CertScheme = SchemeOf<SimplexCertificateMock>;
+type K = PublicKeyOf<SimplexCertificateMock>;
+type StoreVariant = Standard<B>;
+
+/// Certificate-mock port of the harness prunable-validator setup: identical
+/// wiring, with the BLS scheme replaced by the certificate mock.
+#[allow(clippy::type_complexity)]
+async fn setup_prunable_validator_cert_mock(
+    context: deterministic::Context,
+    oracle: &Oracle<K, deterministic::Context>,
+    validator: K,
+    schemes: &[CertScheme],
+    partition_prefix: &str,
+    page_cache: CacheRef,
+) -> (
+    Mailbox<CertScheme, StoreVariant>,
+    buffered::Mailbox<K, B>,
+    Application<B>,
+) {
+    let control = oracle.control(validator.clone());
+    let provider = ConstantProvider::new(schemes[0].clone());
+    let config = Config {
+        provider,
+        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+        start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+        mailbox_size: NZUsize!(100),
+        view_retention: ViewDelta::new(10),
+        max_repair: NZUsize!(10),
+        max_pending_acks: NZUsize!(1),
+        block_codec_config: (),
+        partition_prefix: partition_prefix.to_string(),
+        prunable_items_per_section: NZU64!(10),
+        replay_buffer: NZUsize!(1024),
+        key_write_buffer: NZUsize!(1024),
+        value_write_buffer: NZUsize!(1024),
+        page_cache: page_cache.clone(),
+        strategy: Sequential,
+    };
+
+    let backfill = control.register(0, TEST_QUOTA).await.unwrap();
+    let resolver = resolver::init(
+        context.child("resolver"),
+        resolver::Config {
+            public_key: validator.clone(),
+            peer_provider: oracle.manager(),
+            blocker: control.clone(),
+            mailbox_size: config.mailbox_size,
+            initial: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
+        },
+        backfill,
+    );
+
+    let (broadcast_engine, buffer) = buffered::Engine::new(
+        context.child("broadcast"),
+        buffered::Config {
+            public_key: validator.clone(),
+            mailbox_size: config.mailbox_size,
+            deque_size: 10,
+            priority: false,
+            codec_config: (),
+            peer_provider: oracle.manager(),
+        },
+    );
+    let network = control.register(1, TEST_QUOTA).await.unwrap();
+    broadcast_engine.start(network);
+
+    let finalizations_by_height = prunable::Archive::init(
+        context.child("finalizations_by_height"),
+        prunable::Config {
+            translator: EightCap,
+            key_partition: format!("{partition_prefix}-finalizations-by-height-key"),
+            key_page_cache: page_cache.clone(),
+            value_partition: format!("{partition_prefix}-finalizations-by-height-value"),
+            compression: None,
+            codec_config: CertScheme::certificate_codec_config_unbounded(),
+            items_per_section: NZU64!(10),
+            key_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
+            replay_buffer: config.replay_buffer,
+        },
+    )
+    .await
+    .expect("failed to initialize finalizations by height archive");
+
+    let finalized_blocks = prunable::Archive::init(
+        context.child("finalized_blocks"),
+        prunable::Config {
+            translator: EightCap,
+            key_partition: format!("{partition_prefix}-finalized-blocks-key"),
+            key_page_cache: page_cache.clone(),
+            value_partition: format!("{partition_prefix}-finalized-blocks-value"),
+            compression: None,
+            codec_config: config.block_codec_config,
+            items_per_section: NZU64!(10),
+            key_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
+            replay_buffer: config.replay_buffer,
+        },
+    )
+    .await
+    .expect("failed to initialize finalized blocks archive");
+
+    let (actor, mailbox, _) = Actor::init(
+        context.child("actor"),
+        finalizations_by_height,
+        finalized_blocks,
+        config,
+    )
+    .await;
+    let application = Application::<B>::default();
+    actor.start(application.clone(), buffer.clone(), resolver);
+
+    (mailbox, buffer, application)
+}
 
 const NUM_BLOCKS: u64 = 16;
 const MIN_OPS: usize = 1;
@@ -138,12 +270,12 @@ impl Arbitrary<'_> for StoreOp {
 }
 
 #[derive(Debug, Clone)]
-pub struct MarshalStoreInput {
+pub struct MarshalActorStoreInput {
     pub raw_bytes: Vec<u8>,
     pub ops: Vec<StoreOp>,
 }
 
-impl Arbitrary<'_> for MarshalStoreInput {
+impl Arbitrary<'_> for MarshalActorStoreInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let op_count = u.int_in_range(MIN_OPS..=MAX_OPS)?;
         let mut ops = Vec::with_capacity(op_count);
@@ -223,13 +355,18 @@ fn make_chain() -> Vec<B> {
     blocks
 }
 
-fn make_finalization(block: &B, schemes: &[S]) -> Finalization<S, D> {
+fn make_finalization(block: &B, schemes: &[CertScheme]) -> Finalization<CertScheme, D> {
     let proposal = Proposal::new(
         round_for_height(block.height()),
         parent_view(block.height()),
         block.digest(),
     );
-    StandardHarness::make_finalization(proposal, schemes, QUORUM)
+    let finalizes: Vec<_> = schemes
+        .iter()
+        .take(QUORUM as usize)
+        .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+        .collect();
+    Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
 }
 
 fn assert_returned_block(block: &B, returned: B, label: &str) {
@@ -241,17 +378,17 @@ fn assert_returned_block(block: &B, returned: B, label: &str) {
     );
 }
 
-pub fn fuzz_marshal_store(input: MarshalStoreInput) {
+/// Crypto: `SimplexCertificateMock`. Marshal: standard, store driven directly
+/// below the wrapper. Cluster: single validator, prunable archives. Liveness:
+/// not checked. App: none (plain delivery sink).
+pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let Fixture {
-            participants,
-            schemes,
-            ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let (participants, schemes) =
+            SimplexCertificateMock::setup(&mut context, NAMESPACE, NUM_VALIDATORS);
         let oracle = setup_network_with_participants(
             context.child("network"),
             NZUsize!(1),
@@ -275,7 +412,7 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-direct-finalizations-value"),
                 compression: None,
-                codec_config: S::certificate_codec_config_unbounded(),
+                codec_config: CertScheme::certificate_codec_config_unbounded(),
                 items_per_section: NZU64!(10),
                 key_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
@@ -302,7 +439,7 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
         .await
         .expect("failed to initialize direct blocks archive");
 
-        let setup = StandardHarness::setup_prunable_validator(
+        let setup = setup_prunable_validator_cert_mock(
             context.child("validator"),
             &oracle,
             validator.clone(),
@@ -312,24 +449,18 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
         )
         .await;
         let mut application = setup.2;
-        let mut handle = ValidatorHandle::<StandardHarness> {
-            mailbox: setup.0,
-            extra: setup.1,
-        };
+        let mut mailbox = setup.0;
 
         for op in input.ops {
             match op {
                 StoreOp::SeedBlock { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    StandardHarness::verify_for_prune(&mut handle, block.context.round, block)
-                        .await;
+                    assert!(mailbox.verified(block.context.round, block.clone()).await);
                 }
                 StoreOp::ReportFinalization { block_idx } => {
-                    StandardHarness::report_finalization(
-                        &mut handle.mailbox,
+                    mailbox.report(Activity::Finalization(
                         finalizations[block_index(block_idx)].clone(),
-                    )
-                    .await;
+                    ));
                 }
                 StoreOp::GetBlock {
                     block_idx,
@@ -337,9 +468,9 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 } => {
                     let block = &canonical[block_index(block_idx)];
                     let returned = if by_digest {
-                        handle.mailbox.get_block(&block.digest()).await
+                        mailbox.get_block(&block.digest()).await
                     } else {
-                        handle.mailbox.get_block(block.height()).await
+                        mailbox.get_block(block.height()).await
                     };
                     if let Some(returned) = returned {
                         assert_returned_block(block, returned, "GetBlock");
@@ -348,9 +479,9 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 StoreOp::GetInfo { block_idx, latest } => {
                     let block = &canonical[block_index(block_idx)];
                     let returned = if latest {
-                        handle.mailbox.get_info(Identifier::Latest).await
+                        mailbox.get_info(Identifier::Latest).await
                     } else {
-                        handle.mailbox.get_info(block.height()).await
+                        mailbox.get_info(block.height()).await
                     };
                     if let Some((height, digest)) = returned
                         && height.get() != 0
@@ -368,9 +499,7 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 }
                 StoreOp::GetFinalization { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    if let Some(finalization) =
-                        handle.mailbox.get_finalization(block.height()).await
-                    {
+                    if let Some(finalization) = mailbox.get_finalization(block.height()).await {
                         assert_eq!(
                             finalization.proposal.payload,
                             block.digest(),
@@ -381,13 +510,13 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                 }
                 StoreOp::Prune { block_idx } => {
                     let height = Height::new(block_index(block_idx) as u64 + 1);
-                    handle.mailbox.prune(height);
+                    mailbox.prune(height);
                 }
                 StoreOp::Restart => {
-                    drop(handle);
+                    drop(mailbox);
                     drop(application);
                     context.sleep(EVENT_SETTLE).await;
-                    let setup = StandardHarness::setup_prunable_validator(
+                    let setup = setup_prunable_validator_cert_mock(
                         context.child("validator_restart"),
                         &oracle,
                         validator.clone(),
@@ -397,15 +526,12 @@ pub fn fuzz_marshal_store(input: MarshalStoreInput) {
                     )
                     .await;
                     application = setup.2;
-                    handle = ValidatorHandle::<StandardHarness> {
-                        mailbox: setup.0,
-                        extra: setup.1,
-                    };
+                    mailbox = setup.0;
                 }
                 StoreOp::ObserveApplication => {
                     let _ = application.tip();
                     let _ = application.blocks();
-                    let _ = handle.mailbox.get_processed_height().await;
+                    let _ = mailbox.get_processed_height().await;
                 }
                 StoreOp::DirectPutBlock { block_idx } => {
                     let block = canonical[block_index(block_idx)].clone();

@@ -7,7 +7,12 @@
 //! `(round, digest)` models an honest notarization and must therefore recover
 //! through the candidate's embedded context.
 
-use super::multi_node::invariants::CertificationAgreementInvariant;
+use super::end_to_end::invariants::CertificationAgreementInvariant;
+use crate::{
+    SimplexCertificateMock,
+    marshal::end_to_end::twins::{SchemeOf, stack::setup_validator},
+    simplex::Simplex as _,
+};
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_broadcast::Broadcaster as _;
@@ -18,18 +23,16 @@ use commonware_consensus::{
         Update,
         ancestry::Ancestry,
         mocks::harness::{
-            B, BLOCKS_PER_EPOCH, D, K, NAMESPACE, NUM_VALIDATORS, S, StandardHarness, TestHarness,
-            V, setup_network_with_participants,
+            B, BLOCKS_PER_EPOCH, D, K, NAMESPACE, NUM_VALIDATORS, StandardHarness, TestHarness,
+            setup_network_with_participants,
         },
         standard::{Deferred, Inline},
     },
-    simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
+    simplex::{Plan, types::Context},
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
 };
 use commonware_cryptography::{
-    Digestible, Hasher as _,
-    certificate::{ConstantProvider, mocks::Fixture},
-    sha256::Sha256,
+    Digestible, Hasher as _, certificate::ConstantProvider, sha256::Sha256,
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -37,6 +40,9 @@ use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize, channel::oneshot};
 use futures::StreamExt;
 use std::time::Duration;
+
+/// The standard-marshal fuzzer runs on the cheap certificate mock.
+type CertScheme = SchemeOf<SimplexCertificateMock>;
 
 const NUM_BLOCKS: u64 = 24;
 const MIN_EVENTS: usize = 1;
@@ -170,14 +176,14 @@ impl Arbitrary<'_> for InlineEvent {
 }
 
 #[derive(Debug, Clone)]
-pub struct MarshalInlineInput {
+pub struct MarshalActorStandardInput {
     pub raw_bytes: Vec<u8>,
     pub app_propose_idx: Option<u8>,
     pub app_verify_result: bool,
     pub events: Vec<InlineEvent>,
 }
 
-impl Arbitrary<'_> for MarshalInlineInput {
+impl Arbitrary<'_> for MarshalActorStandardInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
         let app_propose_idx = if u.arbitrary()? {
@@ -291,7 +297,7 @@ impl InlineApp {
 }
 
 impl ConsensusApplication<deterministic::Context> for InlineApp {
-    type SigningScheme = S;
+    type SigningScheme = CertScheme;
     type Context = Context<D, K>;
     type Block = B;
     type Input = ();
@@ -405,8 +411,8 @@ enum WrapperKind {
 
 #[derive(Clone)]
 enum Wrapper {
-    Inline(Inline<deterministic::Context, S, InlineApp, B, FixedEpocher>),
-    Deferred(Deferred<deterministic::Context, S, InlineApp, B, FixedEpocher>),
+    Inline(Inline<deterministic::Context, CertScheme, InlineApp, B, FixedEpocher>),
+    Deferred(Deferred<deterministic::Context, CertScheme, InlineApp, B, FixedEpocher>),
 }
 
 impl Wrapper {
@@ -415,7 +421,7 @@ impl Wrapper {
         context: deterministic::Context,
         application: InlineApp,
         marshal: commonware_consensus::marshal::core::Mailbox<
-            S,
+            CertScheme,
             commonware_consensus::marshal::standard::Standard<B>,
         >,
     ) -> Self {
@@ -471,17 +477,23 @@ impl Wrapper {
     }
 }
 
-fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
+/// Shared driver for [`fuzz_marshal_actor_inline`] and [`fuzz_marshal_actor_deferred`],
+/// selected by `kind`.
+///
+/// Fuzzes the marshal actor directly, not an end-to-end stack: one validator,
+/// no Simplex engine and no peers. The remaining identities only populate the
+/// validator set. The input supplies the application's proposed block and
+/// verify verdict plus the wrapper event sequence - seeds, proposals and
+/// verifications, including split-header equivocation - rather than
+/// certificates.
+fn fuzz_marshal_actor_standard(input: MarshalActorStandardInput, kind: WrapperKind) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let Fixture {
-            participants,
-            schemes,
-            ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let (participants, schemes) =
+            SimplexCertificateMock::setup(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = setup_network_with_participants(
             context.child("network"),
             NZUsize!(1),
@@ -490,15 +502,20 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
         .await;
 
         let me = participants[0].clone();
-        let setup = StandardHarness::setup_validator(
+        let mut setup = setup_validator::<SimplexCertificateMock>(
             context.child("validator"),
             &mut oracle,
             me.clone(),
             ConstantProvider::new(schemes[0].clone()),
+            StandardHarness::genesis_block(NUM_VALIDATORS as u16),
+            NZUsize!(64),
         )
         .await;
-        let marshal = setup.mailbox;
-        let buffer = setup.extra;
+        let marshal = setup.mailbox.clone();
+        let buffer = setup.buffer.clone();
+        // Validator setup defers actor startup until its reporter is selected.
+        let sink = setup.application.clone();
+        setup.start(sink);
 
         let (_genesis, canonical) = make_chain();
         let propose_result = input
@@ -683,12 +700,18 @@ fn fuzz_marshal_standard(input: MarshalInlineInput, kind: WrapperKind) {
     });
 }
 
-pub fn fuzz_marshal_inline(input: MarshalInlineInput) {
-    fuzz_marshal_standard(input, WrapperKind::Inline);
+/// Crypto: `SimplexCertificateMock`. Marshal: standard, inline. Cluster: single
+/// validator, no consensus engine. Liveness: not checked. App: from fuzz input
+/// (proposed block and verification verdict).
+pub fn fuzz_marshal_actor_inline(input: MarshalActorStandardInput) {
+    fuzz_marshal_actor_standard(input, WrapperKind::Inline);
 }
 
-pub fn fuzz_marshal_deferred(input: MarshalInlineInput) {
-    fuzz_marshal_standard(input, WrapperKind::Deferred);
+/// Crypto: `SimplexCertificateMock`. Marshal: standard, deferred. Cluster:
+/// single validator, no consensus engine. Liveness: not checked. App: from fuzz
+/// input (proposed block and verification verdict).
+pub fn fuzz_marshal_actor_deferred(input: MarshalActorStandardInput) {
+    fuzz_marshal_actor_standard(input, WrapperKind::Deferred);
 }
 
 #[cfg(test)]
@@ -697,7 +720,7 @@ mod tests {
 
     #[test]
     fn deferred_out_of_epoch_split_header_does_not_arm_recovery() {
-        fuzz_marshal_deferred(MarshalInlineInput {
+        fuzz_marshal_actor_deferred(MarshalActorStandardInput {
             raw_bytes: vec![0],
             app_propose_idx: None,
             app_verify_result: true,

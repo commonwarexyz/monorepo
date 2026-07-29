@@ -386,71 +386,57 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_single_node_standard"
-path = "fuzz_targets/marshal_single_node_standard.rs"
+name = "marshal_actor_standard_inline_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_inline_cert_mock.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_single_node_coding"
-path = "fuzz_targets/marshal_single_node_coding.rs"
+name = "marshal_actor_standard_deferred_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_deferred_cert_mock.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_standard_inline"
-path = "fuzz_targets/marshal_standard_inline.rs"
+name = "marshal_actor_standard_store_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_store_cert_mock.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_standard_deferred"
-path = "fuzz_targets/marshal_standard_deferred.rs"
+name = "marshal_e2e_standard_deferred_cert_mock_disrupter"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_disrupter.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_store_standard"
-path = "fuzz_targets/marshal_store_standard.rs"
+name = "marshal_e2e_standard_app_cert_mock_twins"
+path = "fuzz_targets/marshal_e2e_standard_app_cert_mock_twins.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_liveness_deferred"
-path = "fuzz_targets/marshal_multi_node_liveness_deferred.rs"
+name = "marshal_e2e_standard_deferred_id_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_deferred_id_twins_split_header.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_twins"
-path = "fuzz_targets/marshal_multi_node_twins.rs"
+name = "marshal_e2e_standard_inline_id_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_inline_id_twins_split_header.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_twins_id_split_header_deferred"
-path = "fuzz_targets/marshal_multi_node_twins_id_split_header_deferred.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_multi_node_twins_id_split_header_inline"
-path = "fuzz_targets/marshal_multi_node_twins_id_split_header_inline.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_multi_node_liveness_coding"
-path = "fuzz_targets/marshal_multi_node_liveness_coding.rs"
+name = "marshal_e2e_coding_cert_mock_disrupter"
+path = "fuzz_targets/marshal_e2e_coding_cert_mock_disrupter.rs"
 test = false
 doc = false
 bench = false

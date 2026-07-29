@@ -2,7 +2,7 @@
 
 use super::{Ctx, VERIFY_PROBE};
 use crate::{
-    marshal::multi_node::{
+    marshal::end_to_end::{
         app::FaultyConfig,
         invariants::{CertificationAgreementInvariant, HeaderMismatchInvariant},
     },

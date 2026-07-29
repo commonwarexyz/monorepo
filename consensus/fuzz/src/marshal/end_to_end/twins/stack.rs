@@ -26,7 +26,7 @@ use commonware_consensus::{
         resolver::{handler, p2p as resolver},
         standard::{Deferred, Inline, Standard},
     },
-    simplex::{Engine, Floor, Plan, config, types::Finalization},
+    simplex::{Engine, Floor, Plan, config, elector::Config as ElectorConfig, types::Finalization},
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -47,7 +47,7 @@ use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-pub(super) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 const POLL: Duration = Duration::from_millis(50);
 const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
 const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
@@ -56,14 +56,14 @@ const LEADER_TIMEOUT: Duration = Duration::from_millis(LEADER_TIMEOUT_MILLIS);
 const CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(CERTIFICATION_TIMEOUT_MILLIS);
 // The slow validator must time out in the precursor view, then finish early
 // enough to vote for the good header in the attack view.
-pub(super) const ATTACK_SLOW_VERIFY_DELAY: Duration =
+pub(crate) const ATTACK_SLOW_VERIFY_DELAY: Duration =
     Duration::from_millis(CERTIFICATION_TIMEOUT_MILLIS + ATTACK_TIMING_MARGIN_MILLIS);
 // The victim must remain uncertified while the attack-view header is checked.
-pub(super) const ATTACK_VICTIM_VERIFY_DELAY: Duration = Duration::from_millis(
+pub(crate) const ATTACK_VICTIM_VERIFY_DELAY: Duration = Duration::from_millis(
     CERTIFICATION_TIMEOUT_MILLIS + LEADER_TIMEOUT_MILLIS + ATTACK_TIMING_MARGIN_MILLIS,
 );
 
-pub(super) trait TwinsBlockBuilder<P: Simplex>:
+pub(crate) trait TwinsBlockBuilder<P: Simplex>:
     commonware_consensus::Application<
         deterministic::Context,
         SigningScheme = SchemeOf<P>,
@@ -125,7 +125,7 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
 }
 
 /// Instantiates the standard marshal wrapper used as the Simplex automaton and relay.
-pub(super) trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
+pub(crate) trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
     type Wrapper: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>
         + Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>
         + Reporter<Activity = Update<B<P>>>;
@@ -139,7 +139,7 @@ pub(super) trait TwinsMarshal<P: Simplex, A: TwinsBlockBuilder<P>> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MarshalChoice {
+pub(crate) enum MarshalChoice {
     Deferred,
     Inline,
 }
@@ -153,7 +153,7 @@ impl fmt::Display for MarshalChoice {
     }
 }
 
-pub(super) struct DeferredMarshal;
+pub(crate) struct DeferredMarshal;
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for DeferredMarshal {
     type Wrapper = Deferred<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>;
@@ -173,7 +173,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for DeferredMarshal
     }
 }
 
-pub(super) struct InlineMarshal;
+pub(crate) struct InlineMarshal;
 
 impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for InlineMarshal {
     type Wrapper = Inline<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>;
@@ -193,9 +193,9 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>> TwinsMarshal<P, A> for InlineMarshal {
     }
 }
 
-pub(super) struct SelectedMarshal;
+pub(crate) struct SelectedMarshal;
 
-pub(super) enum SelectedMarshalWrapper<P: Simplex, A: TwinsBlockBuilder<P>> {
+pub(crate) enum SelectedMarshalWrapper<P: Simplex, A: TwinsBlockBuilder<P>> {
     Deferred(Deferred<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>),
     Inline(Inline<deterministic::Context, SchemeOf<P>, A, B<P>, FixedEpocher>),
 }
@@ -311,16 +311,16 @@ type MarshalResolver<P> = (
     resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>,
 );
 
-pub(super) struct Validator<P: Simplex> {
-    pub(super) mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
-    pub(super) application: Application<B<P>>,
+pub(crate) struct Validator<P: Simplex> {
+    pub(crate) mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
+    pub(crate) application: Application<B<P>>,
     actor: Option<MarshalActor<P>>,
-    buffer: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
+    pub(crate) buffer: buffered::Mailbox<PublicKeyOf<P>, B<P>>,
     resolver: Option<MarshalResolver<P>>,
 }
 
 impl<P: Simplex> Validator<P> {
-    pub(super) fn start(&mut self, reporter: impl Reporter<Activity = Update<B<P>>>) {
+    pub(crate) fn start(&mut self, reporter: impl Reporter<Activity = Update<B<P>>>) {
         let actor = self
             .actor
             .take()
@@ -333,7 +333,7 @@ impl<P: Simplex> Validator<P> {
     }
 }
 
-pub(super) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
+pub(crate) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
     let parent = Sha256::hash(&[b""]);
     let context = Ctx::<P> {
         round: Round::new(Epoch::zero(), View::zero()),
@@ -343,7 +343,7 @@ pub(super) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
     B::<P>::new::<Sha256>(context, parent, Height::zero(), 0)
 }
 
-pub(super) async fn setup_network<P: Simplex>(
+pub(crate) async fn setup_network<P: Simplex>(
     context: deterministic::Context,
     participants: Vec<PublicKeyOf<P>>,
 ) -> Oracle<PublicKeyOf<P>, deterministic::Context> {
@@ -363,7 +363,7 @@ pub(super) async fn setup_network<P: Simplex>(
     oracle
 }
 
-pub(super) async fn setup_network_links<P: Simplex>(
+pub(crate) async fn setup_network_links<P: Simplex>(
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
 ) {
@@ -379,7 +379,7 @@ pub(super) async fn setup_network_links<P: Simplex>(
     }
 }
 
-pub(super) async fn setup_validator<P: Simplex>(
+pub(crate) async fn setup_validator<P: Simplex>(
     context: deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
@@ -538,7 +538,7 @@ pub(super) async fn setup_validator<P: Simplex>(
     }
 }
 
-pub(super) async fn register_engine_networks<P: Simplex>(
+pub(crate) async fn register_engine_networks<P: Simplex>(
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
 ) -> NetworkChannels<PublicKeyOf<P>> {
@@ -553,12 +553,12 @@ pub(super) async fn register_engine_networks<P: Simplex>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn start_engine<P: Simplex, A, R>(
+pub(crate) fn start_engine<P: Simplex, EC, A, R>(
     context: deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     scheme: SchemeOf<P>,
-    elector: crate::TwinsElector<P>,
+    elector: EC,
     automaton: A,
     relay: R,
     mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
@@ -578,6 +578,7 @@ pub(super) fn start_engine<P: Simplex, A, R>(
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) where
+    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
     A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
     R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {
@@ -619,7 +620,7 @@ fn trailing_blocks<P: Simplex>(application: &Application<B<P>>, prefix_end: View
         .count()
 }
 
-pub(super) async fn wait_for_liveness<P: Simplex>(
+pub(crate) async fn wait_for_liveness<P: Simplex>(
     context: &deterministic::Context,
     honest: &[(usize, Application<B<P>>)],
     prefix_end: View,

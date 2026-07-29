@@ -28,7 +28,7 @@ fn sample_fault_rounds(
 }
 
 #[derive(Debug, Clone)]
-pub struct MarshalLivenessInput {
+pub struct MarshalDisrupterInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub degraded_network: bool,
@@ -37,7 +37,7 @@ pub struct MarshalLivenessInput {
     pub forwarding: ForwardingPolicy,
 }
 
-impl Arbitrary<'_> for MarshalLivenessInput {
+impl Arbitrary<'_> for MarshalDisrupterInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let partition = match u.int_in_range(0..=99)? {
             0..=49 => Partition::Connected,

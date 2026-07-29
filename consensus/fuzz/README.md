@@ -109,11 +109,11 @@ The standard-wrapper targets exercise proposal, verification, certification,
 broadcast, and application-result transitions using structured libFuzzer input:
 
 ```bash
-cargo fuzz run marshal_standard_inline
-cargo fuzz run marshal_standard_deferred
-cargo fuzz run marshal_multi_node_twins
-cargo fuzz run marshal_multi_node_twins_id_split_header_deferred
-cargo fuzz run marshal_multi_node_twins_id_split_header_inline
+cargo fuzz run marshal_actor_standard_inline_cert_mock
+cargo fuzz run marshal_actor_standard_deferred_cert_mock
+cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
+cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
+cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
 ```
 
 The inline and deferred targets include split-header equivocation in their
