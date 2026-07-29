@@ -99,10 +99,6 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
     /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
-    /// Test-only: park destruction after this many component removals.
-    #[cfg(test)]
-    halt_destroy_after: u8,
-
     // Metrics
     gets: Counter,
     has: Counter,
@@ -192,8 +188,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             metadata,
             freezer,
             ordinal,
-            #[cfg(test)]
-            halt_destroy_after: 0,
             gets,
             has,
             syncs,
@@ -348,29 +342,18 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         self.ordinal.last_index()
     }
 
-    /// See [crate::archive::Archive::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        // Destroy metadata first: it holds the freezer's committed checkpoint, and a checkpoint
-        // that outlives the data it describes fails the next init rather than being recovered.
-        self.metadata.destroy().await?;
-
-        #[cfg(test)]
-        if self.halt_destroy_after == 1 {
-            std::future::pending::<()>().await;
-        }
-
-        // Destroy ordinal
-        self.ordinal.destroy().await?;
-
-        #[cfg(test)]
-        if self.halt_destroy_after == 2 {
-            std::future::pending::<()>().await;
-        }
-
-        // Destroy freezer
-        self.freezer.destroy().await?;
-
-        Ok(())
+    /// Wait for pending child syncs, then prepare the archive for removal.
+    async fn prepare_destroy(self) -> Result<crate::DestroyPlan<E>, Error> {
+        let Self {
+            metadata,
+            ordinal,
+            freezer,
+            ..
+        } = self;
+        let mut plan = metadata.prepare_destroy().await?;
+        plan.merge(freezer.prepare_destroy().await?);
+        plan.merge(ordinal.into_destroy_plan());
+        Ok(plan)
     }
 }
 
@@ -395,11 +378,9 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
 
-    /// Park destruction after `count` component-removal awaits.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after(&mut self, count: u8) {
-        assert!((1..=2).contains(&count));
-        self.0.halt_destroy_after = count;
+    /// Wait for pending child syncs, then prepare the archive for removal.
+    async fn prepare_destroy(self) -> Result<crate::DestroyPlan<E>, Error> {
+        self.0.prepare_destroy().await
     }
 }
 
@@ -450,7 +431,12 @@ impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(metadata::Error::Runtime)
+            .map_err(Error::Metadata)
     }
 }
 

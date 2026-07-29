@@ -78,6 +78,20 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// An exact namespace entry to remove with [`Storage::remove_batch`].
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum RemoveTarget {
+        /// Remove one blob from a partition.
+        Blob {
+            /// Partition containing the blob.
+            partition: String,
+            /// Exact blob name.
+            name: Vec<u8>,
+        },
+        /// Remove an entire partition.
+        Partition(String),
+    }
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -675,6 +689,25 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: Option<&[u8]>,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Atomically remove an exact set of blobs and partitions.
+        ///
+        /// Implementations must validate every target before mutation, remove duplicates, and
+        /// ignore blob targets subsumed by a partition target. Missing targets are considered
+        /// successfully removed, including when every target is missing. An empty batch succeeds.
+        ///
+        /// The batch has one durable commit point. Concurrent namespace operations observe either
+        /// all targets or none of them. Once committed, cancellation, an error, or a crash must not
+        /// expose a partial removal: recovery completes the committed deletion before another
+        /// namespace operation proceeds. On platforms without durable directory synchronization,
+        /// directory-entry durability is best-effort, matching [`Storage::remove`].
+        ///
+        /// Open handles and recreated names have the same semantics documented by
+        /// [`Storage::remove`].
+        fn remove_batch(
+            &self,
+            targets: Vec<RemoveTarget>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Return all blobs in a given partition.

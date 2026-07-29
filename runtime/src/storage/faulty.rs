@@ -1,6 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBuf, IoBufs, IoBufsMut, deterministic::BoxDynRng};
+use crate::{Error, Handle, IoBuf, IoBufs, IoBufsMut, RemoveTarget, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
@@ -22,6 +22,8 @@ enum Op {
     Sync,
     Resize,
     Remove,
+    RemoveBatch,
+    RemoveBatchPostCommit,
     Scan,
 }
 
@@ -60,6 +62,12 @@ pub struct Config {
     /// Failure rate for `remove` operations.
     pub remove_rate: Option<f64>,
 
+    /// Pre-commit failure rate for non-empty `remove_batch` operations.
+    pub remove_batch_rate: Option<f64>,
+
+    /// Failure rate reported after a non-empty `remove_batch` commits successfully.
+    pub remove_batch_post_commit_rate: Option<f64>,
+
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<f64>,
 }
@@ -74,6 +82,8 @@ impl Config {
             Op::Sync => self.sync_rate,
             Op::Resize => self.resize_rate,
             Op::Remove => self.remove_rate,
+            Op::RemoveBatch => self.remove_batch_rate,
+            Op::RemoveBatchPostCommit => self.remove_batch_post_commit_rate,
             Op::Scan => self.scan_rate,
         }
         .unwrap_or(0.0)
@@ -124,6 +134,18 @@ impl Config {
     /// Set the remove failure rate.
     pub const fn remove(mut self, rate: f64) -> Self {
         self.remove_rate = Some(rate);
+        self
+    }
+
+    /// Set the pre-commit removal batch failure rate.
+    pub const fn remove_batch(mut self, rate: f64) -> Self {
+        self.remove_batch_rate = Some(rate);
+        self
+    }
+
+    /// Set the failure rate reported after a removal batch commits.
+    pub const fn remove_batch_post_commit(mut self, rate: f64) -> Self {
+        self.remove_batch_post_commit_rate = Some(rate);
         self
     }
 
@@ -288,6 +310,21 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             return Err(injected_io_error().into());
         }
         self.inner.remove(partition, name).await
+    }
+
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        let targets = crate::storage::removal::canonicalize(targets)?;
+        if targets.is_empty() {
+            return self.inner.remove_batch(targets).await;
+        }
+        if self.ctx.should_fail(Op::RemoveBatch) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.remove_batch(targets).await?;
+        if self.ctx.should_fail(Op::RemoveBatchPostCommit) {
+            return Err(injected_io_error().into());
+        }
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -627,6 +664,59 @@ mod tests {
             h.storage.remove("partition", Some(b"test")).await,
             Err(Error::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_remove_batch_fault_phases_are_atomic() {
+        let h = Harness::new(Config::default().remove_batch(1.0));
+        for partition in ["batch_a", "batch_b"] {
+            let (blob, _) = h.storage.open(partition, b"name").await.unwrap();
+            blob.write_at(0, partition.as_bytes()).await.unwrap();
+            blob.sync().await.unwrap();
+        }
+
+        assert!(matches!(
+            h.storage
+                .remove_batch(vec![RemoveTarget::Partition("invalid/name".into())])
+                .await,
+            Err(Error::PartitionNameInvalid(_))
+        ));
+        h.storage.remove_batch(Vec::new()).await.unwrap();
+
+        let targets = vec![
+            RemoveTarget::Blob {
+                partition: "batch_b".into(),
+                name: b"name".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_a".into(),
+                name: b"name".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_b".into(),
+                name: b"name".to_vec(),
+            },
+        ];
+        assert!(matches!(
+            h.storage.remove_batch(targets.clone()).await,
+            Err(Error::Io(_))
+        ));
+        assert_eq!(
+            h.inner.scan("batch_a").await.unwrap(),
+            vec![b"name".to_vec()]
+        );
+        assert_eq!(
+            h.inner.scan("batch_b").await.unwrap(),
+            vec![b"name".to_vec()]
+        );
+
+        *h.config.write() = Config::default().remove(1.0).remove_batch_post_commit(1.0);
+        assert!(matches!(
+            h.storage.remove_batch(targets).await,
+            Err(Error::Io(_))
+        ));
+        assert!(h.inner.scan("batch_a").await.unwrap().is_empty());
+        assert!(h.inner.scan("batch_b").await.unwrap().is_empty());
     }
 
     #[tokio::test]

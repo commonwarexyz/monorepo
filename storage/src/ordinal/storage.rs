@@ -1,10 +1,10 @@
 use super::{Config, Error};
-use crate::{Context, rmap::RMap};
+use crate::{Context, DestroyPlan, rmap::RMap};
 use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, Error as RError,
+    Blob, Buf, BufMut, BufferPooler, Error as RError, RemoveTarget,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -162,19 +162,32 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
-            // Drop sections the committed bits do not cover
-            let sections = blobs.keys().copied().collect::<Vec<_>>();
-            for section in sections {
-                let keep = match bits.get(&section) {
-                    Some(Some(bits)) => bits.count_ones() != 0,
-                    Some(None) => true,
-                    None => false,
-                };
-                if !keep {
-                    context
-                        .remove(&config.partition, Some(&section.to_be_bytes()))
-                        .await?;
-                    blobs.remove(&section);
+            // Drop sections the committed bits do not cover.
+            let sections_to_remove = blobs
+                .keys()
+                .filter(|&&section| {
+                    let keep = match bits.get(&section) {
+                        Some(Some(bits)) => bits.count_ones() != 0,
+                        Some(None) => true,
+                        None => false,
+                    };
+                    !keep
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if !sections_to_remove.is_empty() {
+                let targets = sections_to_remove
+                    .iter()
+                    .map(|section| RemoveTarget::Blob {
+                        partition: config.partition.clone(),
+                        name: section.to_be_bytes().to_vec(),
+                    })
+                    .collect();
+                context.remove_batch(targets).await?;
+
+                for section in sections_to_remove {
+                    let (blob, _) = blobs.remove(&section).expect("selected section must exist");
+                    drop(blob);
                 }
             }
 
@@ -383,28 +396,34 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             .filter(|&&section| section < min_section)
             .copied()
             .collect();
-
-        // Remove the collected sections
-        for section in sections_to_remove {
-            if let Some(blob) = self.blobs.remove(&section) {
-                drop(blob);
-                self.context
-                    .remove(&self.config.partition, Some(&section.to_be_bytes()))
-                    .await?;
-
-                // Remove the corresponding index range from intervals
-                let start_index = section * items_per_blob;
-                let end_index = (section + 1) * items_per_blob - 1;
-                self.intervals.remove(start_index, end_index);
-                debug!(section, start_index, end_index, "pruned blob");
-            }
-
-            // Update metrics
-            self.pruned.inc();
+        if sections_to_remove.is_empty() {
+            return Ok(());
         }
 
-        // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
+        // Keep handles and logical state until the batch reports success.
+        let targets = sections_to_remove
+            .iter()
+            .map(|section| RemoveTarget::Blob {
+                partition: self.config.partition.clone(),
+                name: section.to_be_bytes().to_vec(),
+            })
+            .collect();
+        self.context.remove_batch(targets).await?;
+
+        for section in sections_to_remove {
+            let blob = self
+                .blobs
+                .remove(&section)
+                .expect("selected section must exist");
+            drop(blob);
+
+            let start_index = section * items_per_blob;
+            let end_index = (section + 1) * items_per_blob - 1;
+            self.intervals.remove(start_index, end_index);
+            self.pending.remove(&section);
+            debug!(section, start_index, end_index, "pruned blob");
+            self.pruned.inc();
+        }
 
         Ok(())
     }
@@ -428,25 +447,6 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         // Clear pending sections.
         self.pending.clear();
 
-        Ok(())
-    }
-
-    /// See [Ordinal::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            drop(blob);
-            self.context
-                .remove(&self.config.partition, Some(&i.to_be_bytes()))
-                .await?;
-            debug!(section = i, "destroyed blob");
-        }
-        match self.context.remove(&self.config.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
-                // Partition already removed or never existed.
-            }
-            Err(err) => return Err(Error::Runtime(err)),
-        }
         Ok(())
     }
 }
@@ -548,9 +548,20 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(self)
     }
 
+    /// Consume this store into the physical namespace entries it owns.
+    pub(crate) fn into_destroy_plan(self) -> DestroyPlan<E> {
+        let context = self.0.context.child("destroy");
+        let target = RemoveTarget::Partition(self.0.config.partition.clone());
+        drop(self);
+        DestroyPlan::new(context, [target])
+    }
+
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        self.into_destroy_plan()
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
     }
 }
 

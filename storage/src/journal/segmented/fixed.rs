@@ -30,7 +30,7 @@
 //! (and their corresponding blobs) independently.
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
-use crate::journal::Error;
+use crate::{DestroyPlan, journal::Error};
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Buf, Handle, Metrics, Storage,
@@ -269,9 +269,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         self.manager.rewind_section(section, size).await
     }
 
-    /// See [Journal::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+    /// Wait for pending section syncs, then prepare the journal for removal.
+    async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.manager.prepare_destroy().await
     }
 
     /// See [Journal::clear].
@@ -576,7 +576,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Wait for pending section syncs, then prepare the journal for removal.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.0.prepare_destroy().await
     }
 
     /// Clear all data, resetting the journal to an empty state.

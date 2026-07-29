@@ -4,7 +4,7 @@
 
 use super::operation::{Operation, update::Update};
 use crate::{
-    Context,
+    Context, DestroyPlan,
     index::Unordered as UnorderedIndex,
     journal::{
         Error as JournalError, authenticated,
@@ -898,12 +898,21 @@ where
         Ok(self)
     }
 
+    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, crate::qmdb::Error<F>> {
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the destroy future.
+        let Self { log, .. } = self;
+        Ok(log.prepare_destroy().await?)
+    }
+
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
-        // Destructure before the await boundary to avoid stack growth from
-        // retaining the entire `self` in the future.
-        let Self { log, .. } = self;
-        log.destroy().await.map_err(Into::into)
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(crate::qmdb::Error::Runtime)
     }
 }

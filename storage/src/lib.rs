@@ -136,6 +136,43 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     > Context for T
     {
     }
+
+    /// The physical namespace entries owned by one logical storage object.
+    ///
+    /// Every target in a plan belongs to the same runtime storage namespace. Composite objects
+    /// merge child plans and execute the union as one crash-recoverable removal.
+    pub(crate) struct DestroyPlan<E: commonware_runtime::Storage> {
+        context: E,
+        targets: Vec<commonware_runtime::RemoveTarget>,
+    }
+
+    impl<E: commonware_runtime::Storage> DestroyPlan<E> {
+        pub(crate) fn new(
+            context: E,
+            targets: impl IntoIterator<Item = commonware_runtime::RemoveTarget>,
+        ) -> Self {
+            Self {
+                context,
+                targets: targets.into_iter().collect(),
+            }
+        }
+
+        pub(crate) fn merge(&mut self, mut other: Self) {
+            self.targets.append(&mut other.targets);
+        }
+
+        #[commonware_macros::stability(ALPHA)]
+        pub(crate) fn extend(
+            &mut self,
+            targets: impl IntoIterator<Item = commonware_runtime::RemoveTarget>,
+        ) {
+            self.targets.extend(targets);
+        }
+
+        pub(crate) async fn destroy(self) -> Result<(), commonware_runtime::Error> {
+            self.context.remove_batch(self.targets).await
+        }
+    }
 });
 commonware_macros::stability_scope!(BETA {
     pub mod translator;

@@ -415,6 +415,12 @@ impl crate::Runner for Runner {
                 self.cfg.storage_directory.display()
             );
         }
+        if let Err(e) = crate::storage::removal::recover(&self.cfg.storage_directory) {
+            panic!(
+                "failed to recover storage namespace at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
+        }
 
         // Initialize storage
         cfg_if::cfg_if! {
@@ -830,6 +836,10 @@ impl crate::Storage for Context {
         self.storage.remove(partition, name).await
     }
 
+    async fn remove_batch(&self, targets: Vec<crate::RemoveTarget>) -> Result<(), Error> {
+        self.storage.remove_batch(targets).await
+    }
+
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
     }
@@ -948,6 +958,40 @@ mod tests {
         );
         assert_eq!(reopened_len, 4);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_startup_recovers_committed_remove_batch_before_user_code() {
+        let cfg = Config::new();
+        let root = cfg.storage_directory().clone();
+        let alpha = root.join("alpha");
+        let beta = root.join("beta");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::create_dir_all(&beta).unwrap();
+        let removed_blob = alpha.join(commonware_formatting::hex(b"remove"));
+        let kept_blob = alpha.join(commonware_formatting::hex(b"keep"));
+        std::fs::write(&removed_blob, b"remove").unwrap();
+        std::fs::write(&kept_blob, b"keep").unwrap();
+        std::fs::write(beta.join(commonware_formatting::hex(b"remove")), b"remove").unwrap();
+
+        let targets = crate::storage::removal::canonicalize(vec![
+            crate::RemoveTarget::Partition("beta".into()),
+            crate::RemoveTarget::Blob {
+                partition: "alpha".into(),
+                name: b"remove".to_vec(),
+            },
+        ])
+        .unwrap();
+        assert!(crate::storage::removal::interrupt_committed_for_test(&root, &targets, 1).is_err());
+        assert!(beta.exists());
+
+        let checked_root = root.clone();
+        Runner::new(cfg).start(move |_| async move {
+            assert!(!removed_blob.exists());
+            assert!(!checked_root.join("beta").exists());
+            assert!(kept_blob.exists());
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

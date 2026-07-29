@@ -106,6 +106,7 @@ stability_scope!(BETA {
     pub mod metered;
 
     mod header;
+    pub(crate) mod removal;
     pub(crate) use header::{Header, Layout};
 
     /// Validate that a partition name contains only allowed characters.
@@ -126,7 +127,7 @@ stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, RemoveTarget, Storage};
     use futures::FutureExt;
 
     /// Runs the full suite of tests on the provided storage implementation.
@@ -137,6 +138,9 @@ pub(crate) mod tests {
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
+        test_remove_batch_set_semantics(&storage).await;
+        test_remove_batch_validates_atomically(&storage).await;
+        test_remove_batch_handle_generation(&storage).await;
         test_read_after_remove_blob(&storage).await;
         test_read_after_remove_partition(&storage).await;
         test_recreate_after_remove(&storage).await;
@@ -202,6 +206,105 @@ pub(crate) mod tests {
 
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
+    }
+
+    /// A batch is an idempotent exact set, with partition targets subsuming blob targets.
+    async fn test_remove_batch_set_semantics<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        storage.remove_batch(Vec::new()).await.unwrap();
+        storage.open("batch_set_a", b"one").await.unwrap();
+        storage.open("batch_set_a", b"two").await.unwrap();
+        storage.open("batch_set_a", b"keep").await.unwrap();
+        storage.open("batch_set_b", b"victim").await.unwrap();
+
+        let targets = vec![
+            RemoveTarget::Blob {
+                partition: "batch_set_a".into(),
+                name: b"two".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_set_b".into(),
+                name: b"victim".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_set_a".into(),
+                name: b"one".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_set_a".into(),
+                name: b"two".to_vec(),
+            },
+            RemoveTarget::Partition("batch_set_b".into()),
+            RemoveTarget::Partition("batch_set_missing".into()),
+            RemoveTarget::Blob {
+                partition: "batch_blob_missing".into(),
+                name: b"missing".to_vec(),
+            },
+        ];
+        storage.remove_batch(targets.clone()).await.unwrap();
+
+        let mut blobs = storage.scan("batch_set_a").await.unwrap();
+        blobs.sort();
+        assert_eq!(blobs, vec![b"keep".to_vec()]);
+        assert!(storage.scan("batch_set_b").await.is_err());
+
+        // Repeating the same exact set succeeds after every target is already absent.
+        storage.remove_batch(targets).await.unwrap();
+    }
+
+    /// A bad late target rejects the entire batch before any valid target is removed.
+    async fn test_remove_batch_validates_atomically<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        storage.open("batch_validation", b"survivor").await.unwrap();
+        let result = storage
+            .remove_batch(vec![
+                RemoveTarget::Blob {
+                    partition: "batch_validation".into(),
+                    name: b"survivor".to_vec(),
+                },
+                RemoveTarget::Partition("../invalid".into()),
+            ])
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            storage.scan("batch_validation").await.unwrap(),
+            vec![b"survivor".to_vec()]
+        );
+    }
+
+    /// Batch removal preserves old handles while recreation creates an independent generation.
+    async fn test_remove_batch_handle_generation<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (old, _) = storage
+            .open("batch_generation", b"shared_name")
+            .await
+            .unwrap();
+        old.write_at(0, b"old").await.unwrap();
+        storage
+            .remove_batch(vec![RemoveTarget::Blob {
+                partition: "batch_generation".into(),
+                name: b"shared_name".to_vec(),
+            }])
+            .await
+            .unwrap();
+
+        let (new, size) = storage
+            .open("batch_generation", b"shared_name")
+            .await
+            .unwrap();
+        assert_eq!(size, 0);
+        new.write_at_sync(0, b"new").await.unwrap();
+        assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
+        assert_eq!(new.read_at(0, 3).await.unwrap().coalesce(), b"new");
     }
 
     /// An already-open handle remains fully readable after the blob is removed by name.

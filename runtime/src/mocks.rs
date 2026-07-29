@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
+    RemoveTarget, Spawner, Storage, Supervisor,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -564,6 +564,10 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         self.inner.remove(partition, name).await
     }
 
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        self.inner.remove_batch(targets).await
+    }
+
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.inner.scan(partition).await
     }
@@ -914,6 +918,10 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
         self.inner.remove(partition, name).await
     }
 
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        self.inner.remove_batch(targets).await
+    }
+
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.inner.scan(partition).await
     }
@@ -1002,6 +1010,10 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.inner.remove(partition, name).await
+    }
+
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        self.inner.remove_batch(targets).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {

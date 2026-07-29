@@ -74,7 +74,7 @@ where
     I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
-    C: Mutable<Item = Operation<F, U>> + 'static,
+    C: Mutable<Item = Operation<F, U>> + authenticated::Backing<E> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {

@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, RemoveTarget,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -34,7 +34,10 @@ use std::{
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
@@ -74,7 +77,9 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 /// Configuration for a [Storage].
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Where to store blobs.
+    /// Directory exclusively owned by this storage instance and its clones.
+    ///
+    /// Concurrent access by another storage instance or process is unsupported.
     pub storage_directory: PathBuf,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
@@ -84,10 +89,15 @@ pub struct Config {
 
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<Mutex<()>>,
+    namespace: Arc<Namespace>,
     storage_directory: PathBuf,
     io_handle: iouring::Handle,
     pool: BufferPool,
+}
+
+struct Namespace {
+    lock: Mutex<()>,
+    recovery_required: AtomicBool,
 }
 
 impl Storage {
@@ -108,7 +118,10 @@ impl Storage {
         let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
 
         let storage = Self {
-            lock: Arc::new(Mutex::new(())),
+            namespace: Arc::new(Namespace {
+                lock: Mutex::new(()),
+                recovery_required: AtomicBool::new(true),
+            }),
             storage_directory,
             io_handle,
             pool,
@@ -116,6 +129,18 @@ impl Storage {
 
         utils::thread::spawn(thread_stack_size, move || iouring_loop.run());
         storage
+    }
+
+    /// Complete any prior committed batch while the namespace lock is held.
+    fn recover_locked(&self) -> Result<(), Error> {
+        if !self.namespace.recovery_required.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        super::removal::recover(&self.storage_directory)?;
+        self.namespace
+            .recovery_required
+            .store(false, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -131,7 +156,8 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let _guard = self.namespace.lock.lock();
+        self.recover_locked()?;
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -197,7 +223,8 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let _guard = self.namespace.lock.lock();
+        self.recover_locked()?;
 
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
@@ -216,11 +243,32 @@ impl crate::Storage for Storage {
         Ok(())
     }
 
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        let targets = super::removal::canonicalize(targets)?;
+        let _guard = self.namespace.lock.lock();
+        self.recover_locked()?;
+        if targets.is_empty() {
+            return Ok(());
+        }
+
+        self.namespace
+            .recovery_required
+            .store(true, Ordering::Release);
+        let result = super::removal::remove_batch(&self.storage_directory, &targets);
+        if result.is_ok() {
+            self.namespace
+                .recovery_required
+                .store(false, Ordering::Release);
+        }
+        result.map_err(Into::into)
+    }
+
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let _guard = self.namespace.lock.lock();
+        self.recover_locked()?;
 
         let path = self.storage_directory.join(partition);
 

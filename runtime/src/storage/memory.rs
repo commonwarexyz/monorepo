@@ -1,9 +1,11 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBuf, IoBufs, IoBufsMut, deterministic::AuditHasher};
+use crate::{
+    Buf, BufferPool, Handle, IoBuf, IoBufs, IoBufsMut, RemoveTarget, deterministic::AuditHasher,
+};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
     sync::{
         Arc,
@@ -288,6 +290,52 @@ impl crate::Storage for Storage {
                 recovery.pending.retain(|key, _| key.0 != partition);
             }
         }
+        Ok(())
+    }
+
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), crate::Error> {
+        let targets = super::removal::canonicalize(targets)?;
+        if targets.is_empty() {
+            return Ok(());
+        }
+
+        let removed_partitions: BTreeSet<&str> = targets
+            .iter()
+            .filter_map(|target| match target {
+                RemoveTarget::Partition(partition) => Some(partition.as_str()),
+                RemoveTarget::Blob { .. } => None,
+            })
+            .collect();
+        let removed_blobs: BTreeSet<(&str, &[u8])> = targets
+            .iter()
+            .filter_map(|target| match target {
+                RemoveTarget::Blob { partition, name } => {
+                    Some((partition.as_str(), name.as_slice()))
+                }
+                RemoveTarget::Partition(_) => None,
+            })
+            .collect();
+
+        let mut recovery = self.recovery.lock();
+        let mut partitions = self.partitions.lock();
+        for target in &targets {
+            match target {
+                RemoveTarget::Blob { partition, name } => {
+                    if let Some(blobs) = partitions.get_mut(partition) {
+                        blobs.remove(name);
+                    }
+                }
+                RemoveTarget::Partition(partition) => {
+                    partitions.remove(partition);
+                }
+            }
+        }
+        let keep = |key: &BlobKey| {
+            !removed_partitions.contains(key.0.as_str())
+                && !removed_blobs.contains(&(key.0.as_str(), key.1.as_slice()))
+        };
+        recovery.generations.retain(|key, _| keep(key));
+        recovery.pending.retain(|key, _| keep(key));
         Ok(())
     }
 
@@ -656,6 +704,74 @@ mod tests {
         let (blob, size) = storage.open("partition", b"blob").await.unwrap();
         assert_eq!(size, 3);
         assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"new");
+    }
+
+    #[tokio::test]
+    async fn test_remove_batch_preserves_handles_and_rotates_generations() {
+        let storage = Storage::new(test_pool());
+        let (old_blob, _) = storage.open("batch_blob", b"name").await.unwrap();
+        old_blob.write_at(0, b"old blob").await.unwrap();
+        let old_blob_generation = old_blob.generation;
+
+        let (old_partition, _) = storage.open("batch_partition", b"name").await.unwrap();
+        old_partition.write_at(0, b"old partition").await.unwrap();
+        let old_partition_generation = old_partition.generation;
+
+        storage
+            .remove_batch(vec![
+                RemoveTarget::Blob {
+                    partition: "batch_blob".into(),
+                    name: b"name".to_vec(),
+                },
+                RemoveTarget::Blob {
+                    partition: "batch_blob".into(),
+                    name: b"name".to_vec(),
+                },
+                RemoveTarget::Blob {
+                    partition: "batch_partition".into(),
+                    name: b"name".to_vec(),
+                },
+                RemoveTarget::Partition("batch_partition".into()),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            old_blob.read_at(0, 8).await.unwrap().coalesce(),
+            b"old blob"
+        );
+        assert_eq!(
+            old_partition.read_at(0, 13).await.unwrap().coalesce(),
+            b"old partition"
+        );
+
+        let (new_blob, blob_len) = storage.open("batch_blob", b"name").await.unwrap();
+        assert_eq!(blob_len, 0);
+        assert_ne!(old_blob_generation, new_blob.generation);
+        new_blob.write_at(0, b"new blob").await.unwrap();
+        new_blob.sync().await.unwrap();
+
+        let (new_partition, partition_len) =
+            storage.open("batch_partition", b"name").await.unwrap();
+        assert_eq!(partition_len, 0);
+        assert_ne!(old_partition_generation, new_partition.generation);
+        new_partition.write_at(0, b"new partition").await.unwrap();
+        new_partition.sync().await.unwrap();
+
+        assert!(old_blob.sync().await.is_err());
+        assert!(old_partition.sync().await.is_err());
+        drop((old_blob, old_partition, new_blob, new_partition));
+
+        storage.simulate_crash(|| u64::MAX);
+        let (blob, blob_len) = storage.open("batch_blob", b"name").await.unwrap();
+        assert_eq!(blob_len, 8);
+        assert_eq!(blob.read_at(0, 8).await.unwrap().coalesce(), b"new blob");
+        let (partition, partition_len) = storage.open("batch_partition", b"name").await.unwrap();
+        assert_eq!(partition_len, 13);
+        assert_eq!(
+            partition.read_at(0, 13).await.unwrap().coalesce(),
+            b"new partition"
+        );
     }
 
     #[tokio::test]

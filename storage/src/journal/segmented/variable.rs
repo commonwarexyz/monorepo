@@ -88,10 +88,14 @@
 //! ```
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
-use crate::journal::{
-    Error,
-    frame::{
-        FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
+use crate::{
+    DestroyPlan,
+    journal::{
+        Error,
+        frame::{
+            FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame,
+            read_frame_at,
+        },
     },
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
@@ -349,9 +353,9 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.num_sections()
     }
 
-    /// See [Journal::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+    /// Wait for pending section syncs, then prepare the journal for removal.
+    async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.manager.prepare_destroy().await
     }
 
     /// See [Journal::clear].
@@ -512,8 +516,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// # Warnings
     ///
     /// * This operation is not guaranteed to survive restarts until sync is called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed in reverse order of section.
+    /// * Whole-section removals are committed as one namespace batch before the retained section
+    ///   is truncated. After commitment, storage recovery completes any interrupted removals
+    ///   before reopening the namespace.
     pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind(section, size).await?;
         Ok(self)
@@ -594,7 +599,16 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Wait for pending section syncs, then prepare the journal for removal.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.0.prepare_destroy().await
     }
 
     /// Clear all data, resetting the journal to an empty state.

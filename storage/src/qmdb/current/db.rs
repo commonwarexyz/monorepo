@@ -850,15 +850,10 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        // Destructure before the await boundary to avoid stack growth from
-        // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
-        // Keep graft metadata until the backing log has completed its recoverable reset: a pruned
-        // log cannot be reconstructed without it. If the reset wins the race with a crash, Any's
-        // empty-log initialization ignores the now-stale pruning boundary.
-        any.destroy().await?;
-        metadata.destroy().await?;
-        Ok(())
+        let mut plan = any.prepare_destroy().await?;
+        plan.merge(metadata.prepare_destroy().await?);
+        plan.destroy().await.map_err(Error::Runtime)
     }
 }
 
@@ -1289,7 +1284,9 @@ where
     S: Strategy,
 {
     let journal = J::init(context.child("reset_journal"), journal_config).await?;
-    <J as Mutable>::destroy(journal).await?;
+    let journal = <J as Mutable>::sync(journal).await?;
+    let backing_targets = <J as authenticated::Backing<E>>::destroy_targets(&journal);
+    drop(journal);
 
     let hasher = qmdb::hasher::<H>();
     let merkle = merkle::full::Merkle::<F, _, _, S>::init(
@@ -1298,8 +1295,9 @@ where
         merkle_config,
     )
     .await?;
-    merkle.destroy().await?;
-    Ok(())
+    let mut plan = merkle.prepare_destroy().await?;
+    plan.extend(backing_targets);
+    plan.destroy().await.map_err(Error::Runtime)
 }
 
 /// Load the pruning state for the active metadata generation.
@@ -1658,50 +1656,6 @@ mod tests {
             assert_eq!(db.inactivity_floor_loc(), floor);
             assert_eq!(db.root(), root);
             assert!(db.any.bitmap.pruned_bits() > *durable_floor);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_interrupted_destroy_reopens_pruned_db() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            let suffix = "interrupted-destroy";
-            let mut db = MmrDb::init(ctx.child("first"), fixed_config::<OneCap>(suffix, &ctx))
-                .await
-                .unwrap();
-            for _ in 0..5 {
-                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-            }
-            let boundary = db.sync_boundary();
-            let db = db.prune(boundary).await.unwrap();
-            assert!(db.any.bitmap.pruned_chunks() > 0);
-
-            // Fail after the authenticated log has staged its reset but before Current removes
-            // the graft metadata needed by the old, pruned log.
-            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default().remove(1.0);
-            assert!(db.destroy().await.is_err());
-            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-
-            let db = MmrDb::init(ctx.child("second"), fixed_config::<OneCap>(suffix, &ctx))
-                .await
-                .expect("interrupted destroy must leave an openable database");
-            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
-
-            // Commit new history without Current::sync, then reopen again. Stale graft metadata
-            // must not be able to reattach to the replacement log on this second startup.
-            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 16).await;
-            let root = db.root();
-            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
-            let value = Sha256::hash(&[&16u64.to_be_bytes()]);
-            drop(db);
-
-            let db = MmrDb::init(ctx.child("third"), fixed_config::<OneCap>(suffix, &ctx))
-                .await
-                .expect("replacement history must remain reopenable");
-            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
-            assert_eq!(db.root(), root);
-            assert_eq!(db.get(&key).await.unwrap(), Some(value));
             db.destroy().await.unwrap();
         });
     }

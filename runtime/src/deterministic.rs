@@ -1600,6 +1600,10 @@ impl crate::Storage for Context {
         self.storage.remove(partition, name).await
     }
 
+    async fn remove_batch(&self, targets: Vec<crate::RemoveTarget>) -> Result<(), Error> {
+        self.storage.remove_batch(targets).await
+    }
+
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
     }
@@ -1621,8 +1625,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, deterministic, reschedule,
+        Blob, Metrics as _, RemoveTarget, Resolver, Runner as _, Spawner as _, Storage,
+        Strategizer, Supervisor as _, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1863,6 +1867,60 @@ mod tests {
                 .coalesce();
             assert!(recovered.as_ref().contains(&0xA5));
             assert!(recovered.as_ref().contains(&0));
+        });
+    }
+
+    #[test]
+    fn test_recover_remove_batch_is_atomic_and_durable() {
+        fn targets() -> Vec<RemoveTarget> {
+            vec![
+                RemoveTarget::Partition("batch_partition".into()),
+                RemoveTarget::Blob {
+                    partition: "batch_blob".into(),
+                    name: b"name".to_vec(),
+                },
+            ]
+        }
+
+        let config = deterministic::Config::default().with_storage_fault_config(FaultConfig {
+            remove_batch_rate: Some(1.0),
+            ..FaultConfig::default()
+        });
+        let (result, checkpoint) =
+            deterministic::Runner::new(config).start_and_recover(|context| async move {
+                for partition in ["batch_blob", "batch_partition"] {
+                    let (blob, _) = context.open(partition, b"name").await.unwrap();
+                    blob.write_at(0, partition.as_bytes()).await.unwrap();
+                    blob.sync().await.unwrap();
+                }
+                context.remove_batch(targets()).await
+            });
+        assert!(matches!(result, Err(Error::Io(_))));
+
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                assert_eq!(
+                    context.scan("batch_blob").await.unwrap(),
+                    vec![b"name".to_vec()]
+                );
+                assert_eq!(
+                    context.scan("batch_partition").await.unwrap(),
+                    vec![b"name".to_vec()]
+                );
+                *context.storage_fault_config().write() = FaultConfig::default();
+                context.remove_batch(targets()).await.unwrap();
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            assert!(context.scan("batch_blob").await.unwrap().is_empty());
+            assert!(matches!(
+                context.scan("batch_partition").await,
+                Err(Error::PartitionMissing(_))
+            ));
+            let (_, blob_len) = context.open("batch_blob", b"name").await.unwrap();
+            assert_eq!(blob_len, 0);
+            let (_, partition_len) = context.open("batch_partition", b"name").await.unwrap();
+            assert_eq!(partition_len, 0);
         });
     }
 

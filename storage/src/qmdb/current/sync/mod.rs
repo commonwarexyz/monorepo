@@ -117,7 +117,7 @@ where
     I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>> + 'static,
+    J: Mutable<Item = Operation<F, U>> + authenticated::Backing<E> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
@@ -355,11 +355,8 @@ macro_rules! impl_current_sync_database {
             }
 
             async fn discard_sync_result(self) -> Result<(), qmdb::Error<F>> {
-                // Destroy the mismatched generation before reporting RootMismatch. Destroy
-                // durably empties the journal before removing its blobs and clears the intent
-                // with the metadata, so an interrupted discard converges through the
-                // pending-intent reset on the next init and a completed discard leaves nothing
-                // to resume.
+                // Remove the mismatched generation before reporting RootMismatch so a retry cannot
+                // resume any of its backing components.
                 self.destroy().await
             }
 

@@ -1,12 +1,12 @@
 //! Blob management for a contiguous journal.
 
 use crate::{
-    Context, SyncCompletion,
+    Context, DestroyPlan, SyncCompletion,
     journal::{Error, frame::FrameReader},
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs,
+    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, RemoveTarget,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -99,6 +99,34 @@ impl<E: Context> Partition<E> {
         Ok(())
     }
 
+    /// Remove an exact set of blobs as one namespace operation.
+    pub(super) async fn remove_many(
+        &self,
+        blobs: impl IntoIterator<Item = u64>,
+    ) -> Result<(), Error> {
+        let targets = blobs.into_iter().map(|blob| RemoveTarget::Blob {
+            partition: self.name.clone(),
+            name: blob.to_be_bytes().to_vec(),
+        });
+        self.context
+            .remove_batch(targets.collect())
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Consume this partition into its namespace-removal plan.
+    pub(super) fn into_destroy_plan(self) -> DestroyPlan<E> {
+        let context = self.context.child("destroy");
+        let target = self.destroy_target();
+        drop(self);
+        DestroyPlan::new(context, [target])
+    }
+
+    /// Return the exact namespace entry owned by this partition.
+    pub(super) fn destroy_target(&self) -> RemoveTarget {
+        RemoveTarget::Partition(self.name.clone())
+    }
+
     /// Remove an entire partition by name, treating "already missing" as success.
     pub(super) async fn remove_all(context: &E, name: &str) -> Result<(), Error> {
         match context.remove(name, None).await {
@@ -152,13 +180,15 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the live tail. Kept on failure so later operations keep failing.
     tail_sync: Option<SyncCompletion>,
-
-    /// Test-only: park destruction after removing one blob.
-    #[cfg(test)]
-    halt_destroy_after_first_remove: bool,
 }
 
 impl<E: Context> Writable<E> {
+    /// Return the exact namespace entry owned by these blobs.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn destroy_target(&self) -> RemoveTarget {
+        self.partition.destroy_target()
+    }
+
     /// Build from recovered writers: seal every blob below `tail_blob` and install the tail,
     /// opening an empty one if absent.
     ///
@@ -225,8 +255,6 @@ impl<E: Context> Writable<E> {
             sealed_snapshot: None,
             tail_predecessor_sync: None,
             tail_sync: None,
-            #[cfg(test)]
-            halt_destroy_after_first_remove: false,
         })
     }
 
@@ -296,9 +324,9 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
-    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
-    /// valid.
+    /// Drop every blob below `min_blob` and remove their names as one batch. Safe with live
+    /// readers: snapshot readers keep their own handles, which the runtime's read-after-remove
+    /// contract keeps valid.
     ///
     /// # Invariants
     ///
@@ -314,11 +342,13 @@ impl<E: Context> Writable<E> {
         self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
 
-        for blob in prev_oldest_blob_index..min_blob {
-            self.partition.remove(blob).await?;
-            self.metrics.tracked.dec();
-            self.metrics.pruned.inc();
-        }
+        self.partition
+            .remove_many(prev_oldest_blob_index..min_blob)
+            .await?;
+        self.metrics
+            .tracked
+            .dec_by(i64::try_from(drop_count).expect("tracked blob count fits in i64"));
+        self.metrics.pruned.inc_by(drop_count as u64);
         Ok(())
     }
 
@@ -368,17 +398,15 @@ impl<E: Context> Writable<E> {
             new_writer.resize(byte_offset).await?;
         }
 
-        // Remove blobs newest-first so a crash leaves a contiguous prefix: the old tail, then
-        // sealed blobs down to the target. Capture the old tail before truncating `sealed`
-        // (which redefines `tail_blob`).
+        // Capture the old tail before truncating `sealed` (which redefines `tail_blob`).
         let old_tail_blob = self.tail_blob_index();
         self.tail = new_writer;
-        self.partition.remove(old_tail_blob).await?;
-        self.metrics.tracked.dec();
-        for newer in ((blob + 1)..old_tail_blob).rev() {
-            self.partition.remove(newer).await?;
-            self.metrics.tracked.dec();
-        }
+        self.partition
+            .remove_many((blob + 1)..=old_tail_blob)
+            .await?;
+        self.metrics
+            .tracked
+            .dec_by(i64::try_from(old_tail_blob - blob).expect("tracked blob count fits in i64"));
 
         // Sealed history now ends below the target, which is the tail.
         self.sealed.truncate(idx);
@@ -394,9 +422,9 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
 
-        for blob in self.oldest_blob_index..=self.tail_blob_index() {
-            self.partition.remove(blob).await?;
-        }
+        self.partition
+            .remove_many(self.oldest_blob_index..=self.tail_blob_index())
+            .await?;
         let _ = self.metrics.tracked.try_set(0);
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
@@ -451,27 +479,11 @@ impl<E: Context> Writable<E> {
         })
     }
 
-    /// Remove every blob and the partition itself.
-    pub(super) async fn destroy(mut self) -> Result<(), Error> {
+    /// Wait for in-flight blob syncs, then prepare the owned partition for removal.
+    pub(super) async fn prepare_destroy(mut self) -> Result<DestroyPlan<E>, Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
-
-        let tail_blob = self.tail_blob_index();
-        drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
-            self.partition.remove(blob).await?;
-            #[cfg(test)]
-            if self.halt_destroy_after_first_remove {
-                std::future::pending::<()>().await;
-            }
-        }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
-    }
-
-    /// Park destruction after its first successful blob removal.
-    #[cfg(test)]
-    pub(super) const fn halt_destroy_after_first_remove(&mut self) {
-        self.halt_destroy_after_first_remove = true;
+        Ok(self.partition.into_destroy_plan())
     }
 }
 

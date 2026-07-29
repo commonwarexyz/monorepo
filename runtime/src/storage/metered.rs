@@ -1,5 +1,5 @@
 use crate::{
-    Buf, Error, Handle, IoBufs, IoBufsMut,
+    Buf, Error, Handle, IoBufs, IoBufsMut, RemoveTarget,
     telemetry::metrics::{Counter, Gauge, Register, raw},
 };
 use std::{
@@ -106,6 +106,10 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.inner.remove(partition, name).await
+    }
+
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        self.inner.remove_batch(targets).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {

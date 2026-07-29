@@ -3,10 +3,10 @@
 //! This module provides `Manager`, a reusable component that handles
 //! section-based blob storage, pruning, syncing, and metrics.
 
-use crate::journal::Error;
+use crate::{DestroyPlan, journal::Error};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Handle, Metrics, RemoveTarget, Storage,
     buffer::{
         Write,
         paged::{CacheRef, Writer},
@@ -17,8 +17,8 @@ use futures::future::{join_all, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
-    mem::take,
     num::NonZeroUsize,
+    ops::RangeBounds,
 };
 use tracing::debug;
 
@@ -159,11 +159,10 @@ pub struct Config<F> {
 ///
 /// # In-flight syncs
 ///
-/// Syncs started by [Manager::start_sync] complete in the background, so every path that
-/// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
-/// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
-/// completion first, guaranteeing that caller-held sync handles always report the sync's true
-/// result and that no buffer is dropped with I/O in flight.
+/// Syncs started by [Manager::start_sync] complete in the background, so mutations that remove
+/// blobs (`prune`, `remove_section`, `rewind`, `clear`, `prepare_destroy`) call
+/// [SectionBuffer::wait_for_sync] before dropping them. This resolves the sync's shared completion
+/// first, guaranteeing that caller-held sync handles report the sync's true result.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
@@ -193,6 +192,45 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             .await
             .map(|_| ())
             .map_err(Error::Runtime)
+    }
+
+    /// Remove every section in `range` as one namespace operation.
+    async fn remove_range<R>(&mut self, range: R) -> Result<Vec<(u64, u64)>, Error>
+    where
+        R: RangeBounds<u64> + Clone,
+    {
+        let sections: Vec<_> = self
+            .blobs
+            .range(range.clone())
+            .map(|(&section, _)| section)
+            .collect();
+        if sections.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Self::wait_for_syncs(self.blobs.range_mut(range).map(|(_, blob)| blob)).await?;
+
+        let targets = sections
+            .iter()
+            .map(|section| RemoveTarget::Blob {
+                partition: self.partition.clone(),
+                name: section.to_be_bytes().to_vec(),
+            })
+            .collect();
+        self.context.remove_batch(targets).await?;
+
+        let mut removed = Vec::with_capacity(sections.len());
+        for section in sections {
+            let blob = self
+                .blobs
+                .remove(&section)
+                .expect("selected section must exist");
+            let size = blob.size();
+            drop(blob);
+            removed.push((section, size));
+        }
+
+        Ok(removed)
     }
 
     /// Initialize a new `Manager`.
@@ -339,36 +377,18 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        // Prune any blobs that are smaller than the minimum
-        let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
-            // Remove blob from map
-            let mut blob = self.blobs.remove(&section).unwrap();
-            blob.wait_for_sync().await?;
-            let size = blob.size();
-            drop(blob);
-
-            // Remove blob from storage
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            pruned = true;
-
+        let removed = self.remove_range(..min).await?;
+        for (section, size) in &removed {
             debug!(section, size, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
 
-        if pruned {
+        if !removed.is_empty() {
             self.oldest_retained_section = min;
         }
 
-        Ok(pruned)
+        Ok(!removed.is_empty())
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -428,39 +448,27 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
     }
 
-    /// Remove all underlying blobs.
-    pub async fn destroy(mut self) -> Result<(), Error> {
+    /// Consume the manager into the partition-removal plan it owns.
+    fn into_destroy_plan(self) -> DestroyPlan<E> {
+        let Self {
+            context, partition, ..
+        } = self;
+        DestroyPlan::new(context, [RemoveTarget::Partition(partition)])
+    }
+
+    /// Wait for pending section syncs, then prepare the owned partition for removal.
+    pub(crate) async fn prepare_destroy(mut self) -> Result<DestroyPlan<E>, Error> {
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size();
-            drop(blob);
-            debug!(section, size, "destroyed blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-        }
-        match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            // Partition already removed or never existed.
-            Err(RError::PartitionMissing(_)) => {}
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        Ok(())
+        Ok(self.into_destroy_plan())
     }
 
     /// Clear all blobs, resetting the manager to an empty state.
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        let blobs = take(&mut self.blobs);
-        for (section, blob) in blobs {
-            let size = blob.size();
-            drop(blob);
+        let removed = self.remove_range(..).await?;
+        for (section, size) in removed {
             debug!(section, size, "cleared blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
@@ -471,24 +479,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
-        // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
-        // no sections above it to remove.
-        let sections_to_remove: Vec<u64> = match section.checked_add(1) {
-            Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
+        // Remove every newer section before resizing the target. Section `u64::MAX` has no
+        // successor, so there are no sections above it to remove.
+        let removed = match section.checked_add(1) {
+            Some(next) => self.remove_range(next..).await?,
             None => Vec::new(),
         };
-
-        for s in sections_to_remove {
-            // Remove the underlying blob from storage
-            let mut blob = self.blobs.remove(&s).unwrap();
-            blob.wait_for_sync().await?;
-            drop(blob);
-            self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
-                .await?;
+        for (removed_section, _) in removed {
             self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
+            debug!(section = removed_section, "removed blob during rewind");
         }
 
         // If the section exists, truncate it to the given size. The buffer waits for any in-flight
@@ -536,7 +535,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Name, Runner as _, Spawner as _, Supervisor, deterministic,
+        telemetry::metrics::{Metric, Registered},
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
@@ -552,6 +554,78 @@ mod tests {
 
     /// A shared sync result, mirroring the runtime buffers' internal completion sharing.
     type SharedSync = Shared<BoxFuture<'static, Result<(), RError>>>;
+
+    #[derive(Default)]
+    struct RemoveCalls {
+        single: usize,
+        batches: Vec<Vec<RemoveTarget>>,
+    }
+
+    #[derive(Clone)]
+    struct RecordingContext<E> {
+        inner: E,
+        calls: Arc<Mutex<RemoveCalls>>,
+    }
+
+    impl<E: Supervisor> Supervisor for RecordingContext<E> {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                calls: self.calls.clone(),
+            }
+        }
+
+        fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            self.inner = self.inner.with_attribute(key, value);
+            self
+        }
+    }
+
+    impl<E: Metrics> Metrics for RecordingContext<E> {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl<E: Storage> Storage for RecordingContext<E> {
+        type Blob = E::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RError> {
+            self.inner.open_versioned(partition, name, versions).await
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
+            self.calls.lock().single += 1;
+            self.inner.remove(partition, name).await
+        }
+
+        async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), RError> {
+            self.calls.lock().batches.push(targets.clone());
+            self.inner.remove_batch(targets).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            self.inner.scan(partition).await
+        }
+    }
 
     #[derive(Clone)]
     struct TestFactory {
@@ -641,6 +715,56 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_section_removals_use_exact_batches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let calls = Arc::new(Mutex::new(RemoveCalls::default()));
+            let context = RecordingContext {
+                inner: context.child("manager"),
+                calls: calls.clone(),
+            };
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending, wait_for_syncs);
+            let mut manager = Manager::init(context, cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            for section in 1..=4 {
+                manager
+                    .get_or_create(section)
+                    .await
+                    .expect("failed to create section");
+            }
+            assert!(manager.prune(3).await.expect("prune failed"));
+            manager.clear().await.expect("clear failed");
+
+            for section in 5..=7 {
+                manager
+                    .get_or_create(section)
+                    .await
+                    .expect("failed to create section");
+            }
+            manager.rewind(5, 0).await.expect("rewind failed");
+
+            let target = |section: u64| RemoveTarget::Blob {
+                partition: "test".into(),
+                name: section.to_be_bytes().to_vec(),
+            };
+            let calls = calls.lock();
+            assert_eq!(calls.single, 0);
+            assert_eq!(
+                calls.batches,
+                vec![
+                    vec![target(1), target(2)],
+                    vec![target(3), target(4)],
+                    vec![target(6), target(7)],
+                ]
+            );
+        });
+    }
+
+    #[test]
     fn test_start_sync_multiple_sections_returns_combined_handle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -675,7 +799,13 @@ mod tests {
 
             complete_next_pending_sync(&pending, Ok(()));
             handle.await.expect("sync handle should complete");
-            manager.destroy().await.expect("destroy failed");
+            manager
+                .prepare_destroy()
+                .await
+                .expect("prepare destroy failed")
+                .destroy()
+                .await
+                .expect("destroy failed");
         });
     }
 
@@ -720,7 +850,13 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.expect("first sync handle should complete");
             second.await.expect("reused sync handle should complete");
-            manager.destroy().await.expect("destroy failed");
+            manager
+                .prepare_destroy()
+                .await
+                .expect("prepare destroy failed")
+                .destroy()
+                .await
+                .expect("destroy failed");
         });
     }
 
@@ -791,7 +927,13 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let waiter = context.child("destroy").spawn(|_| async move {
-                manager.destroy().await.expect("destroy failed");
+                manager
+                    .prepare_destroy()
+                    .await
+                    .expect("prepare destroy failed")
+                    .destroy()
+                    .await
+                    .expect("destroy failed");
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
@@ -833,9 +975,10 @@ mod tests {
             complete_next_pending_sync(&pending, Err(RError::Closed));
 
             let err = manager
-                .destroy()
+                .prepare_destroy()
                 .await
-                .expect_err("destroy should surface the sync failure");
+                .err()
+                .expect("destroy should surface the sync failure");
             assert!(matches!(err, Error::Runtime(RError::Closed)));
             assert!(matches!(
                 handle.await.expect_err("sync handle should fail"),

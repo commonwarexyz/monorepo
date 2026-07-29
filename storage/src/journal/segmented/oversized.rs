@@ -67,7 +67,7 @@ use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::journal::Error;
+use crate::{DestroyPlan, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
 use futures::future::try_join;
@@ -129,8 +129,6 @@ pub struct Config<C> {
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
-    #[cfg(test)]
-    halt_destroy_after_index: bool,
 }
 
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug
@@ -209,12 +207,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         };
         let values = Glob::init(context.child("values"), value_cfg).await?;
 
-        Ok(Self {
-            index,
-            values,
-            #[cfg(test)]
-            halt_destroy_after_index: false,
-        })
+        Ok(Self { index, values })
     }
 
     /// Perform crash recovery by validating index entries and values above each durable floor.
@@ -620,9 +613,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// between that removal and these blob removals merely leaves old sections to be scanned
     /// again, while the reverse order can report a pruned section as lost.
     ///
-    /// Prunes index first, then glob. This order ensures crash safety:
-    /// - If crash after index prune but before glob: orphan data in glob (acceptable)
-    /// - If crash before index prune: no change, retry works
+    /// Prunes index first, then glob. Each journal commits its selected sections as one namespace
+    /// batch. Once the index batch commits, storage recovery completes it; interruption before the
+    /// glob batch commits can therefore leave only orphan values, which are safe to remove later.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let index_pruned;
         (self.index, index_pruned) = self.index.prune(min).await?;
@@ -637,9 +630,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// after the given section. The value size is derived from the last entry.
     ///
     /// Both of `section`'s truncations are durable before this returns: a crash recovers
-    /// `section` to either its pre-rewind or its post-rewind state. Each journal removes
-    /// its later sections (newest first) before truncating `section`, and those removals
-    /// carry the storage layer's removal durability.
+    /// `section` to either its pre-rewind or its post-rewind state. Each journal commits its later
+    /// sections as one namespace removal batch before truncating `section`; storage recovery
+    /// completes a committed batch before reopening the namespace.
     ///
     /// The caller must durably lower its checkpoint to this boundary first, or recovery will
     /// report the discarded data as lost.
@@ -769,36 +762,25 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         self.index.newest_section()
     }
 
-    /// Destroy all underlying storage.
-    ///
-    /// The caller must durably invalidate its external checkpoint before calling this method.
-    /// After an interrupted destroy, reopen with an empty checkpoint and retry destruction; an old
-    /// nonzero checkpoint may correctly report corruption after referenced storage was removed.
-    pub async fn destroy(self) -> Result<(), Error> {
-        let Self {
-            index,
-            values,
-            #[cfg(test)]
-            halt_destroy_after_index,
-        } = self;
-
-        // Remove references before their values. An interrupted destroy then leaves only orphan
-        // value sections, which reopening with an empty checkpoint discards without any
-        // per-section truncate-and-sync repair.
-        index.destroy().await?;
-
-        #[cfg(test)]
-        if halt_destroy_after_index {
-            std::future::pending::<()>().await;
-        }
-
-        values.destroy().await
+    /// Wait for pending child syncs, then prepare the journal for removal.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        let Self { index, values } = self;
+        let mut plan = index.prepare_destroy().await?;
+        plan.merge(values.prepare_destroy().await?);
+        Ok(plan)
     }
 
-    /// Park destruction after removing the index.
-    #[cfg(test)]
-    const fn halt_destroy_after_index(&mut self) {
-        self.halt_destroy_after_index = true;
+    /// Destroy all underlying storage.
+    ///
+    /// The caller must durably invalidate any externally persisted checkpoint before calling this
+    /// method. Once destruction is committed, recovery completes an interrupted removal before
+    /// another namespace operation proceeds.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
     }
 }
 
@@ -830,8 +812,6 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         Ok(Oversized {
             index: self.index.finish()?,
             values: self.values,
-            #[cfg(test)]
-            halt_destroy_after_index: false,
         })
     }
 }
@@ -989,46 +969,6 @@ mod tests {
             assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_interrupted_destroy_reopens() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to init");
-
-            for section in 0..2 {
-                (oversized, _, _, _) = oversized
-                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
-                    .await
-                    .expect("Failed to append");
-            }
-            oversized = oversized.sync_all().await.expect("Failed to sync");
-
-            // Cancel after every index reference has been removed but before value removal.
-            // Recovery can safely discard the remaining orphaned values and retry destruction.
-            oversized.halt_destroy_after_index();
-            {
-                let destroy = oversized.destroy();
-                futures::pin_mut!(destroy);
-                assert!(
-                    futures::poll!(destroy.as_mut()).is_pending(),
-                    "destroy must park after removing the index"
-                );
-            }
-
-            let invalidated_checkpoint = BTreeMap::new();
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized_at(context.child("second"), cfg, invalidated_checkpoint)
-                    .await
-                    .expect("interrupted destroy must leave openable storage");
-            assert_eq!(oversized.newest_section(), None);
-            oversized.destroy().await.expect("Failed to redestroy");
         });
     }
 

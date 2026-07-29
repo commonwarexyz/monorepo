@@ -22,7 +22,7 @@ use super::{
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
-    Context, SyncCompletion,
+    Context, DestroyPlan, SyncCompletion,
     journal::{
         Error,
         frame::{
@@ -1630,13 +1630,29 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(self)
     }
 
+    /// Return the exact physical namespace entries owned by this journal.
+    #[commonware_macros::stability(ALPHA)]
+    fn destroy_targets(&self) -> Vec<commonware_runtime::RemoveTarget> {
+        let mut targets = vec![self.blobs.destroy_target()];
+        targets.extend(self.offsets.destroy_targets());
+        targets
+    }
+
+    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        let Self { blobs, offsets, .. } = self;
+        let mut plan = blobs.prepare_destroy().await?;
+        plan.merge((*offsets).prepare_destroy().await?);
+        Ok(plan)
+    }
+
     /// See [Journal::destroy].
-    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
-        // Stage a recoverable reset before removing either half. If a later removal is interrupted,
-        // initialization completes the reset and can retry destruction.
-        self.offsets = self.offsets.stage_clear_intent(0).await?;
-        self.blobs.destroy().await?;
-        self.offsets.destroy().await
+    pub(crate) async fn destroy(self) -> Result<(), Error> {
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -2370,10 +2386,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Remove any underlying blobs created by the journal.
     ///
     /// This destroys both the data blobs and the offsets journal.
-    ///
-    /// # Crash Safety
-    ///
-    /// If interrupted, the journal remains openable and `destroy` can be retried.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -2486,6 +2498,10 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
 
     async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
         Self::init(context, cfg).await
+    }
+
+    fn destroy_targets(&self) -> Vec<commonware_runtime::RemoveTarget> {
+        self.0.destroy_targets()
     }
 }
 
@@ -6284,11 +6300,43 @@ mod tests {
 
     #[test_traced]
     fn test_clear_to_size_crash_after_staging_completes_on_init() {
-        let partition = "clear-to-size-crash-after-staging".to_string();
-        let executor = deterministic::Runner::default();
-        let ((), checkpoint) = executor.start_and_recover({
-            let partition = partition.clone();
-            |context| async move {
+        for post_commit in [false, true] {
+            let partition = format!("clear-to-size-crash-after-staging-{post_commit}");
+            let executor = deterministic::Runner::default();
+            let ((), checkpoint) = executor.start_and_recover({
+                let partition = partition.clone();
+                |context| async move {
+                    let cfg = Config {
+                        partition,
+                        items_per_section: NZU64!(5),
+                        compression: None,
+                        codec_config: (),
+                        page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                        write_buffer: NZUsize!(1024),
+                    };
+
+                    let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for i in 0..12u64 {
+                        (journal, _) = journal.append(&(100 + i)).await.unwrap();
+                    }
+                    journal = journal.sync().await.unwrap();
+
+                    // The clear intent is durable before the namespace batch starts. Whether the
+                    // batch fails before or after commitment, init must finish the staged clear.
+                    let faults = if post_commit {
+                        deterministic::FaultConfig::default().remove_batch_post_commit(1.0)
+                    } else {
+                        deterministic::FaultConfig::default().remove_batch(1.0)
+                    };
+                    *context.storage_fault_config().write() = faults;
+                    assert!(journal.0.clear_to_size(7).await.is_err());
+                }
+            });
+
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let cfg = Config {
                     partition,
                     items_per_section: NZU64!(5),
@@ -6298,55 +6346,26 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                 };
 
-                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                // `init` finds the staged intent, discards the stale data, and completes the reset.
+                let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
                     .await
                     .unwrap();
-                for i in 0..12u64 {
-                    (journal, _) = journal.append(&(100 + i)).await.unwrap();
-                }
-                journal = journal.sync().await.unwrap();
+                assert_eq!(journal.bounds(), 7..7);
+                let appended;
+                (journal, appended) = journal.append(&700).await.unwrap();
+                assert_eq!(appended, 7);
+                journal.sync().await.unwrap();
 
-                // Let `stage_clear_intent` (a metadata sync) persist the reset intent, but fail the
-                // subsequent `data.clear()` (a blob remove) so `clear_to_size` aborts after the
-                // intent is durable but before the data is cleared.
-                *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    remove_rate: Some(1.0),
-                    ..Default::default()
-                };
-                assert!(journal.0.clear_to_size(7).await.is_err());
-            }
-        });
+                // Reopen: the completed reset persists and no stale data was replayed.
+                let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 7..8);
+                assert_eq!(journal.read(7).await.unwrap(), 700);
 
-        deterministic::Runner::from(checkpoint).start(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = Config {
-                partition,
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // `init` finds the staged intent, discards the stale data, and completes the reset.
-            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..7);
-            let appended;
-            (journal, appended) = journal.append(&700).await.unwrap();
-            assert_eq!(appended, 7);
-            journal.sync().await.unwrap();
-
-            // Reopen: the completed reset persists and no stale data was replayed.
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 7..8);
-            assert_eq!(journal.read(7).await.unwrap(), 700);
-
-            journal.destroy().await.unwrap();
-        });
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]
@@ -7653,45 +7672,6 @@ mod tests {
             assert_eq!(bounds.start, 5);
             assert_eq!(journal.read(bounds.end - 1).await.unwrap(), 500);
 
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_journal_interrupted_destroy_reopens() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "destroy-test".into(),
-                items_per_section: NZU64!(2),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..5 {
-                (journal, _) = journal.append(&i).await.unwrap();
-            }
-            let mut journal = journal.sync().await.unwrap();
-
-            // Cancel the production future after the staged reset and one successful data-blob
-            // removal, leaving the offsets clear intent to finish recovery.
-            journal.0.blobs.halt_destroy_after_first_remove();
-            {
-                let destroy = journal.destroy();
-                futures::pin_mut!(destroy);
-                assert!(
-                    futures::poll!(destroy.as_mut()).is_pending(),
-                    "destroy must park after removing its first data blob"
-                );
-            }
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
-                .await
-                .expect("interrupted destroy must leave openable storage");
             journal.destroy().await.unwrap();
         });
     }

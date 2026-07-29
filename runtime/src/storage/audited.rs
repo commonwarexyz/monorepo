@@ -1,4 +1,4 @@
-use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::Auditor};
+use crate::{Error, Handle, IoBufs, IoBufsMut, RemoveTarget, deterministic::Auditor};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -62,6 +62,30 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             }
         });
         self.inner.remove(partition, name).await
+    }
+
+    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        let targets = crate::storage::removal::canonicalize(targets)?;
+        self.auditor.event(b"remove_batch", |hasher| {
+            hasher.update((targets.len() as u64).to_be_bytes());
+            for target in &targets {
+                match target {
+                    RemoveTarget::Partition(partition) => {
+                        hasher.update([0]);
+                        hasher.update((partition.len() as u64).to_be_bytes());
+                        hasher.update(partition.as_bytes());
+                    }
+                    RemoveTarget::Blob { partition, name } => {
+                        hasher.update([1]);
+                        hasher.update((partition.len() as u64).to_be_bytes());
+                        hasher.update(partition.as_bytes());
+                        hasher.update((name.len() as u64).to_be_bytes());
+                        hasher.update(name);
+                    }
+                }
+            }
+        });
+        self.inner.remove_batch(targets).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -163,7 +187,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
-        Storage as _,
+        RemoveTarget, Storage as _,
         deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
@@ -199,6 +223,45 @@ mod tests {
         storage2.open("ab", b"c").await.unwrap();
 
         assert_ne!(auditor1.state(), auditor2.state());
+    }
+
+    #[tokio::test]
+    async fn test_audited_remove_batch_hashes_canonical_set() {
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+
+        storage1
+            .remove_batch(vec![
+                RemoveTarget::Blob {
+                    partition: "blob_partition".into(),
+                    name: b"name".to_vec(),
+                },
+                RemoveTarget::Blob {
+                    partition: "whole_partition".into(),
+                    name: b"subsumed".to_vec(),
+                },
+                RemoveTarget::Partition("whole_partition".into()),
+                RemoveTarget::Blob {
+                    partition: "blob_partition".into(),
+                    name: b"name".to_vec(),
+                },
+            ])
+            .await
+            .unwrap();
+        storage2
+            .remove_batch(vec![
+                RemoveTarget::Partition("whole_partition".into()),
+                RemoveTarget::Blob {
+                    partition: "blob_partition".into(),
+                    name: b"name".to_vec(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(auditor1.state(), auditor2.state());
     }
 
     #[tokio::test]

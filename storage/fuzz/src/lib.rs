@@ -45,11 +45,16 @@ pub fn interrupt_faults() -> deterministic::FaultConfig {
         .partial_write(1.0)
         .sync(0.5)
         .remove(0.5)
+        .remove_batch(0.5)
+        .remove_batch_post_commit(0.5)
 }
 
 /// Fault preset for interrupting blob removals only.
 pub fn remove_faults() -> deterministic::FaultConfig {
-    deterministic::FaultConfig::default().remove(0.5)
+    deterministic::FaultConfig::default()
+        .remove(0.5)
+        .remove_batch(0.5)
+        .remove_batch_post_commit(0.5)
 }
 
 /// Page size for the buffer pool (1-256 bytes).

@@ -463,7 +463,7 @@ where
     }
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (pruned_chunks, mut pinned_nodes) = db::load_metadata(&metadata)?;
+    let (pruned_chunks, pinned_nodes) = db::load_metadata(&metadata)?;
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
     // metadata, then hand it to `any` which becomes the sole owner. `any::init_with_bitmap`
@@ -473,14 +473,6 @@ where
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
-    let reset_metadata = pruned_chunks != 0 && any.log.size() == 1;
-    if reset_metadata {
-        // The authenticated log retained genesis, so graft metadata from a previously destroyed
-        // pruned log is stale. Clear it durably; a failed clear is retried on the next init.
-        metadata.clear();
-        metadata = metadata.sync().await?;
-        pinned_nodes.clear();
-    }
 
     // Build the grafted tree from the bitmap and ops tree.
     let ops_size = any.log.merkle.size();

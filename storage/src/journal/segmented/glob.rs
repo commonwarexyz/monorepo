@@ -27,7 +27,7 @@
 //! 5. Decode value
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
-use crate::journal::Error;
+use crate::{DestroyPlan, journal::Error};
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage};
@@ -242,9 +242,9 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.remove_section(section).await
     }
 
-    /// See [Glob::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+    /// Wait for pending section syncs, then prepare the glob for removal.
+    async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.manager.prepare_destroy().await
     }
 }
 
@@ -395,7 +395,16 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
 
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Wait for pending section syncs, then prepare the glob for removal.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.0.prepare_destroy().await
     }
 }
 

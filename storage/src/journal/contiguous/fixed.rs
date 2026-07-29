@@ -138,7 +138,7 @@ use super::{
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
-    Context, SyncCompletion,
+    Context, DestroyPlan, SyncCompletion,
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
@@ -1123,13 +1123,32 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok((self, true))
     }
 
+    /// Return the exact physical namespace entries owned by this journal.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn destroy_targets(&self) -> Vec<commonware_runtime::RemoveTarget> {
+        vec![
+            self.blobs.destroy_target(),
+            self.checkpoint.destroy_target(),
+        ]
+    }
+
+    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        let Self {
+            blobs, checkpoint, ..
+        } = self;
+        let mut plan = blobs.prepare_destroy().await?;
+        plan.merge(checkpoint.prepare_destroy().await?);
+        Ok(plan)
+    }
+
     /// See [Journal::destroy].
-    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
-        // Stage a recoverable reset before removing storage. If a later removal is interrupted,
-        // initialization completes the reset and can retry destruction.
-        self.checkpoint = self.checkpoint.stage_clear(0).await?;
-        self.blobs.destroy().await?;
-        self.checkpoint.destroy().await
+    pub(crate) async fn destroy(self) -> Result<(), Error> {
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -1180,6 +1199,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
         new_size: u64,
@@ -1347,8 +1367,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// # Warnings
     ///
     /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
-    /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
-    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
+    /// * Whole-blob removals are committed as one namespace batch. After commitment, storage
+    ///   recovery completes any interrupted removals before reopening the namespace.
     /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
     ///   rewind truncates into their range.
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
@@ -1368,27 +1388,23 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
-    /// event of failure as items are always pruned in order from oldest to newest.
+    /// Whole-blob removals are committed as one runtime namespace batch. After commitment,
+    /// storage recovery completes any interrupted removals before reopening the namespace.
     pub async fn prune(mut self, min_item_pos: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min_item_pos).await?;
         self.0 = inner;
         Ok((self, pruned))
     }
 
-    /// Remove any persisted data created by the journal.
-    ///
-    /// # Crash Safety
-    ///
-    /// If interrupted, the journal remains openable and `destroy` can be retried.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+        self.0.prepare_destroy().await
     }
 
-    /// Park destruction after removing its first blob.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_first_remove(&mut self) {
-        self.0.blobs.halt_destroy_after_first_remove();
+    /// Remove any persisted data created by the journal.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.0.destroy().await
     }
 }
 
@@ -1747,6 +1763,10 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 
     async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
         Self::init(context, cfg).await
+    }
+
+    fn destroy_targets(&self) -> Vec<commonware_runtime::RemoveTarget> {
+        self.0.destroy_targets()
     }
 }
 
@@ -2713,38 +2733,6 @@ mod tests {
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_interrupted_destroy_reopens() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0u64..5 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-            let mut journal = journal.sync().await.unwrap();
-
-            // Cancel the production future after the staged reset and one successful blob
-            // removal, leaving a nonempty suffix for initialization to clear.
-            journal.0.blobs.halt_destroy_after_first_remove();
-            {
-                let destroy = journal.destroy();
-                futures::pin_mut!(destroy);
-                assert!(
-                    futures::poll!(destroy.as_mut()).is_pending(),
-                    "destroy must park after removing its first blob"
-                );
-            }
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("interrupted destroy must leave openable storage");
-            journal.destroy().await.unwrap();
         });
     }
 

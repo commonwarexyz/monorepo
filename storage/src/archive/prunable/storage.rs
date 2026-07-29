@@ -155,10 +155,6 @@ struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: Co
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    /// Test-only: park destruction after removing metadata and before touching the journals.
-    #[cfg(test)]
-    halt_destroy_after_metadata: bool,
-
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
 
@@ -349,8 +345,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
-            #[cfg(test)]
-            halt_destroy_after_metadata: false,
             indices,
             extra_indices,
             intervals,
@@ -701,24 +695,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.intervals.last_index()
     }
 
-    /// See [crate::archive::Archive::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        // Remove the checkpoint before the journals it describes, matching the ordering `prune`
-        // uses. The reverse order can leave a checkpoint entry for an already-removed section,
-        // which `Oversized::repair` reports as unrecoverable loss, and `init` is the only way to
-        // obtain the handle `destroy` needs.
-        self.metadata.destroy().await?;
-
-        #[cfg(test)]
-        if self.halt_destroy_after_metadata {
-            std::future::pending::<()>().await;
-        }
-
-        // Without a checkpoint every section recovers at floor zero, so an interrupted destroy
-        // leaves storage the next init can open by scan and destroy again.
-        self.oversized.destroy().await?;
-
-        Ok(())
+    /// Wait for pending child syncs, then prepare the archive for removal.
+    async fn prepare_destroy(self) -> Result<crate::DestroyPlan<E>, Error> {
+        let Self {
+            metadata,
+            oversized,
+            ..
+        } = self;
+        let mut plan = metadata.prepare_destroy().await?;
+        plan.merge(oversized.prepare_destroy().await?);
+        Ok(plan)
     }
 
     /// See [crate::archive::MultiArchive::get_all].
@@ -820,10 +806,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(self)
     }
 
-    /// Park destruction after its metadata await.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_metadata(&mut self) {
-        self.0.halt_destroy_after_metadata = true;
+    /// Wait for pending child syncs, then prepare the archive for removal.
+    async fn prepare_destroy(self) -> Result<crate::DestroyPlan<E>, Error> {
+        self.0.prepare_destroy().await
     }
 }
 
@@ -897,7 +882,12 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        self.prepare_destroy()
+            .await?
+            .destroy()
+            .await
+            .map_err(crate::metadata::Error::Runtime)
+            .map_err(Error::Metadata)
     }
 }
 
