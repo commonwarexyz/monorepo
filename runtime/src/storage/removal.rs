@@ -10,6 +10,12 @@
 //! 3. Remove every target idempotently and sync the affected partition and storage directories.
 //! 4. Remove the committed manifest and sync the control directory.
 //!
+//! The prepared file is renamed only after `write_all` and `sync_all` succeed. A short or
+//! interrupted write therefore cannot commit and is discarded during recovery. The manifest has a
+//! bounded length and a CRC32 over its complete body. Recovery validates the checksum, magic,
+//! version, target count, encoding, and canonical order before removing any target. An invalid
+//! committed manifest blocks namespace access instead of guessing which targets were recorded.
+//!
 //! Recovery runs while the storage namespace is locked and before another namespace operation is
 //! exposed. It discards a prepared manifest. Before acting on a committed manifest or trusting its
 //! absence, it syncs the control directory so the visible marker state is authoritative.
@@ -30,7 +36,9 @@
 //! Directory-entry durability is best-effort on platforms that cannot synchronize directories.
 //!
 //! A filesystem storage root must not be accessed concurrently by another storage instance or
-//! process. The manifest protocol relies on serialized namespace operations.
+//! process. The manifest protocol relies on serialized namespace operations. CRC32 detects
+//! accidental corruption and torn data, but does not authenticate a manifest against another
+//! process with write access to the root.
 
 use crate::{Error, RemoveTarget};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
