@@ -322,7 +322,7 @@ where
     H: Hasher + 'static,
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-    R: sync::compact::CompactDbResolver<Self>,
+    R: sync::compact::Resolver<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -358,7 +358,7 @@ where
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
-    R: sync::compact::CompactDbResolver<Self>,
+    R: sync::compact::Resolver<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 

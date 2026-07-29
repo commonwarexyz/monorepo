@@ -184,23 +184,20 @@ pub struct ValidatedState<F: Family, Op, D: Digest> {
     pub root: D,
 }
 
-/// A [`Source`] of compact state whose associated types match a specific `Database`.
+/// A [`Source`] of compact state whose associated types match a specific [`Database`].
 ///
-/// Blanket-impled for any matching `Source`, so callers never implement this directly.
-/// `Clone` and `'static` are required by the retry loop, not by sources in general.
-pub trait CompactDbResolver<DB: Database>:
+/// Blanket-impled for any matching `Source`, so callers never implement this directly. It names
+/// the type equalities [`sync`] needs and nothing else: compact sync fetches one response at a
+/// time through a borrow, so it never needs a source it can clone or outlive.
+pub trait Resolver<DB: Database>:
     Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
-    + Clone
-    + 'static
 {
 }
 
-impl<DB, R> CompactDbResolver<DB> for R
+impl<DB, R> Resolver<DB> for R
 where
     DB: Database,
-    R: Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
-        + Clone
-        + 'static,
+    R: Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
 {
 }
 
@@ -241,7 +238,7 @@ pub trait Database: Sized + Send {
 pub struct Config<DB, R>
 where
     DB: Database,
-    R: CompactDbResolver<DB>,
+    R: Resolver<DB>,
 {
     /// Runtime context for creating database components.
     pub context: DB::Context,
@@ -301,7 +298,7 @@ pub async fn sync<DB, R>(
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
-    R: CompactDbResolver<DB>,
+    R: Resolver<DB>,
 {
     let Config {
         context,
@@ -395,7 +392,7 @@ async fn attempt_sync<DB, R>(
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
-    R: CompactDbResolver<DB>,
+    R: Resolver<DB>,
 {
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
