@@ -379,7 +379,7 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config::<_>("fixed-bytes-var-partition", &context);
+        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
         VariableDb::init(context, cfg).await.unwrap()
     }
 

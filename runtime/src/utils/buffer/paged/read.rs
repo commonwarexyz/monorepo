@@ -161,7 +161,7 @@ impl<B: Blob> PageReader<B> {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
                 &physical_buf.as_ref()[page_start..page_start + self.physical_page_size];
-            let Some(record) = Checksum::validate_page(page_slice) else {
+            let Some(checksum) = Checksum::validate_page(page_slice) else {
                 error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
                 self.deferred_invalid_checksum = true;
                 if valid_pages == 0 {
@@ -169,8 +169,7 @@ impl<B: Blob> PageReader<B> {
                 }
                 break;
             };
-            let (len, _) = record.get_crc();
-            let len = len as usize;
+            let len = checksum.len as usize;
 
             let logical_start = (self.blob_page + page_idx as u64)
                 .checked_mul(self.page_size as u64)

@@ -2242,7 +2242,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops(
@@ -2366,7 +2366,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops_seeded(
@@ -2504,7 +2504,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops(
@@ -2671,7 +2671,7 @@ mod harnesses {
             suffix: &str,
             pooler: &impl BufferPooler,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
         }
 
         fn create_ops(

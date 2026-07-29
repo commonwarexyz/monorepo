@@ -53,9 +53,10 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
-/// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
-/// has more than 2^255 leaves).
-pub const MAX_LEVELS: usize = u8::MAX as usize;
+/// There should never be more than 32 sibling levels in a proof. Because
+/// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
+/// which requires at most `u32::BITS` sibling hashes per proven item.
+pub const MAX_LEVELS: usize = u32::BITS as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -88,8 +89,16 @@ impl<H: Hasher> Builder<H> {
     /// Adds a leaf to the Binary Merkle Tree.
     ///
     /// When added, the leaf is hashed with its position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tree already has `u32::MAX` leaves.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
+        // The count after this add must fit in Proof::leaf_count, a u32, so the
+        // maximum position is u32::MAX - 1.
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
+        assert!(position < u32::MAX, "too many leaves");
+
         let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
         self.leaves.push(digest);
         position

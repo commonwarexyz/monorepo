@@ -198,7 +198,7 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = fixed_db_config::<_>("partition", &context);
+        let cfg = fixed_db_config("partition", &context);
         AnyTest::init(context, cfg).await.unwrap()
     }
 
@@ -1599,7 +1599,7 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        let cfg = fixed_db_config::<_>("fixed-bytes-partition", &context);
+        let cfg = fixed_db_config("fixed-bytes-partition", &context);
         FixedDb::init(context, cfg).await.unwrap()
     }
 

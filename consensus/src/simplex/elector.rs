@@ -318,9 +318,8 @@ impl Random {
 
         let Some(seed_signature) = seed_signature else {
             // Standard round-robin for view 1
-            return Participant::new(
-                (round.epoch().get().wrapping_add(round.view().get())) as u32 % n,
-            );
+            let idx = round.epoch().get().wrapping_add(round.view().get()) % u64::from(n);
+            return Participant::new(u32::try_from(idx).expect("leader index fits in u32"));
         };
 
         // Use the seed signature as a source of randomness
@@ -630,6 +629,26 @@ mod tests {
     }
 
     #[test]
+    fn random_fallback_does_not_truncate_before_modulo() {
+        // Five participants make truncation observable:
+        // 2^32 % 5 is 1, while (2^32 as u32) % 5 is 0
+        let mut rng = test_rng();
+        let Fixture { participants, .. } =
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let random: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let round_robin: RoundRobinElector<ThresholdScheme> =
+            RoundRobin::<Sha256>::default().build(&participants);
+
+        // View 1 exercises Random's round-robin fallback
+        let round = Round::new(Epoch::new(u64::from(u32::MAX)), View::new(1));
+
+        // Both electors must preserve the full u64 sum through the modulo
+        assert_eq!(round_robin.elect(round, None), Participant::new(1));
+        assert_eq!(random.elect(round, None), Participant::new(1));
+    }
+
+    #[test]
     fn random_uses_certificate_randomness() {
         let mut rng = test_rng();
         let Fixture {
@@ -651,9 +670,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0]
-            .assemble::<_, N3f1>(attestations1, &Sequential)
-            .unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -665,9 +682,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0]
-            .assemble::<_, N3f1>(attestations2, &Sequential)
-            .unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -774,9 +789,7 @@ mod tests {
                     .take(quorum)
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
-                let cert = schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap();
+                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
                 // Elect leader using the certificate
                 let leader = elector.elect(round, Some(&cert));

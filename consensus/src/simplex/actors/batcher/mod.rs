@@ -487,6 +487,148 @@ mod tests {
         assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
     }
 
+    #[test_traced]
+    fn test_leader_proposal_verifies_all_ready_vote_kinds() {
+        let n = 5;
+        let namespace = b"batcher_test";
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+            let reporter = test_reporter(&mut context, &schemes[0]);
+            let me = participants[0].clone();
+            let batcher_cfg = test_config(
+                schemes[0].clone(),
+                oracle.control(me.clone()),
+                reporter,
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mailbox::new::<voter::Message<_, Sha256Digest>>(
+                    context.child("mailbox"),
+                    NZUsize!(1024),
+                );
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::ZERO,
+                success_rate: 1.0,
+            };
+            let mut participant_senders = Vec::with_capacity(n as usize);
+            participant_senders.push(None);
+            for participant in participants.iter().skip(1) {
+                let (sender, _receiver) = oracle
+                    .control(participant.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(participant.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                participant_senders.push(Some(sender));
+            }
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            let leader = Participant::from_usize(4);
+            batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"payload"]));
+
+            // Buffer finalizes and non-leader notarizes while the leader's
+            // proposal is unknown. Both kinds become verifiable together when
+            // the leader's notarize arrives.
+            for i in 1..n as usize {
+                let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
+                participant_senders[i]
+                    .as_mut()
+                    .unwrap()
+                    .send(
+                        Recipients::One(me.clone()),
+                        Vote::Finalize(finalize).encode(),
+                        true,
+                    );
+            }
+            for i in 1..usize::from(leader) {
+                let notarize = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
+                participant_senders[i]
+                    .as_mut()
+                    .unwrap()
+                    .send(
+                        Recipients::One(me.clone()),
+                        Vote::Notarize(notarize).encode(),
+                        true,
+                    );
+            }
+            context.sleep(Duration::from_millis(50)).await;
+
+            let leader = usize::from(leader);
+            let notarize = Notarize::sign(&schemes[leader], proposal).unwrap();
+            participant_senders[leader]
+                .as_mut()
+                .unwrap()
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(notarize).encode(),
+                    true,
+                );
+
+            let mut received_proposal = false;
+            let mut received_notarization = false;
+            let mut received_finalization = false;
+            for _ in 0..3 {
+                let message = select! {
+                    message = voter_receiver.recv() => {
+                        message.expect("voter receiver closed")
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {
+                        panic!("timed out waiting for all ready vote kinds")
+                    },
+                };
+                match message {
+                    voter::Message::Proposal { .. } => received_proposal = true,
+                    voter::Message::Verified {
+                        certificate: Certificate::Notarization(_),
+                        ..
+                    } => received_notarization = true,
+                    voter::Message::Verified {
+                        certificate: Certificate::Finalization(_),
+                        ..
+                    } => received_finalization = true,
+                    _ => panic!("unexpected voter message"),
+                }
+            }
+
+            assert!(received_proposal);
+            assert!(received_notarization);
+            assert!(received_finalization);
+        });
+    }
+
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

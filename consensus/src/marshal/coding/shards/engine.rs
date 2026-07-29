@@ -1691,7 +1691,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
     };
     use std::{
         future::Future,
@@ -1721,7 +1721,7 @@ mod tests {
         }
     }
 
-    impl_certificate_ed25519!(TestSubject, Vec<u8>);
+    impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
