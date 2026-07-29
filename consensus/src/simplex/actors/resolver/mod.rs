@@ -32,6 +32,13 @@
 //! certificate response do not change. See [the Simplex overview](crate::simplex) for the protocol
 //! rationale.
 //!
+//! A certified-notarization floor bounds background repair, but it is not a finalization boundary.
+//! Raising that floor may remove background requests for holes between the last finalization and
+//! the certified view. If a later proposal names a parent below those holes, the voter still checks
+//! the entire skipped range and targets the proposal's leader for the first missing certificate.
+//! It reruns the check after each delivery and may target the next gap. A certified-floor raise does
+//! not retire this targeted demand; matching evidence or finalization does.
+//!
 //! The wire key does not identify a certificate kind. A producer serves its certified or finalized
 //! floor when that floor covers the key. The floor takes priority when a nullification also exists.
 //! Otherwise, the producer serves the covering nullification. A late floor change or Byzantine

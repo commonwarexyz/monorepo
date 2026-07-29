@@ -36,7 +36,11 @@ pub(crate) enum Effect {
         /// Why the fetch is needed.
         reason: FetchReason,
     },
-    /// Retain only views above this floor.
+    /// Retire background demand at or below a new floor.
+    ///
+    /// Applying this effect must preserve targeted ancestry demand: a certified
+    /// floor does not prove that a proposal's selected ancestry is available.
+    /// Matching evidence or finalization retires targeted demand separately.
     RetainAbove(View),
 }
 
@@ -232,7 +236,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// anchor and advancing the cursor past everything scanned. Requests
     /// stay pending in the resolver until answered or retained out (we must
     /// eventually receive a nullification at the anchor or a
-    /// notarization/finalization at a higher view). See the
+    /// notarization/finalization at a higher view).
+    ///
+    /// Background scans never descend below a certified floor. Proposals
+    /// repair holes below it through targeted requests. See the
     /// [module docs](super) for the full strategy, including how mid-term
     /// floor raises pull the cursor back.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
@@ -252,7 +259,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         effects
     }
 
-    /// Prune stored certificates and requests that are not higher than the floor.
+    /// Prune floor-obsolete state and request retirement of background demand
+    /// at or below the floor.
     fn prune(&mut self) -> Effect {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);

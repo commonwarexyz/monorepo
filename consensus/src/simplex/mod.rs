@@ -330,6 +330,11 @@
 //! participants hold a nullification at `v`. Both sides consider `v` complete, but they choose different parents
 //! and cannot initially verify each other's proposals.
 //!
+//! The local certified floor bounds background repair, but it does not bound ancestry validation. A participant may
+//! still lack certificates between its last finalization and its certified floor. Proposal verification checks the
+//! named parent and every skipped view, requesting the first missing certificate from the leader even when that view
+//! is below the local certified floor. Only finalization makes ancestry below its view invalid.
+//!
 //! A proposal makes this otherwise invisible split actionable. An honest leader that skips a view must hold a
 //! covering nullification. An honest leader that names a parent must hold its certified notarization or finalization.
 //! A participant missing either certificate requests its exact view from that leader. An ancestry-only request
