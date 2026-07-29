@@ -132,25 +132,18 @@ impl<
             .verifier
             .set_proposal(ProposalState::Certificate(proposal.clone()));
         if proposal_changed && proposal_replaced {
-            self.restore_tracked_finalizes(proposal);
+            // Matching tracked finalizes are unverified network votes: the conflicting
+            // leader proposal filtered them, while constructed finalizes establish the
+            // proposal before entering the tracker.
+            for finalize in self
+                .votes
+                .iter_finalizes()
+                .filter(|finalize| &finalize.proposal == proposal)
+            {
+                self.verifier.add(Vote::Finalize(finalize.clone()), false);
+            }
         }
         proposal_changed
-    }
-
-    /// Restores network finalize votes after an authoritative proposal
-    /// replaces the leader-selected proposal.
-    ///
-    /// Constructed finalizes establish the proposal before entering the tracker.
-    fn restore_tracked_finalizes(&mut self, proposal: &Proposal<D>) {
-        // No matching finalize can already be verified: unknown proposals do
-        // not verify, and selecting a conflicting leader proposal filters them.
-        for finalize in self
-            .votes
-            .iter_finalizes()
-            .filter(|finalize| &finalize.proposal == proposal)
-        {
-            self.verifier.add(Vote::Finalize(finalize.clone()), false);
-        }
     }
 
     /// Adds a vote from the network to this round's verifier.
