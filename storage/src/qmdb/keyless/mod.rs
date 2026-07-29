@@ -327,17 +327,17 @@ where
     }
 
     /// Analogous to proof, but with respect to the state of the Merkle structure when it had
-    /// `op_count` operations.
+    /// `historical_size` operations.
     ///
-    /// `op_count` must be the size of a commit boundary.
+    /// `historical_size` must be the size of a commit boundary.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
-    ///   >= `op_count` or `op_count` > number of operations.
+    ///   >= `historical_size` or `historical_size` > number of operations.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
+    /// - Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a commit
     ///   op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -345,28 +345,28 @@ where
         level = "info",
         skip_all,
         fields(
-            op_count = *op_count,
+            historical_size = *historical_size,
             start_loc = *start_loc,
             max_ops = max_ops.get(),
         ),
     )]
     pub async fn historical_proof(
         &self,
-        op_count: Location<F>,
+        historical_size: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, V>>), Error<F>> {
-        if op_count > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        if historical_size > self.journal.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size, |op| op.has_floor())
                 .await?;
 
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
