@@ -141,54 +141,6 @@ where
     Ok(FetchResult::new(proof, operations, pinned_nodes))
 }
 
-/// Fetch an operation range from separate local-store callbacks and package it as a
-/// [`FetchResult`].
-///
-/// Use this for database APIs that expose `historical_proof` separately from
-/// `pinned_nodes_at`; pinned nodes are fetched only when `include_pinned_nodes` is true.
-pub async fn fetch_operations<
-    F,
-    Op,
-    D,
-    Error,
-    HistoricalProof,
-    HistoricalFuture,
-    Pins,
-    PinsFuture,
->(
-    op_count: Location<F>,
-    start_loc: Location<F>,
-    max_ops: NonZeroU64,
-    include_pinned_nodes: bool,
-    historical_proof: HistoricalProof,
-    pinned_nodes_at: Pins,
-) -> Result<FetchResult<F, Op, D>, Error>
-where
-    F: Family,
-    D: Digest,
-    HistoricalProof: FnOnce(Location<F>, Location<F>, NonZeroU64) -> HistoricalFuture,
-    HistoricalFuture: Future<Output = Result<(Proof<F, D>, Vec<Op>), Error>>,
-    Pins: FnOnce(Location<F>) -> PinsFuture,
-    PinsFuture: Future<Output = Result<Vec<D>, Error>>,
-{
-    fetch_operation_range(
-        op_count,
-        start_loc,
-        max_ops,
-        include_pinned_nodes,
-        |op_count, start_loc, max_ops, include_pinned_nodes| async move {
-            let (proof, operations) = historical_proof(op_count, start_loc, max_ops).await?;
-            let pinned_nodes = if include_pinned_nodes {
-                Some(pinned_nodes_at(start_loc).await?)
-            } else {
-                None
-            };
-            Ok(FetchedOperations::new(proof, operations, pinned_nodes))
-        },
-    )
-    .await
-}
-
 /// Trait for network communication with the sync server.
 pub trait Resolver: Send + Sync + Clone + 'static {
     /// The merkle family backing the resolver's proofs
@@ -219,64 +171,109 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     + 'a;
 }
 
-macro_rules! impl_resolver {
-    ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$db<F, E, K, V, H, T, S>>
-        where
-            F: Family,
-            E: Context,
-            K: Array,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+/// A source of QMDB operations that can prove them.
+///
+/// Sync serving reads through this trait, so a live database and an owned snapshot are
+/// interchangeable to it. An implementor supplies the two primitive reads, and this module's
+/// [`Resolver`] implementations then cover every shape a source is held in: directly, behind
+/// a lock, or behind a lock that may be empty.
+pub trait ProofSource: Send + Sync {
+    /// The merkle family backing this source's proofs.
+    type Family: Family;
 
-            async fn get_operations(
-                &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
-                max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
-                )
-                .await
-            }
+    /// The digest type used in this source's proofs.
+    type Digest: Digest;
+
+    /// The type of operations this source yields. Served across threads, so it is [`Send`].
+    type Op: Send;
+
+    /// Prove the operations starting at `start_loc`, against the state this source held when
+    /// it had `op_count` operations.
+    #[allow(clippy::type_complexity)]
+    fn historical_proof<'a>(
+        &'a self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+    ) -> impl Future<
+        Output = Result<
+            (Proof<Self::Family, Self::Digest>, Vec<Self::Op>),
+            qmdb::Error<Self::Family>,
+        >,
+    > + Send
+    + 'a;
+
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    fn pinned_nodes_at<'a>(
+        &'a self,
+        loc: Location<Self::Family>,
+    ) -> impl Future<Output = Result<Vec<Self::Digest>, qmdb::Error<Self::Family>>> + Send + 'a;
+
+    /// Prove the operations starting at `start_loc` and package them for a peer, including
+    /// the pinned nodes at `start_loc` when `include_pinned_nodes` is set.
+    #[allow(clippy::type_complexity)]
+    fn fetch_operations<'a>(
+        &'a self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+    ) -> impl Future<
+        Output = Result<
+            FetchResult<Self::Family, Self::Op, Self::Digest>,
+            qmdb::Error<Self::Family>,
+        >,
+    > + Send
+    + 'a {
+        async move {
+            let (proof, operations) = self.historical_proof(op_count, start_loc, max_ops).await?;
+            let pinned_nodes = if include_pinned_nodes {
+                Some(self.pinned_nodes_at(start_loc).await?)
+            } else {
+                None
+            };
+            Ok(FetchResult::new(proof, operations, pinned_nodes))
         }
-        impl_resolver!(@locked $db, $op, $val_bound, AsyncRwLock);
-        impl_resolver!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
-    };
-    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
+    }
+}
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
+/// Serve from a source held directly.
+impl<T> Resolver for Arc<T>
+where
+    T: ProofSource + 'static,
+{
+    type Family = T::Family;
+    type Digest = T::Digest;
+    type Op = T::Op;
+    type Error = qmdb::Error<T::Family>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.fetch_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+            .await
+    }
+}
+
+/// Serve from a source behind a lock, and from one behind a lock that may be empty.
+///
+/// A single read guard spans the whole fetch, so the proof and its pinned nodes are read
+/// from one state even while a writer waits. A macro rather than a further blanket
+/// implementation because the two lock types share no trait to be generic over.
+macro_rules! impl_locked_resolver {
+    ($lock:ident) => {
+        impl<T> Resolver for Arc<$lock<T>>
         where
-            F: Family,
-            E: Context,
-            K: Array,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
+            T: ProofSource + 'static,
         {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+            type Family = T::Family;
+            type Digest = T::Digest;
+            type Op = T::Op;
+            type Error = qmdb::Error<T::Family>;
 
             async fn get_operations(
                 &self,
@@ -286,35 +283,19 @@ macro_rules! impl_resolver {
                 include_pinned_nodes: bool,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                )
-                .await
+                db.fetch_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+                    .await
             }
         }
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
+        impl<T> Resolver for Arc<$lock<Option<T>>>
         where
-            F: Family,
-            E: Context,
-            K: Array,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
+            T: ProofSource + 'static,
         {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
+            type Family = T::Family;
+            type Digest = T::Digest;
+            type Op = T::Op;
+            type Error = ServeError<T::Family, T::Digest>;
 
             async fn get_operations(
                 &self,
@@ -325,40 +306,23 @@ macro_rules! impl_resolver {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                )
-                .await?)
+                Ok(db
+                    .fetch_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+                    .await?)
             }
         }
     };
 }
 
-// Unordered Fixed
-impl_resolver!(FixedDb, FixedOperation, FixedValue);
+impl_locked_resolver!(AsyncRwLock);
+impl_locked_resolver!(TracedAsyncRwLock);
 
-// Unordered Variable
-impl_resolver!(VariableDb, VariableOperation, VariableValue);
-
-// Ordered Fixed
-impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
-
-// Ordered Variable
-impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
-
-// Immutable types need a separate macro because the key bound varies
-// (Array for fixed, Key for variable) unlike the other DB types which
-// always use Array.
-macro_rules! impl_resolver_immutable {
+/// Forward a database's inherent proof reads to [`ProofSource`].
+///
+/// The keyless arm exists because those databases have no key or translator parameter.
+macro_rules! impl_proof_source {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$db<F, E, K, V, H, T, S>>
+        impl<F, E, K, V, H, T, S> ProofSource for $db<F, E, K, V, H, T, S>
         where
             F: Family,
             E: Context,
@@ -372,237 +336,69 @@ macro_rules! impl_resolver_immutable {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
 
-            async fn get_operations(
+            async fn historical_proof(
                 &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
+                op_count: Location<F>,
+                start_loc: Location<F>,
                 max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
-                )
-                .await
+            ) -> Result<(Proof<F, H::Digest>, Vec<Self::Op>), qmdb::Error<F>> {
+                self.historical_proof(op_count, start_loc, max_ops).await
+            }
+
+            async fn pinned_nodes_at(
+                &self,
+                loc: Location<F>,
+            ) -> Result<Vec<H::Digest>, qmdb::Error<F>> {
+                self.pinned_nodes_at(loc).await
             }
         }
-        impl_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, AsyncRwLock);
-        impl_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, TracedAsyncRwLock);
     };
-    (@locked $db:ident, $op:ident, $val_bound:ident, $key_bound:path, $lock:ident) => {
-
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
+    (keyless $db:ident, $op:ident, $val_bound:ident) => {
+        impl<F, E, V, H, S> ProofSource for $db<F, E, V, H, S>
         where
             F: Family,
             E: Context,
-            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
             S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
+            type Op = $op<F, V>;
 
-            async fn get_operations(
+            async fn historical_proof(
                 &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
+                op_count: Location<F>,
+                start_loc: Location<F>,
                 max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                )
-                .await
+            ) -> Result<(Proof<F, H::Digest>, Vec<Self::Op>), qmdb::Error<F>> {
+                self.historical_proof(op_count, start_loc, max_ops).await
             }
-        }
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
-        where
-            F: Family,
-            E: Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_operations(
+            async fn pinned_nodes_at(
                 &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
-                max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                )
-                .await?)
+                loc: Location<F>,
+            ) -> Result<Vec<H::Digest>, qmdb::Error<F>> {
+                self.pinned_nodes_at(loc).await
             }
         }
     };
 }
 
-// Immutable Fixed
-impl_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
-
-// Immutable Variable
-impl_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
-
-// Keyless types have no key or translator, so they need their own macro.
-macro_rules! impl_resolver_keyless {
-    ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, V, H, S> Resolver for Arc<$db<F, E, V, H, S>>
-        where
-            F: Family,
-            E: Context,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = qmdb::Error<F>;
-
-            async fn get_operations(
-                &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
-                max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.pinned_nodes_at(start_loc),
-                )
-                .await
-            }
-        }
-        impl_resolver_keyless!(@locked $db, $op, $val_bound, AsyncRwLock);
-        impl_resolver_keyless!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
-    };
-    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
-
-        impl<F, E, V, H, S> Resolver for Arc<$lock<$db<F, E, V, H, S>>>
-        where
-            F: Family,
-            E: Context,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = qmdb::Error<F>;
-
-            async fn get_operations(
-                &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
-                max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                )
-                .await
-            }
-        }
-
-        impl<F, E, V, H, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, S>>>>
-        where
-            F: Family,
-            E: Context,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_operations(
-                &self,
-                op_count: Location<Self::Family>,
-                start_loc: Location<Self::Family>,
-                max_ops: NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.pinned_nodes_at(start_loc),
-                )
-                .await?)
-            }
-        }
-    };
-}
-
-// Keyless Fixed
-impl_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
-
-// Keyless Variable
-impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
+impl_proof_source!(FixedDb, FixedOperation, FixedValue, Array);
+impl_proof_source!(VariableDb, VariableOperation, VariableValue, Array);
+impl_proof_source!(OrderedFixedDb, OrderedFixedOperation, FixedValue, Array);
+impl_proof_source!(
+    OrderedVariableDb,
+    OrderedVariableOperation,
+    VariableValue,
+    Array
+);
+impl_proof_source!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
+impl_proof_source!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+impl_proof_source!(keyless KeylessFixedDb, KeylessFixedOp, FixedValue);
+impl_proof_source!(keyless KeylessVariableDb, KeylessVariableOp, VariableValue);
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -614,7 +410,7 @@ pub(crate) mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
     use commonware_runtime::deterministic;
-    use commonware_utils::sync::AsyncRwLock;
+    use commonware_utils::sync::{AsyncRwLock, TracedAsyncRwLock};
     use std::{marker::PhantomData, sync::Arc};
 
     macro_rules! assert_resolver_variants {
@@ -622,6 +418,8 @@ pub(crate) mod tests {
             assert_resolver::<Arc<$db>>();
             assert_resolver::<Arc<AsyncRwLock<$db>>>();
             assert_resolver::<Arc<AsyncRwLock<Option<$db>>>>();
+            assert_resolver::<Arc<TracedAsyncRwLock<$db>>>();
+            assert_resolver::<Arc<TracedAsyncRwLock<Option<$db>>>>();
         };
     }
 

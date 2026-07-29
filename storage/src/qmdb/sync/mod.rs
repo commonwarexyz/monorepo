@@ -23,7 +23,7 @@ pub(crate) use database::{
 };
 
 pub mod resolver;
-pub(crate) use resolver::{FetchResult, Resolver};
+pub(crate) use resolver::{ProofSource, Resolver};
 
 mod target;
 pub use target::Target;

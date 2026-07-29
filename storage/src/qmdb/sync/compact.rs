@@ -681,27 +681,131 @@ where
     })
 }
 
-// Resolver impls for full keyless databases. These synthesize compact state by querying the
-// historical tip proof and current frontier pins from the full source.
-macro_rules! impl_compact_resolver_keyless {
-    ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, V, H, S> Resolver for Arc<$db<F, E, V, H, S>>
+/// A source of a database's compact state at a target.
+///
+/// Compact sync serving reads through this trait, so it does not care whether the state is
+/// read from a persisted witness or synthesized from a full operation log. An implementor
+/// supplies that one read, and this module's [`Resolver`] implementations then cover every
+/// shape a source is held in: directly, behind a lock, or behind a lock that may be empty.
+pub trait StateSource: Send + Sync {
+    /// The merkle family backing this source's proofs.
+    type Family: Family;
+
+    /// The digest type used in this source's proofs.
+    type Digest: Digest;
+
+    /// The type of operations this source yields. Served across threads, so it is [`Send`].
+    type Op: Send;
+
+    /// Return the compact state committing `target`, or a stale-target error if this source
+    /// does not hold it.
+    #[allow(clippy::type_complexity)]
+    fn compact_state<'a>(
+        &'a self,
+        target: Target<Self::Family, Self::Digest>,
+    ) -> impl Future<
+        Output = Result<
+            State<Self::Family, Self::Op, Self::Digest>,
+            ServeError<Self::Family, Self::Digest>,
+        >,
+    > + Send
+    + 'a;
+}
+
+/// Serve from a source held directly.
+impl<T> Resolver for Arc<T>
+where
+    T: StateSource + 'static,
+{
+    type Family = T::Family;
+    type Digest = T::Digest;
+    type Op = T::Op;
+    type Error = ServeError<T::Family, T::Digest>;
+
+    async fn get_compact_state(
+        &self,
+        target: Target<Self::Family, Self::Digest>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.compact_state(target).await.map(Into::into)
+    }
+}
+
+/// Serve from a source behind a lock, and from one behind a lock that may be empty.
+///
+/// A single read guard spans the whole read, so a full source's synthesized state is built
+/// from one database state even while a writer waits. A macro rather than a further blanket
+/// implementation because the two lock types share no trait to be generic over.
+macro_rules! impl_locked_resolver {
+    ($lock:ident) => {
+        impl<T> Resolver for Arc<$lock<T>>
         where
-            F: Family,
-            E: crate::Context,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            S: Strategy,
+            T: StateSource + 'static,
         {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
+            type Family = T::Family;
+            type Digest = T::Digest;
+            type Op = T::Op;
+            type Error = ServeError<T::Family, T::Digest>;
 
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let db = self.read().await;
+                db.compact_state(target).await.map(Into::into)
+            }
+        }
+
+        impl<T> Resolver for Arc<$lock<Option<T>>>
+        where
+            T: StateSource + 'static,
+        {
+            type Family = T::Family;
+            type Digest = T::Digest;
+            type Op = T::Op;
+            type Error = ServeError<T::Family, T::Digest>;
+
+            async fn get_compact_state(
+                &self,
+                target: Target<Self::Family, Self::Digest>,
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                let guard = self.read().await;
+                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
+                db.compact_state(target).await.map(Into::into)
+            }
+        }
+    };
+}
+
+impl_locked_resolver!(AsyncRwLock);
+impl_locked_resolver!(TracedAsyncRwLock);
+
+/// Implement [`StateSource`] for a database.
+///
+/// A `full` database has no persisted witness, so its state is synthesized on demand from
+/// the current tip commit plus the frontier pins at the requested tree size; a `compact`
+/// database reads its witness directly. The `keyless` arms exist because those databases
+/// have no key or translator parameter.
+macro_rules! impl_state_source {
+    (full $db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
+        impl<F, E, K, V, H, T, S> StateSource for $db<F, E, K, V, H, T, S>
+        where
+            F: Family,
+            E: crate::Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+            S: Strategy,
+        {
+            type Family = F;
+            type Digest = H::Digest;
+            type Op = $op<F, K, V>;
+
+            async fn compact_state(
+                &self,
+                target: Target<F, H::Digest>,
+            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
                 fetch_state_from_full_source(
                     target,
                     || Target::new(self.root(), self.bounds().end),
@@ -715,15 +819,11 @@ macro_rules! impl_compact_resolver_keyless {
                     |leaf_count| self.pinned_nodes_at(leaf_count),
                 )
                 .await
-                .map(Into::into)
             }
         }
-        impl_compact_resolver_keyless!(@locked $db, $op, $val_bound, AsyncRwLock);
-        impl_compact_resolver_keyless!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
     };
-    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
-
-        impl<F, E, V, H, S> Resolver for Arc<$lock<$db<F, E, V, H, S>>>
+    (full keyless $db:ident, $op:ident, $val_bound:ident) => {
+        impl<F, E, V, H, S> StateSource for $db<F, E, V, H, S>
         where
             F: Family,
             E: crate::Context,
@@ -734,92 +834,11 @@ macro_rules! impl_compact_resolver_keyless {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
 
-            async fn get_compact_state(
+            async fn compact_state(
                 &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                fetch_state_from_full_source(
-                    target,
-                    || Target::new(db.root(), db.bounds().end),
-                    |leaf_count, last_commit_loc| {
-                        db.historical_proof(
-                            leaf_count,
-                            last_commit_loc,
-                            NonZeroU64::new(1).unwrap(),
-                        )
-                    },
-                    |leaf_count| db.pinned_nodes_at(leaf_count),
-                )
-                .await
-                .map(Into::into)
-            }
-        }
-
-        impl<F, E, V, H, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, S>>>>
-        where
-            F: Family,
-            E: crate::Context,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                fetch_state_from_full_source(
-                    target,
-                    || Target::new(db.root(), db.bounds().end),
-                    |leaf_count, last_commit_loc| {
-                        db.historical_proof(
-                            leaf_count,
-                            last_commit_loc,
-                            NonZeroU64::new(1).unwrap(),
-                        )
-                    },
-                    |leaf_count| db.pinned_nodes_at(leaf_count),
-                )
-                .await
-                .map(Into::into)
-            }
-        }
-    };
-}
-
-// Resolver impls for full immutable databases. Same pattern as keyless, but with the extra key and
-// translator parameters carried by immutable variants.
-macro_rules! impl_compact_resolver_immutable {
-    ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$db<F, E, K, V, H, T, S>>
-        where
-            F: Family,
-            E: crate::Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                target: Target<F, H::Digest>,
+            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
                 fetch_state_from_full_source(
                     target,
                     || Target::new(self.root(), self.bounds().end),
@@ -833,180 +852,11 @@ macro_rules! impl_compact_resolver_immutable {
                     |leaf_count| self.pinned_nodes_at(leaf_count),
                 )
                 .await
-                .map(Into::into)
-            }
-        }
-        impl_compact_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, AsyncRwLock);
-        impl_compact_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, TracedAsyncRwLock);
-    };
-    (@locked $db:ident, $op:ident, $val_bound:ident, $key_bound:path, $lock:ident) => {
-
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
-        where
-            F: Family,
-            E: crate::Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                fetch_state_from_full_source(
-                    target,
-                    || Target::new(db.root(), db.bounds().end),
-                    |leaf_count, last_commit_loc| {
-                        db.historical_proof(
-                            leaf_count,
-                            last_commit_loc,
-                            NonZeroU64::new(1).unwrap(),
-                        )
-                    },
-                    |leaf_count| db.pinned_nodes_at(leaf_count),
-                )
-                .await
-                .map(Into::into)
-            }
-        }
-
-        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
-        where
-            F: Family,
-            E: crate::Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                fetch_state_from_full_source(
-                    target,
-                    || Target::new(db.root(), db.bounds().end),
-                    |leaf_count, last_commit_loc| {
-                        db.historical_proof(
-                            leaf_count,
-                            last_commit_loc,
-                            NonZeroU64::new(1).unwrap(),
-                        )
-                    },
-                    |leaf_count| db.pinned_nodes_at(leaf_count),
-                )
-                .await
-                .map(Into::into)
             }
         }
     };
-}
-
-// Resolver impls for compact keyless databases. These already persist a compact witness, so serving
-// is just a target check over the current witness rather than reconstructing anything from history.
-macro_rules! impl_compact_resolver_compact_keyless {
-    ($db:ident, $op:ident) => {
-        impl<F, E, V, H, C, S> Resolver for Arc<$db<F, E, V, H, C, S>>
-        where
-            F: Family,
-            E: crate::Context,
-            V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
-            $op<F, V>: Encode + Read<Cfg = C>,
-            C: Clone + Send + Sync + 'static,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target).map(Into::into)
-            }
-        }
-        impl_compact_resolver_compact_keyless!(@locked $db, $op, AsyncRwLock);
-        impl_compact_resolver_compact_keyless!(@locked $db, $op, TracedAsyncRwLock);
-    };
-    (@locked $db:ident, $op:ident, $lock:ident) => {
-
-        impl<F, E, V, H, C, S> Resolver for Arc<$lock<$db<F, E, V, H, C, S>>>
-        where
-            F: Family,
-            E: crate::Context,
-            V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
-            $op<F, V>: Encode + Read<Cfg = C>,
-            C: Clone + Send + Sync + 'static,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                db.compact_state(target).map(Into::into)
-            }
-        }
-
-        impl<F, E, V, H, C, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, C, S>>>>
-        where
-            F: Family,
-            E: crate::Context,
-            V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
-            $op<F, V>: Encode + Read<Cfg = C>,
-            C: Clone + Send + Sync + 'static,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).map(Into::into)
-            }
-        }
-    };
-}
-
-// Resolver impls for compact immutable databases. Like the keyless compact path, these read the
-// persisted witness directly instead of rebuilding it from a full operation log.
-macro_rules! impl_compact_resolver_compact_immutable {
-    ($db:ident, $op:ident) => {
-        impl<F, E, K, V, H, C, S> Resolver for Arc<$db<F, E, K, V, H, C, S>>
+    (compact $db:ident, $op:ident) => {
+        impl<F, E, K, V, H, C, S> StateSource for $db<F, E, K, V, H, C, S>
         where
             F: Family,
             E: crate::Context,
@@ -1020,80 +870,46 @@ macro_rules! impl_compact_resolver_compact_immutable {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
 
-            async fn get_compact_state(
+            async fn compact_state(
                 &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target).map(Into::into)
+                target: Target<F, H::Digest>,
+            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
+                self.compact_state(target)
             }
         }
-        impl_compact_resolver_compact_immutable!(@locked $db, $op, AsyncRwLock);
-        impl_compact_resolver_compact_immutable!(@locked $db, $op, TracedAsyncRwLock);
     };
-    (@locked $db:ident, $op:ident, $lock:ident) => {
-
-        impl<F, E, K, V, H, C, S> Resolver for Arc<$lock<$db<F, E, K, V, H, C, S>>>
+    (compact keyless $db:ident, $op:ident) => {
+        impl<F, E, V, H, C, S> StateSource for $db<F, E, V, H, C, S>
         where
             F: Family,
             E: crate::Context,
-            K: Key,
             V: ValueEncoding + Send + Sync + 'static,
             H: Hasher,
-            $op<F, K, V>: Encode + Read<Cfg = C>,
+            $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
             S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
+            type Op = $op<F, V>;
 
-            async fn get_compact_state(
+            async fn compact_state(
                 &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                db.compact_state(target).map(Into::into)
-            }
-        }
-
-        impl<F, E, K, V, H, C, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, C, S>>>>
-        where
-            F: Family,
-            E: crate::Context,
-            K: Key,
-            V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
-            $op<F, K, V>: Encode + Read<Cfg = C>,
-            C: Clone + Send + Sync + 'static,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).map(Into::into)
+                target: Target<F, H::Digest>,
+            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
+                self.compact_state(target)
             }
         }
     };
 }
 
-impl_compact_resolver_compact_keyless!(KeylessCompactDb, KeylessOp);
-impl_compact_resolver_compact_immutable!(ImmutableCompactDb, ImmutableOp);
-
-impl_compact_resolver_keyless!(KeylessFixedDb, KeylessFixedOp, FixedValue);
-impl_compact_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
-impl_compact_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
-impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+impl_state_source!(compact keyless KeylessCompactDb, KeylessOp);
+impl_state_source!(compact ImmutableCompactDb, ImmutableOp);
+impl_state_source!(full keyless KeylessFixedDb, KeylessFixedOp, FixedValue);
+impl_state_source!(full keyless KeylessVariableDb, KeylessVariableOp, VariableValue);
+impl_state_source!(full ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
+impl_state_source!(full ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
 
 #[cfg(test)]
 mod tests {
@@ -1106,7 +922,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::sync::AsyncRwLock;
+    use commonware_utils::sync::{AsyncRwLock, TracedAsyncRwLock};
     use std::{
         collections::VecDeque,
         convert::Infallible,
@@ -1121,6 +937,8 @@ mod tests {
             assert_resolver::<Arc<$db>>();
             assert_resolver::<Arc<AsyncRwLock<$db>>>();
             assert_resolver::<Arc<AsyncRwLock<Option<$db>>>>();
+            assert_resolver::<Arc<TracedAsyncRwLock<$db>>>();
+            assert_resolver::<Arc<TracedAsyncRwLock<Option<$db>>>>();
         };
     }
 
