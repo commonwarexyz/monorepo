@@ -1,3 +1,37 @@
+//! Crash-recoverable removal of an exact storage namespace set.
+//!
+//! Every batch is validated and canonicalized before the namespace is mutated. Duplicate targets
+//! are removed, and a partition target subsumes every blob target in that partition. The
+//! filesystem implementation then uses a manifest with one durable commit point:
+//!
+//! 1. Write and sync the target set as the prepared manifest.
+//! 2. Rename it to the committed manifest and sync the control directory. Completion of this
+//!    directory sync commits the batch.
+//! 3. Remove every target idempotently and sync the affected partition and storage directories.
+//! 4. Remove the committed manifest and sync the control directory.
+//!
+//! Recovery runs while the storage namespace is locked and before another namespace operation is
+//! exposed. It discards a prepared manifest. Before acting on a committed manifest or trusting its
+//! absence, it syncs the control directory so the visible marker state is authoritative.
+//!
+//! | Control state | Meaning | Recovery action |
+//! | --- | --- | --- |
+//! | No manifest | No batch awaits recovery | Continue without removal recovery |
+//! | Prepared manifest | The batch is not committed | Discard the prepared manifest |
+//! | Committed manifest | The whole batch is committed | Repeat every removal, sync them, then remove the marker |
+//!
+//! Target removal is idempotent, so recovery may safely repeat any prefix completed before an
+//! error, cancellation, or crash. The committed marker is removed only after target removals are
+//! synced. If marker removal itself was not durable, the marker may reappear after a crash and the
+//! same batch is completed again.
+//!
+//! On Windows, targets are first renamed into a private graveyard. This releases their public names
+//! for new generations while handles opened before removal retain access to the detached files.
+//! Directory-entry durability is best-effort on platforms that cannot synchronize directories.
+//!
+//! A filesystem storage root must not be accessed concurrently by another storage instance or
+//! process. The manifest protocol relies on serialized namespace operations.
+
 use crate::{Error, RemoveTarget};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
