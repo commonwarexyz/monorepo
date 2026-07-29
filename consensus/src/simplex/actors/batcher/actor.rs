@@ -632,8 +632,8 @@ where
                 };
                 let span = round.span();
                 async {
-                    // Batch verify every ready kind. Learning the leader's
-                    // proposal can make notarizes and finalizes ready together.
+                    // Batch verify every ready kind. Multiple vote kinds may
+                    // be ready at the same time.
                     let mut verified_any = false;
                     loop {
                         let timer = self.verify_latency.timer(self.context.as_ref());
