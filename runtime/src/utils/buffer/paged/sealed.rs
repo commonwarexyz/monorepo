@@ -933,7 +933,10 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
 
             let (_durable, _writes, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(full_syncs, 1, "seal must invoke Blob::sync");
+            assert_eq!(
+                full_syncs, 2,
+                "seal must follow the reopen barrier with Blob::sync"
+            );
             assert_eq!(range_syncs, 0, "seal must not invoke Blob::write_at_sync");
             sync.await.unwrap();
 

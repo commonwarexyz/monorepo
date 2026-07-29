@@ -693,9 +693,11 @@ stability_scope!(BETA {
     /// name, they are not expected to coordinate access to underlying storage
     /// and writing to both is undefined behavior.
     ///
-    /// When a blob is dropped, any unsynced changes may be discarded. Implementations
-    /// may attempt to sync during drop but errors will go unhandled. Call `sync`
-    /// before dropping to ensure all changes are durably persisted.
+    /// After an unclean shutdown, any subset of unsynced mutations may persist. Surviving writes
+    /// need not form a prefix of the submitted bytes or preserve write order, and resizes may
+    /// persist independently. Implementations may attempt to sync when a blob is dropped, but
+    /// errors will go unhandled. Call [`Blob::sync`] before dropping to ensure all pending changes
+    /// are durably persisted.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read `len` bytes at `offset` into caller-provided buffer(s).

@@ -168,8 +168,20 @@ mod tests {
         mocks::{DelayedSyncBlob, next_pending_sync},
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, sync::Mutex};
+    use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex};
     use std::sync::Arc;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum ResizeDelay {
+        Before,
+        After,
+    }
+
+    struct ResizePause {
+        delay: ResizeDelay,
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
 
     #[derive(Default)]
     struct RangeSyncState {
@@ -190,6 +202,9 @@ mod tests {
 
         /// Number of range-scoped write syncs.
         range_syncs: usize,
+
+        /// One-shot pause injected into the next resize.
+        resize_pause: Option<ResizePause>,
     }
 
     /// Test blob with separate visible and durable state.
@@ -222,6 +237,22 @@ mod tests {
 
         pub fn size(&self) -> u64 {
             self.state.lock().data.len() as u64
+        }
+
+        fn pause_resize(&self, delay: ResizeDelay) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let previous = self.state.lock().resize_pause.replace(ResizePause {
+                delay,
+                started: started_tx,
+                release: release_rx,
+            });
+            assert!(previous.is_none(), "resize pause already armed");
+            (started_rx, release_tx)
+        }
+
+        fn resize_data(&self, len: usize) {
+            self.state.lock().data.resize(len, 0);
         }
 
         fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -282,7 +313,21 @@ mod tests {
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
             let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
-            self.state.lock().data.resize(len, 0);
+            let pause = self.state.lock().resize_pause.take();
+            let delay = pause.as_ref().map(|pause| pause.delay);
+            if delay != Some(ResizeDelay::Before) {
+                self.resize_data(len);
+            }
+            if let Some(pause) = pause {
+                pause
+                    .started
+                    .send(())
+                    .expect("resize start receiver dropped");
+                pause.release.await.expect("resize release sender dropped");
+                if delay == Some(ResizeDelay::Before) {
+                    self.resize_data(len);
+                }
+            }
             Ok(())
         }
 
@@ -1465,11 +1510,12 @@ mod tests {
             let handle = writer.start_sync().await;
             handle.await.unwrap();
 
-            // The buffered write required a full sync because the fresh writer starts dirty.
+            // One barrier orders any pre-wrapped mutation before the physical write, and the
+            // started sync then makes that write durable.
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abc");
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
 
             // The started sync marked the writer clean, so the next buffered write can use a
@@ -1479,14 +1525,14 @@ mod tests {
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abcd");
             assert_eq!(writes, 2);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 1);
 
             // Nothing left to sync.
             let handle = writer.start_sync().await;
             handle.await.unwrap();
             let (_, _, full_syncs, range_syncs) = blob.snapshot();
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 1);
         });
     }
@@ -1658,6 +1704,95 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_after_shrink_syncs_truncation_before_overwrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(4));
+
+            writer.write_at(0, b"old-data").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Keep both the truncation and replacement write individually unsynced. The
+            // replacement is larger than the buffer, so it reaches the blob directly; the durable
+            // image must already be empty when that happens.
+            writer.resize(0).await.unwrap();
+            writer.write_at(0, b"new-data").await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 3);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_after_pre_wrapped_shrink_syncs_truncation_before_overwrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            blob.write_at(0, b"old-data").await.unwrap();
+            blob.sync().await.unwrap();
+
+            // Shrink through the raw handle before wrapping it, leaving the old durable image in
+            // place. The writer must make that visible shrink durable before reusing offset zero.
+            blob.resize(0).await.unwrap();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(4));
+            writer.write_at(0, b"new-data").await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_cancelled_resize_poisons_writer_before_and_after_blob_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for delay in [ResizeDelay::Before, ResizeDelay::After] {
+                let inner = SyncTrackingBlob::new();
+                inner.write_at(0, b"old-data").await.unwrap();
+                inner.sync().await.unwrap();
+
+                let (started, _release) = inner.pause_resize(delay);
+                let mut writer =
+                    Write::from_pooler(&context, inner.clone(), inner.size(), NZUsize!(4));
+
+                let mut resize = Box::pin(writer.resize(0));
+                assert!(
+                    resize.as_mut().now_or_never().is_none(),
+                    "resize completed before the injected cancellation point"
+                );
+                started
+                    .await
+                    .expect("resize never reached cancellation point");
+                drop(resize);
+
+                assert_eq!(writer.size(), 0);
+                assert!(matches!(writer.read_at(0, 0).await, Err(Error::Aborted)));
+                assert!(matches!(
+                    writer.write_at(0, b"replacement").await,
+                    Err(Error::Aborted)
+                ));
+                assert!(matches!(writer.resize(0).await, Err(Error::Aborted)));
+                assert!(matches!(writer.sync().await, Err(Error::Aborted)));
+                assert!(matches!(writer.wait_for_sync().await, Err(Error::Aborted)));
+                assert!(matches!(
+                    writer.start_sync().await.await,
+                    Err(Error::Aborted)
+                ));
+
+                let (durable, _, _, _) = inner.snapshot();
+                assert_eq!(durable.as_slice(), b"old-data");
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_write_sync_uses_range_sync_for_buffer_only_write() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1758,11 +1893,12 @@ mod tests {
             writer.write_at(6, b"g").await.unwrap();
             writer.sync().await.unwrap();
 
-            // The final sync must cover both the prior plain write and the buffered tip.
+            // The first barrier orders any pre-wrapped mutation; the final sync covers both the
+            // prior plain write and the buffered tip.
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abcdefg");
             assert_eq!(writes, 2);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
 
             // With no new writes, sync has no work left.
@@ -1770,7 +1906,7 @@ mod tests {
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abcdefg");
             assert_eq!(writes, 2);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 0);
 
             // After the full sync, the next buffer-only write can use range sync again.
@@ -1780,7 +1916,7 @@ mod tests {
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abcdefgh");
             assert_eq!(writes, 3);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 1);
         });
     }

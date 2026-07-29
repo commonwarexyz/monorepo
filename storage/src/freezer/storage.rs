@@ -440,6 +440,14 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         table_index as u64 * Entry::FULL_SIZE as u64
     }
 
+    /// Advance an epoch while preserving the headroom required by a published checkpoint.
+    const fn next_epoch(checkpoint_epoch: u64) -> Option<u64> {
+        match checkpoint_epoch.checked_add(2) {
+            Some(next) => Some(next - 1),
+            None => None,
+        }
+    }
+
     /// Parse table entries from a buffer.
     fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
         let entry1 = Entry::read(&mut buf)?;
@@ -636,14 +644,37 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,
     ) -> Result<Self, Error> {
-        // Validate that initial_table_size is a power of 2
-        assert!(
-            config.table_initial_size > 0 && config.table_initial_size.is_power_of_two(),
-            "table_initial_size must be a power of 2"
-        );
+        // Validate all public configuration before accessing storage.
+        if config.table_initial_size == 0 || !config.table_initial_size.is_power_of_two() {
+            return Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                "table_initial_size must be a non-zero power of 2".into(),
+            )));
+        }
+        if config.table_resize_frequency == 0 {
+            return Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                "table_resize_frequency must be non-zero".into(),
+            )));
+        }
+        if config.table_resize_chunk_size == 0 {
+            return Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                "table_resize_chunk_size must be non-zero".into(),
+            )));
+        }
+
+        let checkpoint = checkpoint.filter(|checkpoint| !checkpoint.is_empty());
+
+        // Checkpoint restoration is destructive, so reject malformed checkpoints first. Apply the
+        // same epoch-headroom invariant used when publishing a checkpoint.
+        if let Some(checkpoint) = checkpoint
+            && (checkpoint.table_size == 0
+                || !checkpoint.table_size.is_power_of_two()
+                || Self::next_epoch(checkpoint.epoch).is_none())
+        {
+            return Err(Error::CheckpointMismatch);
+        }
 
         // A missing or empty checkpoint starts fresh: delete all existing freezer data
-        let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
+        let reset = checkpoint.is_none();
         if reset {
             for partition in [
                 &config.key_partition,
@@ -655,6 +686,19 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     Err(err) => return Err(Error::Runtime(err)),
                 }
             }
+        }
+
+        // Open and preflight the table before destructively restoring the oversized journal. A
+        // checkpoint may discard an uncommitted table tail, but it cannot recreate committed
+        // table entries that are missing.
+        let (table, table_len) = context
+            .open(&config.table_partition, TABLE_BLOB_NAME)
+            .await?;
+        if let Some(expected_table_len) =
+            checkpoint.map(|checkpoint| Self::table_offset(checkpoint.table_size))
+            && table_len < expected_table_len
+        {
+            return Err(Error::CheckpointMismatch);
         }
 
         // Initialize oversized journal. A checkpoint is only published after the
@@ -670,11 +714,9 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let oversized_checkpoint = checkpoint
-            .filter(|checkpoint| !checkpoint.is_empty())
-            .map_or((0, 0), |checkpoint| {
-                (checkpoint.section, checkpoint.oversized_size)
-            });
+        let oversized_checkpoint = checkpoint.map_or((0, 0), |checkpoint| {
+            (checkpoint.section, checkpoint.oversized_size)
+        });
         let oversized: Oversized<E, Record<K>, V> = Oversized::init_from_checkpoint(
             context.child("oversized"),
             oversized_cfg,
@@ -682,27 +724,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         )
         .await?;
 
-        // Open table blob
-        let (table, table_len) = context
-            .open(&config.table_partition, TABLE_BLOB_NAME)
-            .await?;
-
         // Determine checkpoint based on initialization scenario
         let (checkpoint, resizable) = match checkpoint {
             // Non-empty checkpoint: align existing data to it
-            Some(checkpoint) if !checkpoint.is_empty() => {
-                // A non-empty checkpoint against an empty table references data that does not exist
-                if table_len == 0 {
-                    return Err(Error::CheckpointMismatch);
-                }
-                assert!(
-                    checkpoint.table_size > 0 && checkpoint.table_size.is_power_of_two(),
-                    "table_size must be a power of 2"
-                );
-
-                // Resize table if needed
+            Some(checkpoint) => {
+                // Discard only data beyond the checkpointed table.
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
-                let mut modified = if table_len != expected_table_len {
+                let mut modified = if table_len > expected_table_len {
                     table.resize(expected_table_len).await?;
                     true
                 } else {
@@ -763,7 +791,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
-            next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
+            next_epoch: Self::next_epoch(checkpoint.epoch).ok_or(Error::CheckpointMismatch)?,
             modified_sections: BTreeSet::new(),
             resizable,
             resize_progress: None,
@@ -803,7 +831,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let value_size = self.oversized.value_size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if value_size >= self.blob_target_size {
+        if value_size != 0 && value_size >= self.blob_target_size {
             self.current_section += 1;
             debug!(
                 size = value_size,
@@ -1006,13 +1034,26 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// be spread across multiple sync operations to avoid latency spikes.
     async fn advance_resize(&mut self) -> Result<(), Error> {
         // Compute the range to update
-        let current_index = self.resize_progress.unwrap();
+        let current_index = self
+            .resize_progress
+            .ok_or(crate::journal::Error::SizeOverflow)?;
         let old_size = self.table_size;
-        let chunk_end = (current_index + self.table_resize_chunk_size).min(old_size);
-        let chunk_size = chunk_end - current_index;
+        let new_size = old_size
+            .checked_mul(2)
+            .ok_or(crate::journal::Error::SizeOverflow)?;
+        let remaining = old_size
+            .checked_sub(current_index)
+            .ok_or(crate::journal::Error::SizeOverflow)?;
+        let chunk_size = self.table_resize_chunk_size.min(remaining);
+        let chunk_end = current_index
+            .checked_add(chunk_size)
+            .ok_or(crate::journal::Error::SizeOverflow)?;
 
         // Read the entire chunk
-        let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
+        let chunk_bytes = usize::try_from(chunk_size)
+            .ok()
+            .and_then(|size| size.checked_mul(Entry::FULL_SIZE))
+            .ok_or(crate::journal::Error::UsizeTooSmall)?;
         let read_offset = Self::table_offset(current_index);
         let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
 
@@ -1044,14 +1085,16 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Put the writes into the table.
         let writes = writes.freeze();
         let old_write = self.table.write_at(read_offset, writes.clone());
-        let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
+        let new_offset = Self::table_offset(old_size)
+            .checked_add(read_offset)
+            .ok_or(crate::journal::Error::SizeOverflow)?;
         let new_write = self.table.write_at(new_offset, writes);
         try_join(old_write, new_write).await?;
 
         // Update progress
         if chunk_end >= old_size {
             // Resize complete
-            self.table_size = old_size * 2;
+            self.table_size = new_size;
             self.table_resize_threshold = self.table_size as u64 * RESIZE_THRESHOLD / 100;
             self.resize_progress = None;
             debug!(
@@ -1070,6 +1113,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// See [Freezer::sync].
     async fn sync(mut self: Box<Self>) -> Result<(Box<Self>, Checkpoint), Error> {
+        // Check before mutation that the checkpoint this sync would publish is reopenable.
+        let next_epoch =
+            Self::next_epoch(self.next_epoch).ok_or(crate::journal::Error::SizeOverflow)?;
+
         // Sync all modified sections for oversized journal
         self.oversized = self.oversized.sync(&self.modified_sections).await?;
         self.modified_sections.clear();
@@ -1087,7 +1134,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Sync updated table entries
         self.table.sync().await?;
         let stored_epoch = self.next_epoch;
-        self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
+        self.next_epoch = next_epoch;
 
         // Get size from oversized
         let oversized_size = self.oversized.size(self.current_section)?;
@@ -1202,6 +1249,11 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Close and remove any underlying blobs created by the [Freezer].
+    ///
+    /// The caller must durably invalidate any externally persisted [Checkpoint] before calling
+    /// this method. After an interrupted destroy, reopen with `None` or an empty checkpoint and
+    /// retry destruction; an old nonempty checkpoint may correctly reject the partially removed
+    /// storage.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -1244,7 +1296,8 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
+    use crate::utils::snapshot_partition;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -1254,6 +1307,7 @@ mod tests {
         NZU16, NZUsize,
         sequence::{FixedBytes, U64},
     };
+    use std::collections::BTreeMap;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -1280,6 +1334,44 @@ mod tests {
         unreachable!("u64 key space exhausted");
     }
 
+    fn test_config(context: &Context, prefix: &str) -> super::super::Config<()> {
+        super::super::Config {
+            key_partition: format!("{prefix}-key-index"),
+            key_write_buffer: NZUsize!(1024),
+            key_page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
+            value_partition: format!("{prefix}-value-journal"),
+            value_compression: None,
+            value_write_buffer: NZUsize!(1024),
+            value_target_size: 10 * 1024 * 1024,
+            table_partition: format!("{prefix}-table"),
+            table_initial_size: 2,
+            table_resize_frequency: 1,
+            table_resize_chunk_size: 1,
+            table_replay_buffer: NZUsize!(64 * 1024),
+            codec_config: (),
+        }
+    }
+
+    type PartitionSnapshot = BTreeMap<Vec<u8>, Vec<u8>>;
+
+    async fn snapshot_partitions(
+        context: &Context,
+        partitions: &[String; 3],
+    ) -> [PartitionSnapshot; 3] {
+        [
+            snapshot_partition(context, &partitions[0]).await,
+            snapshot_partition(context, &partitions[1]).await,
+            snapshot_partition(context, &partitions[2]).await,
+        ]
+    }
+
+    async fn seed_partitions(context: &Context, partitions: &[String; 3]) {
+        for partition in partitions {
+            let (blob, _) = context.open(partition, b"sentinel").await.unwrap();
+            blob.write_at_sync(0, vec![0xA5; 3]).await.unwrap();
+        }
+    }
+
     type TestFreezer = Freezer<Context, U64, u64>;
 
     fn is_send<T: Send>(_: T) {}
@@ -1293,6 +1385,231 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
         is_send(freezer.destroy());
+    }
+
+    #[test_traced]
+    fn invalid_config_is_side_effect_free() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (label, table_size, resize_frequency, resize_chunk_size) in [
+                ("zero_table_size", 0, 1, 1),
+                ("non_power_of_two_table_size", 3, 1, 1),
+                ("zero_resize_frequency", 2, 0, 1),
+                ("zero_resize_chunk_size", 2, 1, 0),
+            ] {
+                let mut cfg = test_config(&context, label);
+                cfg.table_initial_size = table_size;
+                cfg.table_resize_frequency = resize_frequency;
+                cfg.table_resize_chunk_size = resize_chunk_size;
+                let partitions = [
+                    cfg.key_partition.clone(),
+                    cfg.value_partition.clone(),
+                    cfg.table_partition.clone(),
+                ];
+                seed_partitions(&context, &partitions).await;
+                let before = snapshot_partitions(&context, &partitions).await;
+
+                let result =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child(label), cfg, None).await;
+                assert!(
+                    matches!(
+                        &result,
+                        Err(Error::Journal(crate::journal::Error::InvalidConfiguration(
+                            _
+                        )))
+                    ),
+                    "{label}: expected InvalidConfiguration, got {result:?}"
+                );
+                assert_eq!(
+                    snapshot_partitions(&context, &partitions).await,
+                    before,
+                    "{label}: rejected configuration changed storage"
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn invalid_checkpoint_is_side_effect_free() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, "invalid-checkpoint");
+            let partitions = [
+                cfg.key_partition.clone(),
+                cfg.value_partition.clone(),
+                cfg.table_partition.clone(),
+            ];
+            let key = test_key("key");
+            let checkpoint = {
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("create"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let (freezer, _) = freezer.put(key, 42).await.unwrap();
+                let (freezer, checkpoint) = freezer.sync().await.unwrap();
+                drop(freezer);
+                checkpoint
+            };
+
+            for (label, invalid_checkpoint) in [
+                (
+                    "zero_checkpoint_table_size",
+                    Checkpoint {
+                        epoch: checkpoint.epoch,
+                        section: 0,
+                        oversized_size: 0,
+                        table_size: 0,
+                    },
+                ),
+                (
+                    "non_power_of_two_checkpoint_table_size",
+                    Checkpoint {
+                        epoch: checkpoint.epoch,
+                        section: 0,
+                        oversized_size: 0,
+                        table_size: 3,
+                    },
+                ),
+                (
+                    "checkpoint_without_sync_headroom",
+                    Checkpoint {
+                        epoch: u64::MAX - 1,
+                        section: 0,
+                        oversized_size: 0,
+                        table_size: checkpoint.table_size,
+                    },
+                ),
+                (
+                    "checkpoint_without_init_headroom",
+                    Checkpoint {
+                        epoch: u64::MAX,
+                        section: 0,
+                        oversized_size: 0,
+                        table_size: checkpoint.table_size,
+                    },
+                ),
+            ] {
+                let invalid_checkpoint = Checkpoint::decode(invalid_checkpoint.encode()).unwrap();
+                let before = snapshot_partitions(&context, &partitions).await;
+                let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child(label),
+                    cfg.clone(),
+                    Some(invalid_checkpoint),
+                )
+                .await;
+                assert!(
+                    matches!(&result, Err(Error::CheckpointMismatch)),
+                    "{label}: expected CheckpointMismatch, got {result:?}"
+                );
+                assert_eq!(
+                    snapshot_partitions(&context, &partitions).await,
+                    before,
+                    "{label}: rejected checkpoint changed storage"
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn checkpoint_rejects_short_table_without_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_config(&context, "short-checkpoint-table");
+            cfg.table_resize_frequency = 2;
+            let partitions = [
+                cfg.key_partition.clone(),
+                cfg.value_partition.clone(),
+                cfg.table_partition.clone(),
+            ];
+            let checkpoint = {
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("create"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let key = test_key_at_index(cfg.table_initial_size, 1);
+                let (freezer, _) = freezer.put(key, 42).await.unwrap();
+                let (freezer, checkpoint) = freezer.sync().await.unwrap();
+                drop(freezer);
+                checkpoint
+            };
+
+            let expected_table_len =
+                Inner::<Context, FixedBytes<64>, i32>::table_offset(checkpoint.table_size);
+            let (table, table_len) = context
+                .open(&cfg.table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            assert_eq!(table_len, expected_table_len);
+            let short_table_len = expected_table_len - Entry::FULL_SIZE as u64;
+            table.resize(short_table_len).await.unwrap();
+            table.sync().await.unwrap();
+
+            let before = snapshot_partitions(&context, &partitions).await;
+            let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("recover"),
+                cfg,
+                Some(checkpoint),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::CheckpointMismatch)));
+            assert_eq!(snapshot_partitions(&context, &partitions).await, before);
+        });
+    }
+
+    #[test_traced]
+    fn epoch_overflow_precedes_sync_mutations() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, "epoch-overflow");
+            let table_partition = cfg.table_partition.clone();
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("storage"), cfg, None)
+                    .await
+                    .unwrap();
+            let (mut freezer, _) = freezer.put(test_key("key"), 42).await.unwrap();
+            freezer.0.next_epoch = u64::MAX - 1;
+            let (_, table_len_before) = context
+                .open(&table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+
+            let result = freezer.sync().await;
+            assert!(matches!(
+                result,
+                Err(Error::Journal(crate::journal::Error::SizeOverflow))
+            ));
+            let (_, table_len_after) = context
+                .open(&table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            assert_eq!(table_len_after, table_len_before);
+        });
+    }
+
+    #[test_traced]
+    fn resize_chunk_is_bounded_by_remaining_entries() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, "bounded-resize");
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("storage"), cfg, None)
+                    .await
+                    .unwrap();
+            let (freezer, _) = freezer.put(test_key("key"), 42).await.unwrap();
+            let (mut freezer, _) = freezer.sync().await.unwrap();
+            assert_eq!(freezer.resizing(), Some(1));
+
+            freezer.0.table_resize_chunk_size = u32::MAX;
+            let (freezer, checkpoint) = freezer.sync().await.unwrap();
+            assert_eq!(checkpoint.table_size, 4);
+            assert_eq!(freezer.resizing(), None);
+        });
     }
 
     #[test_traced]
@@ -1649,6 +1966,14 @@ mod tests {
             .unwrap();
             assert_eq!(freezer.table_size(), 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
+            let (_, table_len) = context
+                .open(&cfg.table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            assert_eq!(
+                table_len,
+                Inner::<Context, FixedBytes<64>, i32>::table_offset(stale_checkpoint.table_size)
+            );
         });
     }
 

@@ -229,7 +229,6 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::Error as JournalError,
-        metadata::{Config as MetadataConfig, Metadata},
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
@@ -238,15 +237,12 @@ mod tests {
         Blob as _, BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
         Supervisor as _, deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
-            release_pending_syncs, release_pending_syncs_after,
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
+            release_next_pending_syncs, release_pending_syncs, release_pending_syncs_after,
         },
         telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{
-        NZU16, NZU64, NZUsize,
-        sequence::{FixedBytes, VecU64, prefixed_u64::U64},
-    };
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -702,6 +698,51 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_below_floor_put_sync_durably_syncs_prior_put() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&delayed, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let archive = drive_pending_syncs(&pending, archive.prune(1))
+                .await
+                .expect("Failed to prune archive");
+            let archive = archive
+                .put(1, test_key("retained"), 10)
+                .await
+                .expect("Failed to put retained item");
+
+            pending.arm();
+            let result =
+                drive_pending_syncs(&pending, archive.put_sync(0, test_key("pruned"), 20)).await;
+            let sync_calls = pending.calls();
+            pending.unblock();
+            let archive = result.expect("Failed to put_sync below floor");
+            assert!(
+                sync_calls > 0,
+                "below-floor put_sync must sync previously accepted writes"
+            );
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), None);
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
     fn test_overlapping_put_start_sync_restarts_after_all_handles_complete() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
@@ -790,7 +831,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_failed_start_sync_is_returned_by_next_start_sync_handle() {
+    fn test_failed_start_sync_is_returned_by_next_put() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -810,30 +851,22 @@ mod tests {
             assert_eq!(pending.lock().len(), 2);
             fail_pending_syncs(&pending);
 
-            let archive = archive
+            let err = archive
                 .put(2, test_key("bbb"), 20)
                 .await
-                .expect("write should be accepted before observing the failed sync");
-
-            let (_archive, second) = archive
-                .start_sync()
-                .await
-                .expect("start_sync should return a handle for the failed sync");
-            let err = second
-                .await
-                .expect_err("next start_sync handle should observe failed in-flight sync");
-            assert!(matches!(err, RError::Io(_)));
+                .expect_err("next put must surface the failed in-flight sync before writing");
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::Runtime(RError::Io(_)))
+            ));
 
             let err = first.await.expect_err("first sync handle should fail");
             assert!(matches!(err, RError::Io(_)));
         });
     }
 
-    /// `destroy` removes the checkpoint before the journals it describes. If the journal removal
-    /// is interrupted, the leftover storage must still be openable: a checkpoint that outlived
-    /// its sections would fail init permanently, and `destroy` needs a handle only init produces.
     #[test_traced]
-    fn test_destroy_removes_checkpoint_before_journals() {
+    fn test_interrupted_destroy_reopens() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config(&context, NZU64!(1));
@@ -847,34 +880,24 @@ mod tests {
                     .await
                     .expect("Failed to put");
             }
-            let archive = archive.sync().await.expect("Failed to sync");
-            drop(archive);
+            let mut archive = archive.sync().await.expect("Failed to sync");
 
-            // The checkpoint is live: it names every synced section.
-            let metadata = Metadata::<_, U64, VecU64>::init(
-                context.child("checkpoint"),
-                MetadataConfig {
-                    partition: cfg.metadata_partition.clone(),
-                    codec_config: (),
-                },
-            )
-            .await
-            .expect("Failed to open checkpoint");
-            assert!(metadata.keys().next().is_some(), "expected a checkpoint");
-            drop(metadata);
-
-            // Stop `destroy` after the checkpoint is gone but before the journals are, the state
-            // a crash between the two removals leaves behind.
-            context
-                .remove(&cfg.metadata_partition, None)
-                .await
-                .expect("Failed to remove checkpoint");
+            // Cancel the production destroy future after metadata removal and before journal
+            // removal, rather than constructing that state out of band.
+            archive.halt_destroy_after_metadata();
+            {
+                let destroy = archive.destroy();
+                futures::pin_mut!(destroy);
+                assert!(
+                    futures::poll!(destroy.as_mut()).is_pending(),
+                    "destroy must park between metadata and journal removal"
+                );
+            }
 
             let archive =
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .expect("interrupted destroy must leave openable storage");
-            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(0));
             archive.destroy().await.expect("Failed to destroy");
         });
     }
@@ -918,9 +941,8 @@ mod tests {
         });
     }
 
-    /// Regression (#539): the archive uses only its explicitly configured `metadata_partition`
-    /// and never claims the previously-derived `{key_partition}-metadata` name. Foreign data
-    /// stored at that derived name by an unrelated component must be left untouched.
+    /// The archive owns only its explicitly configured `metadata_partition`. It must not claim
+    /// the implicit `{key_partition}-metadata` name or alter unrelated data stored there.
     #[test_traced]
     fn test_init_leaves_foreign_derived_metadata_untouched() {
         let executor = deterministic::Runner::default();
@@ -934,8 +956,6 @@ mod tests {
             blob.write_at_sync(0, vec![0xAB; 5]).await.unwrap();
             drop(blob);
 
-            // Configure the archive with an explicit metadata partition distinct from the
-            // derived name.
             let cfg = Config {
                 translator: FourCap,
                 metadata_partition: "orders-watermarks".into(),
@@ -1431,8 +1451,8 @@ mod tests {
                 None
             );
 
-            // The sync combinators skip the sync for a satisfied below-floor put
-            // and return a ready handle
+            // The sync combinators still synchronize previously accepted writes even though the
+            // below-floor put itself stores nothing.
             let (archive, handle) = archive
                 .put_start_sync(1, test_key("key1-blah"), 1)
                 .await
@@ -1884,8 +1904,7 @@ mod tests {
                 None
             );
 
-            // put_multi_start_sync below the prune floor skips the sync and
-            // returns a ready handle
+            // put_multi_start_sync below the prune floor still synchronizes prior writes.
             let (archive, handle) = archive
                 .put_multi_start_sync(2, test_key("ddd"), 41)
                 .await
@@ -1893,7 +1912,7 @@ mod tests {
             handle.await.expect("handle must resolve");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
 
-            // put_multi_sync below the prune floor skips the sync
+            // put_multi_sync below the prune floor still synchronizes prior writes.
             let archive = archive
                 .put_multi_sync(2, test_key("ddd"), 42)
                 .await

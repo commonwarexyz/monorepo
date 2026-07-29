@@ -271,4 +271,59 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (boundary, removals) in [("metadata", 1), ("ordinal", 2)] {
+                let context = context.child(boundary);
+                let cfg = Config {
+                    metadata_partition: format!("destroy-{boundary}-metadata"),
+                    freezer_table_partition: format!("destroy-{boundary}-freezer-table"),
+                    freezer_table_initial_size: 4,
+                    freezer_table_resize_frequency: 2,
+                    freezer_table_resize_chunk_size: 1,
+                    freezer_key_partition: format!("destroy-{boundary}-freezer-key"),
+                    freezer_key_page_cache: CacheRef::from_pooler(
+                        &context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    freezer_value_partition: format!("destroy-{boundary}-freezer-value"),
+                    freezer_value_target_size: 1024,
+                    freezer_value_compression: None,
+                    ordinal_partition: format!("destroy-{boundary}-ordinal"),
+                    items_per_section: NZU64!(1),
+                    freezer_key_write_buffer: NZUsize!(1024),
+                    freezer_value_write_buffer: NZUsize!(1024),
+                    ordinal_write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    codec_config: (),
+                };
+                let key = Sha256::hash(&[boundary.as_bytes()]);
+                let archive: Archive<_, Digest, i32> =
+                    Archive::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                let archive = archive.put(0, key, 7).await.unwrap();
+                let mut archive = archive.sync().await.unwrap();
+
+                archive.halt_destroy_after(removals);
+                {
+                    let destroy = archive.destroy();
+                    futures::pin_mut!(destroy);
+                    assert!(
+                        futures::poll!(destroy.as_mut()).is_pending(),
+                        "destroy must park after its {boundary} await"
+                    );
+                }
+
+                let archive: Archive<_, Digest, i32> = Archive::init(context.child("second"), cfg)
+                    .await
+                    .expect("interrupted destroy must leave openable storage");
+                archive.destroy().await.unwrap();
+            }
+        });
+    }
 }

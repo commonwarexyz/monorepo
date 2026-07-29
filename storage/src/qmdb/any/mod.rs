@@ -86,6 +86,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
+use commonware_utils::bitmap::Readable as _;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -174,7 +175,7 @@ where
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
     cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
-    bitmap: Option<Arc<Shared<N>>>,
+    mut bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -201,6 +202,17 @@ where
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
         (log, _) = log.append(&commit_floor).await?;
         log = log.sync().await?;
+    }
+
+    // A genesis-only log cannot have a pruned bitmap. This identifies a completed log reset after
+    // an interrupted Current destroy without confusing it with a prune whose metadata was synced
+    // before the log itself was pruned.
+    if log.size() == 1
+        && bitmap
+            .as_ref()
+            .is_some_and(|bitmap| bitmap.pruned_chunks() != 0)
+    {
+        bitmap = None;
     }
 
     let index = I::new(context.child("index"), cfg.translator);

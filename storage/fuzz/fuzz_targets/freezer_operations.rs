@@ -2,103 +2,250 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::freezer::{Config, Freezer, Identifier};
+use commonware_storage::freezer::{Checkpoint, Config, Cursor, Freezer, Identifier};
+use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, remove_faults, split_cycles};
 use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroUsize},
 };
 
 #[derive(Arbitrary, Debug)]
 enum Op {
-    Put { key: Vec<u8>, value: i32 },
-    Get { key: Vec<u8> },
+    Put { key: [u8; 32], value: i32 },
+    Get { key: [u8; 32] },
     Sync,
     Close,
     Destroy,
+    Crash,
 }
 
 const MAX_OPERATIONS: usize = 64;
 
 #[derive(Debug)]
 struct FuzzInput {
+    raw_bytes: [u8; RNG_BYTES],
+    compression: Option<u8>,
     ops: Vec<Op>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let raw_bytes = u.arbitrary()?;
+        let compression = u.arbitrary::<bool>()?.then_some(3);
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let ops = (0..num_ops)
             .map(|_| Op::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        Ok(FuzzInput {
+            raw_bytes,
+            compression,
+            ops,
+        })
     }
-}
-
-fn vec_to_key(v: &[u8]) -> FixedBytes<32> {
-    let mut buf = [0u8; 32];
-    let len = v.len().min(32);
-    buf[..len].copy_from_slice(&v[..len]);
-    FixedBytes::<32>::new(buf)
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(393);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
 
-fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::default();
+fn config(context: &deterministic::Context, compression: Option<u8>) -> Config<()> {
+    Config {
+        key_partition: "fuzz-key".into(),
+        key_write_buffer: NZUsize!(1024),
+        key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        value_partition: "fuzz-value".into(),
+        value_compression: compression,
+        value_write_buffer: NZUsize!(1024),
+        value_target_size: 64,
+        table_partition: "fuzz-table".into(),
+        table_initial_size: 4,
+        table_resize_frequency: 2,
+        table_resize_chunk_size: 1,
+        table_replay_buffer: NZUsize!(64 * 1024),
+        codec_config: (),
+    }
+}
 
-    runner.start(|context| async move {
-        let cfg = Config {
-            key_partition: "fuzz-key".into(),
-            key_write_buffer: NZUsize!(1024 * 1024),
-            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            value_partition: "fuzz-value".into(),
-            value_compression: None,
-            value_write_buffer: NZUsize!(1024 * 1024),
-            value_target_size: 10 * 1024 * 1024,
-            table_partition: "fuzz-table".into(),
-            table_initial_size: 256,
-            table_resize_frequency: 4,
-            table_resize_chunk_size: 128,
-            table_replay_buffer: NZUsize!(64 * 1024),
-            codec_config: (),
-        };
-        let mut freezer =
-            Freezer::<_, FixedBytes<32>, i32>::init(context.child("storage"), cfg.clone(), None)
-                .await
-                .unwrap();
+type Model = BTreeMap<FixedBytes<32>, i32>;
+type CursorModel = Vec<(Cursor, i32)>;
 
-        let mut expected_state: HashMap<FixedBytes<32>, i32> = HashMap::new();
+#[derive(Default)]
+struct Expected {
+    checkpoint: Option<Checkpoint>,
+    durable: Model,
+    durable_cursors: CursorModel,
+    seen: BTreeSet<FixedBytes<32>>,
+}
 
-        for op in input.ops {
+async fn verify(
+    freezer: &Freezer<deterministic::Context, FixedBytes<32>, i32>,
+    expected: &Expected,
+) {
+    for key in &expected.seen {
+        assert_eq!(
+            freezer.get(Identifier::Key(key)).await.unwrap(),
+            expected.durable.get(key).copied()
+        );
+    }
+    for &(cursor, value) in &expected.durable_cursors {
+        assert_eq!(
+            freezer.get(Identifier::Cursor(cursor)).await.unwrap(),
+            Some(value)
+        );
+    }
+}
+
+fn run_cycle(
+    runner: deterministic::Runner,
+    compression: Option<u8>,
+    expected: Expected,
+    ops: Vec<Op>,
+) -> (Expected, deterministic::Checkpoint) {
+    runner.start_and_recover(move |context| async move {
+        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(
+            context.child("storage"),
+            config(&context, compression),
+            expected.checkpoint,
+        )
+        .await
+        .expect("recovery should succeed");
+        verify(&freezer, &expected).await;
+
+        let mut live = expected.durable.clone();
+        let mut durable = expected.durable;
+        let mut live_cursors = expected.durable_cursors.clone();
+        let mut durable_cursors = expected.durable_cursors;
+        let mut seen = expected.seen;
+        let mut checkpoint = expected.checkpoint;
+
+        for op in ops {
             match op {
                 Op::Put { key, value } => {
-                    let k = vec_to_key(&key);
-                    (freezer, _) = freezer.put(k.clone(), value).await.unwrap();
-                    expected_state.insert(k, value);
+                    let key = FixedBytes::new(key);
+                    let cursor;
+                    (freezer, cursor) = freezer.put(key.clone(), value).await.unwrap();
+                    seen.insert(key.clone());
+                    live.insert(key, value);
+                    live_cursors.push((cursor, value));
                 }
                 Op::Get { key } => {
-                    let k = vec_to_key(&key);
-                    let res = freezer.get(Identifier::Key(&k)).await.unwrap();
-                    assert_eq!(res, expected_state.get(&k).cloned());
+                    let key = FixedBytes::new(key);
+                    assert_eq!(
+                        freezer.get(Identifier::Key(&key)).await.unwrap(),
+                        live.get(&key).copied()
+                    );
                 }
                 Op::Sync => {
-                    (freezer, _) = freezer.sync().await.unwrap();
+                    let next_checkpoint;
+                    (freezer, next_checkpoint) = freezer.sync().await.unwrap();
+                    checkpoint = Some(next_checkpoint);
+                    durable.clone_from(&live);
+                    durable_cursors.clone_from(&live_cursors);
                 }
                 Op::Close => {
-                    freezer.close().await.unwrap();
-                    return;
+                    checkpoint = Some(freezer.close().await.unwrap());
+                    durable = live;
+                    durable_cursors = live_cursors;
+                    return Expected {
+                        checkpoint,
+                        durable,
+                        durable_cursors,
+                        seen,
+                    };
                 }
                 Op::Destroy => {
                     freezer.destroy().await.unwrap();
-                    return;
+                    return Expected {
+                        checkpoint: None,
+                        durable: Model::new(),
+                        durable_cursors: CursorModel::new(),
+                        seen,
+                    };
                 }
+                Op::Crash => unreachable!("Crash operations are cycle separators"),
             }
         }
 
-        freezer.close().await.unwrap();
+        // The published checkpoint remains authoritative. Dirty writes may survive beneath it,
+        // but the next boot must repair back to this exact model.
+        Expected {
+            checkpoint,
+            durable,
+            durable_cursors,
+            seen,
+        }
+    })
+}
+
+fn fuzz(input: FuzzInput) {
+    let mut runner = fuzz_runner(&input.raw_bytes);
+    let compression = input.compression;
+    let mut expected = Expected::default();
+
+    for cycle in split_cycles(input.ops, |op| matches!(op, Op::Crash)) {
+        let checkpoint;
+        (expected, checkpoint) = run_cycle(runner, compression, expected, cycle);
+        runner = deterministic::Runner::from(checkpoint);
+    }
+
+    // Recover the last fuzz cycle, commit a sentinel, and cross one more crash boundary.
+    let (expected, runtime_checkpoint) = runner.start_and_recover(move |context| async move {
+        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(
+            context.child("sentinel"),
+            config(&context, compression),
+            expected.checkpoint,
+        )
+        .await
+        .expect("sentinel recovery should succeed");
+        verify(&freezer, &expected).await;
+
+        let sentinel = FixedBytes::new([0xFF; 32]);
+        let cursor;
+        (freezer, cursor) = freezer.put(sentinel.clone(), i32::MAX).await.unwrap();
+        let checkpoint;
+        (freezer, checkpoint) = freezer.sync().await.unwrap();
+        let mut durable = expected.durable;
+        durable.insert(sentinel.clone(), i32::MAX);
+        let mut durable_cursors = expected.durable_cursors;
+        durable_cursors.push((cursor, i32::MAX));
+        let mut seen = expected.seen;
+        seen.insert(sentinel);
+        drop(freezer);
+        Expected {
+            checkpoint: Some(checkpoint),
+            durable,
+            durable_cursors,
+            seen,
+        }
+    });
+
+    let (_, runtime_checkpoint) = deterministic::Runner::from(runtime_checkpoint)
+        .start_and_recover(move |context| async move {
+            let freezer = Freezer::<_, FixedBytes<32>, i32>::init(
+                context.child("final"),
+                config(&context, compression),
+                expected.checkpoint,
+            )
+            .await
+            .expect("final recovery should succeed");
+            verify(&freezer, &expected).await;
+            *context.storage_fault_config().write() = remove_faults();
+            let _ = freezer.destroy().await;
+        });
+
+    deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        // Once destroy starts, the external checkpoint must be invalidated. Reopening without it
+        // exercises both an interrupted destroy and the documented reset path before retrying.
+        let freezer = Freezer::<_, FixedBytes<32>, i32>::init(
+            context.child("redestroy"),
+            config(&context, compression),
+            None,
+        )
+        .await
+        .expect("freezer reset must clean up interrupted destroy state");
+        freezer.destroy().await.expect("destroy retry must succeed");
     });
 }
 

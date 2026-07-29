@@ -39,6 +39,14 @@ where
     type Digest = H::Digest;
     type Context = E;
 
+    async fn prepare_sync(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
+    ) -> Result<(), qmdb::Error<F>> {
+        Ok(())
+    }
+
     /// Returns a [Keyless] db initialized from data collected in the sync process.
     ///
     /// # Behavior
@@ -114,6 +122,14 @@ where
         db.update_metrics();
 
         db.sync().await
+    }
+
+    async fn publish_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+        Ok(self)
+    }
+
+    async fn discard_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        self.destroy().await
     }
 
     async fn local_boundary_nodes(

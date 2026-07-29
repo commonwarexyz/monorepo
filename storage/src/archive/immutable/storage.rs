@@ -99,6 +99,10 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
     /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
+    /// Test-only: park destruction after this many component removals.
+    #[cfg(test)]
+    halt_destroy_after: u8,
+
     // Metrics
     gets: Counter,
     has: Counter,
@@ -188,6 +192,8 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             metadata,
             freezer,
             ordinal,
+            #[cfg(test)]
+            halt_destroy_after: 0,
             gets,
             has,
             syncs,
@@ -348,8 +354,18 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // that outlives the data it describes fails the next init rather than being recovered.
         self.metadata.destroy().await?;
 
+        #[cfg(test)]
+        if self.halt_destroy_after == 1 {
+            std::future::pending::<()>().await;
+        }
+
         // Destroy ordinal
         self.ordinal.destroy().await?;
+
+        #[cfg(test)]
+        if self.halt_destroy_after == 2 {
+            std::future::pending::<()>().await;
+        }
 
         // Destroy freezer
         self.freezer.destroy().await?;
@@ -377,6 +393,13 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Park destruction after `count` component-removal awaits.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after(&mut self, count: u8) {
+        assert!((1..=2).contains(&count));
+        self.0.halt_destroy_after = count;
     }
 }
 

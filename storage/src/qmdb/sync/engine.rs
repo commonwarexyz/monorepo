@@ -252,10 +252,18 @@ where
             }));
         }
 
+        let journal_config = config.db_config.journal_config();
+        DB::prepare_sync(
+            config.context.child("prepare_sync"),
+            &config.db_config,
+            &config.target,
+        )
+        .await?;
+
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
-            config.db_config.journal_config(),
+            journal_config,
             config.target.range.clone(),
         )
         .await?;
@@ -394,6 +402,13 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
+        // Update database-specific recovery intent before mutating the journal for the new target.
+        DB::prepare_sync(
+            self.context.child("prepare_sync_update"),
+            &self.config,
+            &new_target,
+        )
+        .await?;
         self.journal = self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
         // must be re-issued as a pinned-nodes request with the new target size.
@@ -740,12 +755,14 @@ where
             let got_root = database.root();
             let expected_root = self.target.root;
             if got_root != expected_root {
+                database.discard_sync_result().await?;
                 return Err(SyncError::Engine(EngineError::RootMismatch {
                     expected: expected_root,
                     actual: got_root,
                 }));
             }
 
+            let database = database.publish_sync_result().await?;
             return Ok(NextStep::Complete(database));
         }
 
@@ -796,14 +813,18 @@ mod tests {
     #[derive(Clone)]
     struct TestConfig {
         journal_size: u64,
+        prepare_calls: Arc<AtomicUsize>,
+        journal_opens: Arc<AtomicUsize>,
         boundary_probes: Arc<AtomicUsize>,
+        publish_calls: Arc<AtomicUsize>,
+        discard_calls: Arc<AtomicUsize>,
     }
 
     impl crate::qmdb::sync::DatabaseConfig for TestConfig {
-        type JournalConfig = u64;
+        type JournalConfig = (u64, Arc<AtomicUsize>);
 
         fn journal_config(&self) -> Self::JournalConfig {
-            self.journal_size
+            (self.journal_size, self.journal_opens.clone())
         }
     }
 
@@ -812,16 +833,17 @@ mod tests {
     }
 
     impl Journal<MmrFamily> for TestJournal {
-        type Config = u64;
+        type Config = (u64, Arc<AtomicUsize>);
         type Context = deterministic::Context;
         type Error = crate::journal::Error;
         type Op = i32;
 
         async fn new(
             _context: Self::Context,
-            size: Self::Config,
+            (size, opens): Self::Config,
             _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
         ) -> Result<Self, Self::Error> {
+            opens.fetch_add(1, Ordering::SeqCst);
             Ok(Self { size })
         }
 
@@ -844,7 +866,10 @@ mod tests {
         }
     }
 
-    struct TestDb;
+    struct TestDb {
+        publish_calls: Arc<AtomicUsize>,
+        discard_calls: Arc<AtomicUsize>,
+    }
 
     impl Database for TestDb {
         type Config = TestConfig;
@@ -855,15 +880,38 @@ mod tests {
         type Journal = TestJournal;
         type Op = i32;
 
+        async fn prepare_sync(
+            _context: Self::Context,
+            config: &Self::Config,
+            _target: &Target<Self::Family, Self::Digest>,
+        ) -> Result<(), qmdb::Error<Self::Family>> {
+            assert_eq!(config.journal_opens.load(Ordering::SeqCst), 0);
+            config.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn from_sync_result(
             _context: Self::Context,
-            _config: Self::Config,
+            config: Self::Config,
             _journal: Self::Journal,
             _pinned_nodes: Option<Vec<Self::Digest>>,
             _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
             _apply_batch_size: usize,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
-            Ok(Self)
+            Ok(Self {
+                publish_calls: config.publish_calls,
+                discard_calls: config.discard_calls,
+            })
+        }
+
+        async fn publish_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
+            self.publish_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self)
+        }
+
+        async fn discard_sync_result(self) -> Result<(), qmdb::Error<Self::Family>> {
+            self.discard_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn local_boundary_nodes(
@@ -927,13 +975,32 @@ mod tests {
             apply_batch_size: 1,
             db_config: TestConfig {
                 journal_size,
+                prepare_calls: Arc::new(AtomicUsize::new(0)),
+                journal_opens: Arc::new(AtomicUsize::new(0)),
                 boundary_probes,
+                publish_calls: Arc::new(AtomicUsize::new(0)),
+                discard_calls: Arc::new(AtomicUsize::new(0)),
             },
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 0,
         }
+    }
+
+    #[test]
+    fn new_prepares_before_opening_journal() {
+        deterministic::Runner::default().start(|context| async move {
+            let boundary_probes = Arc::new(AtomicUsize::new(0));
+            let config = test_engine_config(context, 7, boundary_probes);
+            let prepare_calls = config.db_config.prepare_calls.clone();
+            let journal_opens = config.db_config.journal_opens.clone();
+
+            Engine::new(config).await.unwrap();
+
+            assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(journal_opens.load(Ordering::SeqCst), 1);
+        });
     }
 
     #[test]
@@ -957,6 +1024,24 @@ mod tests {
                 .unwrap();
 
             assert_eq!(boundary_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn root_mismatch_discards_before_publication() {
+        deterministic::Runner::default().start(|context| async move {
+            let boundary_probes = Arc::new(AtomicUsize::new(0));
+            let config = test_engine_config(context, 10, boundary_probes);
+            let publish_calls = config.db_config.publish_calls.clone();
+            let discard_calls = config.db_config.discard_calls.clone();
+            let engine = Engine::new(config).await.unwrap();
+
+            assert!(matches!(
+                engine.step().await,
+                Err(SyncError::Engine(EngineError::RootMismatch { .. }))
+            ));
+            assert_eq!(publish_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(discard_calls.load(Ordering::SeqCst), 1);
         });
     }
 

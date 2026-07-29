@@ -70,7 +70,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
@@ -88,7 +88,7 @@ impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
     }
 }
 
-/// Shared helper to build a `current::db::Db` from sync components.
+/// Assemble a `current::db::Db` from sync components without publishing its graft metadata.
 ///
 /// This follows the same pattern as `any/sync/mod.rs::build_db` but additionally:
 /// * Builds the activity bitmap by replaying the operations log.
@@ -96,7 +96,7 @@ impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
 /// * Builds the grafted tree from the bitmap and ops tree.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
+async fn assemble_db<F, E, U, I, H, J, T, const N: usize, S>(
     context: E,
     merkle_config: full::Config<S>,
     log: J,
@@ -121,6 +121,19 @@ where
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
+    // Reopen the intent staged before the sync journal was touched. The final metadata sync
+    // atomically replaces both the old generation and this intent. The engine stages the intent
+    // via prepare_sync before opening or resizing the sync journal, so a missing or mismatched
+    // intent here is a bug, not a crash shape.
+    let metadata =
+        db::open_metadata::<F, _>(context.child("metadata"), &metadata_partition).await?;
+    let pending = db::pending_sync::<F, _, H::Digest>(&metadata)?
+        .expect("sync target staged by prepare_sync before assembly");
+    assert!(
+        pending.range == range,
+        "staged sync target does not cover the assembled range"
+    );
+
     // Build authenticated log.
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
@@ -223,11 +236,7 @@ where
     )
     .await?;
 
-    // Initialize metadata store and construct the Db.
-    let (metadata, _, _) =
-        db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
-            .await?;
-
+    // Construct the Db with the metadata handle retaining the replacement intent.
     let metrics = db::Metrics::new(context);
     let current_db = db::Db {
         any,
@@ -241,13 +250,20 @@ where
     };
     current_db.update_metrics();
 
-    // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    let current_db = current_db.sync_metadata().await?;
-
     Ok(current_db)
 }
 
 // --- Database trait implementations ---
+
+/// Return whether an existing sync target can be reused as a prefix of `target`.
+fn can_resume<F: Graftable, D: commonware_cryptography::Digest>(
+    pending: &qmdb::sync::Target<F, D>,
+    target: &qmdb::sync::Target<F, D>,
+) -> bool {
+    pending == target
+        || (pending.range.start() <= target.range.start()
+            && pending.range.end() < target.range.end())
+}
 
 macro_rules! impl_current_sync_database {
     ($db:ident, $op:ident, $update:ident,
@@ -273,6 +289,34 @@ macro_rules! impl_current_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
+            async fn prepare_sync(
+                context: Self::Context,
+                config: &Self::Config,
+                target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+            ) -> Result<(), qmdb::Error<F>> {
+                let metadata = db::open_metadata::<F, _>(
+                    context.child("metadata"),
+                    &config.grafted_metadata_partition,
+                )
+                .await?;
+
+                if let Some(pending) = db::pending_sync::<F, _, H::Digest>(&metadata)?
+                    && !can_resume(&pending, target)
+                {
+                    // Keep the old marker durable until both components are reset. An
+                    // interrupted reset is therefore retried before another target is staged.
+                    db::reset_sync_components::<F, _, $journal, H, S>(
+                        &context,
+                        config.journal_config.clone(),
+                        config.merkle_config.clone(),
+                    )
+                    .await?;
+                }
+
+                drop(db::stage_sync::<F, _, H::Digest>(metadata, target).await?);
+                Ok(())
+            }
+
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -288,7 +332,7 @@ macro_rules! impl_current_sync_database {
                 let cache_size = config.init_cache_size;
                 let init_buffer = config.init_buffer;
                 let init_concurrency = config.init_concurrency;
-                build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
+                assemble_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
                     log,
@@ -303,6 +347,20 @@ macro_rules! impl_current_sync_database {
                     strategy,
                 )
                 .await
+            }
+
+            async fn publish_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                // Clear the replacement intent only after the engine authenticates the ops root.
+                self.sync_metadata().await
+            }
+
+            async fn discard_sync_result(self) -> Result<(), qmdb::Error<F>> {
+                // Destroy the mismatched generation before reporting RootMismatch. Destroy
+                // durably empties the journal before removing its blobs and clears the intent
+                // with the metadata, so an interrupted discard converges through the
+                // pending-intent reset on the next init and a completed discard leaves nothing
+                // to resume.
+                self.destroy().await
             }
 
             async fn local_boundary_nodes(
