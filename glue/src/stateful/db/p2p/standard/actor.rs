@@ -367,7 +367,7 @@ where
         }
         let result = database.serve(request).await;
 
-        let Ok((served, _validity)) = result else {
+        let Ok((served, _validity_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
@@ -625,15 +625,15 @@ mod tests {
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let (_response, validity) = sub1_rx.await.unwrap().unwrap();
-                    validity
+                    let (_response, validity_tx) = sub1_rx.await.unwrap().unwrap();
+                    validity_tx
                         .expect("standard deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 },
                 async {
-                    let (_response, validity) = sub2_rx.await.unwrap().unwrap();
-                    validity
+                    let (_response, validity_tx) = sub2_rx.await.unwrap().unwrap();
+                    validity_tx
                         .expect("standard deliveries should include feedback")
                         .send(false)
                         .unwrap();
@@ -664,8 +664,8 @@ mod tests {
                     drop(fetch);
                 },
                 async {
-                    let (_response, validity) = sub2_rx.await.unwrap().unwrap();
-                    validity
+                    let (_response, validity_tx) = sub2_rx.await.unwrap().unwrap();
+                    validity_tx
                         .expect("standard deliveries should include feedback")
                         .send(true)
                         .unwrap();

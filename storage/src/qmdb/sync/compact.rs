@@ -400,7 +400,7 @@ where
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
     loop {
-        let (response, validity) = resolver
+        let (response, validity_tx) = resolver
             .serve(target.clone())
             .await
             .map_err(Error::Resolver)?;
@@ -410,8 +410,8 @@ where
         let validated_state = match validate_compact_state::<DB>(target, response) {
             Ok(state) => state,
             Err(err) => {
-                if let Some(validity) = validity {
-                    let _ = validity.send(false);
+                if let Some(validity_tx) = validity_tx {
+                    let _ = validity_tx.send(false);
                 }
                 tracing::debug!(error = ?err, "compact state failed validation, will retry");
                 continue;
@@ -434,8 +434,8 @@ where
             "validated compact state reconstructed unexpected root",
         );
 
-        if let Some(validity) = validity {
-            let _ = validity.send(true);
+        if let Some(validity_tx) = validity_tx {
+            let _ = validity_tx.send(true);
         }
         let db = db.persist_compact_state().await?;
         return Ok(db);
@@ -543,7 +543,7 @@ where
 /// Derive compact state from a source that still holds its operation log.
 ///
 /// A full database has no persisted witness, so its compact state is synthesized on demand.
-/// This is the same question the operation-log path asks, at the degenerate range: prove the
+/// This is the same request the operation-log path makes, at the degenerate range: prove the
 /// final commit, and pin at the tip, because a compact client retains no operations at all.
 async fn compact_state_from_log<S, F, D>(
     source: &S,
@@ -567,10 +567,7 @@ where
     let last_commit_loc = Location::new(*leaf_count - 1);
     let request = Request::new(leaf_count, last_commit_loc, NonZeroU64::new(1).unwrap())
         .retaining_from(leaf_count);
-    let (response, _validity) = source
-        .serve(request)
-        .await
-        .map_err(ServeError::Database)?;
+    let (response, _validity_tx) = source.serve(request).await?;
 
     Ok(response)
 }
@@ -604,7 +601,10 @@ macro_rules! impl_compact_source {
                 target: Target<F, H::Digest>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
-                Ok((compact_state_from_log(self, current, target).await?, None))
+                Ok((
+                    compact_state_from_log(self, current, target).await?,
+                    None,
+                ))
             }
         }
     };
@@ -627,7 +627,10 @@ macro_rules! impl_compact_source {
                 target: Target<F, H::Digest>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
-                Ok((compact_state_from_log(self, current, target).await?, None))
+                Ok((
+                    compact_state_from_log(self, current, target).await?,
+                    None,
+                ))
             }
         }
     };

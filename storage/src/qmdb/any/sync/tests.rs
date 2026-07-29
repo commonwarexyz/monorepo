@@ -1794,7 +1794,7 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-        let (mut response, validity) = self.inner.serve(request).await?;
+        let (mut response, validity_tx) = self.inner.serve(request).await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if response.pinned_nodes.is_some()
             && !self
@@ -1805,7 +1805,7 @@ where
         {
             nodes[0] = Digest::from([0xFFu8; 32]);
         }
-        Ok((response, validity))
+        Ok((response, validity_tx))
     }
 }
 
@@ -1908,10 +1908,10 @@ where
                 // so the engine has to retry it.
                 let historical =
                     Request::new(self.historical_target_size, request.start, request.max_ops);
-                let (mut response, validity) =
+                let (mut response, validity_tx) =
                     self.inner.serve(historical).await?;
                 response.pinned_nodes = None;
-                return Ok((response, validity));
+                return Ok((response, validity_tx));
             }
 
             let release = self.release_boundary_retry.lock().take();

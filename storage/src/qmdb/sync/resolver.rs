@@ -154,12 +154,12 @@ where
 /// `None` when the response came from local storage, where there is no peer to score.
 pub type Validity = Option<oneshot::Sender<bool>>;
 
-/// Anything that can answer question `Q`.
+/// Anything that can answer request `Req`.
 ///
 /// A database is a source; so is an owned snapshot; so is a lock around either, because
 /// wrapping a source yields a source; so is a handle to a remote peer. One implementation of
 /// this trait therefore covers both where the data lives and how it is reached.
-pub trait Source<Q: Send + 'static>: Send + Sync {
+pub trait Source<Req: Send + 'static>: Send + Sync {
     /// The merkle family backing this source's proofs.
     type Family: Family;
 
@@ -172,12 +172,12 @@ pub trait Source<Q: Send + 'static>: Send + Sync {
     /// Why this source could not answer.
     type Error: std::error::Error + Send + 'static;
 
-    /// Answer one question.
+    /// Answer one request.
     ///
     #[allow(clippy::type_complexity)]
     fn serve<'a>(
         &'a self,
-        question: Q,
+        request: Req,
     ) -> impl Future<
         Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
     > + Send
@@ -185,10 +185,10 @@ pub trait Source<Q: Send + 'static>: Send + Sync {
 }
 
 /// An `Arc` around a source is a source.
-impl<T, Q> Source<Q> for Arc<T>
+impl<T, Req> Source<Req> for Arc<T>
 where
-    T: Source<Q> + ?Sized,
-    Q: Send + 'static,
+    T: Source<Req> + ?Sized,
+    Req: Send + 'static,
 {
     type Family = T::Family;
     type Digest = T::Digest;
@@ -197,12 +197,12 @@ where
 
     fn serve<'a>(
         &'a self,
-        question: Q,
+        request: Req,
     ) -> impl Future<
         Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
     > + Send
     + 'a {
-        T::serve(self, question)
+        T::serve(self, request)
     }
 }
 
@@ -210,10 +210,10 @@ where
 ///
 /// This is what makes `Arc<Lock<Option<Db>>>` work: the `Option` contributes the missing case,
 /// the lock contributes the guard, and the `Arc` is transparent.
-impl<T, Q> Source<Q> for Option<T>
+impl<T, Req> Source<Req> for Option<T>
 where
-    T: Source<Q>,
-    Q: Send + 'static,
+    T: Source<Req>,
+    Req: Send + 'static,
     ServeError<T::Family, T::Digest>: From<T::Error>,
 {
     type Family = T::Family;
@@ -223,10 +223,10 @@ where
 
     async fn serve(
         &self,
-        question: Q,
+        request: Req,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
-        Ok(source.serve(question).await?)
+        Ok(source.serve(request).await?)
     }
 }
 
@@ -238,10 +238,10 @@ where
 /// implementation for [`Arc`].
 macro_rules! impl_locked_source {
     ($lock:ident) => {
-        impl<T, Q> Source<Q> for $lock<T>
+        impl<T, Req> Source<Req> for $lock<T>
         where
-            T: Source<Q>,
-            Q: Send + 'static,
+            T: Source<Req>,
+            Req: Send + 'static,
         {
             type Family = T::Family;
             type Digest = T::Digest;
@@ -250,9 +250,9 @@ macro_rules! impl_locked_source {
 
             async fn serve(
                 &self,
-                question: Q,
+                request: Req,
             ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-                self.read().await.serve(question).await
+                self.read().await.serve(request).await
             }
         }
     };
@@ -373,8 +373,11 @@ pub(crate) mod tests {
     };
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
-    use commonware_runtime::deterministic;
-    use commonware_utils::sync::{AsyncRwLock, TracedAsyncRwLock};
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{
+        NZU64,
+        sync::{AsyncRwLock, TracedAsyncRwLock},
+    };
     use std::{marker::PhantomData, sync::Arc};
 
     macro_rules! assert_resolver_variants {
@@ -552,5 +555,17 @@ pub(crate) mod tests {
         assert_resolver_variants!(ImmutableVariable);
         assert_resolver_variants!(KeylessFixed);
         assert_resolver_variants!(KeylessVariable);
+    }
+
+    /// A source behind a lock reaches the source and reports its error.
+    #[test]
+    fn test_locked_source_reaches_source() {
+        deterministic::Runner::default().start(|_context| async move {
+            let lock = AsyncRwLock::new(FailResolver::<mmr::Family, u8, ShaDigest>::new());
+
+            let request = Request::new(Location::new(1), Location::new(0), NZU64!(1));
+            let result = lock.serve(request).await;
+            assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
+        });
     }
 }

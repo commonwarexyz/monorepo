@@ -570,11 +570,11 @@ mod tests {
                         .await;
                 },
                 async {
-                    let (_, validity) = subscriber_rx
+                    let (_, validity_tx) = subscriber_rx
                         .await
                         .expect("subscriber should receive valid state")
                         .expect("fetch should succeed");
-                    validity
+                    validity_tx
                         .expect("compact deliveries should include feedback")
                         .send(true)
                         .unwrap();
@@ -626,8 +626,8 @@ mod tests {
                         .await;
                 },
                 async {
-                    let (_, validity) = subscriber_rx.await.unwrap().unwrap();
-                    validity
+                    let (_, validity_tx) = subscriber_rx.await.unwrap().unwrap();
+                    validity_tx
                         .expect("compact deliveries should include feedback")
                         .send(false)
                         .unwrap();
