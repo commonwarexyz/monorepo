@@ -39,7 +39,7 @@ struct TrackedRequest<F: Family> {
 /// Manages outstanding fetch requests.
 pub(super) struct Requests<F: Family, Op, D: Digest, E> {
     /// Futures that will resolve to fetch results.
-    pool: AbortablePool<IndexedFetchResult<F, Op, D, E>>,
+    futures: AbortablePool<IndexedFetchResult<F, Op, D, E>>,
 
     /// Counter for assigning unique request IDs.
     next_id: u64,
@@ -55,7 +55,7 @@ pub(super) struct Requests<F: Family, Op, D: Digest, E> {
 impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
     pub fn new() -> Self {
         Self {
-            pool: AbortablePool::default(),
+            futures: AbortablePool::default(),
             next_id: 0,
             tracked: HashMap::new(),
             by_location: BTreeMap::new(),
@@ -82,7 +82,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         if let Some(old_id) = self.by_location.insert(start_loc, id) {
             self.tracked.remove(&old_id);
         }
-        let aborter = self.pool.push(future);
+        let aborter = self.futures.push(future);
         self.tracked.insert(
             id,
             TrackedRequest {
@@ -130,7 +130,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
 
     /// Resolve to the next fetch result, or [`Aborted`] if that request was cancelled.
     pub async fn next_completed(&mut self) -> Result<IndexedFetchResult<F, Op, D, E>, Aborted> {
-        self.pool.next_completed().await
+        self.futures.next_completed().await
     }
 
     /// Get the number of outstanding requests, not including aborted ones.

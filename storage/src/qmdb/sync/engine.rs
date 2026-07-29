@@ -84,7 +84,6 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
         || Either::Right(pending()),
         |finish_rx| Either::Left(finish_rx.recv()),
     );
-    // The pool never resolves while nothing is outstanding, so it needs no empty-case arm.
     let batch_result_fut = outstanding_requests.next_completed();
 
     select! {
