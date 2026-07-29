@@ -323,7 +323,7 @@ impl<E: Context> Writable<E> {
     ///
     /// - `oldest_blob_index < min_blob`
     /// - `min_blob <= tail_blob_index`
-    fn detach(&mut self, min_blob: u64) -> Range<u64> {
+    fn prune_mem(&mut self, min_blob: u64) -> Range<u64> {
         assert!(self.oldest_blob_index < min_blob);
         assert!(min_blob <= self.tail_blob_index());
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
@@ -348,7 +348,7 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
         self.drain_pending_prune().await;
-        let freed = self.detach(min_blob);
+        let freed = self.prune_mem(min_blob);
 
         #[cfg(test)]
         if self.halt_prune_unlinks {
@@ -369,13 +369,13 @@ impl<E: Context> Writable<E> {
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     /// - every blob in `oldest_blob_index..min_blob` is durable
-    pub(super) async fn start_prune(&mut self, min_blob: u64) -> Result<SyncCompletion, Error> {
+    pub(super) async fn start_prune(&mut self, min_blob: u64) -> SyncCompletion {
         // Drain any prior deferred unlink first, so at most one is in flight. Unlike `prune`, the
         // tail syncs are not drained: seals are eager and the sync that advances the durable
         // frontier joins the seal sync, so a blob with an in-flight seal sync is always at or above
         // the frontier and excluded by the `min_blob <= watermark_blob` clamp.
         self.drain_pending_prune().await;
-        let freed = self.detach(min_blob);
+        let freed = self.prune_mem(min_blob);
 
         // Deferred removal runs alongside continued appends and targets only blobs below the live
         // tail.
@@ -421,7 +421,7 @@ impl<E: Context> Writable<E> {
         .boxed()
         .shared();
         self.pending_prune = Some(removal.clone());
-        Ok(removal)
+        removal
     }
 
     /// Rewind the tail to `byte_offset`, shrinking it in place.

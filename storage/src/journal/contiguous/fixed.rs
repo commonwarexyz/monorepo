@@ -1217,7 +1217,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Advance the in-memory blob boundary and defer the unlink into the returned handle, gated
         // on the boundary being durable.
-        let removal = self.blobs.start_prune(min_blob).await?;
+        let removal = self.blobs.start_prune(min_blob).await;
         self.metrics
             .update(self.bounds.end, self.bounds.start, items_per_blob);
 

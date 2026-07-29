@@ -50,9 +50,9 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use tracing::warn;
 #[commonware_macros::stability(ALPHA)]
-use tracing::{debug, info};
+use tracing::debug;
+use tracing::{info, warn};
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -1625,7 +1625,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Defer the data unlink into the returned handle, gated on the offsets boundary being
         // durable so a crash never removes data ahead of an uncommitted boundary.
-        let data_removal = self.blobs.start_prune(min_blob).await?;
+        let data_removal = self.blobs.start_prune(min_blob).await;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
