@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut,
+    Buf, BufMut, RemoveTarget,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
@@ -342,18 +342,18 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         self.ordinal.last_index()
     }
 
-    /// Wait for pending child syncs, then prepare the archive for removal.
-    async fn prepare_destroy(self) -> Result<crate::DestroyPlan<E>, Error> {
+    /// Wait for pending child syncs, then return the archive's storage targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Self {
             metadata,
             ordinal,
             freezer,
             ..
         } = self;
-        let mut plan = metadata.prepare_destroy().await?;
-        plan.merge(freezer.prepare_destroy().await?);
-        plan.merge(ordinal.into_destroy_plan());
-        Ok(plan)
+        let mut targets = metadata.into_remove_targets().await?;
+        targets.extend(freezer.into_remove_targets().await?);
+        targets.extend(ordinal.into_remove_targets());
+        Ok(targets)
     }
 }
 
@@ -378,9 +378,14 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
 
-    /// Wait for pending child syncs, then prepare the archive for removal.
-    async fn prepare_destroy(self) -> Result<crate::DestroyPlan<E>, Error> {
-        self.0.prepare_destroy().await
+    /// Return a context that can remove this archive's storage targets.
+    fn destroy_context(&self) -> E {
+        self.0.metadata.destroy_context()
+    }
+
+    /// Wait for pending child syncs, then return the archive's storage targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 }
 
@@ -431,9 +436,10 @@ impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .remove_batch(targets)
             .await
             .map_err(metadata::Error::Runtime)
             .map_err(Error::Metadata)

@@ -415,7 +415,7 @@ impl crate::Runner for Runner {
                 self.cfg.storage_directory.display()
             );
         }
-        if let Err(e) = crate::storage::removal::recover(&self.cfg.storage_directory) {
+        if let Err(e) = crate::storage::removal_fs::recover(&self.cfg.storage_directory) {
             panic!(
                 "failed to recover storage namespace at startup ({}): {e}",
                 self.cfg.storage_directory.display()
@@ -982,7 +982,9 @@ mod tests {
             },
         ])
         .unwrap();
-        assert!(crate::storage::removal::interrupt_committed_for_test(&root, &targets, 1).is_err());
+        assert!(
+            crate::storage::removal_fs::interrupt_committed_for_test(&root, &targets, 1).is_err()
+        );
         assert!(beta.exists());
 
         let checked_root = root.clone();

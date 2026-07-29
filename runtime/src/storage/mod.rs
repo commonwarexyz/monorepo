@@ -107,6 +107,8 @@ stability_scope!(BETA {
 
     mod header;
     pub(crate) mod removal;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) mod removal_fs;
     pub(crate) use header::{Header, Layout};
 
     /// Validate that a partition name contains only allowed characters.

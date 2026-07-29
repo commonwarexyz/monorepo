@@ -67,9 +67,9 @@ use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::{DestroyPlan, journal::Error};
+use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, RemoveTarget, Storage};
 use futures::future::try_join;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -762,12 +762,17 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         self.index.newest_section()
     }
 
-    /// Wait for pending child syncs, then prepare the journal for removal.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.index.destroy_context()
+    }
+
+    /// Wait for pending child syncs, then return the journal's removal targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Self { index, values } = self;
-        let mut plan = index.prepare_destroy().await?;
-        plan.merge(values.prepare_destroy().await?);
-        Ok(plan)
+        let mut targets = index.into_remove_targets().await?;
+        targets.extend(values.into_remove_targets().await?);
+        Ok(targets)
     }
 
     /// Destroy all underlying storage.
@@ -776,11 +781,9 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// method. Once destruction is committed, recovery completes an interrupted removal before
     /// another namespace operation proceeds.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
-            .await
-            .map_err(Error::Runtime)
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 }
 
@@ -824,10 +827,90 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, mocks::SyncFaultContext,
+        Blob as _, Buf, BufMut, BufferPool, BufferPooler, Metrics, Name, RemoveTarget, Runner,
+        Storage, Supervisor,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::SyncFaultContext,
+        telemetry::metrics::{Metric, Registered},
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, sync::Mutex};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct RecordingContext<E> {
+        inner: E,
+        batches: Arc<Mutex<Vec<Vec<RemoveTarget>>>>,
+    }
+
+    impl<E: Supervisor> Supervisor for RecordingContext<E> {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                batches: self.batches.clone(),
+            }
+        }
+
+        fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            self.inner = self.inner.with_attribute(key, value);
+            self
+        }
+    }
+
+    impl<E: Metrics> Metrics for RecordingContext<E> {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl<E: BufferPooler> BufferPooler for RecordingContext<E> {
+        fn network_buffer_pool(&self) -> &BufferPool {
+            self.inner.network_buffer_pool()
+        }
+
+        fn storage_buffer_pool(&self) -> &BufferPool {
+            self.inner.storage_buffer_pool()
+        }
+    }
+
+    impl<E: Storage> Storage for RecordingContext<E> {
+        type Blob = E::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RError> {
+            self.inner.open_versioned(partition, name, versions).await
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), RError> {
+            self.batches.lock().push(targets.clone());
+            self.inner.remove_batch(targets).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            self.inner.scan(partition).await
+        }
+    }
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -937,6 +1020,33 @@ mod tests {
 
     /// Simple test value type with unit config.
     type TestValue = [u8; 16];
+
+    #[test_traced]
+    fn test_destroy_submits_one_batch_for_both_partitions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let batches = Arc::new(Mutex::new(Vec::new()));
+            let context = RecordingContext {
+                inner: context,
+                batches: batches.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context, cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            oversized.destroy().await.expect("Failed to destroy");
+
+            assert_eq!(
+                *batches.lock(),
+                vec![vec![
+                    RemoveTarget::Partition(cfg.index_partition),
+                    RemoveTarget::Partition(cfg.value_partition),
+                ]]
+            );
+        });
+    }
 
     #[test_traced]
     fn test_oversized_append_and_get() {

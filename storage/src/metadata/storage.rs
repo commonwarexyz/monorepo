@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::{DestroyPlan, SyncCompletion};
+use crate::SyncCompletion;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
@@ -663,21 +663,23 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         RemoveTarget::Partition(self.0.partition.clone())
     }
 
-    /// Wait for an in-flight sync, then prepare the physical namespace entries this store owns.
-    pub(crate) async fn prepare_destroy(mut self) -> Result<DestroyPlan<E>, Error> {
+    /// Return a child context for removing this store's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.context.child("destroy")
+    }
+
+    /// Wait for an in-flight sync, then return the physical namespace entries this store owns.
+    pub(crate) async fn into_remove_targets(mut self) -> Result<Vec<RemoveTarget>, Error> {
         self.0.wait_for_pending().await?;
-        let context = self.0.context.child("destroy");
         let target = self.destroy_target();
         drop(self);
-        Ok(DestroyPlan::new(context, [target]))
+        Ok(vec![target])
     }
 
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
-            .await
-            .map_err(Error::Runtime)
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 }

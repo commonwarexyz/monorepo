@@ -13,7 +13,7 @@
 //! recoverable.
 
 use crate::{
-    Context, DestroyPlan,
+    Context,
     journal::{
         Error as JournalError,
         contiguous::{Contiguous, Many, Mutable},
@@ -721,8 +721,13 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Finish backing-journal work, then prepare the physical namespace entries it owns.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error<F>> {
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.merkle.destroy_context()
+    }
+
+    /// Finish backing-journal work, then return the physical namespace entries it owns.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error<F>> {
         let Self {
             journal,
             merkle,
@@ -733,17 +738,18 @@ where
         // it observes any prior started sync and leaves no background mutation racing namespace
         // removal. Concrete journals use lighter-weight preparation when destroyed directly.
         drop(journal.sync().await?);
-        let mut plan = merkle.prepare_destroy().await?;
-        plan.extend(backing_targets);
-        Ok(plan)
+        let mut targets = merkle.into_remove_targets().await?;
+        targets.extend(backing_targets);
+        Ok(targets)
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .remove_batch(targets)
             .await
             .map_err(JournalError::Runtime)
             .map_err(Error::Journal)

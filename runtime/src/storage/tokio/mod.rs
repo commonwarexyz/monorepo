@@ -112,7 +112,7 @@ impl Storage {
         let root = self.cfg.storage_directory.clone();
         let namespace = self.namespace.clone();
         let recovery = tokio::task::spawn_blocking(move || {
-            let result = super::removal::recover(&root);
+            let result = super::removal_fs::recover(&root);
             if result.is_ok() {
                 namespace.recovery_required.store(false, Ordering::Release);
             }
@@ -150,7 +150,7 @@ impl Storage {
         let namespace = self.namespace.clone();
         let removal = tokio::task::spawn_blocking(move || {
             on_worker_start();
-            let result = super::removal::remove_batch(&root, &targets);
+            let result = super::removal_fs::remove_batch(&root, &targets);
             if result.is_ok() {
                 namespace.recovery_required.store(false, Ordering::Release);
             }
@@ -293,7 +293,7 @@ impl crate::Storage for Storage {
             };
             let root = self.cfg.storage_directory.clone();
             let removal = tokio::task::spawn_blocking(move || {
-                let result = super::removal::remove_windows(&root, &target);
+                let result = super::removal_fs::remove_windows(&root, &target);
                 drop(guard);
                 result
             });
@@ -499,8 +499,12 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            crate::storage::removal::interrupt_committed_for_test(&storage_directory, &targets, 1,)
-                .is_err()
+            crate::storage::removal_fs::interrupt_committed_for_test(
+                &storage_directory,
+                &targets,
+                1,
+            )
+            .is_err()
         );
 
         // A fresh instance completes the committed partition deletion before returning this scan.

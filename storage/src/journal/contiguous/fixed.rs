@@ -138,7 +138,7 @@ use super::{
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
-    Context, DestroyPlan, SyncCompletion,
+    Context, SyncCompletion,
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
@@ -146,7 +146,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf,
+    Blob as RBlob, Buf, Handle, IoBuf, RemoveTarget,
     buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
@@ -1132,23 +1132,26 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         ]
     }
 
-    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.blobs.destroy_context()
+    }
+
+    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Self {
             blobs, checkpoint, ..
         } = self;
-        let mut plan = blobs.prepare_destroy().await?;
-        plan.merge(checkpoint.prepare_destroy().await?);
-        Ok(plan)
+        let mut targets = blobs.into_remove_targets().await?;
+        targets.extend(checkpoint.into_remove_targets().await?);
+        Ok(targets)
     }
 
-    /// See [Journal::destroy].
-    pub(crate) async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
-            .await
-            .map_err(Error::Runtime)
+    #[cfg(test)]
+    async fn destroy(self) -> Result<(), Error> {
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -1396,15 +1399,23 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((self, pruned))
     }
 
-    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
+    /// Return a context capable of removing this journal's namespace entries.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
-        self.0.prepare_destroy().await
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
+    }
+
+    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 
     /// Remove any persisted data created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 }
 

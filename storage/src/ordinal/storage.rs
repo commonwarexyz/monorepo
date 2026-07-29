@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::{Context, DestroyPlan, rmap::RMap};
+use crate::{Context, rmap::RMap};
 use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
@@ -549,19 +549,17 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 
     /// Consume this store into the physical namespace entries it owns.
-    pub(crate) fn into_destroy_plan(self) -> DestroyPlan<E> {
-        let context = self.0.context.child("destroy");
+    pub(crate) fn into_remove_targets(self) -> Vec<RemoveTarget> {
         let target = RemoveTarget::Partition(self.0.config.partition.clone());
         drop(self);
-        DestroyPlan::new(context, [target])
+        vec![target]
     }
 
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.into_destroy_plan()
-            .destroy()
-            .await
-            .map_err(Error::Runtime)
+        let context = self.0.context.child("destroy");
+        let targets = self.into_remove_targets();
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 }
 

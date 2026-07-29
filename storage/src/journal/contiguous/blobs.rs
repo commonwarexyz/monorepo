@@ -1,7 +1,7 @@
 //! Blob management for a contiguous journal.
 
 use crate::{
-    Context, DestroyPlan, SyncCompletion,
+    Context, SyncCompletion,
     journal::{Error, frame::FrameReader},
 };
 use commonware_formatting::hex;
@@ -114,12 +114,14 @@ impl<E: Context> Partition<E> {
             .map_err(Error::Runtime)
     }
 
-    /// Consume this partition into its namespace-removal plan.
-    pub(super) fn into_destroy_plan(self) -> DestroyPlan<E> {
-        let context = self.context.child("destroy");
-        let target = self.destroy_target();
-        drop(self);
-        DestroyPlan::new(context, [target])
+    /// Return a context capable of removing this partition's namespace entries.
+    pub(super) fn destroy_context(&self) -> E {
+        self.context.child("destroy")
+    }
+
+    /// Consume this partition into its exact namespace-removal target.
+    pub(super) fn into_remove_targets(self) -> Vec<RemoveTarget> {
+        vec![RemoveTarget::Partition(self.name)]
     }
 
     /// Return the exact namespace entry owned by this partition.
@@ -183,6 +185,11 @@ pub(super) struct Writable<E: Context> {
 }
 
 impl<E: Context> Writable<E> {
+    /// Return a context capable of removing these blobs' namespace entries.
+    pub(super) fn destroy_context(&self) -> E {
+        self.partition.destroy_context()
+    }
+
     /// Return the exact namespace entry owned by these blobs.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn destroy_target(&self) -> RemoveTarget {
@@ -479,11 +486,11 @@ impl<E: Context> Writable<E> {
         })
     }
 
-    /// Wait for in-flight blob syncs, then prepare the owned partition for removal.
-    pub(super) async fn prepare_destroy(mut self) -> Result<DestroyPlan<E>, Error> {
+    /// Wait for in-flight blob syncs, then return the owned partition removal target.
+    pub(super) async fn into_remove_targets(mut self) -> Result<Vec<RemoveTarget>, Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
-        Ok(self.partition.into_destroy_plan())
+        Ok(self.partition.into_remove_targets())
     }
 }
 

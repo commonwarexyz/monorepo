@@ -88,19 +88,15 @@
 //! ```
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
-use crate::{
-    DestroyPlan,
-    journal::{
-        Error,
-        frame::{
-            FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
-        },
+use crate::journal::{
+    Error,
+    frame::{
+        FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
     },
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Handle, IoBuf, Metrics, Storage,
+    Blob, Buf, Handle, IoBuf, Metrics, RemoveTarget, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{collections::VecDeque, io::Cursor, num::NonZeroUsize};
@@ -353,9 +349,14 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.num_sections()
     }
 
-    /// Wait for pending section syncs, then prepare the journal for removal.
-    async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
-        self.manager.prepare_destroy().await
+    /// Return a context capable of removing this journal's namespace entries.
+    fn destroy_context(&self) -> E {
+        self.manager.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the journal's removal targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.manager.into_remove_targets().await
     }
 
     /// See [Journal::clear].
@@ -599,16 +600,19 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
-            .await
-            .map_err(Error::Runtime)
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 
-    /// Wait for pending section syncs, then prepare the journal for removal.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
-        self.0.prepare_destroy().await
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the journal's removal targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 
     /// Clear all data, resetting the journal to an empty state.

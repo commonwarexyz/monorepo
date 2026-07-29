@@ -14,7 +14,7 @@
 //! recoverable.
 
 use crate::{
-    Context, DestroyPlan,
+    Context,
     journal::{
         Error as JError,
         contiguous::{
@@ -32,7 +32,7 @@ use crate::{
 use commonware_codec::{DecodeExt, FixedSize, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, buffer::paged::CacheRef};
+use commonware_runtime::{Handle, RemoveTarget, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::BTreeMap,
@@ -903,21 +903,27 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(self)
     }
 
-    /// Wait for in-flight child syncs, then prepare the physical namespace entries it owns.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error<F>> {
+    /// Return a context capable of removing this structure's physical namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.journal.destroy_context()
+    }
+
+    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error<F>> {
         let Self {
             journal, metadata, ..
         } = self;
-        let mut plan = journal.prepare_destroy().await?;
-        plan.merge(metadata.prepare_destroy().await?);
-        Ok(plan)
+        let mut targets = journal.into_remove_targets().await?;
+        targets.extend(metadata.into_remove_targets().await?);
+        Ok(targets)
     }
 
     /// Close and permanently remove any disk resources.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .remove_batch(targets)
             .await
             .map_err(JError::Runtime)
             .map_err(Error::Journal)

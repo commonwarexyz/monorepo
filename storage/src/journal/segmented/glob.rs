@@ -27,10 +27,12 @@
 //! 5. Decode value
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
-use crate::{DestroyPlan, journal::Error};
+use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
-use commonware_runtime::{BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage};
+use commonware_runtime::{
+    BufMut, BufferPooler, Error as RError, Handle, Metrics, RemoveTarget, Storage,
+};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -242,9 +244,14 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.remove_section(section).await
     }
 
-    /// Wait for pending section syncs, then prepare the glob for removal.
-    async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
-        self.manager.prepare_destroy().await
+    /// Return a context capable of removing this glob's namespace entries.
+    fn destroy_context(&self) -> E {
+        self.manager.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the glob's removal targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.manager.into_remove_targets().await
     }
 }
 
@@ -395,16 +402,19 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
 
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
-            .await
-            .map_err(Error::Runtime)
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 
-    /// Wait for pending section syncs, then prepare the glob for removal.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
-        self.0.prepare_destroy().await
+    /// Return a context capable of removing this glob's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the glob's removal targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 }
 

@@ -850,10 +850,11 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        let context = self.any.destroy_context();
         let Self { any, metadata, .. } = self;
-        let mut plan = any.prepare_destroy().await?;
-        plan.merge(metadata.prepare_destroy().await?);
-        plan.destroy().await.map_err(Error::Runtime)
+        let mut targets = any.into_remove_targets().await?;
+        targets.extend(metadata.into_remove_targets().await?);
+        context.remove_batch(targets).await.map_err(Error::Runtime)
     }
 }
 
@@ -1295,9 +1296,13 @@ where
         merkle_config,
     )
     .await?;
-    let mut plan = merkle.prepare_destroy().await?;
-    plan.extend(backing_targets);
-    plan.destroy().await.map_err(Error::Runtime)
+    let destroy_context = merkle.destroy_context();
+    let mut targets = merkle.into_remove_targets().await?;
+    targets.extend(backing_targets);
+    destroy_context
+        .remove_batch(targets)
+        .await
+        .map_err(Error::Runtime)
 }
 
 /// Load the pruning state for the active metadata generation.

@@ -27,7 +27,7 @@
 //! more durable data than the checkpoint claims, never less.
 
 use crate::{
-    Context, DestroyPlan,
+    Context,
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
 };
@@ -65,9 +65,9 @@ impl<E: Context> Checkpoint<E> {
         Ok(Self { metadata })
     }
 
-    /// Wait for an in-flight checkpoint sync, then prepare its namespace-removal plan.
-    pub(super) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
-        Ok(self.metadata.prepare_destroy().await?)
+    /// Wait for an in-flight checkpoint sync, then return its namespace-removal targets.
+    pub(super) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        Ok(self.metadata.into_remove_targets().await?)
     }
 
     /// Return the exact namespace entry owned by this checkpoint.

@@ -3,7 +3,7 @@
 //! This module provides `Manager`, a reusable component that handles
 //! section-based blob storage, pruning, syncing, and metrics.
 
-use crate::{DestroyPlan, journal::Error};
+use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob, BufferPool, Error as RError, Handle, Metrics, RemoveTarget, Storage,
@@ -160,7 +160,7 @@ pub struct Config<F> {
 /// # In-flight syncs
 ///
 /// Syncs started by [Manager::start_sync] complete in the background, so mutations that remove
-/// blobs (`prune`, `remove_section`, `rewind`, `clear`, `prepare_destroy`) call
+/// blobs (`prune`, `remove_section`, `rewind`, `clear`, `into_remove_targets`) call
 /// [SectionBuffer::wait_for_sync] before dropping them. This resolves the sync's shared completion
 /// first, guaranteeing that caller-held sync handles report the sync's true result.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
@@ -448,18 +448,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
     }
 
-    /// Consume the manager into the partition-removal plan it owns.
-    fn into_destroy_plan(self) -> DestroyPlan<E> {
-        let Self {
-            context, partition, ..
-        } = self;
-        DestroyPlan::new(context, [RemoveTarget::Partition(partition)])
+    /// Return a context capable of removing this manager's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.context.child("destroy")
     }
 
-    /// Wait for pending section syncs, then prepare the owned partition for removal.
-    pub(crate) async fn prepare_destroy(mut self) -> Result<DestroyPlan<E>, Error> {
+    /// Wait for pending section syncs, then return the owned partition removal target.
+    pub(crate) async fn into_remove_targets(mut self) -> Result<Vec<RemoveTarget>, Error> {
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        Ok(self.into_destroy_plan())
+        Ok(vec![RemoveTarget::Partition(self.partition)])
     }
 
     /// Clear all blobs, resetting the manager to an empty state.
@@ -799,11 +796,13 @@ mod tests {
 
             complete_next_pending_sync(&pending, Ok(()));
             handle.await.expect("sync handle should complete");
-            manager
-                .prepare_destroy()
+            let destroy_context = manager.destroy_context();
+            let targets = manager
+                .into_remove_targets()
                 .await
-                .expect("prepare destroy failed")
-                .destroy()
+                .expect("failed to collect remove targets");
+            destroy_context
+                .remove_batch(targets)
                 .await
                 .expect("destroy failed");
         });
@@ -850,11 +849,13 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.expect("first sync handle should complete");
             second.await.expect("reused sync handle should complete");
-            manager
-                .prepare_destroy()
+            let destroy_context = manager.destroy_context();
+            let targets = manager
+                .into_remove_targets()
                 .await
-                .expect("prepare destroy failed")
-                .destroy()
+                .expect("failed to collect remove targets");
+            destroy_context
+                .remove_batch(targets)
                 .await
                 .expect("destroy failed");
         });
@@ -927,11 +928,13 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let waiter = context.child("destroy").spawn(|_| async move {
-                manager
-                    .prepare_destroy()
+                let destroy_context = manager.destroy_context();
+                let targets = manager
+                    .into_remove_targets()
                     .await
-                    .expect("prepare destroy failed")
-                    .destroy()
+                    .expect("failed to collect remove targets");
+                destroy_context
+                    .remove_batch(targets)
                     .await
                     .expect("destroy failed");
                 completed_clone.fetch_add(1, Ordering::Relaxed);
@@ -975,10 +978,9 @@ mod tests {
             complete_next_pending_sync(&pending, Err(RError::Closed));
 
             let err = manager
-                .prepare_destroy()
+                .into_remove_targets()
                 .await
-                .err()
-                .expect("destroy should surface the sync failure");
+                .expect_err("destroy should surface the sync failure");
             assert!(matches!(err, Error::Runtime(RError::Closed)));
             assert!(matches!(
                 handle.await.expect_err("sync handle should fail"),

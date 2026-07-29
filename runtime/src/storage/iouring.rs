@@ -136,7 +136,7 @@ impl Storage {
         if !self.namespace.recovery_required.load(Ordering::Acquire) {
             return Ok(());
         }
-        super::removal::recover(&self.storage_directory)?;
+        super::removal_fs::recover(&self.storage_directory)?;
         self.namespace
             .recovery_required
             .store(false, Ordering::Release);
@@ -254,7 +254,7 @@ impl crate::Storage for Storage {
         self.namespace
             .recovery_required
             .store(true, Ordering::Release);
-        let result = super::removal::remove_batch(&self.storage_directory, &targets);
+        let result = super::removal_fs::remove_batch(&self.storage_directory, &targets);
         if result.is_ok() {
             self.namespace
                 .recovery_required

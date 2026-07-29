@@ -1,6 +1,6 @@
 use super::{Config, Error, Identifier};
 use crate::{
-    Context, DestroyPlan,
+    Context,
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
@@ -1232,10 +1232,14 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         self.0.close().await
     }
 
-    /// Wait for pending journal syncs, then prepare the freezer for removal.
-    pub(crate) async fn prepare_destroy(self) -> Result<DestroyPlan<E>, Error> {
+    /// Return a context that can remove this freezer's storage targets.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.oversized.destroy_context()
+    }
+
+    /// Wait for pending journal syncs, then return the freezer's storage targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Inner {
-            context,
             table_partition,
             table,
             oversized,
@@ -1243,12 +1247,9 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         } = *self.0;
         drop(table);
 
-        let mut plan = oversized.prepare_destroy().await?;
-        plan.merge(DestroyPlan::new(
-            context.child("destroy"),
-            [RemoveTarget::Partition(table_partition)],
-        ));
-        Ok(plan)
+        let mut targets = oversized.into_remove_targets().await?;
+        targets.push(RemoveTarget::Partition(table_partition));
+        Ok(targets)
     }
 
     /// Close and remove any underlying blobs created by the [Freezer].
@@ -1257,9 +1258,10 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// this method. Once destruction is committed, recovery completes an interrupted removal
     /// before another namespace operation proceeds.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.prepare_destroy()
-            .await?
-            .destroy()
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .remove_batch(targets)
             .await
             .map_err(crate::journal::Error::Runtime)
             .map_err(Error::Journal)
