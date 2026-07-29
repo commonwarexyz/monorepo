@@ -685,10 +685,26 @@ mod tests {
         certificate_forwarding_from_network(secp256r1::fixture);
     }
 
-    /// Regression: a notarization for a future view must unlock already-buffered
-    /// finalize votes even though that view's leader is not yet known.
-    fn notarization_unlocks_future_finalizes<S, F>(mut fixture: F)
-    where
+    #[derive(Clone, Copy)]
+    enum ConflictingLeaderTiming {
+        /// No conflicting leader proposal is selected.
+        None,
+        /// Select the conflicting leader proposal before matching finalize
+        /// votes arrive.
+        BeforeFinalizes,
+        /// Select the conflicting leader proposal after matching finalize
+        /// votes arrive.
+        AfterFinalizes,
+    }
+
+    /// A notarization must unlock matching finalize votes when it first selects
+    /// a proposal and when it replaces a conflicting leader proposal.
+    /// Replacement must work whether the votes arrived before or after leader
+    /// selection.
+    fn notarization_unlocks_future_finalizes<S, F>(
+        mut fixture: F,
+        conflict: ConflictingLeaderTiming,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
@@ -768,6 +784,23 @@ mod tests {
                 finalize_senders.push((i, sender));
             }
 
+            // Reserve a participant outside the finalize quorum as the
+            // equivocating leader.
+            let future_leader = quorum_size;
+            let (mut conflicting_leader_sender, _receiver) = oracle
+                .control(participants[future_leader].clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    participants[future_leader].clone(),
+                    me.clone(),
+                    link.clone(),
+                )
+                .await
+                .unwrap();
+
             // Register a sender for the notarization certificate.
             let (mut notarization_sender, _receiver) = oracle
                 .control(participants[1].clone())
@@ -796,8 +829,38 @@ mod tests {
                 Sha256::hash(&[b"future_payload"]),
             );
 
-            // Buffer a finalize quorum before the notarization. The future
-            // round has no leader yet, so these votes cannot be verified.
+            // Send an equivocating leader vote before the future view's leader
+            // is announced. Learning the leader later selects this proposal
+            // until the authoritative notarization arrives.
+            if !matches!(conflict, ConflictingLeaderTiming::None) {
+                let conflicting = Proposal::new(
+                    Round::new(epoch, future),
+                    current,
+                    Sha256::hash(&[b"conflicting_payload"]),
+                );
+                let notarize =
+                    Notarize::sign(&schemes[future_leader], conflicting).unwrap();
+                conflicting_leader_sender.send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(notarize).encode(),
+                    true,
+                );
+            }
+
+            if matches!(conflict, ConflictingLeaderTiming::BeforeFinalizes) {
+                // Select the conflicting proposal before matching finalizes
+                // arrive. The tracker retains votes the verifier rejects.
+                batcher_mailbox.update(
+                    Span::none(),
+                    future,
+                    Participant::from_usize(future_leader),
+                    View::zero(),
+                    None,
+                );
+                context.sleep(Duration::from_millis(50)).await;
+            }
+
+            // Submit a finalize quorum before the authoritative notarization.
             let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Finalize(finalize));
             for (i, mut sender) in finalize_senders {
@@ -810,8 +873,21 @@ mod tests {
                     );
             }
 
-            // Allow all finalize votes to arrive before the notarization.
+            // Allow all finalize votes to arrive before the next state change.
             context.sleep(Duration::from_millis(50)).await;
+
+            if matches!(conflict, ConflictingLeaderTiming::AfterFinalizes) {
+                // Select the conflicting proposal after matching finalizes were
+                // buffered. Proposal selection filters them from the verifier.
+                batcher_mailbox.update(
+                    Span::none(),
+                    future,
+                    Participant::from_usize(future_leader),
+                    View::zero(),
+                    None,
+                );
+                context.sleep(Duration::from_millis(50)).await;
+            }
 
             // The notarization authenticates the proposal without announcing
             // the future round's leader.
@@ -854,16 +930,42 @@ mod tests {
         });
     }
 
+    fn notarization_unlocks_future_finalizes_all_schemes(conflict: ConflictingLeaderTiming) {
+        notarization_unlocks_future_finalizes(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            conflict,
+        );
+        notarization_unlocks_future_finalizes(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            conflict,
+        );
+        notarization_unlocks_future_finalizes(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            conflict,
+        );
+        notarization_unlocks_future_finalizes(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            conflict,
+        );
+        notarization_unlocks_future_finalizes(bls12381_multisig::fixture::<MinPk, _>, conflict);
+        notarization_unlocks_future_finalizes(bls12381_multisig::fixture::<MinSig, _>, conflict);
+        notarization_unlocks_future_finalizes(ed25519::fixture, conflict);
+        notarization_unlocks_future_finalizes(secp256r1::fixture, conflict);
+    }
+
     #[test_traced]
     fn test_notarization_unlocks_future_finalizes() {
-        notarization_unlocks_future_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        notarization_unlocks_future_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        notarization_unlocks_future_finalizes(bls12381_threshold_std::fixture::<MinPk, _>);
-        notarization_unlocks_future_finalizes(bls12381_threshold_std::fixture::<MinSig, _>);
-        notarization_unlocks_future_finalizes(bls12381_multisig::fixture::<MinPk, _>);
-        notarization_unlocks_future_finalizes(bls12381_multisig::fixture::<MinSig, _>);
-        notarization_unlocks_future_finalizes(ed25519::fixture);
-        notarization_unlocks_future_finalizes(secp256r1::fixture);
+        notarization_unlocks_future_finalizes_all_schemes(ConflictingLeaderTiming::None);
+    }
+
+    #[test_traced]
+    fn test_notarization_replays_finalizes_filtered_by_leader_selection() {
+        notarization_unlocks_future_finalizes_all_schemes(ConflictingLeaderTiming::AfterFinalizes);
+    }
+
+    #[test_traced]
+    fn test_notarization_replays_finalizes_received_after_leader_selection() {
+        notarization_unlocks_future_finalizes_all_schemes(ConflictingLeaderTiming::BeforeFinalizes);
     }
 
     /// Regression: an old notarization for view `V` is still forwarded to voter even
