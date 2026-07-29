@@ -354,14 +354,12 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let (_cancel_tx, cancel_rx) = oneshot::channel();
         let result = database
             .get_operations(
                 key.op_count,
                 key.start_loc,
                 key.max_ops,
                 key.include_pinned_nodes,
-                cancel_rx,
             )
             .await;
 

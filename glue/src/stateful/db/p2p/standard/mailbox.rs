@@ -5,14 +5,39 @@ use crate::stateful::db::{AttachableResolver, Shared};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
-use commonware_macros::select;
 use commonware_storage::{
     merkle::{Family, Location},
     qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
 };
 use commonware_utils::channel::oneshot;
-use futures::FutureExt as _;
 use std::{collections::VecDeque, future::Future, num::NonZeroU64};
+
+struct CancelGuard<DB, F: Family, Op, D: Digest> {
+    sender: Sender<Message<DB, F, Op, D>>,
+    request: Option<handler::Request<F>>,
+}
+
+impl<DB, F: Family, Op, D: Digest> CancelGuard<DB, F, Op, D> {
+    const fn new(sender: Sender<Message<DB, F, Op, D>>, request: handler::Request<F>) -> Self {
+        Self {
+            sender,
+            request: Some(request),
+        }
+    }
+
+    const fn disarm(&mut self) {
+        self.request = None;
+    }
+}
+
+impl<DB, F: Family, Op, D: Digest> Drop for CancelGuard<DB, F, Op, D> {
+    fn drop(&mut self) {
+        let Some(request) = self.request.take() else {
+            return;
+        };
+        let _ = self.sender.enqueue(Message::CancelOperations { request });
+    }
+}
 
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
@@ -144,7 +169,6 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let request = handler::Request {
             op_count,
@@ -153,24 +177,15 @@ where
             include_pinned_nodes,
         };
 
-        futures::pin_mut!(cancel_rx);
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
             request: request.clone(),
             response: response_tx,
         });
-        futures::pin_mut!(response_rx);
-
-        select! {
-            response = response_rx.as_mut() => response.map_err(|_| ResponseDropped)?,
-            _ = cancel_rx.as_mut() => {
-                if let Some(response) = response_rx.as_mut().now_or_never() {
-                    return response.map_err(|_| ResponseDropped)?;
-                }
-                let _ = self.sender.enqueue(Message::CancelOperations { request });
-                Err(ResponseDropped)
-            },
-        }
+        let mut cancel = CancelGuard::new(self.sender.clone(), request);
+        let result = response_rx.await;
+        cancel.disarm();
+        result.map_err(|_| ResponseDropped)?
     }
 }
 
@@ -195,8 +210,10 @@ mod tests {
     use commonware_storage::mmr;
     use commonware_utils::{NZU64, NZUsize};
 
+    /// A caller that abandons its fetch drops the future, which retracts the request from the
+    /// actor. Nothing fires a channel: the drop guard is the whole mechanism.
     #[test]
-    fn get_operations_cancellation_sends_cancel_message() {
+    fn dropping_get_operations_sends_cancel_message() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
@@ -204,39 +221,65 @@ mod tests {
             let start_loc = mmr::Location::new(3);
             let max_ops = NZU64!(2);
 
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let get = mailbox.get_operations(op_count, start_loc, max_ops, false, cancel_rx);
-            let observe = async move {
-                let response = match receiver.recv().await.expect("request should be queued") {
-                    Message::GetOperations { request, response } => {
-                        assert_eq!(request.op_count, op_count);
-                        assert_eq!(request.start_loc, start_loc);
-                        assert_eq!(request.max_ops, max_ops);
-                        assert!(!request.include_pinned_nodes);
-                        response
-                    }
-                    Message::AttachDatabase(_) => panic!("unexpected attach message"),
-                    Message::CancelOperations { .. } => panic!("cancel should come after request"),
-                };
+            // Poll once so the request is enqueued, then abandon the fetch.
+            {
+                let get = mailbox.get_operations(op_count, start_loc, max_ops, false);
+                futures::pin_mut!(get);
+                assert!(futures::poll!(get.as_mut()).is_pending());
+            }
 
-                drop(cancel_tx);
-
-                match receiver.recv().await.expect("cancel should be queued") {
-                    Message::CancelOperations { request } => {
-                        assert_eq!(request.op_count, op_count);
-                        assert_eq!(request.start_loc, start_loc);
-                        assert_eq!(request.max_ops, max_ops);
-                        assert!(!request.include_pinned_nodes);
-                    }
-                    Message::AttachDatabase(_) => panic!("unexpected attach message"),
-                    Message::GetOperations { .. } => panic!("unexpected duplicate request"),
+            match receiver.recv().await.expect("request should be queued") {
+                Message::GetOperations { request, .. } => {
+                    assert_eq!(request.op_count, op_count);
+                    assert_eq!(request.start_loc, start_loc);
+                    assert_eq!(request.max_ops, max_ops);
+                    assert!(!request.include_pinned_nodes);
                 }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::CancelOperations { .. } => panic!("cancel should come after request"),
+            }
 
-                drop(response);
+            match receiver.recv().await.expect("cancel should be queued") {
+                Message::CancelOperations { request } => {
+                    assert_eq!(request.op_count, op_count);
+                    assert_eq!(request.start_loc, start_loc);
+                    assert_eq!(request.max_ops, max_ops);
+                    assert!(!request.include_pinned_nodes);
+                }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::GetOperations { .. } => panic!("unexpected duplicate request"),
+            }
+        });
+    }
+
+    /// A fetch that completes normally disarms the guard, so no cancel follows.
+    #[test]
+    fn completed_get_operations_sends_no_cancel() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let get = mailbox.get_operations(
+                mmr::Location::new(10),
+                mmr::Location::new(3),
+                NZU64!(2),
+                false,
+            );
+            let observe = async move {
+                let Message::GetOperations { response, .. } =
+                    receiver.recv().await.expect("request should be queued")
+                else {
+                    panic!("expected a fetch request");
+                };
+                let _ = response.send(Err(ResponseDropped));
+                receiver
             };
 
-            let (result, _) = futures::join!(get, observe);
+            let (result, mut receiver) = futures::join!(get, observe);
             assert!(matches!(result, Err(ResponseDropped)));
+            assert!(
+                receiver.try_recv().is_err(),
+                "a completed fetch must not enqueue a cancel"
+            );
         });
     }
 }

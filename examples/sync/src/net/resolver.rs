@@ -150,7 +150,6 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        _cancel_rx: oneshot::Receiver<()>,
     ) -> Result<sync::resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
     {
         fetch_operation_range(

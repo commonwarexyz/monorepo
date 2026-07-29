@@ -21,13 +21,10 @@ use commonware_utils::{
     NZU64,
     channel::{
         fallible::{AsyncFallibleExt, OneshotExt as _},
-        mpsc, oneshot,
+        mpsc,
     },
 };
-use futures::{
-    StreamExt,
-    future::{Either, pending},
-};
+use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
@@ -49,8 +46,8 @@ pub(crate) enum NextStep<C, D> {
 enum Event<F: Family, Op, D: Digest, E> {
     /// A target update was received
     TargetUpdate(Target<F, D>),
-    /// A batch of operations was received
-    BatchReceived(IndexedFetchResult<F, Op, D, E>),
+    /// A batch of operations was received, or its request was aborted by a target update
+    BatchReceived(Result<IndexedFetchResult<F, Op, D, E>, Aborted>),
     /// The target update channel was closed
     UpdateChannelClosed,
     /// A finish signal was received
@@ -70,7 +67,7 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
 
 /// Wait for the next synchronization event.
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
-async fn wait_for_event<F: Family, Op, D: Digest, E>(
+async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     update_rx: &mut Option<mpsc::Receiver<Target<F, D>>>,
     finish_rx: &mut Option<mpsc::Receiver<()>>,
     outstanding_requests: &mut Requests<F, Op, D, E>,
@@ -87,11 +84,8 @@ async fn wait_for_event<F: Family, Op, D: Digest, E>(
         || Either::Right(pending()),
         |finish_rx| Either::Left(finish_rx.recv()),
     );
-    let batch_result_fut = if outstanding_requests.len() == 0 {
-        Either::Right(pending())
-    } else {
-        Either::Left(outstanding_requests.futures_mut().next())
-    };
+    // The pool never resolves while nothing is outstanding, so it needs no empty-case arm.
+    let batch_result_fut = outstanding_requests.next_completed();
 
     select! {
         finish = finish_fut => finish.map_or_else(
@@ -102,7 +96,7 @@ async fn wait_for_event<F: Family, Op, D: Digest, E>(
             || Some(Event::UpdateChannelClosed),
             |target| Some(Event::TargetUpdate(target))
         ),
-        result = batch_result_fut => result.map(|fetch_result| Event::BatchReceived(fetch_result)),
+        result = batch_result_fut => Some(Event::BatchReceived(result)),
     }
 }
 
@@ -317,20 +311,14 @@ where
         {
             let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
-            let (cancel_tx, cancel_rx) = oneshot::channel();
             let id = self.outstanding_requests.next_id();
-            self.outstanding_requests.insert(
-                id,
-                start_loc,
-                target_size,
-                cancel_tx,
-                Box::pin(async move {
+            self.outstanding_requests
+                .insert(id, start_loc, target_size, async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1), true, cancel_rx)
+                        .get_operations(target_size, start_loc, NZU64!(1), true)
                         .await;
                     IndexedFetchResult { id, result }
-                }),
-            );
+                });
         }
 
         // Calculate the maximum number of requests to make
@@ -365,20 +353,14 @@ where
 
             // Schedule the request
             let resolver = self.resolver.clone();
-            let (cancel_tx, cancel_rx) = oneshot::channel();
             let id = self.outstanding_requests.next_id();
-            self.outstanding_requests.insert(
-                id,
-                gap_range.start,
-                target_size,
-                cancel_tx,
-                Box::pin(async move {
+            self.outstanding_requests
+                .insert(id, gap_range.start, target_size, async move {
                     let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size, false, cancel_rx)
+                        .get_operations(target_size, gap_range.start, batch_size, false)
                         .await;
                     IndexedFetchResult { id, result }
-                }),
-            );
+                });
         }
 
         Ok(())
@@ -685,7 +667,10 @@ where
             }
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
             Event::BatchReceived(fetch_result) => {
-                self.handle_fetch_result(fetch_result)?;
+                // An aborted request carries no result, but still wakes the loop to reschedule.
+                if let Ok(fetch_result) = fetch_result {
+                    self.handle_fetch_result(fetch_result)?;
+                }
                 self.schedule_requests()?;
                 let mut engine = self.apply_operations().await?;
                 engine.record_progress();
@@ -778,13 +763,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::requests::FetchFuture,
-    };
+    use crate::merkle::mmr::{Family as MmrFamily, Proof};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, channel::oneshot, non_empty_range};
+    use commonware_utils::{NZU64, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
@@ -896,7 +878,6 @@ mod tests {
             _start_loc: Location<Self::Family>,
             _max_ops: NonZeroU64,
             _include_pinned_nodes: bool,
-            _cancel_rx: oneshot::Receiver<()>,
         ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
             Ok(FetchResult::new(
                 Proof {
@@ -960,22 +941,20 @@ mod tests {
         });
     }
 
-    /// Create a no-op fetch result future for testing request tracking.
-    fn dummy_future(id: RequestId) -> FetchFuture<MmrFamily, i32, sha256::Digest, ()> {
-        Box::pin(async move {
-            IndexedFetchResult {
-                id,
-                result: Ok(FetchResult::new(
-                    Proof {
-                        leaves: Location::new(0),
-                        inactive_peaks: 0,
-                        digests: vec![],
-                    },
-                    vec![],
-                    None,
-                )),
-            }
-        })
+    /// A no-op fetch result for testing request tracking.
+    fn dummy_result(id: RequestId) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, ()> {
+        IndexedFetchResult {
+            id,
+            result: Ok(FetchResult::new(
+                Proof {
+                    leaves: Location::new(0),
+                    inactive_peaks: 0,
+                    digests: vec![],
+                },
+                vec![],
+                None,
+            )),
+        }
     }
 
     /// Helper to add a request at a given location.
@@ -985,8 +964,7 @@ mod tests {
             id,
             Location::new(loc),
             Location::new(loc),
-            oneshot::channel().0,
-            dummy_future(id),
+            std::future::ready(dummy_result(id)),
         );
         id
     }
