@@ -5,7 +5,7 @@
 //! state:
 //!
 //! - the total committed leaf count,
-//! - the compact frontier's pinned nodes for that leaf count,
+//! - the frontier pins at that leaf count,
 //! - the final commit operation, and
 //! - a proof authenticating that final commit against the requested root.
 //!
@@ -75,7 +75,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
 use commonware_utils::{
     Array,
-    channel::{mpsc, oneshot},
+    channel::mpsc,
 };
 use futures::future::{Either, pending};
 use std::{future::Future, num::NonZeroU64};
@@ -400,12 +400,8 @@ where
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
     loop {
-        // Compact sync fetches one response at a time and has nothing to abandon it for, so the
-        // sender is held for the duration of the call rather than dropped, which would read as an
-        // immediate cancellation.
-        let (_cancel, cancel) = oneshot::channel();
         let (response, validity) = resolver
-            .serve(target.clone(), cancel)
+            .serve(target.clone())
             .await
             .map_err(Error::Resolver)?;
 
@@ -572,7 +568,7 @@ where
     let request = Request::new(leaf_count, last_commit_loc, NonZeroU64::new(1).unwrap())
         .retaining_from(leaf_count);
     let (response, _validity) = source
-        .serve(request, oneshot::channel().1)
+        .serve(request)
         .await
         .map_err(ServeError::Database)?;
 
@@ -606,7 +602,6 @@ macro_rules! impl_compact_source {
             async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-                _cancel: oneshot::Receiver<()>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
                 Ok((compact_state_from_log(self, current, target).await?, None))
@@ -630,7 +625,6 @@ macro_rules! impl_compact_source {
             async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-                _cancel: oneshot::Receiver<()>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
                 Ok((compact_state_from_log(self, current, target).await?, None))
@@ -657,7 +651,6 @@ macro_rules! impl_compact_source {
             async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-                _cancel: oneshot::Receiver<()>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 Ok((self.compact_state(target)?, None))
             }
@@ -682,7 +675,6 @@ macro_rules! impl_compact_source {
             async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-                _cancel: oneshot::Receiver<()>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 Ok((self.compact_state(target)?, None))
             }
@@ -781,7 +773,6 @@ mod tests {
         async fn serve(
             &self,
             _target: Target<Self::Family, Self::Digest>,
-            _cancel: commonware_utils::channel::oneshot::Receiver<()>,
         ) -> Result<CompactResponse, Self::Error> {
             Ok(self
                 .responses

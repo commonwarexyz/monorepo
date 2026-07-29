@@ -24,9 +24,9 @@ pub(super) struct Id(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RequestInfo<F: Family> {
     /// The location of the first requested operation.
-    pub start_loc: Location<F>,
+    pub start: Location<F>,
     /// The database size the request asked the resolver to prove against.
-    pub target_size: Location<F>,
+    pub size: Location<F>,
 }
 
 /// Mutable request state kept while the request is still tracked.
@@ -70,15 +70,15 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
     }
 
     /// Register a request with a previously allocated ID. If a request already
-    /// exists at `start_loc`, the old one is superseded and aborted.
+    /// exists at `start`, the old one is superseded and aborted.
     pub fn insert(
         &mut self,
         id: Id,
-        start_loc: Location<F>,
-        target_size: Location<F>,
+        start: Location<F>,
+        size: Location<F>,
         future: impl Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
     ) {
-        if let Some(old_id) = self.by_location.insert(start_loc, id) {
+        if let Some(old_id) = self.by_location.insert(start, id) {
             self.tracked.remove(&old_id);
         }
         let aborter = self.futures.push(future);
@@ -86,8 +86,8 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
             id,
             TrackedRequest {
                 info: RequestInfo {
-                    start_loc,
-                    target_size,
+                    start,
+                    size,
                 },
                 _aborter: aborter,
             },
@@ -99,8 +99,8 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         if let Some(TrackedRequest { info, _aborter: _ }) = self.tracked.remove(&id) {
             // Only remove from by_location if it still points to this ID.
             // A newer request may have superseded this location.
-            if self.by_location.get(&info.start_loc) == Some(&id) {
-                self.by_location.remove(&info.start_loc);
+            if self.by_location.get(&info.start) == Some(&id) {
+                self.by_location.remove(&info.start);
             }
             Some(info)
         } else {

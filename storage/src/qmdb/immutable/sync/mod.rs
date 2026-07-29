@@ -138,7 +138,7 @@ where
         db.sync().await
     }
 
-    async fn local_boundary_nodes(
+    async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
         target: &sync::Target<F, Self::Digest>,
@@ -158,7 +158,7 @@ where
             })
             .await?;
 
-        sync::local_boundary_nodes::<F, _, H, S>(
+        sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,

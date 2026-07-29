@@ -356,8 +356,7 @@ where
         };
         // Serving is driven by the requesting peer, which this actor cannot cancel, so the
         // sender is held for the duration of the read.
-        let (_cancel, cancel) = oneshot::channel();
-        let Ok((state, _)) = database.serve(key.to_target(), cancel).await else {
+        let Ok((state, _)) = database.serve(key.to_target()).await else {
             return;
         };
         response.send_lossy(state.encode());
@@ -481,9 +480,8 @@ mod tests {
         let db = db.sync().await.unwrap();
 
         let target = db.target();
-        let (_cancel, cancel) = oneshot::channel();
         let (state, _) = Shared::new("test", db)
-            .serve(target.clone(), cancel)
+            .serve(target.clone())
             .await
             .expect("compact state should be available");
         (target, state)

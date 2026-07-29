@@ -303,7 +303,7 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
-            async fn local_boundary_nodes(
+            async fn local_pinned_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
@@ -324,7 +324,7 @@ macro_rules! impl_current_sync_database {
                 )
                 .await?;
 
-                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
                     context,
                     config.merkle_config.clone(),
                     target,

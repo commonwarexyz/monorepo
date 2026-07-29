@@ -262,7 +262,7 @@ where
         // state before asking peers for them. Partial journals resume without
         // probing completed database state.
         let pinned_nodes = if journal_size == *config.target.range.end() {
-            DB::local_boundary_nodes(
+            DB::local_pinned_nodes(
                 config.context.child("local_boundary"),
                 &config.db_config,
                 &config.target,
@@ -302,7 +302,7 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.range.end();
+        let size = self.target.range.end();
 
         // Schedule a boundary request at the lower sync bound if we don't have boundary
         // state yet and one isn't already in flight. The pins it returns are what let us
@@ -313,11 +313,11 @@ where
                 .contains(&self.target.range.start())
         {
             let start_loc = self.target.range.start();
-            let request = Request::new(target_size, start_loc, NZU64!(1)).retaining_from(start_loc);
+            let request = Request::new(size, start_loc, NZU64!(1)).retaining_from(start_loc);
             let resolver = self.resolver.clone();
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
-                .insert(id, start_loc, target_size, async move {
+                .insert(id, start_loc, size, async move {
                     let result = resolver.serve(request).await;
                     IndexedFetchResult { id, result }
                 });
@@ -354,11 +354,11 @@ where
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
-            let request = Request::new(target_size, gap_range.start, batch_size);
+            let request = Request::new(size, gap_range.start, batch_size);
             let resolver = self.resolver.clone();
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
-                .insert(id, gap_range.start, target_size, async move {
+                .insert(id, gap_range.start, size, async move {
                     let result = resolver.serve(request).await;
                     IndexedFetchResult { id, result }
                 });
@@ -528,14 +528,14 @@ where
         Ok(false)
     }
 
-    /// Returns whether this target needs pinned boundary nodes to reconstruct pruned state.
-    fn needs_pinned_boundary(&self) -> bool {
+    /// Returns whether this target needs pins to reconstruct pruned state.
+    fn needs_pins(&self) -> bool {
         self.target.range.start() > Location::new(0)
     }
 
     /// Returns whether the current target has the boundary state needed for completion.
     fn has_boundary_state(&self) -> bool {
-        !self.needs_pinned_boundary() || self.pinned_nodes.is_some()
+        !self.needs_pins() || self.pinned_nodes.is_some()
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
@@ -557,7 +557,7 @@ where
             return Ok(());
         };
 
-        let start_loc = request.start_loc;
+        let start_loc = request.start;
         let (
             Response {
                 proof,
@@ -578,7 +578,7 @@ where
             return Ok(());
         }
 
-        if proof.leaves != request.target_size {
+        if proof.leaves != request.size {
             if let Some(validity) = validity {
                 validity.send_lossy(false);
             }
@@ -588,11 +588,11 @@ where
         // Look up the root to verify against using the tree size the request
         // asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
-        let is_current_target = request.target_size == self.target.range.end();
+        let is_current_target = request.size == self.target.range.end();
         let target_root = if is_current_target {
             &self.target.root
         } else {
-            let Some(root) = self.retained_roots.get(&request.target_size) else {
+            let Some(root) = self.retained_roots.get(&request.size) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
                 // penalizing the resolver — the data may be valid.
@@ -848,7 +848,7 @@ mod tests {
             Ok(Self)
         }
 
-        async fn local_boundary_nodes(
+        async fn local_pinned_nodes(
             _context: Self::Context,
             config: &Self::Config,
             _target: &Target<Self::Family, Self::Digest>,

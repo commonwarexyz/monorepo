@@ -511,7 +511,6 @@ mod tests {
         async fn serve(
             &self,
             target: sync::compact::Target<Self::Family, Self::Digest>,
-            cancel: commonware_utils::channel::oneshot::Receiver<()>,
         ) -> Result<
             (
                 sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,
@@ -524,7 +523,7 @@ mod tests {
                 return futures::future::pending().await;
             }
 
-            self.source.serve(target, cancel).await
+            self.source.serve(target).await
         }
     }
 

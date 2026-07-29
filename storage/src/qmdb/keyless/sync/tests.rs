@@ -1023,11 +1023,11 @@ macro_rules! sync_tests_for_harness {
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 
-/// A completed sync journal reuses local boundary nodes only when the persisted state can
+/// A completed sync journal reuses local pins only when the persisted state can
 /// authenticate the target: a target starting below the local pruning boundary is declined,
-/// while a matching target serves the boundary nodes locally.
+/// while a matching target serves the pins locally.
 #[commonware_macros::test_traced]
-fn test_keyless_local_boundary_nodes_rejects_target_before_local_lower_bound() {
+fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
@@ -1050,7 +1050,7 @@ fn test_keyless_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
+            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -1066,7 +1066,7 @@ fn test_keyless_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_boundary_nodes(
+            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
@@ -1160,7 +1160,6 @@ mod compact_variable_mmr {
         async fn serve(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-            _cancel: commonware_utils::channel::oneshot::Receiver<()>,
         ) -> Result<CompactResponse, Self::Error> {
             self.responses
                 .lock()
@@ -1188,8 +1187,7 @@ mod compact_variable_mmr {
                 Digest = sha256::Digest,
             >,
     {
-        let (_cancel, cancel) = commonware_utils::channel::oneshot::channel();
-        source.serve(target, cancel).await
+        source.serve(target).await
     }
 
     #[test_traced("WARN")]
@@ -1987,7 +1985,6 @@ mod compact_variable_mmb {
         async fn serve(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-            _cancel: commonware_utils::channel::oneshot::Receiver<()>,
         ) -> Result<CompactResponse, Self::Error> {
             self.responses
                 .lock()
@@ -2015,8 +2012,7 @@ mod compact_variable_mmb {
                 Digest = sha256::Digest,
             >,
     {
-        let (_cancel, cancel) = commonware_utils::channel::oneshot::channel();
-        source.serve(target, cancel).await
+        source.serve(target).await
     }
 
     #[test_traced("WARN")]

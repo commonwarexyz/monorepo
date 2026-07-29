@@ -201,7 +201,6 @@ where
     async fn serve(
         &self,
         target: compact::Target<mmr::Family, D>,
-        _cancel: oneshot::Receiver<()>,
     ) -> Result<
         (
             sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,

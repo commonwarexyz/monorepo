@@ -144,7 +144,6 @@ where
     async fn serve(
         &self,
         target: compact::Target<Self::Family, Self::Digest>,
-        _cancel: oneshot::Receiver<()>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
         let request = handler::Request::from_target(target);
         let (response, receiver) = oneshot::channel();
@@ -192,8 +191,7 @@ mod tests {
                 leaf_count: mmr::Location::new(7),
             };
 
-            let (_cancel, cancel) = oneshot::channel();
-            let get = mailbox.serve(target.clone(), cancel);
+            let get = mailbox.serve(target.clone());
             let observe = async move {
                 let message = receiver.recv().await.expect("request should be queued");
                 let Message::GetState { request, response } = message else {
@@ -218,8 +216,7 @@ mod tests {
                 leaf_count: mmr::Location::new(9),
             };
 
-            let (_cancel, cancel) = oneshot::channel();
-            let mut get = Box::pin(mailbox.serve(target.clone(), cancel));
+            let mut get = Box::pin(mailbox.serve(target.clone()));
             poll_fn(|cx| {
                 assert!(matches!(get.as_mut().poll(cx), Poll::Pending));
                 Poll::Ready(())
