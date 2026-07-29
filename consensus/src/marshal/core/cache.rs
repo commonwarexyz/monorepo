@@ -296,6 +296,7 @@ where
         let start = ctx.current();
         let archive_cfg = prunable::Config {
             translator: TwoCap,
+            metadata_partition: format!("{}-cache-{epoch}-{name}-metadata", cfg.partition_prefix),
             key_partition: format!("{}-cache-{epoch}-{name}-key", cfg.partition_prefix),
             key_page_cache: cfg.key_page_cache.clone(),
             value_partition: format!("{}-cache-{epoch}-{name}-value", cfg.partition_prefix),

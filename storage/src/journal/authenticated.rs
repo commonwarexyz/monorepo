@@ -453,6 +453,17 @@ where
         // Rewind Merkle structure elements that are ahead of the journal.
         let journal_size = journal.bounds().end;
         let mut merkle_leaves = merkle.leaves();
+        if journal_size == 0 && merkle_leaves > 0 {
+            // The backing journal may have completed its staged reset during an interrupted
+            // destroy. A pruned Merkle cannot rewind below its retained boundary, so reset it
+            // explicitly instead.
+            warn!(
+                ?merkle_leaves,
+                "clearing Merkle structure for empty journal"
+            );
+            merkle = merkle.clear_to_empty().await?;
+            merkle_leaves = Location::new(0);
+        }
         if merkle_leaves > journal_size {
             let rewind_count = merkle_leaves - journal_size;
             warn!(
@@ -716,17 +727,14 @@ where
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        // `try_join!` contains an await boundary, so destructure first to avoid
-        // stack growth from retaining the entire `self` in the future.
+        // Reset the authoritative item journal before touching its Merkle projection. If
+        // interrupted between the two, initialization clears the projection to match the empty
+        // journal even when it had already been pruned.
         let Self {
             journal, merkle, ..
         } = self;
-        try_join!(
-            journal.destroy().map_err(Error::Journal),
-            merkle.destroy().map_err(Error::Merkle),
-        )?;
-
-        Ok(())
+        journal.destroy().await.map_err(Error::Journal)?;
+        merkle.destroy().await.map_err(Error::Merkle)
     }
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
@@ -2454,6 +2462,42 @@ mod tests {
     fn test_prune_preserves_operation_count_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_prune_preserves_operation_count_inner::<mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_interrupted_destroy_reopens_pruned_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            type F = mmr::Family;
+            let suffix = "interrupted-destroy";
+            let mut journal =
+                create_journal_with_ops::<F>(context.child("first"), suffix, 32).await;
+            (journal, _) = journal
+                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(16)))
+                .await
+                .unwrap();
+            journal = journal.sync().await.unwrap();
+            let (journal, _) = journal.prune(Location::new(16)).await.unwrap();
+
+            // The backing journal has durably staged its reset before this removal fails. The
+            // Merkle projection is still pruned and non-empty at that point.
+            *context.storage_fault_config().write() =
+                deterministic::FaultConfig::default().remove(1.0);
+            assert!(journal.destroy().await.is_err());
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            let journal = TestJournal::<F>::new(
+                context.child("reopen"),
+                merkle_config(suffix, &context),
+                journal_config(suffix, &context),
+                |op: &TestOp<F>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .expect("interrupted destroy must leave an openable journal");
+            assert_eq!(journal.size(), Location::new(0));
+            journal.destroy().await.unwrap();
+        });
     }
 
     /// Verify bounds() for empty journal, no pruning, and after pruning.

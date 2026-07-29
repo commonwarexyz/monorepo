@@ -83,7 +83,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     /// See [Cache::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
-        let journal = Journal::<E, Record<V>>::init(
+        let mut replay = Journal::<E, Record<V>>::init(
             context.child("journal"),
             JConfig {
                 partition: cfg.partition,
@@ -92,6 +92,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
                 page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
+            cfg.replay_buffer,
         )
         .await?;
 
@@ -100,7 +101,6 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         let mut intervals = RMap::new();
         let journal = {
             debug!("initializing cache");
-            let mut replay = journal.replay(0, 0, cfg.replay_buffer).await?;
             while let Some(result) = replay.next().await {
                 // Extract key from record
                 let (_, offset, _, data) = result?;

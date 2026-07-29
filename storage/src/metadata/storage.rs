@@ -1,9 +1,9 @@
 use super::{Config, Error};
-use crate::{Context, SyncCompletion};
+use crate::SyncCompletion;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut,
+    Blob, BufMut, BufferPooler, Error as RError, Handle, IoBufMut, Metrics, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -74,19 +74,23 @@ struct State<B: Blob, K: Span> {
 }
 
 /// The store's state, boxed so the public [Metadata] handle stays pointer-sized.
-struct Inner<E: Context, K: Span, V: Codec> {
+struct Inner<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
     partition: String,
     state: State<E::Blob, K>,
 
+    /// Test-only: park destruction after this many successful blob removals.
+    #[cfg(test)]
+    halt_destroy_after_removals: usize,
+
     sync_overwrites: Counter,
     sync_rewrites: Counter,
     keys: Gauge,
 }
 
-impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Inner<E, K, V> {
     /// See [Metadata::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
@@ -133,6 +137,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 blobs: [left_wrapper, right_wrapper],
                 pending: None,
             },
+            #[cfg(test)]
+            halt_destroy_after_removals: 0,
 
             sync_rewrites,
             sync_overwrites,
@@ -330,6 +336,22 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         completion.clone().await?;
         self.state.pending = None;
         Ok(())
+    }
+
+    /// Observe an in-flight sync without waiting.
+    ///
+    /// Returns `true` when a new sync may start, `false` while the prior sync is still pending,
+    /// and surfaces a completed failure without clearing it.
+    fn poll_pending(&mut self) -> Result<bool, RError> {
+        let Some(completion) = &self.state.pending else {
+            return Ok(true);
+        };
+        let Some(result) = completion.clone().now_or_never() else {
+            return Ok(false);
+        };
+        result?;
+        self.state.pending = None;
+        Ok(true)
     }
 
     /// See [Metadata::sync].
@@ -534,15 +556,30 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
         if let Some(pending) = self.state.pending.take() {
-            let _ = pending.await;
+            pending.await?;
         }
+
         let state = self.state;
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
+        // Remove the superseded copy first so interruption leaves either the newest state or no
+        // state. Both can be reopened to retry destruction.
+        let order = [1 - state.cursor, state.cursor];
+        let mut blobs = state.blobs.map(Some);
+        #[cfg(test)]
+        let mut removed = 0;
+        for i in order {
+            let wrapper = blobs[i].take().expect("metadata blob removed once");
             drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;
             debug!(blob = i, "destroyed blob");
+            #[cfg(test)]
+            {
+                removed += 1;
+                if self.halt_destroy_after_removals == removed {
+                    std::future::pending::<()>().await;
+                }
+            }
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
@@ -559,9 +596,9 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 ///
 /// Storage-mutating functions consume the store and return it only on success: an error (or a
 /// dropped future) destroys the handle.
-pub struct Metadata<E: Context, K: Span, V: Codec>(Box<Inner<E, K, V>>);
+pub struct Metadata<E: BufferPooler + Storage + Metrics, K: Span, V: Codec>(Box<Inner<E, K, V>>);
 
-impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Metadata")
             .field("keys", &self.0.map.len())
@@ -569,10 +606,17 @@ impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
     }
 }
 
-impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Park destruction after `count` successful blob-removal awaits.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after_removals(&mut self, count: usize) {
+        assert!((1..=2).contains(&count));
+        self.0.halt_destroy_after_removals = count;
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -661,7 +705,14 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Ok((self, handle))
     }
 
+    /// Observe whether a new sync can start without waiting for an in-flight sync.
+    pub(crate) fn poll_sync(&mut self) -> Result<bool, Error> {
+        self.0.poll_pending().map_err(Error::Runtime)
+    }
+
     /// Remove the underlying blobs for this [Metadata].
+    ///
+    /// If interrupted, the store remains openable and `destroy` can be retried.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

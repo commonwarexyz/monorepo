@@ -560,6 +560,57 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_zero_value_target_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                key_partition: "zero-target-key-index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "zero-target-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: 0,
+                table_partition: "zero-target-table".into(),
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
+                codec_config: (),
+            };
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+            let entries = [
+                (test_key("zero-a"), 1),
+                (test_key("zero-b"), 2),
+                (test_key("zero-c"), 3),
+            ];
+            for (key, value) in &entries {
+                (freezer, _) = freezer.put(key.clone(), *value).await.unwrap();
+            }
+            let (freezer, checkpoint) = freezer.sync().await.unwrap();
+            drop(freezer);
+
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("second"),
+                cfg,
+                Some(checkpoint),
+            )
+            .await
+            .expect("zero-sized section target must remain reopenable");
+            for (key, value) in &entries {
+                assert_eq!(
+                    freezer.get(Identifier::Key(key)).await.unwrap(),
+                    Some(*value)
+                );
+            }
+            freezer.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_restart() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -806,6 +857,58 @@ mod tests {
                         .is_none()
                 );
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fail a removal inside Oversized destruction. With all removals rejected, the
+            // published checkpoint remains usable and destruction can be retried after init.
+            let cfg = Config {
+                key_partition: "destroy-inside-oversized-key-index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "destroy-inside-oversized-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
+                table_partition: "destroy-inside-oversized-table".into(),
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
+                codec_config: (),
+            };
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("inside_oversized_first"),
+                cfg.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+            let key = test_key("failed");
+            let (freezer, _) = freezer.put(key.clone(), 2).await.unwrap();
+            let (freezer, checkpoint) = freezer.sync().await.unwrap();
+
+            *context.storage_fault_config().write() =
+                deterministic::FaultConfig::default().remove(1.0);
+            assert!(matches!(
+                freezer.destroy().await,
+                Err(Error::Journal(crate::journal::Error::Runtime(_)))
+            ));
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("inside_oversized_second"),
+                cfg,
+                Some(checkpoint),
+            )
+            .await
+            .expect("failed oversized destruction must leave openable storage");
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(2));
+            freezer.destroy().await.unwrap();
         });
     }
 

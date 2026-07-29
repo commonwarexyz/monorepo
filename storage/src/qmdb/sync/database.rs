@@ -49,6 +49,13 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
+    /// Prepare database-specific durable state before the sync journal is opened or mutated.
+    fn prepare_sync(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &Target<Self::Family, Self::Digest>,
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
+
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
         context: Self::Context,
@@ -58,6 +65,16 @@ pub trait Database: Sized + Send {
         range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Publish a constructed database after its root has been verified against the target.
+    fn publish_sync_result(
+        self,
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Discard a constructed database whose root did not match the target.
+    fn discard_sync_result(
+        self,
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Return locally available boundary nodes for the target, if persisted local state can
     /// authenticate them.

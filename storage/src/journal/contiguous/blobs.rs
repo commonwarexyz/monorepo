@@ -152,6 +152,10 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the live tail. Kept on failure so later operations keep failing.
     tail_sync: Option<SyncCompletion>,
+
+    /// Test-only: park destruction after removing one blob.
+    #[cfg(test)]
+    halt_destroy_after_first_remove: bool,
 }
 
 impl<E: Context> Writable<E> {
@@ -221,6 +225,8 @@ impl<E: Context> Writable<E> {
             sealed_snapshot: None,
             tail_predecessor_sync: None,
             tail_sync: None,
+            #[cfg(test)]
+            halt_destroy_after_first_remove: false,
         })
     }
 
@@ -454,8 +460,18 @@ impl<E: Context> Writable<E> {
         drop(self.tail);
         for blob in self.oldest_blob_index..=tail_blob {
             self.partition.remove(blob).await?;
+            #[cfg(test)]
+            if self.halt_destroy_after_first_remove {
+                std::future::pending::<()>().await;
+            }
         }
         Partition::remove_all(&self.partition.context, &self.partition.name).await
+    }
+
+    /// Park destruction after its first successful blob removal.
+    #[cfg(test)]
+    pub(super) const fn halt_destroy_after_first_remove(&mut self) {
+        self.halt_destroy_after_first_remove = true;
     }
 }
 

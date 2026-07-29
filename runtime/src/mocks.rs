@@ -680,6 +680,24 @@ pub fn release_next_pending_syncs(pending: &PendingSyncs, count: usize) {
     }
 }
 
+/// Complete every pending sync except the oldest `skip`, which stay parked.
+///
+/// Lets a test hold one sync in flight while the ones started after it complete.
+pub fn release_pending_syncs_after(pending: &PendingSyncs, skip: usize) {
+    let syncs = {
+        let mut pending = pending.lock();
+        assert!(
+            pending.len() >= skip,
+            "not enough pending syncs: have {}, need {skip}",
+            pending.len()
+        );
+        pending.drain(skip..).collect::<Vec<_>>()
+    };
+    for sync in syncs {
+        let _ = sync.release.send(Ok(()));
+    }
+}
+
 /// Complete all pending syncs successfully.
 pub fn release_pending_syncs(pending: &PendingSyncs) {
     for sync in mem::take(&mut *pending.lock()) {

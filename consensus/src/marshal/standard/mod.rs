@@ -544,6 +544,7 @@ mod tests {
                 context.child("seed_notarized"),
                 prunable::Config {
                     translator: TwoCap,
+                    metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
                     key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
                     key_page_cache: page_cache,
                     value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
@@ -6595,6 +6596,7 @@ mod tests {
                 context.child("finalizations_by_height"),
                 prunable::Config {
                     translator: EightCap,
+                    metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                     key_partition: format!("{partition_prefix}-fbh-key"),
                     key_page_cache: page_cache.clone(),
                     value_partition: format!("{partition_prefix}-fbh-value"),
@@ -6612,6 +6614,7 @@ mod tests {
                 context.child("finalized_blocks"),
                 prunable::Config {
                     translator: EightCap,
+                    metadata_partition: format!("{partition_prefix}-fb-metadata"),
                     key_partition: format!("{partition_prefix}-fb-key"),
                     key_page_cache: page_cache,
                     value_partition: format!("{partition_prefix}-fb-value"),
@@ -6938,6 +6941,7 @@ mod tests {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                 key_partition: format!("{partition_prefix}-fbh-key"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-fbh-value"),
@@ -6955,6 +6959,7 @@ mod tests {
             context.child("finalized_blocks"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{partition_prefix}-fb-metadata"),
                 key_partition: format!("{partition_prefix}-fb-key"),
                 key_page_cache: page_cache,
                 value_partition: format!("{partition_prefix}-fb-value"),

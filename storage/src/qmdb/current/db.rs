@@ -6,7 +6,7 @@ use crate::{
     Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        Error as JournalError,
+        Error as JournalError, authenticated,
         contiguous::{Contiguous, Mutable},
     },
     merkle::{
@@ -28,7 +28,7 @@ use crate::{
         operation::Operation as _,
     },
 };
-use commonware_codec::{Codec, CodecShared, DecodeExt};
+use commonware_codec::{Codec, CodecShared, DecodeExt, Encode};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -53,6 +53,9 @@ const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
+
+/// Prefix used for a pending state-sync replacement target.
+const PENDING_SYNC_PREFIX: u8 = 2;
 
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
@@ -850,8 +853,12 @@ where
         // Destructure before the await boundary to avoid stack growth from
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
+        // Keep graft metadata until the backing log has completed its recoverable reset: a pruned
+        // log cannot be reconstructed without it. If the reset wins the race with a crash, Any's
+        // empty-log initialization ignores the now-stale pruning boundary.
+        any.destroy().await?;
         metadata.destroy().await?;
-        any.destroy().await
+        Ok(())
     }
 }
 
@@ -1223,26 +1230,95 @@ pub(super) async fn build_grafted_tree<
     Ok(grafted_tree)
 }
 
-/// Load the metadata and recover the pruning state persisted by previous runs.
+/// Open the Current-layer metadata store without interpreting its active generation.
+pub(super) async fn open_metadata<F: merkle::Family, E: Context>(
+    context: E,
+    partition: &str,
+) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+    let metadata_cfg = MConfig {
+        partition: partition.into(),
+        codec_config: ((0..).into(), ()),
+    };
+    Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg)
+        .await
+        .map_err(Into::into)
+}
+
+/// Load the durable state-sync replacement target, if present.
 ///
-/// The metadata store holds two kinds of entries (keyed by prefix):
+/// A record that is present but undecodable is loud corruption, never treated as "no intent":
+/// silently ignoring it would adopt a half-replaced generation.
+pub(super) fn pending_sync<F: merkle::Family, E: Context, D: Digest>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+) -> Result<Option<qmdb::sync::Target<F, D>>, Error<F>> {
+    let Some(value) = metadata.get(&U64::new(PENDING_SYNC_PREFIX, 0)) else {
+        return Ok(None);
+    };
+    let target = qmdb::sync::Target::<F, D>::decode(value.as_slice())
+        .map_err(|_| Error::DataCorrupted("invalid pending sync target"))?;
+    Ok(Some(target))
+}
+
+/// Durably record the target whose state sync may replace the active generation.
+pub(super) async fn stage_sync<F: merkle::Family, E: Context, D: Digest>(
+    mut metadata: Metadata<E, U64, Vec<u8>>,
+    target: &qmdb::sync::Target<F, D>,
+) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+    if pending_sync::<F, _, D>(&metadata)?.as_ref() == Some(target) {
+        return Ok(metadata);
+    }
+    metadata.put(U64::new(PENDING_SYNC_PREFIX, 0), target.encode().to_vec());
+    metadata.sync().await.map_err(Into::into)
+}
+
+/// Destroy the operations journal and Merkle structure named by `journal_config` and
+/// `merkle_config`, converging an unpublished sync generation to empty.
+///
+/// Callers own the metadata follow-up: the replacement intent must stay durable until this
+/// completes so an interrupted reset is retried on the next init or prepare.
+pub(super) async fn reset_sync_components<F, E, J, H, S>(
+    context: &E,
+    journal_config: <J as authenticated::Backing<E>>::Config,
+    merkle_config: merkle::full::Config<S>,
+) -> Result<(), Error<F>>
+where
+    F: merkle::Family,
+    E: Context,
+    J: authenticated::Backing<E>,
+    H: Hasher,
+    S: Strategy,
+{
+    let journal = J::init(context.child("reset_journal"), journal_config).await?;
+    <J as Mutable>::destroy(journal).await?;
+
+    let hasher = qmdb::hasher::<H>();
+    let merkle = merkle::full::Merkle::<F, _, _, S>::init(
+        context.child("reset_merkle"),
+        &hasher,
+        merkle_config,
+    )
+    .await?;
+    merkle.destroy().await?;
+    Ok(())
+}
+
+/// Load the pruning state for the active metadata generation.
+///
+/// The metadata store holds two active kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
 ///   pruned. This tells us where the active portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
-///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
-pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
-    context: E,
-    partition: &str,
-) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error<F>> {
-    let metadata_cfg = MConfig {
-        partition: partition.into(),
-        codec_config: ((0..).into(), ()),
-    };
-    let metadata =
-        Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
+pub(super) fn load_metadata<F: merkle::Graftable, E: Context, D: Digest>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+) -> Result<(usize, Vec<D>), Error<F>> {
+    // The caller resolves any durable replacement intent (reset both backing components, then
+    // clear the intent) before loading the active generation, so a surviving intent is a bug.
+    assert!(
+        pending_sync::<F, _, D>(metadata)?.is_none(),
+        "pending sync must be resolved before loading metadata"
+    );
 
     let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
     let pruned_chunks = match metadata.get(&key) {
@@ -1281,7 +1357,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         Vec::new()
     };
 
-    Ok((metadata, pruned_chunks, pinned_nodes))
+    Ok((pruned_chunks, pinned_nodes))
 }
 
 #[cfg(test)]
@@ -1582,6 +1658,50 @@ mod tests {
             assert_eq!(db.inactivity_floor_loc(), floor);
             assert_eq!(db.root(), root);
             assert!(db.any.bitmap.pruned_bits() > *durable_floor);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_interrupted_destroy_reopens_pruned_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let suffix = "interrupted-destroy";
+            let mut db = MmrDb::init(ctx.child("first"), fixed_config::<OneCap>(suffix, &ctx))
+                .await
+                .unwrap();
+            for _ in 0..5 {
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+            }
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
+            assert!(db.any.bitmap.pruned_chunks() > 0);
+
+            // Fail after the authenticated log has staged its reset but before Current removes
+            // the graft metadata needed by the old, pruned log.
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default().remove(1.0);
+            assert!(db.destroy().await.is_err());
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            let db = MmrDb::init(ctx.child("second"), fixed_config::<OneCap>(suffix, &ctx))
+                .await
+                .expect("interrupted destroy must leave an openable database");
+            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
+
+            // Commit new history without Current::sync, then reopen again. Stale graft metadata
+            // must not be able to reattach to the replacement log on this second startup.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 16).await;
+            let root = db.root();
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&16u64.to_be_bytes()]);
+            drop(db);
+
+            let db = MmrDb::init(ctx.child("third"), fixed_config::<OneCap>(suffix, &ctx))
+                .await
+                .expect("replacement history must remain reopenable");
+            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
             db.destroy().await.unwrap();
         });
     }

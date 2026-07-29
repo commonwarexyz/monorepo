@@ -4,6 +4,20 @@ use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
 
+fn page_batch(
+    remaining_physical: u64,
+    physical_page_size: usize,
+    prefetch_count: usize,
+) -> Result<(usize, u64), Error> {
+    let max_pages = remaining_physical / physical_page_size as u64;
+    let prefetch_count = u64::try_from(prefetch_count).unwrap_or(u64::MAX);
+    let pages_to_read = max_pages.min(prefetch_count);
+    let pages_to_read = pages_to_read
+        .try_into()
+        .map_err(|_| Error::OffsetOverflow)?;
+    Ok((pages_to_read, max_pages))
+}
+
 /// State for a single buffer of pages read from the blob.
 ///
 /// Each fill produces one `BufferState` containing all pages read in that batch.
@@ -37,6 +51,9 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
+    /// A later page in the previous batch was invalid. The valid prefix of that batch was
+    /// returned first so callers could consume it before observing the error.
+    deferred_invalid_checksum: bool,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -74,6 +91,7 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             blob_page: 0,
             prefetch_count,
+            deferred_invalid_checksum: false,
         }
     }
 
@@ -95,8 +113,14 @@ impl<B: Blob> PageReader<B> {
     /// Fills a buffer with the next batch of pages.
     ///
     /// Returns `Some((BufferState, logical_bytes))` if data was loaded,
-    /// `None` if no more data available.
+    /// `None` if no more data is available. If an invalid page follows valid pages in the
+    /// batch, returns the valid prefix first and reports [Error::InvalidChecksum] on the
+    /// next fill.
     pub(super) async fn fill(&mut self) -> Result<Option<(BufferState, usize)>, Error> {
+        if self.deferred_invalid_checksum {
+            return Err(Error::InvalidChecksum);
+        }
+
         // Calculate physical read offset
         let start_offset = match self.blob_page.checked_mul(self.physical_page_size as u64) {
             Some(o) => o,
@@ -107,13 +131,18 @@ impl<B: Blob> PageReader<B> {
         }
 
         // Calculate how many pages to read
-        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
-        let max_pages = remaining_physical / self.physical_page_size;
-        let pages_to_read = max_pages.min(self.prefetch_count);
+        let remaining_physical = self.physical_blob_size - start_offset;
+        let (pages_to_read, max_pages) = page_batch(
+            remaining_physical,
+            self.physical_page_size,
+            self.prefetch_count,
+        )?;
         if pages_to_read == 0 {
             return Ok(None);
         }
-        let bytes_to_read = pages_to_read * self.physical_page_size;
+        let bytes_to_read = pages_to_read
+            .checked_mul(self.physical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read physical data
         let physical_buf = self
@@ -126,28 +155,21 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-        let is_final_batch = pages_to_read == max_pages;
+        let mut valid_pages = 0usize;
+        let is_final_batch = pages_to_read as u64 == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
                 &physical_buf.as_ref()[page_start..page_start + self.physical_page_size];
             let Some(checksum) = Checksum::validate_page(page_slice) else {
                 error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
-                return Err(Error::InvalidChecksum);
+                self.deferred_invalid_checksum = true;
+                if valid_pages == 0 {
+                    return Err(Error::InvalidChecksum);
+                }
+                break;
             };
             let len = checksum.len as usize;
-
-            // Only the final page in the blob may have partial length
-            let is_last_page_in_blob = is_final_batch && page_idx + 1 == pages_to_read;
-            if !is_last_page_in_blob && len != self.page_size {
-                error!(
-                    page = self.blob_page + page_idx as u64,
-                    expected = self.page_size,
-                    actual = len,
-                    "non-last page has partial length"
-                );
-                return Err(Error::InvalidChecksum);
-            }
 
             let logical_start = (self.blob_page + page_idx as u64)
                 .checked_mul(self.page_size as u64)
@@ -158,12 +180,33 @@ impl<B: Blob> PageReader<B> {
 
             total_logical += exposed_len;
             last_len = exposed_len;
-        }
-        self.blob_page += pages_to_read as u64;
+            valid_pages += 1;
 
+            // Only the final page in the blob may have partial length. Return its
+            // checksum-valid contents as the recoverable prefix before reporting the
+            // invalid layout.
+            let is_last_page_in_blob = is_final_batch && page_idx + 1 == pages_to_read;
+            if !is_last_page_in_blob && len != self.page_size {
+                error!(
+                    page = self.blob_page + page_idx as u64,
+                    expected = self.page_size,
+                    actual = len,
+                    "non-last page has partial length"
+                );
+                self.deferred_invalid_checksum = true;
+                break;
+            }
+        }
+        self.blob_page += valid_pages as u64;
+
+        let buffer = if valid_pages == pages_to_read {
+            physical_buf
+        } else {
+            physical_buf.slice(..valid_pages * self.physical_page_size)
+        };
         let state = BufferState {
-            buffer: physical_buf,
-            num_pages: pages_to_read,
+            buffer,
+            num_pages: valid_pages,
             last_page_len: last_len,
         };
 
@@ -221,8 +264,13 @@ impl ReplayBuf {
         } else {
             0
         };
+        if skip >= logical_bytes {
+            self.current_page = 0;
+            self.offset_in_page = 0;
+            return;
+        }
         self.buffers.push_back(state);
-        self.remaining += logical_bytes.saturating_sub(skip);
+        self.remaining += logical_bytes - skip;
     }
 
     /// Returns the logical length of the given page in the given buffer.
@@ -248,6 +296,9 @@ impl Buf for ReplayBuf {
             return &[];
         }
         let page_len = Self::page_len(buf, self.current_page, self.page_size);
+        if self.offset_in_page >= page_len {
+            return &[];
+        }
         let physical_start = self.current_page * self.physical_page_size + self.offset_in_page;
         let physical_end = self.current_page * self.physical_page_size + page_len;
         &buf.buffer.as_ref()[physical_start..physical_end]
@@ -264,6 +315,11 @@ impl Buf for ReplayBuf {
             // Advance within current buffer
             while cnt > 0 && self.current_page < buf.num_pages {
                 let page_len = Self::page_len(buf, self.current_page, self.page_size);
+                if self.offset_in_page >= page_len {
+                    self.current_page += 1;
+                    self.offset_in_page = 0;
+                    continue;
+                }
                 let available = page_len - self.offset_in_page;
                 if cnt < available {
                     self.offset_in_page += cnt;
@@ -355,6 +411,7 @@ impl<B: Blob> Replay<B> {
 
         self.buffer.clear();
         self.exhausted = false;
+        self.reader.deferred_invalid_checksum = false;
 
         let page_size = self.reader.page_size as u64;
         self.reader.blob_page = offset / page_size;
@@ -388,6 +445,13 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_PAGES: usize = 2;
+
+    #[test]
+    fn test_page_batch_above_32_bit_length() {
+        let (pages, max_pages) = page_batch(1u64 << 32, 16, 2).unwrap();
+        assert_eq!(pages, 2);
+        assert_eq!(max_pages, 1u64 << 28);
+    }
 
     #[test_traced("DEBUG")]
     fn test_replay_basic() {
@@ -511,6 +575,53 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_replay_returns_valid_prefix_before_batched_checksum_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let mut append = Writer::new(blob.clone(), blob_size, 460, cache_ref)
+                .await
+                .unwrap();
+
+            // Four logical pages fit in one replay prefetch.
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(4 * PAGE_SIZE.get() as usize)
+                .collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            let mut replay = append.replay(NZUsize!(460)).await.unwrap();
+            drop(append);
+
+            // Tear the third physical page while leaving the fourth intact.
+            let physical_page_size = PAGE_SIZE.get() as u64 + super::super::CHECKSUM_SIZE;
+            blob.write_at_sync(2 * physical_page_size + 10, vec![0xFF])
+                .await
+                .unwrap();
+
+            // The first two pages must remain consumable even though they shared a
+            // prefetch with the invalid page.
+            assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(replay.remaining(), 2 * PAGE_SIZE.get() as usize);
+            let mut recovered = Vec::new();
+            while replay.remaining() > 0 {
+                let chunk = replay.chunk();
+                recovered.extend_from_slice(chunk);
+                let len = chunk.len();
+                replay.advance(len);
+            }
+            assert_eq!(recovered, &data[..2 * PAGE_SIZE.get() as usize]);
+
+            assert!(matches!(
+                replay.ensure(1).await,
+                Err(Error::InvalidChecksum)
+            ));
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_replay_empty_blob() {
         // Test that replaying an empty blob works correctly.
         // ensure() should return Ok(false) when no data is available.
@@ -612,6 +723,50 @@ mod tests {
                 collected.len()
             );
             assert_eq!(collected, &data[seek_offset..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_replay_seek_past_recovered_partial_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"seek_partial")
+                .await
+                .unwrap();
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let mut append = Writer::new(blob.clone(), blob_size, 230, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(2 * PAGE_SIZE.get() as usize)
+                .collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            let mut replay = append.replay(NZUsize!(230)).await.unwrap();
+            drop(append);
+
+            // Make the first page a valid partial page even though another page follows it.
+            // Replay exposes that recoverable prefix before reporting the invalid layout.
+            const RECOVERED: usize = 50;
+            let record = Checksum::new(
+                RECOVERED as u16,
+                commonware_cryptography::Crc32::checksum(&data[..RECOVERED]),
+            );
+            blob.write_at_sync(PAGE_SIZE.get() as u64, record.to_bytes().to_vec())
+                .await
+                .unwrap();
+
+            replay.seek_to(75).unwrap();
+            assert!(matches!(
+                replay.ensure(1).await,
+                Err(Error::InvalidChecksum)
+            ));
+            assert_eq!(replay.remaining(), 0);
+            assert!(replay.chunk().is_empty());
         });
     }
 }

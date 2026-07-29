@@ -949,7 +949,7 @@ impl<
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
         // Initialize journal
-        let journal = Journal::<_, Artifact<S, D>>::init(
+        let mut replay = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -958,6 +958,7 @@ impl<
                 page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
             },
+            self.replay_buffer,
         )
         .await
         .expect("unable to open journal");
@@ -987,10 +988,6 @@ impl<
         // Rebuild from journal, nested under the startup span.
         let replayed;
         (self, replayed) = async {
-            let mut replay = journal
-                .replay(0, 0, self.replay_buffer)
-                .await
-                .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
                 // Dropping our own nullify votes at or below the floor is safe
                 // for the same-term finalize gate: the floor finalization

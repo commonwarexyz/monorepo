@@ -337,6 +337,29 @@ impl Checksum {
         checksum
     }
 
+    /// Validate a page and identify an invalid inactive slot that must be retired before reuse.
+    fn validate_page_with_status(buf: &[u8]) -> Option<(ActiveChecksum, Option<Slot>)> {
+        let checksum = Self::validate_page(buf)?;
+        let crc_start_idx = buf.len() - CHECKSUM_SIZE as usize;
+        let mut crc_bytes = &buf[crc_start_idx..];
+        let crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
+        let authoritative = crc_record.authoritative();
+
+        let invalid_slot = if checksum.slot != authoritative {
+            Some(authoritative)
+        } else {
+            let inactive = authoritative.other();
+            let safely_retired = crc_record.get_slot(inactive) == (0, 0);
+            (!safely_retired
+                && crc_record
+                    .validate_slot(inactive, buf, crc_start_idx)
+                    .is_none())
+            .then_some(inactive)
+        };
+
+        Some((checksum, invalid_slot))
+    }
+
     /// Validate one slot independently of the footer's authority ordering.
     fn validate_slot(
         &self,

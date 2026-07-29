@@ -1040,11 +1040,12 @@ impl<
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
+        let mut replay = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
                 .child("journal")
                 .with_attribute("sequencer", sequencer),
             cfg,
+            self.journal_replay_buffer,
         )
         .await
         .expect("unable to init journal");
@@ -1052,12 +1053,6 @@ impl<
         // Replay journal
         let journal = {
             debug!(?sequencer, "journal replay begin");
-
-            // Prepare the reader
-            let mut replay = journal
-                .replay(0, 0, self.journal_replay_buffer)
-                .await
-                .expect("unable to replay journal");
 
             // Read from the reader, which may be in arbitrary order.
             // Remember the highest node height

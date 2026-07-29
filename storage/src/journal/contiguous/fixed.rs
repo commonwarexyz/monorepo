@@ -441,38 +441,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         );
         let mut pending = partition.open_all().await?;
 
-        // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
-        // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
-        // from an incomplete write (the page-CRC layer surfaces it as a partial logical tail).
-        // The truncation is synced before `recover_bounds` queries lengths.
-        for (&blob, writer) in &mut pending {
-            let size = writer.size();
-            let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
-            if valid_size != size {
-                warn!(
-                    blob,
-                    invalid_size = size,
-                    new_size = valid_size,
-                    "trailing bytes detected: truncating"
-                );
-                writer.resize(valid_size).await?;
-                writer.sync().await?;
-            }
-        }
-
-        // Check the two newest blobs for interior holes. Only they can hold non-durable data, and
-        // a crash during an in-flight fsync can lose an interior page while later pages survive.
-        // `Writer::new` sizes a blob by its last valid page, so it cannot see such a hole. Above
-        // the watermark, truncate at the first bad page (rounded down to whole items) so
-        // `recover_bounds` sees only intact data. Beneath the watermark the covering fsync
-        // completed, so a hole is external corruption: fail and preserve the evidence
-        // (`recover_bounds` would reject the truncated result anyway).
+        // Check the two newest blobs for interior holes before rounding short tails down to whole
+        // items. Only they can hold non-durable data, and a crash during an in-flight fsync can
+        // lose an interior page while later pages survive. `Writer::new` sizes a blob by its last
+        // valid page, so it cannot see such a hole. Above the watermark, truncate at the first bad
+        // page (rounded down to whole items) so `recover_bounds` sees only intact data. Beneath the
+        // watermark the covering fsync completed, so a hole is external corruption: fail and
+        // preserve the evidence (`recover_bounds` would reject the truncated result anyway).
         let floor = checkpoint.watermark().unwrap_or(0);
         let floor_blob = super::position_to_blob(floor, cfg.items_per_blob.get());
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let valid = writer.recoverable_prefix_len().await?;
+            let valid = writer.recoverable_prefix_len(0).await?;
             let valid = Self::items_to_bytes(valid / Self::CHUNK_SIZE_U64)?;
             if valid == writer.size() {
                 continue;
@@ -483,9 +464,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             let acknowledged = if blob < floor_blob {
                 writer.size()
             } else if blob == floor_blob {
-                Self::items_to_bytes(
-                    floor - super::blob_first_position(blob, cfg.items_per_blob.get())?,
-                )?
+                let first_retained = first_in_blob(
+                    checkpoint.boundary_hint().unwrap_or(0),
+                    blob,
+                    cfg.items_per_blob.get(),
+                )?;
+                let acknowledged_items = floor.checked_sub(first_retained).ok_or_else(|| {
+                    Error::Corruption(format!(
+                        "recovery watermark {floor} precedes retained position {first_retained}"
+                    ))
+                })?;
+                Self::items_to_bytes(acknowledged_items)?
             } else {
                 0
             };
@@ -504,6 +493,25 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             );
             writer.resize(valid).await?;
             writer.sync().await?;
+        }
+
+        // Truncate trailing non-chunk-aligned bytes on every blob. Items are fixed size, so a blob
+        // ending in fewer than `CHUNK_SIZE` trailing bytes is junk from an incomplete write (the
+        // page-CRC layer surfaces it as a partial logical tail). The truncation is synced before
+        // `recover_bounds` queries lengths.
+        for (&blob, writer) in &mut pending {
+            let size = writer.size();
+            let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
+            if valid_size != size {
+                warn!(
+                    blob,
+                    invalid_size = size,
+                    new_size = valid_size,
+                    "trailing bytes detected: truncating"
+                );
+                writer.resize(valid_size).await?;
+                writer.sync().await?;
+            }
         }
 
         let RecoveredBounds {
@@ -1116,10 +1124,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::destroy].
-    pub(crate) async fn destroy(self) -> Result<(), Error> {
+    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
+        // Stage a recoverable reset before removing storage. If a later removal is interrupted,
+        // initialization completes the reset and can retry destruction.
+        self.checkpoint = self.checkpoint.stage_clear(0).await?;
         self.blobs.destroy().await?;
-        self.checkpoint.destroy().await?;
-        Ok(())
+        self.checkpoint.destroy().await
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -1170,7 +1180,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
         new_size: u64,
@@ -1371,11 +1380,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// If interrupted, the journal remains openable and `destroy` can be retried.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
+    }
+
+    /// Park destruction after removing its first blob.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after_first_remove(&mut self) {
+        self.0.blobs.halt_destroy_after_first_remove();
     }
 }
 
@@ -2704,6 +2717,38 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_journal_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0u64..5 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Cancel the production future after the staged reset and one successful blob
+            // removal, leaving a nonempty suffix for initialization to clear.
+            journal.0.blobs.halt_destroy_after_first_remove();
+            {
+                let destroy = journal.destroy();
+                futures::pin_mut!(destroy);
+                assert!(
+                    futures::poll!(destroy.as_mut()).is_pending(),
+                    "destroy must park after removing its first blob"
+                );
+            }
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("interrupted destroy must leave openable storage");
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_partial_replay() {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         // 53 % 7 = 4, which will trigger a non-trivial seek in the starting blob to reach the
@@ -3865,6 +3910,46 @@ mod tests {
         });
     }
 
+    /// Recovery must find an interior hole before rounding a short tail down to whole items.
+    #[test_traced]
+    fn test_fixed_recovery_repairs_hole_before_short_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(10));
+            cfg.partition = "fixed-hole-short-tail".into();
+            cfg.page_cache = CacheRef::from_pooler(&context, NZU16!(7), PAGE_CACHE_SIZE);
+
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..3u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.commit().await.unwrap();
+
+            // Three items occupy thirteen full 7-byte pages and one partial page. Lose the last
+            // page and tear page 9, so the backward scan reports a 91-byte tail whose item-aligned
+            // truncation point falls inside the torn page.
+            corrupt_page(&context, &blob_partition(&cfg), 0, 9, 7).await;
+            let (blob, _) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            blob.resize(13 * (7 + 12)).await.unwrap();
+            blob.sync().await.unwrap();
+
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("interior hole and short tail should be repaired");
+            assert_eq!(journal.bounds(), 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            let appended;
+            (journal, appended) = journal.append(&test_digest(42)).await.unwrap();
+            assert_eq!(appended, 1);
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// A torn interior page in the tail blob truncates the append frontier without disturbing
     /// its full predecessors.
     #[test_traced]
@@ -3993,6 +4078,51 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_after, size_before);
+        });
+    }
+
+    /// A mid-blob reset stores its first logical position at physical offset zero. Recovery must
+    /// not count the pruned positions before that boundary as acknowledged bytes in the blob.
+    #[test_traced]
+    fn test_fixed_recovery_mid_blob_boundary_uses_physical_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(5));
+            cfg.partition = "fixed-mid-blob-physical-prefix".into();
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+
+            let appended;
+            (journal, appended) = journal.append(&test_digest(7)).await.unwrap();
+            assert_eq!(appended, 7);
+            journal = journal.sync().await.unwrap();
+
+            // Positions 8 and 9 are outside the recovery watermark. Persist their pages so an
+            // interior tear can leave the acknowledged item at physical offset zero intact.
+            for i in 8..10u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            drop(journal.commit().await.unwrap());
+            corrupt_page(
+                &context,
+                &blob_partition(&cfg),
+                1,
+                1,
+                PAGE_SIZE.get() as u64,
+            )
+            .await;
+
+            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("tear above the mid-blob watermark should be repairable");
+            assert_eq!(journal.bounds(), 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), test_digest(7));
+            let appended;
+            (journal, appended) = journal.append(&test_digest(42)).await.unwrap();
+            assert_eq!(appended, 8);
+            journal.destroy().await.unwrap();
         });
     }
 

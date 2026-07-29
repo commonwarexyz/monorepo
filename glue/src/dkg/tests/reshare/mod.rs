@@ -406,13 +406,13 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
         .expect("test epoch should be supported");
     let crash_window_start = state_sync_floor.get() + EPOCH_LENGTH.get() / 2;
     // The application state sync follows the finalized tip, so the node's
-    // first processed height after sync is bounded only by the next epoch
-    // boundary (block production pauses there, letting sync converge). The
-    // crash window therefore extends to the next epoch's first block, and the
-    // processed hold parks the node at whatever height it lands on so the
-    // crash triggers deterministically instead of sampling a moving value.
+    // first processed height after sync can land in the following epoch. The
+    // crash window therefore extends through that epoch, and the processed
+    // hold parks the node at whatever height it lands on so the crash triggers
+    // deterministically before the next boundary instead of sampling a moving
+    // value.
     let crash_window_end = FixedEpocher::new(EPOCH_LENGTH)
-        .first(next_player_epoch.next())
+        .last(next_player_epoch.next())
         .expect("test epoch should be supported");
     let engine = ReshareEngine::with_committee(6, 4).with_state_sync_floor(state_sync_floor);
     let delayed = engine.participants[5].clone();

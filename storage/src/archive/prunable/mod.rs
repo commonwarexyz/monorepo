@@ -146,6 +146,7 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
+//!         metadata_partition: "demo-metadata".into(),
 //!         key_partition: "demo-index".into(),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
@@ -181,6 +182,16 @@ pub struct Config<T: Translator, C> {
     /// [Archive] assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
+
+    /// The partition to use for the archive's durable-size checkpoint.
+    ///
+    /// The checkpoint records how much of each section a completed sync made durable, so recovery
+    /// can tell unacknowledged crash debris apart from damage to data the checkpoint covers.
+    /// [crate::archive::Archive::sync] publishes before it returns.
+    /// [crate::archive::Archive::start_sync] publishes one interval behind, so data it made
+    /// durable is covered only once a later sync publishes it. Damage below an unpublished size
+    /// is repaired rather than reported, the same as for a section the checkpoint omits entirely.
+    pub metadata_partition: String,
 
     /// The partition to use for the key journal (stores index+key metadata).
     pub key_partition: String,
@@ -223,11 +234,11 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
-        deterministic,
+        Blob as _, BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
+        Supervisor as _, deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
-            release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
+            release_next_pending_syncs, release_pending_syncs, release_pending_syncs_after,
         },
         telemetry::metrics::has_metric_value,
     };
@@ -262,6 +273,7 @@ mod tests {
     ) -> Config<FourCap, ()> {
         Config {
             translator: FourCap,
+            metadata_partition: "test-index-metadata".into(),
             key_partition: "test-index".into(),
             key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
@@ -686,6 +698,51 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_below_floor_put_sync_durably_syncs_prior_put() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&delayed, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let archive = drive_pending_syncs(&pending, archive.prune(1))
+                .await
+                .expect("Failed to prune archive");
+            let archive = archive
+                .put(1, test_key("retained"), 10)
+                .await
+                .expect("Failed to put retained item");
+
+            pending.arm();
+            let result =
+                drive_pending_syncs(&pending, archive.put_sync(0, test_key("pruned"), 20)).await;
+            let sync_calls = pending.calls();
+            pending.unblock();
+            let archive = result.expect("Failed to put_sync below floor");
+            assert!(
+                sync_calls > 0,
+                "below-floor put_sync must sync previously accepted writes"
+            );
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), None);
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
     fn test_overlapping_put_start_sync_restarts_after_all_handles_complete() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
@@ -774,7 +831,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_failed_start_sync_is_returned_by_next_start_sync_handle() {
+    fn test_failed_start_sync_is_returned_by_next_put() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -794,22 +851,312 @@ mod tests {
             assert_eq!(pending.lock().len(), 2);
             fail_pending_syncs(&pending);
 
-            let archive = archive
+            let err = archive
                 .put(2, test_key("bbb"), 20)
                 .await
-                .expect("write should be accepted before observing the failed sync");
-
-            let (_archive, second) = archive
-                .start_sync()
-                .await
-                .expect("start_sync should return a handle for the failed sync");
-            let err = second
-                .await
-                .expect_err("next start_sync handle should observe failed in-flight sync");
-            assert!(matches!(err, RError::Io(_)));
+                .expect_err("next put must surface the failed in-flight sync before writing");
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::Runtime(RError::Io(_)))
+            ));
 
             let err = first.await.expect_err("first sync handle should fail");
             assert!(matches!(err, RError::Io(_)));
+        });
+    }
+
+    #[test_traced]
+    fn test_interrupted_destroy_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..3u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let mut archive = archive.sync().await.expect("Failed to sync");
+
+            // Cancel the production destroy future after metadata removal and before journal
+            // removal, rather than constructing that state out of band.
+            archive.halt_destroy_after_metadata();
+            {
+                let destroy = archive.destroy();
+                futures::pin_mut!(destroy);
+                assert!(
+                    futures::poll!(destroy.as_mut()).is_pending(),
+                    "destroy must park between metadata and journal removal"
+                );
+            }
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .expect("interrupted destroy must leave openable storage");
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// Pruning drops a section from the checkpoint before its blobs are removed, so a reopen
+    /// after pruning neither reports the pruned sections as lost nor loses the retained ones.
+    #[test_traced]
+    fn test_prune_then_reopen_with_live_checkpoint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..6u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            let archive = archive.prune(3).await.expect("Failed to prune");
+            drop(archive);
+
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .expect("pruned sections must not be reported as lost");
+            for index in 0..3u64 {
+                assert_eq!(archive.get(Identifier::Index(index)).await.unwrap(), None);
+            }
+            for index in 3..6u64 {
+                assert_eq!(
+                    archive.get(Identifier::Index(index)).await.unwrap(),
+                    Some(index as i32),
+                    "retained section {index} was lost"
+                );
+            }
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// The archive owns only its explicitly configured `metadata_partition`. It must not claim
+    /// the implicit `{key_partition}-metadata` name or alter unrelated data stored there.
+    #[test_traced]
+    fn test_init_leaves_foreign_derived_metadata_untouched() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Seed foreign data at the historically-derived `{key_partition}-metadata` name.
+            let derived = "orders-metadata";
+            let (blob, _) = context
+                .open(derived, b"foreign")
+                .await
+                .expect("Failed to seed foreign partition");
+            blob.write_at_sync(0, vec![0xAB; 5]).await.unwrap();
+            drop(blob);
+
+            let cfg = Config {
+                translator: FourCap,
+                metadata_partition: "orders-watermarks".into(),
+                key_partition: "orders".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "orders-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("archive"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+            archive = archive
+                .put(1, test_key("k"), 7)
+                .await
+                .expect("Failed to put");
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            // The foreign derived-name partition is byte-for-byte untouched.
+            let (blob, len) = context
+                .open(derived, b"foreign")
+                .await
+                .expect("foreign partition must survive");
+            assert_eq!(len, 5, "foreign derived-metadata partition was resized");
+            let data = blob.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(
+                data.as_ref(),
+                &[0xAB; 5][..],
+                "foreign derived-metadata bytes were modified"
+            );
+        });
+    }
+
+    /// Damage to a value the archive acknowledged is loud, because the checkpoint records that
+    /// the value was made durable. The identical damage without a checkpoint (an archive written
+    /// before the archive published one) is indistinguishable from crash debris, so it is
+    /// repaired instead.
+    #[test_traced]
+    fn test_recovery_rejects_damage_below_checkpoint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..2u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            // Damage the checksum of the last acknowledged value.
+            let (blob, size) = context
+                .open(&cfg.value_partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open values");
+            blob.write_at_sync(size - 4, vec![0xFF; 4])
+                .await
+                .expect("Failed to damage value");
+            drop(blob);
+
+            let result =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await;
+            assert!(
+                matches!(result, Err(Error::Journal(JournalError::Corruption(_)))),
+                "expected Corruption, got {result:?}"
+            );
+
+            // Drop the checkpoint to present the same storage as a pre-checkpoint archive.
+            context
+                .remove(&cfg.metadata_partition, None)
+                .await
+                .expect("Failed to remove checkpoint");
+            let archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third"), cfg.clone())
+                    .await
+                    .expect("Failed to recover without a checkpoint");
+            assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(0));
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// An archive whose storage predates the checkpoint recovers all of its data by scan.
+    #[test_traced]
+    fn test_init_without_checkpoint_recovers_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(4));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+            for index in 0..10u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+
+            context
+                .remove(&cfg.metadata_partition, None)
+                .await
+                .expect("Failed to remove checkpoint");
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .expect("Failed to recover without a checkpoint");
+            for index in 0..10u64 {
+                assert_eq!(
+                    archive.get(Identifier::Index(index)).await.unwrap(),
+                    Some(index as i32),
+                    "index {index} must survive a missing checkpoint"
+                );
+            }
+
+            // The recovered archive republishes a checkpoint of its own.
+            archive = archive.put(10, test_key("k10"), 10).await.unwrap();
+            let archive = archive.sync().await.expect("Failed to sync");
+            drop(archive);
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("third"), cfg)
+                .await
+                .expect("Failed to reopen");
+            assert_eq!(archive.get(Identifier::Index(10)).await.unwrap(), Some(10));
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// A checkpoint write in flight must not stall the next data sync: the checkpoint is
+    /// published one interval behind, so `start_sync` skips publication rather than waiting.
+    #[test_traced]
+    fn test_start_sync_does_not_wait_for_checkpoint_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive =
+                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("archive"), cfg)
+                    .await
+                    .expect("Failed to initialize archive");
+
+            // Nothing is durable yet, so this interval publishes no checkpoint.
+            archive = archive.put(1, test_key("a"), 1).await.unwrap();
+            let (mut archive, first) = archive.start_sync().await.expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 2);
+            release_pending_syncs(&pending);
+            first.await.expect("Failed to complete first sync");
+
+            // This interval publishes section 1's completed sync. The checkpoint write is started
+            // before the data sync, so it is the oldest parked sync.
+            archive = archive.put(2, test_key("b"), 2).await.unwrap();
+            let (mut archive, second) = archive.start_sync().await.expect("Failed to start sync");
+            assert_eq!(pending.lock().len(), 3);
+
+            // Complete section 2's data sync while the checkpoint write stays in flight, so the
+            // next interval has something new to publish and a busy metadata store to publish it
+            // through.
+            release_pending_syncs_after(&pending, 1);
+            for _ in 0..8 {
+                commonware_runtime::reschedule().await;
+            }
+            assert_eq!(
+                pending.lock().len(),
+                1,
+                "only the checkpoint write should remain parked"
+            );
+
+            // A third interval must start without waiting for that checkpoint write, and must
+            // skip publication rather than blocking on it.
+            archive = archive.put(3, test_key("c"), 3).await.unwrap();
+            let (archive, third) = archive
+                .start_sync()
+                .await
+                .expect("checkpoint sync must not block a later data sync");
+            assert_eq!(
+                pending.lock().len(),
+                3,
+                "publication must be skipped, adding only section 3's two data syncs"
+            );
+
+            release_pending_syncs(&pending);
+            second.await.expect("Failed to complete second sync");
+            third.await.expect("Failed to complete third sync");
+            archive.destroy().await.expect("Failed to destroy");
         });
     }
 
@@ -821,6 +1168,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -852,6 +1200,7 @@ mod tests {
             // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -888,6 +1237,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -953,6 +1303,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1012,6 +1363,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1099,8 +1451,8 @@ mod tests {
                 None
             );
 
-            // The sync combinators skip the sync for a satisfied below-floor put
-            // and return a ready handle
+            // The sync combinators still synchronize previously accepted writes even though the
+            // below-floor put itself stores nothing.
             let (archive, handle) = archive
                 .put_start_sync(1, test_key("key1-blah"), 1)
                 .await
@@ -1123,6 +1475,7 @@ mod tests {
             let items_per_section = 256u64;
             let cfg = Config {
                 translator: TwoCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1186,6 +1539,7 @@ mod tests {
             // Reinitialize the archive
             let cfg = Config {
                 translator: TwoCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1294,6 +1648,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1345,6 +1700,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1480,6 +1836,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 translator: FourCap,
+                metadata_partition: "test-index-metadata".into(),
                 key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
@@ -1547,8 +1904,7 @@ mod tests {
                 None
             );
 
-            // put_multi_start_sync below the prune floor skips the sync and
-            // returns a ready handle
+            // put_multi_start_sync below the prune floor still synchronizes prior writes.
             let (archive, handle) = archive
                 .put_multi_start_sync(2, test_key("ddd"), 41)
                 .await
@@ -1556,7 +1912,7 @@ mod tests {
             handle.await.expect("handle must resolve");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
 
-            // put_multi_sync below the prune floor skips the sync
+            // put_multi_sync below the prune floor still synchronizes prior writes.
             let archive = archive
                 .put_multi_sync(2, test_key("ddd"), 42)
                 .await

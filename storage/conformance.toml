@@ -4,7 +4,7 @@ hash = "836f71ea345dc8707105fee756c04b1f2edb8a5e54c38b23282b53998244dd12"
 
 ["commonware_storage::archive::conformance::StorageConformance<ArchivePrunableWorkload>"]
 n_cases = 128
-hash = "c42202186ded174cd23871b6728b23a2284f7146c7acdaf1dbff61fa9bd666ea"
+hash = "29774881afa01e413c22aefe5de47a657d1a6975015d31e980bd4d858249d9df"
 
 ["commonware_storage::archive::immutable::storage::conformance::CodecConformance<Record>"]
 n_cases = 65536

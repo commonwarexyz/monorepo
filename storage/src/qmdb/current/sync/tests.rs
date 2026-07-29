@@ -27,6 +27,108 @@ use commonware_runtime::{
 use commonware_utils::non_empty_range;
 use rand::Rng as _;
 
+struct PendingMmrResolver<Op>(core::marker::PhantomData<fn() -> Op>);
+
+impl<Op> PendingMmrResolver<Op> {
+    const fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<Op> Clone for PendingMmrResolver<Op> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<Op: 'static> crate::qmdb::sync::resolver::Resolver for PendingMmrResolver<Op> {
+    type Family = crate::merkle::mmr::Family;
+    type Digest = Digest;
+    type Op = Op;
+    type Error = std::convert::Infallible;
+
+    async fn get_operations(
+        &self,
+        _op_count: crate::merkle::Location<Self::Family>,
+        _start_loc: crate::merkle::Location<Self::Family>,
+        _max_ops: core::num::NonZeroU64,
+        _include_pinned_nodes: bool,
+        _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+    ) -> Result<
+        crate::qmdb::sync::resolver::FetchResult<Self::Family, Self::Op, Self::Digest>,
+        Self::Error,
+    > {
+        std::future::pending().await
+    }
+}
+
+type FixedMmrDb<E> = crate::qmdb::current::unordered::fixed::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Digest,
+    Digest,
+    Sha256,
+    crate::translator::OneCap,
+    32,
+    Sequential,
+>;
+
+type VariableMmrDb<E> = crate::qmdb::current::unordered::variable::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Digest,
+    Digest,
+    Sha256,
+    crate::translator::OneCap,
+    32,
+    Sequential,
+>;
+
+async fn seed_fixed_mmr_client(
+    context: &Context,
+    suffix: &str,
+) -> (
+    crate::qmdb::current::FixedConfig<crate::translator::OneCap, Sequential>,
+    crate::merkle::Location<crate::merkle::mmr::Family>,
+) {
+    let config = fixed_config::<crate::translator::OneCap>(suffix, context);
+    let mut db = FixedMmrDb::<Context>::init(context.child("seed"), config.clone())
+        .await
+        .unwrap();
+    let batch = db
+        .new_batch()
+        .write(Digest::from([1u8; 32]), Some(Digest::from([2u8; 32])))
+        .merkleize(&db, None)
+        .await
+        .unwrap();
+    (db, _) = db.apply_batch(batch).await.unwrap();
+    let db = db.commit().await.unwrap().sync().await.unwrap();
+    let end = db.bounds().end;
+    drop(db);
+    (config, end)
+}
+
+async fn assert_fixed_mmr_client_recovers_empty(
+    context: Context,
+    config: crate::qmdb::current::FixedConfig<crate::translator::OneCap, Sequential>,
+) {
+    use crate::merkle::Location;
+
+    let db = FixedMmrDb::<Context>::init(context.child("recover"), config.clone())
+        .await
+        .expect("pending sync recovery must remain openable");
+    assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
+    let root = db.root();
+    drop(db);
+
+    let db = FixedMmrDb::<Context>::init(context.child("reopen"), config)
+        .await
+        .expect("recovered empty generation must remain stable");
+    assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
+    assert_eq!(db.root(), root);
+    db.destroy().await.unwrap();
+}
+
 // ===== Harness Implementations =====
 
 mod harnesses {
@@ -566,6 +668,563 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             .destroy()
             .await
             .unwrap();
+    });
+}
+
+macro_rules! canceled_engine_after_journal_clear_test {
+    ($name:ident, $db:ty, $op:ty, $config:ident, $suffix:literal $(,)?) => {
+        #[test_traced]
+        fn $name() {
+            use commonware_utils::NZU64;
+
+            const SUFFIX: &str = $suffix;
+
+            let ((), checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let config = $config::<crate::translator::OneCap>(SUFFIX, &context);
+                    let mut db = <$db>::init(context.child("seed"), config.clone())
+                        .await
+                        .unwrap();
+                    let batch = db
+                        .new_batch()
+                        .write(Digest::from([1u8; 32]), Some(Digest::from([2u8; 32])))
+                        .merkleize(&db, None)
+                        .await
+                        .unwrap();
+                    (db, _) = db.apply_batch(batch).await.unwrap();
+                    let db = db.commit().await.unwrap().sync().await.unwrap();
+                    let start = db.bounds().end;
+                    drop(db);
+
+                    let end = start.checked_add(32).unwrap();
+                    let engine: crate::qmdb::sync::Engine<$db, PendingMmrResolver<$op>> =
+                        crate::qmdb::sync::Engine::new(crate::qmdb::sync::engine::Config {
+                            context: context.child("engine"),
+                            resolver: PendingMmrResolver::new(),
+                            target: crate::qmdb::sync::Target {
+                                root: Digest::from([9u8; 32]),
+                                range: non_empty_range!(start, end),
+                            },
+                            max_outstanding_requests: 1,
+                            fetch_batch_size: NZU64!(8),
+                            apply_batch_size: 8,
+                            db_config: config,
+                            update_rx: None,
+                            finish_rx: None,
+                            reached_target_tx: None,
+                            max_retained_roots: 0,
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        crate::journal::contiguous::Contiguous::bounds(engine.journal()),
+                        *start..*start
+                    );
+
+                    // Cancel an actual Engine await after Journal::new durably cleared the raw log
+                    // but before from_sync_result can assemble Full or Current metadata.
+                    let mut stalled = Box::pin(engine.step());
+                    assert!(futures::poll!(stalled.as_mut()).is_pending());
+                    drop(stalled);
+                });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let config = $config::<crate::translator::OneCap>(SUFFIX, &context);
+                let db = <$db>::init(context.child("recover"), config.clone())
+                    .await
+                    .expect("pending sync recovery must remain openable");
+                assert_eq!(
+                    db.bounds(),
+                    crate::merkle::Location::new(0)..crate::merkle::Location::new(1)
+                );
+                let root = db.root();
+                drop(db);
+
+                let db = <$db>::init(context.child("reopen"), config)
+                    .await
+                    .expect("recovered empty generation must remain stable");
+                assert_eq!(
+                    db.bounds(),
+                    crate::merkle::Location::new(0)..crate::merkle::Location::new(1)
+                );
+                assert_eq!(db.root(), root);
+                db.destroy().await.unwrap();
+            });
+        }
+    };
+}
+
+canceled_engine_after_journal_clear_test!(
+    test_canceled_engine_after_journal_clear_recovers_empty_generation,
+    FixedMmrDb<Context>,
+    crate::qmdb::any::unordered::fixed::Operation<
+        crate::merkle::mmr::Family,
+        Digest,
+        Digest,
+    >,
+    fixed_config,
+    "canceled-engine-journal-clear",
+);
+
+canceled_engine_after_journal_clear_test!(
+    test_canceled_engine_after_variable_journal_clear_recovers_empty_generation,
+    VariableMmrDb<Context>,
+    crate::qmdb::any::unordered::variable::Operation<
+        crate::merkle::mmr::Family,
+        Digest,
+        Digest,
+    >,
+    variable_config,
+    "canceled-engine-variable-journal-clear",
+);
+
+#[test_traced]
+fn test_canceled_engine_journal_append_recovers_empty_generation() {
+    use crate::qmdb::{
+        any::{operation::update::Unordered as UnorderedUpdate, unordered::fixed::Operation},
+        sync::Engine,
+    };
+    use commonware_runtime::mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync};
+    use commonware_utils::NZU64;
+
+    type DelayedContext = DelayedSyncContext<Context>;
+    type Op = Operation<crate::merkle::mmr::Family, Digest, Digest>;
+
+    const SUFFIX: &str = "canceled-engine-journal-append";
+
+    let ((), checkpoint) =
+        deterministic::Runner::default().start_and_recover(|context| async move {
+            let (config, start) = seed_fixed_mmr_client(&context, SUFFIX).await;
+            let end = start.checked_add(64).unwrap();
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let delayed = DelayedContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let mut engine: Engine<FixedMmrDb<DelayedContext>, PendingMmrResolver<Op>> =
+                Engine::new(crate::qmdb::sync::engine::Config {
+                    context: delayed,
+                    resolver: PendingMmrResolver::new(),
+                    target: crate::qmdb::sync::Target {
+                        root: Digest::from([10u8; 32]),
+                        range: non_empty_range!(start, end),
+                    },
+                    max_outstanding_requests: 1,
+                    fetch_batch_size: NZU64!(8),
+                    apply_batch_size: 8,
+                    db_config: config,
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 0,
+                })
+                .await
+                .unwrap();
+
+            let mut operations = (0..15u8)
+                .map(|i| {
+                    Operation::Update(UnorderedUpdate(
+                        Digest::from([i.wrapping_add(16); 32]),
+                        Digest::from([i.wrapping_add(64); 32]),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            operations.push(Operation::CommitFloor(None, start));
+            engine.store_operations(start, operations);
+
+            // A multi-blob append must await rollover durability. Interrupt that exact await after
+            // the pre-sync Current intent is durable and before Full assembly begins.
+            pending.arm();
+            let mut applying = Box::pin(engine.apply_operations());
+            for _ in 0..64 {
+                assert!(futures::poll!(applying.as_mut()).is_pending());
+                if pending.calls() != 0 {
+                    break;
+                }
+                commonware_runtime::reschedule().await;
+            }
+            assert_eq!(pending.calls(), 1);
+            let deferred = next_pending_sync(&pending);
+            deferred.blocked.await.unwrap();
+            drop(deferred.release);
+            drop(applying);
+        });
+
+    deterministic::Runner::from(checkpoint).start(|context| async move {
+        let config = fixed_config::<crate::translator::OneCap>(SUFFIX, &context);
+        assert_fixed_mmr_client_recovers_empty(context, config).await;
+    });
+}
+
+#[test_traced]
+fn test_canceled_sync_metadata_publication_recovers_empty_generation() {
+    use crate::{
+        journal::contiguous::fixed,
+        merkle::{Family as _, Location, mmr},
+        qmdb::{
+            any::unordered::fixed::{Operation, Update},
+            current::unordered::fixed::Db,
+        },
+        translator::OneCap,
+    };
+    use commonware_runtime::mocks::{DelayedSyncContext, PendingSyncs};
+    use commonware_utils::{bitmap::Readable as _, non_empty_range};
+
+    type F = mmr::Family;
+    type Op = Operation<F, Digest, Digest>;
+    type NormalDb = Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+    type DelayedContext = DelayedSyncContext<Context>;
+    type DelayedDb = Db<F, DelayedContext, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+
+    const SUFFIX: &str = "canceled-sync-metadata-publication";
+    const REPLACEMENT_START: u64 = 512;
+
+    let (replacement_root, checkpoint) =
+        deterministic::Runner::default().start_and_recover(|context| async move {
+            let config = fixed_config::<OneCap>(SUFFIX, &context);
+
+            // Persist an old Current generation with graft metadata that cannot describe the
+            // replacement generation below.
+            let mut old = NormalDb::init(context.child("old"), config.clone())
+                .await
+                .unwrap();
+            let key = Digest::from([3u8; 32]);
+            for round in 0..160u64 {
+                let batch = old
+                    .new_batch()
+                    .write(key, Some(Digest::from([round as u8; 32])))
+                    .merkleize(&old, None)
+                    .await
+                    .unwrap();
+                (old, _) = old.apply_batch(batch).await.unwrap();
+                old = old.commit().await.unwrap();
+            }
+            let old_boundary = old.sync_boundary();
+            assert!(old_boundary > Location::new(0));
+            assert!(old.bounds().end < Location::new(REPLACEMENT_START));
+            let old = old.prune(old_boundary).await.unwrap().sync().await.unwrap();
+            assert!(old.any.bitmap.pruned_chunks() > 0);
+            drop(old);
+
+            let range = non_empty_range!(
+                Location::new(REPLACEMENT_START),
+                Location::new(REPLACEMENT_START + 1)
+            );
+            let metadata = crate::qmdb::current::db::open_metadata::<F, _>(
+                context.child("intent"),
+                &config.grafted_metadata_partition,
+            )
+            .await
+            .unwrap();
+            drop(
+                crate::qmdb::current::db::stage_sync::<F, _, Digest>(
+                    metadata,
+                    &crate::qmdb::sync::Target::new(Digest::from([0xAA; 32]), range.clone()),
+                )
+                .await
+                .unwrap(),
+            );
+
+            // Prepare the replacement operations journal at a disjoint logical generation. Its
+            // context has durability delays permanently disabled; only assemble_db's context is
+            // armed below.
+            let prep_pending = PendingSyncs::default();
+            prep_pending.unblock();
+            let prep_context = DelayedSyncContext {
+                inner: context.child("prepare_log"),
+                pending: prep_pending,
+            };
+            let journal =
+                fixed::Journal::<_, Op>::init(prep_context, config.journal_config.clone())
+                    .await
+                    .unwrap();
+            let journal = journal.clear_to_size(REPLACEMENT_START).await.unwrap();
+            let commit = Op::CommitFloor(None, Location::new(REPLACEMENT_START));
+            let (journal, _) = journal.append(&commit).await.unwrap();
+            let journal = journal.sync().await.unwrap();
+
+            let pinned_nodes = F::nodes_to_pin(Location::new(REPLACEMENT_START))
+                .enumerate()
+                .map(|(index, _)| Digest::from([index as u8 + 17; 32]))
+                .collect();
+
+            // Assemble and durably sync the replacement Full/log generation while retaining the
+            // Current replacement intent. Delays are disabled during assembly, then armed for the
+            // final graft-metadata publication only.
+            let publish_pending = PendingSyncs::default();
+            publish_pending.unblock();
+            let publish_context = DelayedSyncContext {
+                inner: context.child("assemble"),
+                pending: publish_pending.clone(),
+            };
+            let db: DelayedDb =
+                super::assemble_db::<F, _, Update<Digest, Digest>, _, Sha256, _, OneCap, 32, _>(
+                    publish_context,
+                    config.merkle_config.clone(),
+                    journal,
+                    config.translator.clone(),
+                    Some(pinned_nodes),
+                    range,
+                    1024,
+                    (),
+                    config.init_buffer,
+                    config.init_cache_size,
+                    config.grafted_metadata_partition.clone(),
+                    config.merkle_config.strategy.clone(),
+                )
+                .await
+                .unwrap();
+            let replacement_root = db.root();
+
+            publish_pending.arm();
+            let mut publication = Box::pin(db.sync_metadata());
+            assert!(futures::poll!(publication.as_mut()).is_pending());
+            assert_eq!(publish_pending.calls(), 1);
+            drop(publication);
+            replacement_root
+        });
+
+    deterministic::Runner::from(checkpoint).start(move |context| async move {
+        let config = fixed_config::<OneCap>(SUFFIX, &context);
+        let db = NormalDb::init(context.child("recover"), config.clone())
+            .await
+            .expect("surviving replacement intent must recover to an openable generation");
+        let bounds = db.bounds();
+        if bounds == (Location::new(0)..Location::new(1)) {
+            assert_eq!(db.sync_boundary(), Location::new(0));
+            assert_eq!(db.any.bitmap.pruned_chunks(), 0);
+        } else {
+            assert_eq!(
+                bounds,
+                Location::new(REPLACEMENT_START)..Location::new(REPLACEMENT_START + 1)
+            );
+            assert_eq!(db.root(), replacement_root);
+        }
+        let root = db.root();
+        drop(db);
+
+        let db = NormalDb::init(context.child("reopen"), config)
+            .await
+            .expect("recovered generation must remain stable on reopen");
+        assert_eq!(db.bounds(), bounds);
+        assert_eq!(db.root(), root);
+        db.destroy().await.unwrap();
+    });
+}
+
+#[test_traced]
+fn test_canceled_pending_sync_recovery_retries() {
+    use crate::{
+        merkle::{Location, mmr},
+        qmdb::current::{db as current_db, unordered::fixed::Db},
+        translator::OneCap,
+    };
+    use commonware_runtime::mocks::{DelayedSyncContext, PendingSyncs};
+
+    type F = mmr::Family;
+    type NormalDb = Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+    type DelayedContext = DelayedSyncContext<Context>;
+    type DelayedDb = Db<F, DelayedContext, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+
+    const SUFFIX: &str = "canceled-pending-sync-recovery";
+
+    let ((), checkpoint) =
+        deterministic::Runner::default().start_and_recover(|context| async move {
+            let config = fixed_config::<OneCap>(SUFFIX, &context);
+            let mut db = NormalDb::init(context.child("old"), config.clone())
+                .await
+                .unwrap();
+            let batch = db
+                .new_batch()
+                .write(Digest::from([1u8; 32]), Some(Digest::from([2u8; 32])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.commit().await.unwrap().sync().await.unwrap();
+            drop(db);
+
+            let metadata = current_db::open_metadata::<F, _>(
+                context.child("intent"),
+                &config.grafted_metadata_partition,
+            )
+            .await
+            .unwrap();
+            let target = crate::qmdb::sync::Target::new(
+                Digest::from([0xAA; 32]),
+                non_empty_range!(Location::new(0), Location::new(1)),
+            );
+            let metadata = current_db::stage_sync::<F, _, Digest>(metadata, &target)
+                .await
+                .unwrap();
+            drop(metadata);
+        });
+
+    // Cancel the first durability await while ordinary initialization resolves the durable intent.
+    // The Current marker is not removed until both backing resets complete, so restart retries.
+    let ((), checkpoint) =
+        deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+            let pending = PendingSyncs::default();
+            pending.arm();
+            let delayed = DelayedSyncContext {
+                inner: context.child("interrupted_recovery"),
+                pending: pending.clone(),
+            };
+            let config = fixed_config::<OneCap>(SUFFIX, &delayed);
+            let mut recovery = Box::pin(DelayedDb::init(delayed, config));
+            assert!(futures::poll!(recovery.as_mut()).is_pending());
+            assert_eq!(pending.calls(), 1);
+            drop(recovery);
+        });
+
+    deterministic::Runner::from(checkpoint).start(|context| async move {
+        let config = fixed_config::<OneCap>(SUFFIX, &context);
+        let db = NormalDb::init(context.child("recover"), config.clone())
+            .await
+            .expect("interrupted intent recovery must be retried");
+        assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
+        assert_eq!(db.sync_boundary(), Location::new(0));
+        let root = db.root();
+        drop(db);
+
+        let db = NormalDb::init(context.child("reopen"), config)
+            .await
+            .expect("recovered empty generation must remain stable on reopen");
+        assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
+        assert_eq!(db.root(), root);
+        db.destroy().await.unwrap();
+    });
+}
+
+#[test_traced]
+fn test_incompatible_pending_target_resets_before_restage() {
+    use crate::{
+        journal::contiguous::fixed,
+        merkle::{Location, mmr},
+        qmdb::{
+            any::unordered::fixed::Operation,
+            current::{db as current_db, unordered::fixed::Db},
+        },
+        translator::OneCap,
+    };
+
+    type F = mmr::Family;
+    type Op = Operation<F, Digest, Digest>;
+    type DbType = Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+
+    const SUFFIX: &str = "incompatible-pending-target";
+
+    deterministic::Runner::default().start(|context| async move {
+        let (config, end) = seed_fixed_mmr_client(&context, SUFFIX).await;
+        let range = non_empty_range!(Location::new(0), end);
+        let first = crate::qmdb::sync::Target::new(Digest::from([1; 32]), range.clone());
+        <DbType as SyncDatabase>::prepare_sync(context.child("prepare_first"), &config, &first)
+            .await
+            .unwrap();
+
+        // A different root at the same size cannot reuse the first target's journal prefix.
+        let second = crate::qmdb::sync::Target::new(Digest::from([2; 32]), range);
+        <DbType as SyncDatabase>::prepare_sync(context.child("prepare_second"), &config, &second)
+            .await
+            .unwrap();
+
+        let metadata = current_db::open_metadata::<F, _>(
+            context.child("inspect_intent"),
+            &config.grafted_metadata_partition,
+        )
+        .await
+        .unwrap();
+        let pending = current_db::pending_sync::<F, _, Digest>(&metadata)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending, second);
+        drop(metadata);
+
+        let journal = fixed::Journal::<_, Op>::init(
+            context.child("inspect_journal"),
+            config.journal_config.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.size(), 0);
+        drop(journal);
+
+        // Ordinary initialization can still resolve the new intent and return a reusable db.
+        let db = DbType::init(context.child("recover"), config)
+            .await
+            .unwrap();
+        assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
+        db.destroy().await.unwrap();
+    });
+}
+
+#[test_traced]
+fn test_discarded_sync_result_is_not_resumed() {
+    use crate::{
+        journal::contiguous::fixed,
+        merkle::{Location, mmr},
+        qmdb::{
+            any::unordered::fixed::Operation,
+            current::{db as current_db, unordered::fixed::Db},
+        },
+        translator::OneCap,
+    };
+
+    type F = mmr::Family;
+    type Op = Operation<F, Digest, Digest>;
+    type DbType = Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+
+    deterministic::Runner::default().start(|context| async move {
+        let config = fixed_config::<OneCap>("discarded-sync-result", &context);
+        let mut db = DbType::init(context.child("db"), config.clone())
+            .await
+            .unwrap();
+        let target = crate::qmdb::sync::Target::new(
+            Digest::from([9; 32]),
+            non_empty_range!(Location::new(0), Location::new(1)),
+        );
+        <DbType as SyncDatabase>::prepare_sync(context.child("prepare"), &config, &target)
+            .await
+            .unwrap();
+        db.metadata = current_db::open_metadata::<F, _>(
+            context.child("replacement_metadata"),
+            &config.grafted_metadata_partition,
+        )
+        .await
+        .unwrap();
+        <DbType as SyncDatabase>::discard_sync_result(db)
+            .await
+            .unwrap();
+
+        // The discard destroyed the staged generation and cleared the intent.
+        let metadata = current_db::open_metadata::<F, _>(
+            context.child("inspect"),
+            &config.grafted_metadata_partition,
+        )
+        .await
+        .unwrap();
+        assert!(
+            current_db::pending_sync::<F, _, Digest>(&metadata)
+                .unwrap()
+                .is_none()
+        );
+        drop(metadata);
+
+        let journal = fixed::Journal::<_, Op>::init(
+            context.child("inspect_journal"),
+            config.journal_config.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.size(), 0);
+        drop(journal);
+
+        let db = DbType::init(context.child("recover"), config)
+            .await
+            .expect("a discarded generation must not be resumed");
+        assert_eq!(db.bounds(), Location::new(0)..Location::new(1));
+        db.destroy().await.unwrap();
     });
 }
 

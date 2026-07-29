@@ -135,6 +135,25 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     ) -> impl std::future::Future<Output = Self::Db> + Send;
 }
 
+pub(crate) fn test_discard_sync_result_destroys_database<H: SyncTestHarness>() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let config = H::config("discard-sync-result", &context);
+        let db = H::init_db_with_config(context.child("create"), config.clone()).await;
+        let empty_bounds = db.bounds();
+        let db = H::apply_ops(db, H::create_ops(2)).await;
+        assert_ne!(db.bounds(), empty_bounds);
+
+        <DbOf<H> as qmdb::sync::Database>::discard_sync_result(db)
+            .await
+            .unwrap();
+
+        let reopened = H::init_db_with_config(context.child("reopen"), config).await;
+        assert_eq!(reopened.bounds(), empty_bounds);
+        reopened.destroy().await.unwrap();
+    });
+}
+
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
@@ -2926,6 +2945,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_post_sync_usability() {
                 super::test_sync_post_sync_usability::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_discard_sync_result_destroys_database() {
+                super::test_discard_sync_result_destroys_database::<$harness>();
             }
 
             #[test_traced]

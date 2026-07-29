@@ -85,7 +85,9 @@ use futures::{
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
+use rand::{
+    CryptoRng, RngExt as _, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng,
+};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -543,9 +545,18 @@ impl Runner {
         Self::new(cfg)
     }
 
-    /// Like [crate::Runner::start], but also returns a [Checkpoint] that can be used
-    /// to recover the state of the runtime in a subsequent run.
+    /// Like [crate::Runner::start], but crosses a simulated crash boundary and also returns a
+    /// [Checkpoint] that can recover the resulting state. Storage handles returned in the output
+    /// belong to the stopped runtime and are invalid after this method returns.
     pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
+    where
+        F: FnOnce(Context) -> Fut,
+        Fut: Future,
+    {
+        self.start_inner(f, true)
+    }
+
+    fn start_inner<F, Fut>(self, f: F, crash_boundary: bool) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
         Fut: Future,
@@ -713,7 +724,16 @@ impl Runner {
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
-        // Construct a checkpoint that can be used to restart the runtime
+        if crash_boundary {
+            // Sample pending storage mutations and invalidate handles from the stopped runtime.
+            let mut rng = executor.rng.lock();
+            storage
+                .inner()
+                .inner()
+                .inner()
+                .simulate_crash(|| rng.random());
+        }
+
         let checkpoint = Checkpoint {
             cycle: executor.cycle,
             deadline: executor.deadline,
@@ -745,7 +765,7 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        let (output, _) = self.start_and_recover(f);
+        let (output, _) = self.start_inner(f, false);
         output
     }
 }
@@ -992,10 +1012,11 @@ impl Context {
         )
     }
 
-    /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
-    /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
-    /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
-    /// its shutdown signaler.
+    /// Recover the inner state (deadline, metrics, auditor, rng, storage, etc.) from the current
+    /// runtime and use it to initialize a new instance of the runtime. A recovered runtime does
+    /// not inherit pending tasks, network connections, or its shutdown signaler. Synced storage is
+    /// retained exactly; an arbitrary subset of each unsynced write's bytes and resize operations
+    /// may also survive.
     ///
     /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
     /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
@@ -1805,26 +1826,62 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_unsynced_storage_does_not_persist() {
+    fn test_recover_unsynced_storage_preserves_arbitrary_subset() {
         // Initialize the first runtime
-        let executor = deterministic::Runner::default();
+        let executor = deterministic::Runner::seeded(0);
         let partition = "test_partition";
         let name = b"test_blob";
-        let data = b"Hello, world!";
+        let data = vec![0xA5; 256];
+        let pending = data.clone();
 
         // Run some tasks without syncing storage
-        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+        let (stale, checkpoint) = executor.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, pending).await.unwrap();
+            blob
+        });
+
+        // The completed runtime has crossed a crash boundary, so its handles are stale.
+        futures::executor::block_on(async {
+            assert!(stale.read_at(0, 1).await.is_err());
+            assert!(stale.write_at(0, b"stale").await.is_err());
+            assert!(stale.sync().await.is_err());
         });
 
         // Recover the runtime
         let executor = Runner::from(checkpoint);
 
-        // Check that unsynced storage does not persist after recovery
+        // The selected seed preserves bytes on both sides of holes, demonstrating that recovery
+        // does not reduce an unsynced write to an all-or-nothing or prefix outcome.
         executor.start(|context| async move {
-            let (_, len) = context.open(partition, name).await.unwrap();
-            assert_eq!(len, 0);
+            let (blob, len) = context.open(partition, name).await.unwrap();
+            assert!(len <= data.len() as u64);
+            let recovered = blob
+                .read_at(0, usize::try_from(len).unwrap())
+                .await
+                .unwrap()
+                .coalesce();
+            assert!(recovered.as_ref().contains(&0xA5));
+            assert!(recovered.as_ref().contains(&0));
+        });
+    }
+
+    #[test]
+    fn test_start_does_not_crash_returned_storage_handle() {
+        let blob = deterministic::Runner::seeded(0).start(|context| async move {
+            let (blob, _) = context.open("test_partition", b"test_blob").await.unwrap();
+            blob.write_at(0, b"pending").await.unwrap();
+            blob
+        });
+
+        futures::executor::block_on(async {
+            assert_eq!(blob.read_at(0, 7).await.unwrap().coalesce(), b"pending");
+            blob.write_at(7, b" write").await.unwrap();
+            blob.sync().await.unwrap();
+            assert_eq!(
+                blob.read_at(0, 13).await.unwrap().coalesce(),
+                b"pending write"
+            );
         });
     }
 
@@ -2184,9 +2241,19 @@ mod tests {
             // Explicitly disable faults for recovery verification
             *ctx.storage_fault_config().write() = FaultConfig::default();
 
-            // Data was not synced, so blob should be empty (unsynced writes are lost)
+            // The failed sync leaves the write eligible for arbitrary crash persistence.
             let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
-            assert_eq!(len, 0, "unsynced data should be lost after recovery");
+            assert!(len <= 4);
+            if len != 0 {
+                let recovered = blob
+                    .read_at(0, usize::try_from(len).unwrap())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                for (i, byte) in recovered.as_ref().iter().copied().enumerate() {
+                    assert!(byte == 0 || byte == b"data"[i]);
+                }
+            }
 
             // Now we can write and sync successfully
             blob.write_at(0, b"recovered".to_vec()).await.unwrap();

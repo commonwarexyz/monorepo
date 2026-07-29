@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler,
+    Buf, BufMut,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
@@ -86,7 +86,7 @@ impl EncodeSize for Record {
 }
 
 /// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
-struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
+struct Inner<E: Context, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -99,13 +99,17 @@ struct Inner<E: BufferPooler + Context, K: Array, V: CodecShared> {
     /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
+    /// Test-only: park destruction after this many component removals.
+    #[cfg(test)]
+    halt_destroy_after: u8,
+
     // Metrics
     gets: Counter,
     has: Counter,
     syncs: Counter,
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
@@ -188,6 +192,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             metadata,
             freezer,
             ordinal,
+            #[cfg(test)]
+            halt_destroy_after: 0,
             gets,
             has,
             syncs,
@@ -232,7 +238,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [crate::archive::Archive::put].
     async fn put(mut self: Box<Self>, index: u64, key: K, data: V) -> Result<Box<Self>, Error> {
         // Ignore duplicates
@@ -344,14 +350,25 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
+        // Destroy metadata first: it holds the freezer's committed checkpoint, and a checkpoint
+        // that outlives the data it describes fails the next init rather than being recovered.
+        self.metadata.destroy().await?;
+
+        #[cfg(test)]
+        if self.halt_destroy_after == 1 {
+            std::future::pending::<()>().await;
+        }
+
         // Destroy ordinal
         self.ordinal.destroy().await?;
 
+        #[cfg(test)]
+        if self.halt_destroy_after == 2 {
+            std::future::pending::<()>().await;
+        }
+
         // Destroy freezer
         self.freezer.destroy().await?;
-
-        // Destroy metadata
-        self.metadata.destroy().await?;
 
         Ok(())
     }
@@ -361,9 +378,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
 /// dropped future) destroys the handle.
-pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
+pub struct Archive<E: Context, K: Array, V: CodecShared>(Box<Inner<E, K, V>>);
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Archive")
             .field("first_index", &self.0.first_index())
@@ -372,16 +389,21 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
     }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
+impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
+
+    /// Park destruction after `count` component-removal awaits.
+    #[cfg(test)]
+    pub(crate) fn halt_destroy_after(&mut self, count: u8) {
+        assert!((1..=2).contains(&count));
+        self.0.halt_destroy_after = count;
+    }
 }
 
-impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archive
-    for Archive<E, K, V>
-{
+impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E, K, V> {
     type Key = K;
     type Value = V;
 
