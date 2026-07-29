@@ -124,14 +124,10 @@ impl<
     ///
     /// Returns whether the selected proposal changed.
     fn set_authoritative_proposal(&mut self, proposal: &Proposal<D>) -> bool {
-        let proposal_replaced = self
-            .verifier
-            .proposal()
-            .is_some_and(|selected| selected != proposal);
-        let proposal_changed = self
+        let update = self
             .verifier
             .set_proposal(ProposalState::Certificate(proposal.clone()));
-        if proposal_changed && proposal_replaced {
+        if update.replaced {
             // Matching tracked finalizes are unverified network votes: the conflicting
             // leader proposal filtered them, while constructed finalizes establish the
             // proposal before entering the tracker.
@@ -143,7 +139,7 @@ impl<
                 self.verifier.add(Vote::Finalize(finalize.clone()), false);
             }
         }
-        proposal_changed
+        update.changed
     }
 
     /// Adds a vote from the network to this round's verifier.

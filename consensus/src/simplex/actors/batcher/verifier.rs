@@ -154,6 +154,14 @@ impl<V> Certification<V> {
     }
 }
 
+/// How the selected proposal changed after an update.
+pub(super) struct ProposalUpdate {
+    /// Whether the selected proposal changed.
+    pub(super) changed: bool,
+    /// Whether an existing proposal was replaced with a different one.
+    pub(super) replaced: bool,
+}
+
 /// What the round knows about its proposal, and how it was learned.
 pub(super) enum ProposalState<D: Digest> {
     /// No proposal is known.
@@ -371,16 +379,23 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Updates the proposal state and, if the selected proposal changes, drops
     /// buffered notarize and finalize votes for any other proposal.
     ///
-    /// Returns `true` only if the selected proposal changed. Rejected
-    /// transitions and a provenance-only change from a leader vote to
-    /// authoritative state for the same proposal return `false`.
-    pub(super) fn set_proposal(&mut self, proposal: ProposalState<D>) -> bool {
+    /// Returns whether the selected proposal changed and whether the accepted
+    /// change replaced an existing proposal. Rejected transitions and a
+    /// provenance-only change return `false` for both.
+    pub(super) fn set_proposal(&mut self, proposal: ProposalState<D>) -> ProposalUpdate {
+        let replaced = self.proposal.proposal().is_some();
         let Some(proposal) = self.proposal.update(proposal) else {
-            return false;
+            return ProposalUpdate {
+                changed: false,
+                replaced: false,
+            };
         };
         self.notarize.retain(|n| &n.proposal == proposal);
         self.finalize.retain(|f| &f.proposal == proposal);
-        true
+        ProposalUpdate {
+            changed: true,
+            replaced,
+        }
     }
 
     /// Adds a [Vote] message to the batch for later verification.
@@ -808,16 +823,26 @@ mod tests {
         // from the leader's vote.
         let notarized_proposal = Proposal::new(round, View::new(0), sample_digest(2));
         assert_ne!(notarized_proposal, leader_notarize.proposal);
-        assert!(verifier2.set_proposal(ProposalState::Certificate(notarized_proposal.clone())));
+        assert!(
+            verifier2
+                .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
+                .changed
+        );
         assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
         // Re-adopting the same proposal reports no change.
-        assert!(!verifier2.set_proposal(ProposalState::Certificate(notarized_proposal.clone())));
+        assert!(
+            !verifier2
+                .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
+                .changed
+        );
 
         // The first notarization remains authoritative.
         let conflicting_notarized_proposal = Proposal::new(round, View::new(0), sample_digest(3));
         assert!(
-            !verifier2.set_proposal(ProposalState::Certificate(conflicting_notarized_proposal))
+            !verifier2
+                .set_proposal(ProposalState::Certificate(conflicting_notarized_proposal))
+                .changed
         );
         assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
@@ -828,7 +853,11 @@ mod tests {
             schemes[0].clone(),
             quorum,
         );
-        assert!(verifier3.set_proposal(ProposalState::Certificate(notarized_proposal.clone())));
+        assert!(
+            verifier3
+                .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
+                .changed
+        );
         assert!(verifier3.leader().is_none());
         assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
         verifier3.set_leader(leader, Some(&leader_notarize));
