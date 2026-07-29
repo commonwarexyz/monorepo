@@ -106,3 +106,12 @@ name = "iobuf"
 harness = false
 path = "src/iobuf/benches/bench.rs"
 required-features = ["bench"]
+
+[[bench]]
+name = "timer"
+harness = false
+path = "src/tokio/timer/benches/main.rs"
+
+[[test]]
+name = "timer_bench"
+path = "src/tokio/timer/benches/tests.rs"
