@@ -163,12 +163,14 @@ impl SyncState {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
-        deterministic,
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
+        Runner, Storage, deterministic,
         mocks::{DelayedSyncBlob, next_pending_sync},
+        telemetry::metrics::Registry,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
+    use futures::FutureExt;
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -237,7 +239,8 @@ mod tests {
 
     impl crate::Blob for SyncTrackingBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
@@ -254,7 +257,10 @@ mod tests {
             }
 
             let mut out = buf.into();
-            out.put_slice(&state.data[start..end]);
+            assert!(out.capacity() >= len);
+            // SAFETY: `len` bytes are filled by copy_from_slice below.
+            unsafe { out.set_len(len) };
+            out.copy_from_slice(&state.data[start..end]);
             Ok(out)
         }
 
@@ -330,6 +336,46 @@ mod tests {
             // Attempt to read beyond the end should fail
             let result = reader.read(5).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_read_allocates_lazily_on_first_refill() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"hello world";
+            let (blob, _) = context.open("partition", b"lazy").await.unwrap();
+            blob.write_at(0, data).await.unwrap();
+
+            // A dedicated single-slot pool: reader construction must not touch
+            // it (an eagerly-allocated unwritten buffer would be checked out of
+            // the pool and, under empty-freeze semantics, released straight
+            // back).
+            let mut registry = Registry::default();
+            let config = BufferPoolConfig::for_storage().with_max_per_class(NZU32!(1));
+            let pool = BufferPool::new(config, &mut registry);
+            let mut reader = Read::new(blob, data.len() as u64, NZUsize!(10), pool.clone());
+
+            // No size class may report a created buffer: construction must not
+            // check one out of the pool even transiently. The created gauge
+            // registers per-class label sets lazily, so a clean pool encodes no
+            // member lines at all.
+            let encoded = registry.encode();
+            assert!(
+                !encoded
+                    .lines()
+                    .any(|line| line.starts_with("buffer_pool_created{")),
+                "reader construction created a pool buffer: {encoded}"
+            );
+
+            // The single slot is also unclaimed at read time.
+            let probe = pool
+                .try_alloc(1)
+                .expect("reader construction must not retain a buffer");
+            drop(probe);
+
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
         });
     }
 
