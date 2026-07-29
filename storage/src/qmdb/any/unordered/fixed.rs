@@ -259,9 +259,11 @@ pub(crate) mod test {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(&context, "delayed", "start_sync_overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let initial_barrier = db.barrier();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
             db = apply_write(db, key0, value0).await;
+            let first_barrier = db.inactivity_floor_loc()..db.bounds().end;
 
             let starts_before = pending.starts();
             let entered_before = pending.entered();
@@ -284,19 +286,31 @@ pub(crate) mod test {
             let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
             let value1 = Sha256::hash(&[&200u64.to_be_bytes()]);
             db = apply_write(db, key1, value1).await;
+            let second_barrier = db.inactivity_floor_loc()..db.bounds().end;
             assert_eq!(
                 pending.completions(),
                 completions_before,
                 "the database made progress while the sync was still in flight"
             );
+            assert_eq!(
+                db.barrier(),
+                initial_barrier,
+                "an in-flight sync cannot make either applied batch durable"
+            );
 
             pending.unblock();
             waiter.await.unwrap();
+            assert_eq!(
+                db.barrier(),
+                first_barrier,
+                "the first sync covers its snapshot, not the newer applied batch"
+            );
 
             // The mid-sync batch is durable after the next sync.
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
+            assert_eq!(db.barrier(), second_barrier);
             let root = db.root();
             let size = db.bounds().end;
             drop(db);
@@ -413,6 +427,43 @@ pub(crate) mod test {
                 prune.await.unwrap()
             };
             handle.await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune whose target is justified by a durable commit completes without starting
+    /// (or waiting on) any sync, even while a newer batch's flush is still in flight.
+    #[test_traced]
+    fn test_start_sync_prune_skips_when_durable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&context, "delayed", "start_sync_prune_skip", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+            db = apply_write(db, key0, Sha256::hash(&[&100u64.to_be_bytes()])).await;
+
+            // Complete the first batch's flush: its floor is durably justified.
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
+
+            // Leave the second batch's flush parked.
+            db = apply_write(db, key0, Sha256::hash(&[&200u64.to_be_bytes()])).await;
+            let parked;
+            (db, parked) = db.start_sync().await.unwrap();
+
+            let starts_before = pending.starts();
+            let db = db.prune(floor).await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "durably justified prune must not start a sync"
+            );
+
+            drive_pending_syncs(&pending, parked).await.unwrap();
             db.destroy().await.unwrap();
         });
     }
@@ -1691,8 +1742,8 @@ pub(crate) mod test {
                 .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
                 .await;
             assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
+                matches!(result, Err(crate::qmdb::Error::NoCommitAtSize(loc)) if loc == Location::new(5)),
+                "expected NoCommitAtSize(5), got {result:?}"
             );
 
             db.destroy().await.unwrap();

@@ -104,7 +104,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
-    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
+    Shared<DB>: compact::Resolver<Family = F, Digest = H::Digest, Error = compact::ServeError<F, H::Digest>>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     /// Create a new compact resolver actor and mailbox.
@@ -342,10 +342,16 @@ where
         let fetch = match compact::Resolver::get_compact_state(database, key.to_target()).await {
             Ok(fetch) => fetch,
             Err(err) => {
-                // Declines and storage failures are indistinguishable to the requester, which
-                // simply retries against another peer, so record them here.
-                debug!(?err, "failed to serve compact state");
-                self.metrics.serve_requests.inc(status::Status::Failure);
+                let status = match &err {
+                    compact::ServeError::StaleTarget { .. }
+                    | compact::ServeError::DivergentTarget { .. } => status::Status::Dropped,
+                    compact::ServeError::InvalidTarget(_) => status::Status::Invalid,
+                    compact::ServeError::MissingSource | compact::ServeError::Database(_) => {
+                        status::Status::Failure
+                    }
+                };
+                debug!(?err, ?status, "unable to serve compact state");
+                self.metrics.serve_requests.inc(status);
                 return;
             }
         };
@@ -603,29 +609,46 @@ mod tests {
         });
     }
 
-    /// A target the database cannot serve is indistinguishable from a storage failure to the
-    /// requester, so the actor must at least record it locally.
+    /// Expected target divergence and local database loss have distinct outcomes.
     #[test]
-    fn produce_records_unservable_target() {
+    fn produce_classifies_unservable_targets() {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
             let target = db.target();
             let db = Shared::new("test", db);
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(Some(db)));
+                TestActor::new(context.child("actor"), test_config(Some(db.clone())));
 
-            // A target past the tip is declined by the source.
-            let ahead = compact::Target::new(target.root, Location::new(*target.leaf_count + 1));
+            let divergent_root = sha256::Digest::from([0xff; 32]);
+            assert_ne!(divergent_root, target.root);
+            let divergent = compact::Target::new(divergent_root, target.leaf_count);
             let (response_tx, response_rx) = oneshot::channel();
             actor
-                .handle_produce(handler::Request::from_target(ahead), response_tx)
+                .handle_produce(handler::Request::from_target(divergent), response_tx)
                 .await;
 
             assert!(response_rx.await.is_err(), "decline must not be answered");
+
+            let (slot, owned) = db.write().await;
+            drop(owned);
+            drop(slot);
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_produce(handler::Request::from_target(target), response_tx)
+                .await;
+
+            assert!(
+                response_rx.await.is_err(),
+                "database loss must not be answered"
+            );
             let metrics = context.encode();
             assert!(
+                metrics.contains("actor_serve_requests_total{status=\"Dropped\"} 1"),
+                "serve decline should be counted: {metrics}"
+            );
+            assert!(
                 metrics.contains("actor_serve_requests_total{status=\"Failure\"} 1"),
-                "serve failure should be counted: {metrics}"
+                "database loss should be counted: {metrics}"
             );
         });
     }

@@ -12,8 +12,9 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Handle};
-use std::convert::Infallible;
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_utils::{channel::oneshot, sync::Mutex};
+use std::{convert::Infallible, sync::Arc};
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -47,8 +48,40 @@ impl Merkleized for TestMerkleized {
     }
 }
 
+/// Completes one parked flush when released by the test.
+pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
+
+/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
+/// prune targets.
+#[derive(Clone, Default)]
+pub(crate) struct FlushControl {
+    pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
+    pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+}
+
 #[derive(Default)]
-pub(crate) struct TestDb;
+pub(crate) struct TestDb {
+    finalize: Mutex<Option<Handle<()>>>,
+    control: Option<FlushControl>,
+}
+
+impl TestDb {
+    pub(crate) fn with_finalize(handle: Handle<()>) -> Self {
+        Self {
+            finalize: Mutex::new(Some(handle)),
+            control: None,
+        }
+    }
+
+    /// A database whose every finalize flush parks until the test releases it and whose
+    /// prune records its target immediately, isolating the caller's own scheduling.
+    pub(crate) fn gated(control: FlushControl) -> Self {
+        Self {
+            finalize: Mutex::new(None),
+            control: Some(control),
+        }
+    }
+}
 
 impl<E: Send> ManagedDb<E> for TestDb {
     type Unmerkleized = TestUnmerkleized;
@@ -62,7 +95,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-        Ok(Self)
+        Ok(Self::default())
     }
 
     async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
@@ -74,7 +107,24 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
-        Ok((self, Handle::ready(Ok(()))))
+        if let Some(control) = &self.control {
+            let (release, released) = oneshot::channel();
+            control.flushes.lock().push(release);
+            return Ok((self, Handle::from_receiver(released)));
+        }
+        let handle = self
+            .finalize
+            .lock()
+            .take()
+            .unwrap_or_else(|| Handle::ready(Ok(())));
+        Ok((self, handle))
+    }
+
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
+        if let Some(control) = &self.control {
+            control.pruned.lock().push(*target);
+        }
+        Ok(self)
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -222,7 +272,7 @@ impl<
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb)
+    Shared::new("test", TestDb::default())
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

@@ -370,12 +370,13 @@ where
         let database: DB = match compact::sync(sync_config).await {
             Ok(database) => database,
             Err(sync::Error::Resolver(Error::Server {
-                code: ErrorCode::StaleTarget,
+                code: code @ (ErrorCode::StaleTarget | ErrorCode::DivergentTarget),
                 message,
             })) => {
                 warn!(
                     sync_iteration = iteration,
-                    "{label} target went stale before state fetch: {message}; retrying"
+                    ?code,
+                    "{label} server cannot serve the requested target: {message}; retrying"
                 );
                 continue;
             }

@@ -1670,11 +1670,8 @@ fn test_fixed_durable_range_well_formed_after_prune_crash() {
     });
 }
 
-/// The variable-journal twin of
-/// [test_fixed_durable_range_well_formed_after_prune_crash]: on this path the persisted
-/// watermark covers the barrier (the non-empty align syncs the offsets journal), so the
-/// recovered range is intact without clamping. The collapsing-prune variant below is the
-/// path that needs the clamp.
+/// A non-empty variable journal aligns its offsets during reopen, preserving a durable range
+/// whose watermark covers the barrier without clamping.
 #[test]
 fn test_variable_durable_range_well_formed_after_prune_crash() {
     let executor = deterministic::Runner::default();
@@ -1729,8 +1726,8 @@ fn test_variable_durable_range_well_formed_after_collapsing_prune_crash() {
         }
         // Commit syncs the data blobs without persisting the offsets watermark.
         journal = journal.commit().await.unwrap();
-        // The forced prune path commits the offsets journal (again no watermark) and
-        // removes every item-bearing blob, leaving the journal empty-aligned.
+        // The commit covered the data barrier, so the prune commits only the offsets journal
+        // without advancing the watermark before removing every item-bearing blob.
         (journal, _) = journal.prune(30).await.unwrap();
         drop(journal);
     });

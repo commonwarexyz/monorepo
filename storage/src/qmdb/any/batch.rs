@@ -2873,9 +2873,6 @@ where
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
-        self.pending_commits
-            .push_back(self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1));
-        self.advance_durable();
         self.root = batch.root;
 
         // Return range of operations that were written to the log.

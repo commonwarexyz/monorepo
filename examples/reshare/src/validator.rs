@@ -331,6 +331,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             plan,
             resolvers: qmdb_sync_resolver,
             sync_config: types::sync_config(),
+            retarget_delay: NZDuration!(Duration::from_secs(1)),
             prune_config: None,
         },
     );

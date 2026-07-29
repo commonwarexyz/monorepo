@@ -307,7 +307,7 @@ where
     ///
     /// This is [`Self::bounds`] narrowed to what the Merkle structure still retains, which a sync
     /// can leave ahead of the operations log's own pruning boundary.
-    pub fn provable_bounds(&self) -> Range<Location<F>> {
+    pub(crate) fn provable_bounds(&self) -> Range<Location<F>> {
         self.journal.provable_start()..Location::new(self.journal.bounds().end)
     }
 
@@ -456,7 +456,7 @@ where
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`crate::journal::Error::ItemPruned`] if `start_loc` has been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
+    /// Returns [`Error::NoCommitAtSize`] if `op_count - 1` is retained but is not a
     /// commit op, meaning the caller passed a non-commit-boundary `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -525,6 +525,10 @@ where
                 self.inactivity_floor_loc,
             ));
         }
+        if loc <= Location::new(self.journal.bounds().start) {
+            return Ok(self);
+        }
+
         // Recovery rebuilds the snapshot by replaying the log from the recovered floor,
         // which trails the current floor while its commit is unflushed. Commit first so
         // replay never starts below the pruned boundary.
@@ -1037,6 +1041,16 @@ pub(super) mod test {
                 .merkleize(&db, None, floor)
                 .await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
+            if i == 0 {
+                let durable = db.journal.durable();
+                let retained_start = db.bounds().start;
+                db = db.prune(retained_start).await.unwrap();
+                assert_eq!(
+                    db.journal.durable(),
+                    durable,
+                    "a no-op prune must not commit an unsynced tip",
+                );
+            }
             db = db.commit().await.unwrap();
         }
 

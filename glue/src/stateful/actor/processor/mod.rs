@@ -84,8 +84,7 @@ pub(super) enum PrepareBatchesError {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T> {
-    /// Deferred flush for the applied batch, which must be observed
-    /// (see [`Barrier`]).
+    /// Deferred flush for the applied batch (see [`Barrier`]).
     pub(super) barrier: Barrier,
 
     /// Prune made due by this finalization.
@@ -1478,8 +1477,7 @@ mod tests {
             false
         }
 
-        /// Finalize `block` and wait for its deferred flush, restoring the
-        /// blocking-durability semantics the assertions below rely on.
+        /// Finalize `block` and wait for its deferred flush.
         /// Returns whether the block was newly applied (`false` for a
         /// duplicate report).
         #[boxed]

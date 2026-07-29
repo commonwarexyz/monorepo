@@ -96,7 +96,7 @@ where
                 bounds
                     .end
                     .checked_sub(1)
-                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+                    .ok_or(Error::NoCommitAtSize(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
                 &journal.journal,

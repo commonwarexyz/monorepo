@@ -14,21 +14,22 @@
 //! A compact db's only persistent state is its witness journal (`qmdb::compact::witness`), whose
 //! entries each snapshot one committed state (commit operation, proof, and frontier pins).
 //! The in-memory compact Merkle ([`crate::merkle::compact`]) is rebuilt from the journal tip on
-//! reopen. Without the witness, a compact db could recover its root and continue appending, but
-//! it could not serve compact sync to another node.
+//! reopen. Frontier pins reconstruct the root and allow further appends; serving compact sync also
+//! requires the retained final commit operation and its proof.
 //!
 //! # When compact state changes
 //!
-//! The servable compact state advances only on durable persistence:
+//! Ordinary mutations become servable only on durable persistence:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
-//! - [`Database::from_validated_state`] reconstructs the already-validated state without
-//!   persisting it.
-//! - Compact db-local commits append one witness entry during `sync`.
+//! - [`Database::from_validated_state`] makes validated state immediately servable;
+//!   [`Database::persist_compact_state`] makes it restart-stable.
+//! - Compact db persistence appends one witness entry during `commit` or `sync`.
 //! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
-//! Unsynced in-memory mutations are therefore intentionally not servable: `target()` and
-//! compact-state responses lag behind `apply_batch()` until the db's next sync.
+//! Other unsynced in-memory mutations are intentionally not servable: `target()` and compact-state
+//! responses lag behind `apply_batch()` until the db's next sync. A target identifies the currently
+//! servable witness; it is not itself a durability signal.
 //!
 //! # Safety and invariants
 //!
@@ -43,7 +44,7 @@
 //! with `DataCorrupted` rather than silently serving or restoring mismatched state.
 
 use crate::{
-    merkle::{Family, Location, Proof},
+    merkle::{Family, Location, Proof, hasher::Hasher as MerkleHasher},
     qmdb::{
         self,
         any::{FixedValue, VariableValue, value::ValueEncoding},
@@ -265,10 +266,18 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
-    /// The source cannot serve the requested target: it is past the source's tip, diverges
-    /// from the source's retained state, or fell outside the retained window.
+    /// The source cannot see the requested leaf count: it is past the source's tip, fell
+    /// outside the window the source still retains, or (from a witness source) no retained
+    /// witness entry commits exactly that leaf count.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]
     StaleTarget {
+        requested: Target<F, D>,
+        current: Target<F, D>,
+    },
+    /// The source reaches the requested leaf count but cannot authenticate the requested
+    /// committed root, because the boundary is not a commit or belongs to another history.
+    #[error("divergent compact target - requested {requested:?}, current {current:?}")]
+    DivergentTarget {
         requested: Target<F, D>,
         current: Target<F, D>,
     },
@@ -362,39 +371,39 @@ where
     pub target: Target<DB::Family, DB::Digest>,
     /// Database-specific configuration.
     pub db_config: DB::Config,
-    /// Channel for receiving sync target updates. Each update supersedes the
-    /// current target, cancelling any in-flight attempt against it.
+    /// Channel for receiving sync target updates. Updates must strictly advance the leaf count and
+    /// change the root. They cancel an in-flight fetch, but never local persistence that has
+    /// already started.
     pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
-    /// When `None`, sync completes as soon as the target is reached.
+    /// When `None`, sync completes as soon as the target is reached. Closing a configured channel
+    /// before sending the finish signal returns [`EngineError::FinishChannelClosed`].
     pub finish_rx: Option<mpsc::Receiver<()>>,
     /// Channel used to notify an observer once the current target is reached.
     /// If the receiver is dropped, sync completes with the current database.
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
 }
 
-/// Maximum queued target updates drained per scheduling tick.
-const MAX_UPDATE_DRAIN_PER_TICK: usize = 32;
-
-/// Drain all queued target updates without blocking, returning the newest.
-async fn drain_latest_target<T>(update_rx: &mut mpsc::Receiver<T>) -> Option<T> {
+/// Drain and validate the target updates queued at entry without blocking, returning the newest.
+fn drain_latest_target<T, E>(
+    update_rx: &mut mpsc::Receiver<T>,
+    current: &T,
+    mut validate: impl FnMut(&T, &T) -> Result<(), E>,
+) -> Result<Option<T>, E> {
     let mut latest = None;
-    let mut drained = 0usize;
-    loop {
+    for _ in 0..update_rx.len() {
         match update_rx.try_recv() {
             Ok(update) => {
+                validate(latest.as_ref().unwrap_or(current), &update)?;
                 latest = Some(update);
-                drained += 1;
-                if drained.is_multiple_of(MAX_UPDATE_DRAIN_PER_TICK) {
-                    reschedule().await;
-                }
             }
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                return latest;
+                break;
             }
         }
     }
+    Ok(latest)
 }
 
 /// Create/open a compact-storage database and initialize it from compact authenticated state.
@@ -424,17 +433,21 @@ where
         reached_target_tx,
     } = config;
     let metrics = super::Metrics::new(&context);
+    target
+        .validate()
+        .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
+
     let mut attempt = 0u64;
     loop {
         // Prefer the newest queued target before starting an attempt.
         if let Some(update_rx) = update_rx.as_mut()
-            && let Some(update) = drain_latest_target(update_rx).await
+            && let Some(update) =
+                drain_latest_target(update_rx, &target, validate_compact_target_update)
+                    .map_err(Error::Engine)?
         {
             target = update;
         }
-        target
-            .validate()
-            .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
+
         metrics.record_target(*target.leaf_count);
 
         attempt += 1;
@@ -442,22 +455,47 @@ where
             || Either::Right(pending()),
             |update_rx| Either::Left(update_rx.recv()),
         );
-        let db = select! {
+        let finish_future = finish_rx.as_mut().map_or_else(
+            || Either::Right(pending()),
+            |finish_rx| Either::Left(finish_rx.recv()),
+        );
+        let validated_state = select! {
+            finish = finish_future => match finish {
+                Some(()) => {
+                    finish_rx = None;
+                    continue;
+                }
+                None => return Err(Error::Engine(EngineError::FinishChannelClosed)),
+            },
             update = update_future => {
                 let Some(update) = update else {
                     update_rx = None;
                     continue;
                 };
+                validate_compact_target_update(&target, &update).map_err(Error::Engine)?;
                 target = update;
                 continue;
             },
-            db = attempt_sync(&context, attempt, &resolver, &db_config, &target) => db?,
+            validated = fetch_validated_state::<DB, R>(&resolver, &target) => validated?,
         };
+
+        // No target update is observed until persistence returns: it must run to completion
+        // once started (see [`persist_validated_state`]).
+        let db = persist_validated_state::<DB, R>(
+            &context,
+            attempt,
+            &db_config,
+            &target,
+            validated_state,
+        )
+        .await?;
         metrics.record_synced(*target.leaf_count);
 
         // A target queued while the attempt ran supersedes the result.
         if let Some(update_rx) = update_rx.as_mut()
-            && let Some(update) = drain_latest_target(update_rx).await
+            && let Some(update) =
+                drain_latest_target(update_rx, &target, validate_compact_target_update)
+                    .map_err(Error::Engine)?
         {
             target = update;
             continue;
@@ -472,85 +510,113 @@ where
         let Some(finish_rx) = finish_rx.as_mut() else {
             return Ok(db);
         };
-        let Some(update_rx) = update_rx.as_mut() else {
-            return Ok(db);
-        };
-        select! {
-            _ = finish_rx.recv() => return Ok(db),
-            update = update_rx.recv() => {
-                let Some(update) = update else {
-                    return Ok(db);
-                };
-                target = update;
-            },
+        loop {
+            let update_future = update_rx.as_mut().map_or_else(
+                || Either::Right(pending()),
+                |update_rx| Either::Left(update_rx.recv()),
+            );
+            select! {
+                finish = finish_rx.recv() => match finish {
+                    Some(()) => return Ok(db),
+                    None => return Err(Error::Engine(EngineError::FinishChannelClosed)),
+                },
+                update = update_future => match update {
+                    Some(update) => {
+                        validate_compact_target_update(&target, &update)
+                            .map_err(Error::Engine)?;
+                        target = update;
+                        break;
+                    }
+                    None => update_rx = None,
+                },
+            }
         }
     }
 }
 
-/// Run one compact sync attempt against `target`.
-///
-/// Verification order:
-/// 1. Fetch the proposed compact state for `target`.
-/// 2. Verify the final commit proof against `target.root`.
-/// 3. Rebuild the compact frontier in memory and compare its root against `target.root`.
-/// 4. Build the compact db from that already-validated state.
-/// 5. Assert the db root still matches and persist the state.
-///
-/// A failure before the final persist leaves on-disk state untouched.
-async fn attempt_sync<DB, R>(
-    context: &DB::Context,
-    attempt: u64,
+/// Validate compact state fetched for `target` without writing local storage.
+async fn fetch_validated_state<DB, R>(
     resolver: &R,
-    db_config: &DB::Config,
     target: &Target<DB::Family, DB::Digest>,
-) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+) -> Result<CompactValidatedState<DB>, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
     R: CompactDbResolver<DB>,
 {
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
-    // responses. Resolver errors and local construction failures remain terminal.
+    // responses. Resolver errors remain terminal.
     loop {
         let FetchResult { state, callback } = resolver
             .get_compact_state(target.clone())
             .await
             .map_err(Error::Resolver)?;
 
-        // Validation failures describe a bad compact response. Reject it if the resolver supplied
-        // feedback, then fetch another candidate.
-        let validated_state = match validate_compact_state::<DB>(target, state) {
-            Ok(state) => state,
+        match validate_compact_state::<DB>(target, state) {
+            Ok(state) => {
+                if let Some(callback) = callback {
+                    let _ = callback.send(true);
+                }
+                return Ok(state);
+            }
             Err(err) => {
                 if let Some(callback) = callback {
                     let _ = callback.send(false);
                 }
                 tracing::debug!(error = ?err, "compact state failed validation, will retry");
-                continue;
+                reschedule().await;
             }
-        };
-
-        // The peer response has already authenticated the final commit and frontier. From here,
-        // construction should only fail for local database/storage reasons; a root mismatch is a
-        // bug in this path.
-        let db = DB::from_validated_state(
-            context.child("compact").with_attribute("attempt", attempt),
-            db_config.clone(),
-            validated_state,
-        )
-        .await
-        .map_err(Error::Database)?;
-        assert_eq!(
-            db.root(),
-            target.root,
-            "validated compact state reconstructed unexpected root",
-        );
-
-        if let Some(callback) = callback {
-            let _ = callback.send(true);
         }
-        let db = db.persist_compact_state().await?;
-        return Ok(db);
     }
+}
+
+/// Construct and persist compact state already validated against `target`.
+///
+/// This phase must run to completion once started because persistence may replace an existing
+/// compact witness journal in place.
+async fn persist_validated_state<DB, R>(
+    context: &DB::Context,
+    attempt: u64,
+    db_config: &DB::Config,
+    target: &Target<DB::Family, DB::Digest>,
+    validated_state: CompactValidatedState<DB>,
+) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+where
+    DB: Database,
+    R: CompactDbResolver<DB>,
+{
+    let db = DB::from_validated_state(
+        context.child("compact").with_attribute("attempt", attempt),
+        db_config.clone(),
+        validated_state,
+    )
+    .await
+    .map_err(Error::Database)?;
+    let actual = db.root();
+    if actual != target.root {
+        return Err(Error::Engine(EngineError::RootMismatch {
+            expected: target.root,
+            actual,
+        }));
+    }
+    db.persist_compact_state().await.map_err(Error::Database)
+}
+
+fn validate_compact_target_update<F: Family, D: Digest>(
+    current: &Target<F, D>,
+    update: &Target<F, D>,
+) -> Result<(), EngineError<F, D>> {
+    update
+        .validate()
+        .map_err(EngineError::InvalidCompactTarget)?;
+    if update.leaf_count <= current.leaf_count {
+        return Err(EngineError::InvalidCompactTarget(
+            "target update must strictly advance leaf_count",
+        ));
+    }
+    if update.root == current.root {
+        return Err(EngineError::SyncTargetRootUnchanged);
+    }
+    Ok(())
 }
 
 /// Validate the peer-provided compact state before constructing local database storage.
@@ -581,9 +647,13 @@ where
     validate_compact_frontier::<DB>(target, state)
 }
 
+/// Peer-provided compact state validated against a target.
+type CompactValidatedState<DB> =
+    ValidatedState<<DB as Database>::Family, <DB as Database>::Op, <DB as Database>::Digest>;
+
 /// Result of validating a peer-provided compact frontier.
 type CompactFrontierValidation<DB> = Result<
-    ValidatedState<<DB as Database>::Family, <DB as Database>::Op, <DB as Database>::Digest>,
+    CompactValidatedState<DB>,
     EngineError<<DB as Database>::Family, <DB as Database>::Digest>,
 >;
 
@@ -634,8 +704,9 @@ where
     })
 }
 
-async fn fetch_state_from_full_source<F, Op, D, Source, Hist, HistFut, Pins, PinsFut>(
+async fn fetch_state_from_full_source<F, Op, D, MH, Source, Hist, HistFut, Pins, PinsFut>(
     target: Target<F, D>,
+    hasher: MH,
     source: Source,
     historical_proof: Hist,
     pinned_nodes_at: Pins,
@@ -643,6 +714,8 @@ async fn fetch_state_from_full_source<F, Op, D, Source, Hist, HistFut, Pins, Pin
 where
     F: Family,
     D: Digest,
+    Op: Encode,
+    MH: MerkleHasher<F, Digest = D>,
     Source: FnOnce() -> (D, Range<Location<F>>),
     Hist: FnOnce(Location<F>, Location<F>) -> HistFut,
     HistFut: Future<Output = Result<(Proof<F, D>, Vec<Op>), qmdb::Error<F>>>,
@@ -652,34 +725,35 @@ where
     // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
     // from the historical commit proof plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
+
     let (root, provable) = source();
     let current = Target::new(root, provable.end);
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
-    // Serve any commit the source can still prove: a syncing client's target trails the server by
-    // its fetch latency, and the client verifies every payload against its own target root, so
-    // divergence surfaces as a client-side verification failure and a refetch. Targets past the
-    // tip or below the provable window are declined so the client refetches a servable one.
+
+    // A retained commit is servable only while its final leaf remains within the provable window.
+    // Targets ahead of the tip or below that window are stale.
     if leaf_count > current.leaf_count || last_commit_loc < provable.start {
         return Err(ServeError::StaleTarget {
             requested: target,
             current,
         });
     }
-    // The window check keeps both the commit and its Merkle nodes provable, so pruning cannot
-    // reach the reads below. `HistoricalFloorPruned` therefore means only that the operation
-    // preceding `leaf_count` is not a commit, which a source reaches honestly after a rewind and
-    // regrow. That target does not describe this source's history, so it is declined rather than
-    // failed.
-    let (last_commit_proof, mut operations) = historical_proof(leaf_count, last_commit_loc)
-        .await
-        .map_err(|err| match err {
-        qmdb::Error::HistoricalFloorPruned(_) => ServeError::StaleTarget {
-            requested: target.clone(),
-            current: current.clone(),
-        },
-        err => ServeError::Database(err),
-    })?;
+
+    // The window check rules out pruning: a size with no commit here belongs to another
+    // history, never to a pruned prefix.
+    let (last_commit_proof, mut operations) =
+        match historical_proof(leaf_count, last_commit_loc).await {
+            Ok(state) => state,
+            Err(qmdb::Error::NoCommitAtSize(_)) => {
+                return Err(ServeError::DivergentTarget {
+                    requested: target,
+                    current,
+                });
+            }
+            Err(err) => return Err(ServeError::Database(err)),
+        };
+
     // Compact sync always authenticates exactly the final commit leaf.
     let last_commit_op =
         operations
@@ -687,6 +761,23 @@ where
             .ok_or(ServeError::Database(qmdb::Error::DataCorrupted(
                 "missing last commit operation",
             )))?;
+
+    // Answer only what the source can prove satisfies the request. The commit it just proved
+    // authenticates exactly one root at `leaf_count`, so a target naming a different one
+    // describes a history this source does not have. Checking before reading the pins keeps
+    // the decline off the frontier read.
+    if !last_commit_proof.verify_range_inclusion(
+        &hasher,
+        &[last_commit_op.encode()],
+        last_commit_loc,
+        &target.root,
+    ) {
+        return Err(ServeError::DivergentTarget {
+            requested: target,
+            current,
+        });
+    }
+
     let pinned_nodes = pinned_nodes_at(leaf_count)
         .await
         .map_err(ServeError::Database)?;
@@ -721,6 +812,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
+                    qmdb::hasher::<H>(),
                     || (self.root(), self.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
@@ -760,6 +852,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
+                    qmdb::hasher::<H>(),
                     || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
@@ -796,6 +889,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
+                    qmdb::hasher::<H>(),
                     || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
@@ -839,6 +933,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
+                    qmdb::hasher::<H>(),
                     || (self.root(), self.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
@@ -881,6 +976,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
+                    qmdb::hasher::<H>(),
                     || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
@@ -920,6 +1016,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
+                    qmdb::hasher::<H>(),
                     || (db.root(), db.provable_bounds()),
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
@@ -1114,7 +1211,10 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Database, FetchResult, Resolver, State, Target};
+    use super::{
+        Config, Database, FetchResult, Resolver, State, Target, drain_latest_target,
+        validate_compact_target_update,
+    };
     use crate::{
         merkle::{Location, mmr},
         qmdb,
@@ -1123,13 +1223,13 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::sync::AsyncRwLock;
+    use commonware_utils::{channel::mpsc, sync::AsyncRwLock};
     use std::{
         collections::VecDeque,
         convert::Infallible,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -1145,23 +1245,41 @@ mod tests {
 
     struct TestDb {
         root: Digest,
+        persists: Arc<AtomicUsize>,
+        persistence_allowed: Arc<AtomicBool>,
+    }
+
+    #[derive(Clone)]
+    struct TestDbConfig {
+        constructions: Arc<AtomicUsize>,
+        persists: Arc<AtomicUsize>,
+        construction_allowed: Arc<AtomicBool>,
+        persistence_allowed: Arc<AtomicBool>,
+        root_override: Option<Digest>,
     }
 
     impl Database for TestDb {
         type Family = mmr::Family;
         type Op = u8;
-        type Config = (Digest, Arc<AtomicUsize>);
+        type Config = TestDbConfig;
         type Digest = Digest;
         type Context = deterministic::Context;
         type Hasher = Sha256;
 
         async fn from_validated_state(
             _context: Self::Context,
-            (root, constructions): Self::Config,
-            _state: super::ValidatedState<Self::Family, Self::Op, Self::Digest>,
+            config: Self::Config,
+            state: super::ValidatedState<Self::Family, Self::Op, Self::Digest>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
-            constructions.fetch_add(1, Ordering::SeqCst);
-            Ok(Self { root })
+            while !config.construction_allowed.load(Ordering::SeqCst) {
+                commonware_runtime::reschedule().await;
+            }
+            config.constructions.fetch_add(1, Ordering::SeqCst);
+            Ok(Self {
+                root: config.root_override.unwrap_or(state.root),
+                persists: config.persists,
+                persistence_allowed: config.persistence_allowed,
+            })
         }
 
         fn inactivity_floor(_op: &Self::Op) -> Option<Location<Self::Family>> {
@@ -1173,6 +1291,10 @@ mod tests {
         }
 
         async fn persist_compact_state(self) -> Result<Self, qmdb::Error<Self::Family>> {
+            while !self.persistence_allowed.load(Ordering::SeqCst) {
+                commonware_runtime::reschedule().await;
+            }
+            self.persists.fetch_add(1, Ordering::SeqCst);
             Ok(self)
         }
     }
@@ -1180,6 +1302,7 @@ mod tests {
     #[derive(Clone)]
     struct SequenceResolver {
         states: Arc<commonware_utils::sync::Mutex<VecDeque<FetchResult<mmr::Family, u8, Digest>>>>,
+        fetches: Arc<AtomicUsize>,
     }
 
     impl Resolver for SequenceResolver {
@@ -1192,6 +1315,7 @@ mod tests {
             &self,
             _target: Target<Self::Family, Self::Digest>,
         ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
             Ok(self
                 .states
                 .lock()
@@ -1200,33 +1324,65 @@ mod tests {
         }
     }
 
-    fn valid_state_and_target() -> (State<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
+    #[derive(Clone)]
+    struct PendingResolver;
+
+    impl Resolver for PendingResolver {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = u8;
+        type Error = Infallible;
+
+        async fn get_compact_state(
+            &self,
+            _target: Target<Self::Family, Self::Digest>,
+        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            std::future::pending().await
+        }
+    }
+
+    fn valid_state_and_target_for(
+        ops: &[u8],
+    ) -> (State<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
+        assert!(!ops.is_empty());
         let hasher = qmdb::hasher::<Sha256>();
         let mut merkle = crate::merkle::mem::Mem::<mmr::Family, Digest>::new();
-        let op = 0u8;
-        let first_op = 1u8;
-        let batch = merkle
-            .new_batch()
-            .add(&hasher, &first_op.encode())
-            .add(&hasher, &op.encode());
+        let batch = ops.iter().fold(merkle.new_batch(), |batch, op| {
+            batch.add(&hasher, &op.encode())
+        });
         let batch = batch.merkleize(&merkle, &hasher);
         merkle.apply_batch(&batch).unwrap();
         let root = merkle.root(&hasher, 0).unwrap();
-        let leaf_count = Location::new(2);
+        let leaf_count = Location::new(ops.len() as u64);
         let pinned_nodes = merkle
             .nodes_to_pin(leaf_count)
             .into_values()
             .collect::<Vec<_>>();
-        let proof = merkle.proof(&hasher, Location::new(1), 0).unwrap();
+        let last_commit_loc = Location::new(*leaf_count - 1);
+        let proof = merkle.proof(&hasher, last_commit_loc, 0).unwrap();
         (
             State {
                 leaf_count,
                 pinned_nodes,
-                last_commit_op: op,
+                last_commit_op: *ops.last().unwrap(),
                 last_commit_proof: proof,
             },
             Target::<mmr::Family, Digest> { root, leaf_count },
         )
+    }
+
+    fn valid_state_and_target() -> (State<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
+        valid_state_and_target_for(&[1, 0])
+    }
+
+    fn test_db_config(constructions: Arc<AtomicUsize>, persists: Arc<AtomicUsize>) -> TestDbConfig {
+        TestDbConfig {
+            constructions,
+            persists,
+            construction_allowed: Arc::new(AtomicBool::new(true)),
+            persistence_allowed: Arc::new(AtomicBool::new(true)),
+            root_override: None,
+        }
     }
 
     #[test]
@@ -1283,13 +1439,109 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_sync_retries_invalid_state_without_feedback() {
+    fn test_target_update_must_advance() {
+        let (_, current) = valid_state_and_target_for(&[1, 0]);
+        let (_, newer) = valid_state_and_target_for(&[1, 0, 2, 0]);
+        assert!(validate_compact_target_update(&current, &newer).is_ok());
+
+        let same_size = Target::new(newer.root, current.leaf_count);
+        assert!(matches!(
+            validate_compact_target_update(&current, &same_size),
+            Err(super::EngineError::InvalidCompactTarget(_))
+        ));
+
+        let unchanged_root = Target::new(current.root, newer.leaf_count);
+        assert!(matches!(
+            validate_compact_target_update(&current, &unchanged_root),
+            Err(super::EngineError::SyncTargetRootUnchanged)
+        ));
+    }
+
+    #[test]
+    fn test_target_drain_is_bounded_and_validates_each_update() {
+        deterministic::Runner::default().start(|_| async move {
+            struct RefillOnDrop {
+                value: u8,
+                refill: Option<commonware_utils::channel::mpsc::Sender<Self>>,
+            }
+
+            impl Drop for RefillOnDrop {
+                fn drop(&mut self) {
+                    let Some(sender) = self.refill.take() else {
+                        return;
+                    };
+                    assert!(
+                        sender
+                            .try_send(Self {
+                                value: 3,
+                                refill: None,
+                            })
+                            .is_ok()
+                    );
+                }
+            }
+
+            let (sender, mut receiver) = commonware_utils::channel::mpsc::channel(2);
+            sender
+                .try_send(RefillOnDrop {
+                    value: 1,
+                    refill: Some(sender.clone()),
+                })
+                .unwrap_or_else(|_| panic!("first update should fit"));
+            sender
+                .try_send(RefillOnDrop {
+                    value: 2,
+                    refill: None,
+                })
+                .unwrap_or_else(|_| panic!("second update should fit"));
+
+            let current = RefillOnDrop {
+                value: 0,
+                refill: None,
+            };
+            let latest =
+                drain_latest_target(&mut receiver, &current, |_, _| Ok::<(), Infallible>(()))
+                    .unwrap()
+                    .expect("snapshot should not be empty");
+            assert_eq!(latest.value, 2);
+            assert_eq!(
+                receiver
+                    .try_recv()
+                    .expect("refill should remain queued")
+                    .value,
+                3
+            );
+
+            let (_, current) = valid_state_and_target_for(&[1, 0]);
+            let (_, newest) = valid_state_and_target_for(&[1, 0, 2, 0, 3, 0]);
+            let (_, rollback) = valid_state_and_target_for(&[1, 0, 2, 0]);
+            let (sender, mut receiver) = mpsc::channel(2);
+            sender.try_send(newest).unwrap();
+            sender.try_send(rollback).unwrap();
+            assert!(matches!(
+                drain_latest_target(&mut receiver, &current, validate_compact_target_update,),
+                Err(super::EngineError::InvalidCompactTarget(_))
+            ));
+        });
+    }
+
+    #[test]
+    fn test_compact_sync_retries_divergent_frontier_without_feedback() {
         deterministic::Runner::default().start(|context| async move {
             let (good_state, target) = valid_state_and_target();
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes.push(Sha256::hash(&[b"extra pin"]));
+            let divergent_pin = Sha256::hash(&[b"divergent pin"]);
+            assert_ne!(bad_state.pinned_nodes[0], divergent_pin);
+            bad_state.pinned_nodes[0] = divergent_pin;
+            assert!(matches!(
+                super::validate_compact_state::<TestDb>(&target, bad_state.clone()),
+                Err(super::EngineError::RootMismatch { expected, actual })
+                    if expected == target.root && actual != expected
+            ));
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let constructions = Arc::new(AtomicUsize::new(0));
+            let persists = Arc::new(AtomicUsize::new(0));
+            let fetches = Arc::new(AtomicUsize::new(0));
 
             let db = super::sync::<TestDb, _>(Config {
                 context,
@@ -1304,9 +1556,10 @@ mod tests {
                             callback: Some(good_tx),
                         },
                     ]))),
+                    fetches: fetches.clone(),
                 },
                 target: target.clone(),
-                db_config: (target.root, constructions.clone()),
+                db_config: test_db_config(constructions.clone(), persists.clone()),
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
@@ -1315,8 +1568,237 @@ mod tests {
             .unwrap();
 
             assert!(good_rx.await.expect("valid feedback should arrive"));
+            assert_eq!(fetches.load(Ordering::SeqCst), 2);
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
+            assert_eq!(persists.load(Ordering::SeqCst), 1);
             assert_eq!(db.root(), target.root);
+        });
+    }
+
+    #[test]
+    fn test_target_update_waits_for_in_progress_persist() {
+        deterministic::Runner::default().start(|context| async move {
+            let (first_state, first_target) = valid_state_and_target_for(&[1, 0]);
+            let (second_state, second_target) = valid_state_and_target_for(&[1, 0, 2, 0]);
+            let constructions = Arc::new(AtomicUsize::new(0));
+            let persists = Arc::new(AtomicUsize::new(0));
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let (first_feedback_tx, first_feedback_rx) =
+                commonware_utils::channel::oneshot::channel();
+            let db_config = test_db_config(constructions.clone(), persists.clone());
+            db_config
+                .construction_allowed
+                .store(false, Ordering::SeqCst);
+            db_config.persistence_allowed.store(false, Ordering::SeqCst);
+            let construction_allowed = db_config.construction_allowed.clone();
+            let persistence_allowed = db_config.persistence_allowed.clone();
+
+            let sync = super::sync::<TestDb, _>(Config {
+                context,
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        FetchResult {
+                            state: first_state,
+                            callback: Some(first_feedback_tx),
+                        },
+                        second_state.into(),
+                    ]))),
+                    fetches: Arc::new(AtomicUsize::new(0)),
+                },
+                target: first_target,
+                db_config,
+                update_rx: Some(update_rx),
+                finish_rx: None,
+                reached_target_tx: None,
+            });
+            let update = async {
+                assert!(
+                    first_feedback_rx
+                        .await
+                        .expect("validation feedback should arrive")
+                );
+                assert_eq!(
+                    constructions.load(Ordering::SeqCst),
+                    0,
+                    "peer feedback must not wait for local construction"
+                );
+                construction_allowed.store(true, Ordering::SeqCst);
+                while constructions.load(Ordering::SeqCst) == 0 {
+                    commonware_runtime::reschedule().await;
+                }
+                update_tx
+                    .send(second_target.clone())
+                    .await
+                    .expect("target update should be observed");
+                for _ in 0..4 {
+                    commonware_runtime::reschedule().await;
+                }
+                assert_eq!(
+                    constructions.load(Ordering::SeqCst),
+                    1,
+                    "a target update must not replace construction during persistence",
+                );
+                assert_eq!(
+                    persists.load(Ordering::SeqCst),
+                    0,
+                    "the first persistence operation should still be in progress",
+                );
+                persistence_allowed.store(true, Ordering::SeqCst);
+            };
+
+            let (result, ()) = futures::join!(sync, update);
+            let db = result.unwrap();
+            assert_eq!(db.root(), second_target.root);
+            assert_eq!(constructions.load(Ordering::SeqCst), 2);
+            assert_eq!(persists.load(Ordering::SeqCst), 2);
+        });
+    }
+
+    #[test]
+    fn test_reconstructed_root_mismatch_is_an_error() {
+        deterministic::Runner::default().start(|context| async move {
+            let (state, target) = valid_state_and_target();
+            let actual = Digest::from([0xff; 32]);
+            assert_ne!(actual, target.root);
+            let persists = Arc::new(AtomicUsize::new(0));
+            let mut db_config = test_db_config(Arc::new(AtomicUsize::new(0)), persists.clone());
+            db_config.root_override = Some(actual);
+
+            let result = super::sync::<TestDb, _>(Config {
+                context,
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        state.into()
+                    ]))),
+                    fetches: Arc::new(AtomicUsize::new(0)),
+                },
+                target: target.clone(),
+                db_config,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(qmdb::sync::Error::Engine(
+                    qmdb::sync::EngineError::RootMismatch { expected, actual: got }
+                )) if expected == target.root && got == actual
+            ));
+            assert_eq!(persists.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn test_invalid_ready_response_yields_to_target_update() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut invalid_state, first_target) = valid_state_and_target_for(&[1, 0]);
+            invalid_state
+                .pinned_nodes
+                .push(Sha256::hash(&[b"extra pin"]));
+            let (second_state, second_target) = valid_state_and_target_for(&[1, 0, 2, 0]);
+            let fetches = Arc::new(AtomicUsize::new(0));
+            let constructions = Arc::new(AtomicUsize::new(0));
+            let (update_tx, update_rx) = mpsc::channel(1);
+
+            let sync = super::sync::<TestDb, _>(Config {
+                context,
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        invalid_state.into(),
+                        second_state.into(),
+                    ]))),
+                    fetches: fetches.clone(),
+                },
+                target: first_target,
+                db_config: test_db_config(constructions.clone(), Arc::new(AtomicUsize::new(0))),
+                update_rx: Some(update_rx),
+                finish_rx: None,
+                reached_target_tx: None,
+            });
+            let update = async {
+                while fetches.load(Ordering::SeqCst) == 0 {
+                    commonware_runtime::reschedule().await;
+                }
+                update_tx
+                    .send(second_target.clone())
+                    .await
+                    .expect("target update should be observed");
+            };
+
+            let (result, ()) = futures::join!(sync, update);
+            assert_eq!(result.unwrap().root(), second_target.root);
+            assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn test_finish_signal_is_required_after_update_channel_closes() {
+        deterministic::Runner::default().start(|context| async move {
+            let (state, target) = valid_state_and_target();
+            let constructions = Arc::new(AtomicUsize::new(0));
+            let persists = Arc::new(AtomicUsize::new(0));
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+
+            let sync = super::sync::<TestDb, _>(Config {
+                context,
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        state.into()
+                    ]))),
+                    fetches: Arc::new(AtomicUsize::new(0)),
+                },
+                target: target.clone(),
+                db_config: test_db_config(constructions, persists),
+                update_rx: Some(update_rx),
+                finish_rx: Some(finish_rx),
+                reached_target_tx: Some(reached_tx),
+            });
+            let finish = async {
+                assert_eq!(reached_rx.recv().await, Some(target.clone()));
+                drop(update_tx);
+                commonware_runtime::reschedule().await;
+                finish_tx
+                    .send(())
+                    .await
+                    .expect("sync must keep waiting for the explicit finish signal");
+            };
+
+            let (result, ()) = futures::join!(sync, finish);
+            assert_eq!(result.unwrap().root(), target.root);
+        });
+    }
+
+    #[test]
+    fn test_closed_finish_channel_is_an_error() {
+        deterministic::Runner::default().start(|context| async move {
+            let (_, target) = valid_state_and_target();
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            drop(finish_tx);
+
+            let result = super::sync::<TestDb, _>(Config {
+                context,
+                resolver: PendingResolver,
+                target,
+                db_config: test_db_config(
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(AtomicUsize::new(0)),
+                ),
+                update_rx: None,
+                finish_rx: Some(finish_rx),
+                reached_target_tx: None,
+            })
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(qmdb::sync::Error::Engine(
+                    qmdb::sync::EngineError::FinishChannelClosed
+                ))
+            ));
         });
     }
 }

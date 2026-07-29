@@ -237,17 +237,10 @@ mod test {
         });
     }
 
-    /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
-    /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
-    /// (no floor is derivable because the size is not a commit boundary) rather than the misleading
-    /// `UnexpectedData` (which sounds like data corruption).
-    ///
-    /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
-    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <= 8) and retains blob 1 ([7, 14)).
-    /// `bounds.start = 7` is a non-commit op (an Append), so `historical_proof(op_count=8, ...)`
-    /// names a size whose preceding operation is not a commit.
+    /// A historical proof whose requested size is not a retained commit boundary returns
+    /// `NoCommitAtSize`.
     #[test_traced("INFO")]
-    fn test_keyless_historical_proof_floor_pruned() {
+    fn test_keyless_historical_proof_no_commit_at_size() {
         use crate::merkle::Location;
         deterministic::Runner::default().start(|ctx| async move {
             let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
@@ -273,7 +266,7 @@ mod test {
             assert_eq!(*bounds.start, 7);
 
             // op_count = first retained commit (= state just before that commit). Expected:
-            // HistoricalFloorPruned, NOT UnexpectedData.
+            // NoCommitAtSize, NOT UnexpectedData.
             let result = db
                 .historical_proof(Location::new(8), bounds.start, NZU64!(5))
                 .await;
@@ -282,8 +275,8 @@ mod test {
                 "must not surface as UnexpectedData; got {result:?}",
             );
             assert!(
-                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
-                "expected HistoricalFloorPruned(8), got {result:?}",
+                matches!(result, Err(Error::NoCommitAtSize(loc)) if loc == Location::new(8)),
+                "expected NoCommitAtSize(8), got {result:?}",
             );
 
             // Sanity: a commit-boundary size whose floor is retained still works. First retained

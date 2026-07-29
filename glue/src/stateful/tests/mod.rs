@@ -22,6 +22,7 @@ use single_db_app::SingleDbEngine;
 use std::time::Duration;
 
 mod common;
+pub(crate) mod fixtures;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;

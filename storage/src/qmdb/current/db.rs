@@ -523,27 +523,6 @@ where
         Ok(())
     }
 
-    /// Ensure the durable log justifies durably recording `boundary` as the bitmap pruning
-    /// boundary, committing the log first when it does not.
-    ///
-    /// The invariant lives here and nowhere else: pruning metadata must never record a
-    /// boundary the durable log cannot rebuild on reopen. The boundary a durable state
-    /// justifies depends on its floor AND its ops count (delayed-merge absorption), so it is
-    /// recomputed from the durable barrier window with the same helper that computes serving
-    /// boundaries.
-    async fn ensure_durable(mut self, boundary: Location<F>) -> Result<Self, Error<F>> {
-        let barrier = self.any.barrier();
-        let durable_boundary = self::sync_boundary::<F, N>(
-            *barrier.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *barrier.end,
-        );
-        if durable_boundary < boundary {
-            self.any.log = self.any.log.commit().await?;
-            self.any.mark_commits_durable();
-        }
-        Ok(self)
-    }
-
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -551,10 +530,8 @@ where
     /// uncommitted operations are not guaranteed to survive.
     ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
-    /// advance past the point where the grafting overlay has been pruned. The bitmap and
-    /// grafted tree never advance past the caller's target: callers prune to a retention
-    /// window, and a recorded boundary past the window's oldest block would forbid rewinding
-    /// to it.
+    /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
+    /// tree advance only to the chunk boundary at or below `prune_loc`.
     ///
     /// # Errors
     ///
@@ -573,13 +550,21 @@ where
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
         }
 
-        // The recorded boundary follows the caller's target, not the live boundary. Any chunk
-        // count at or below the live boundary is itself settled and absorbed (birth sizes are
-        // monotone in chunk count), so the target is always a valid boundary.
+        // Align the request down to a chunk boundary. Because birth sizes are monotone in chunk
+        // count, every boundary at or below `sync_boundary` is settled and absorbed.
         let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
         let bitmap_boundary = Location::new((*prune_loc / chunk_bits) * chunk_bits);
 
-        self = self.ensure_durable(bitmap_boundary).await?;
+        // The durable log must be able to rebuild the recorded boundary. Delayed-merge
+        // absorption depends on both the durable floor and operation count, so the justified
+        // boundary is derived from the durable frontier.
+        let barrier = self.any.barrier();
+        let durable_boundary =
+            self::sync_boundary::<F, N>(*barrier.start / chunk_bits, *barrier.end);
+        if durable_boundary < bitmap_boundary {
+            self.any.log = self.any.log.commit().await?;
+            self.any.mark_commit_durable();
+        }
         self.any.prune_bitmap(bitmap_boundary);
         self.prune_grafted_tree_to_bitmap()?;
 
@@ -1598,11 +1583,8 @@ mod tests {
         });
     }
 
-    /// A prune whose bitmap boundary is covered by the log's barrier but not by any
-    /// durable commit's floor must still commit before durably recording pruning
-    /// metadata: recovery otherwise lands on the older floor below the recorded boundary
-    /// and the database can never reopen. A barrier-only gate takes the fast path here,
-    /// so this pins the durable-floor gate.
+    /// Pruning commits when the requested bitmap boundary exceeds the newest durable commit's
+    /// floor, even if the journal barrier already covers the boundary.
     #[test_traced]
     fn test_current_prune_commits_when_boundary_exceeds_durable_floor() {
         let executor = deterministic::Runner::default();
@@ -1656,12 +1638,8 @@ mod tests {
         });
     }
 
-    /// A prune whose bitmap boundary is covered by the durable floor but whose delayed-merge
-    /// absorption is satisfied only by applied-but-uncommitted operations must still commit
-    /// before durably recording pruning metadata: recovery otherwise rebuilds an ops tree
-    /// whose graftable chunks cannot cover the recorded boundary and the database can never
-    /// reopen. A floor-only gate takes the fast path here, so this pins the durable-boundary
-    /// gate.
+    /// Pruning commits when delayed-merge absorption at the requested boundary depends on
+    /// operations beyond the durable commit, even if that commit's floor covers the boundary.
     #[test_traced]
     fn test_current_mmb_prune_commits_when_absorption_exceeds_durable_size() {
         let executor = deterministic::Runner::default();
@@ -1691,9 +1669,8 @@ mod tests {
                 round += 1;
             }
 
-            // One large uncommitted batch satisfies chunk 0's absorption threshold with live
-            // operations alone: the boundary jumps to the chunk boundary while the durable
-            // floor already covers it, so a floor-only gate skips the commit.
+            // Apply enough uncommitted operations to satisfy chunk 0's absorption threshold. The
+            // durable floor covers the boundary, but the durable operation count does not.
             let mut batch = db.new_batch();
             for idx in 0..506u64 {
                 let key = Sha256::hash(&[&(1_000 + idx).to_be_bytes()]);
@@ -1709,8 +1686,7 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             let root = db.root();
 
-            // Drop the production prune future while it is parked after the metadata sync,
-            // before the log prune: a genuine cancellation at that await.
+            // Cancel pruning after the metadata sync but before the log prune.
             db.halt_before_prune_log = true;
             {
                 let fut = db.prune(boundary);
@@ -1737,10 +1713,8 @@ mod tests {
         });
     }
 
-    /// A prune to a windowed target must keep rewinds within that window possible: the
-    /// durably recorded bitmap boundary follows the caller's target, not the live boundary.
-    /// Recording the live boundary would forbid the startup repair rewind to a retained
-    /// block whose size the live boundary has outrun, wedging every reopen.
+    /// Pruning to a retained checkpoint's boundary preserves rewind to that checkpoint even when
+    /// the live sync boundary has advanced farther.
     #[test_traced]
     fn test_current_prune_boundary_respects_windowed_target() {
         let executor = deterministic::Runner::default();
@@ -1792,14 +1766,10 @@ mod tests {
         commonware_parallel::Sequential,
     >;
 
-    /// A committed state the simulation may later prune toward or rewind to: its size, its
-    /// root, and the sync boundary recorded when it was committed (the sync-target analog
-    /// of what glue passes to prune).
+    /// A committed state's operation count, root, and pruning boundary.
     type SimCommit<F> = (Location<F>, sha256::Digest, Location<F>);
 
-    /// The simulation's repair window, mirroring glue's repair math: prune targets come from
-    /// the commit `SIM_WINDOW` entries back, so every younger commit must remain a valid
-    /// repair rewind target.
+    /// Number of recent commits that must remain valid rewind targets after pruning.
     const SIM_WINDOW: usize = 4;
 
     /// The window invariant, checked eagerly: every commit the repair window may rewind to
@@ -1877,8 +1847,7 @@ mod tests {
             db
         };
 
-        // Repair-rewind to the window floor: the startup path glue drives when marshal's
-        // durable floor trails the db.
+        // Occasionally rewind to the retention-window floor after reopening.
         if phase > 0 && commits.len() > SIM_WINDOW && rng.random_range(0..2u32) == 0 {
             let idx = commits.len() - 1 - SIM_WINDOW;
             let (size, root, _) = commits[idx];
@@ -1942,8 +1911,8 @@ mod tests {
                         .unwrap();
                     (db, _) = db.apply_batch(merkleized).await.unwrap();
                 }
-                // Prune to the window floor's recorded boundary, exactly as glue does. The
-                // guard mirrors glue re-deriving targets after a repair rewind.
+                // Prune to the retention-window floor's recorded boundary when it is within the
+                // live sync boundary.
                 _ => {
                     if commits.len() > SIM_WINDOW {
                         let (_, _, boundary) = commits[commits.len() - 1 - SIM_WINDOW];
@@ -1956,9 +1925,8 @@ mod tests {
             }
         }
 
-        // End the phase as an unclean shutdown: either a prune dropped between the metadata
-        // sync and the log prune (the crash cut that bricked reopen twice before), or a
-        // plain crash with the db dropped mid-life.
+        // End the phase as an unclean shutdown: either cancel a prune between the metadata
+        // sync and log prune, or drop the db mid-life.
         if commits.len() > SIM_WINDOW && rng.random_range(0..3u32) == 0 {
             let (_, _, boundary) = commits[commits.len() - 1 - SIM_WINDOW];
             if boundary <= db.sync_boundary() {
@@ -1976,18 +1944,12 @@ mod tests {
 
     /// Random-walk crash-interleaving simulation over one database family.
     ///
-    /// Interleaves applies, both glue-driven durability paths (commit, pipelined
-    /// start_sync), windowed prunes, and prunes dropped between the metadata sync and the
-    /// log prune, across checkpoint-recovered phases whose boundaries are unclean
-    /// shutdowns. Two invariants hold at every step: reopen always succeeds, and every
-    /// commit in the retention window stays above both retention boundaries, with the
-    /// window floor rewound and root-checked on repair.
+    /// Exercises applies, commits, pipelined syncs, windowed prunes, and cancelled prunes across
+    /// crash-recovered phases. Reopen must succeed, and every commit in the retention window must
+    /// remain above both retention boundaries with its recorded root.
     ///
-    /// The workload runs in one of two regimes, since their failure states are mutually
-    /// exclusive. Floor-chasing keeps a tiny active set so the floor crosses chunk
-    /// boundaries within the window span (the recorded-boundary-outruns-the-window states).
-    /// Append-heavy interleaves fresh-key batches so live leaves outrun the floor and the
-    /// durable state (the delayed-merge absorption states).
+    /// Floor-chasing drives the inactivity floor across chunk boundaries; append-heavy workloads
+    /// drive delayed-merge absorption ahead of the durable frontier.
     fn crash_interleaving_sim<F: merkle::Graftable>(
         seed: u64,
         partition: &'static str,
@@ -2021,9 +1983,8 @@ mod tests {
         });
     }
 
-    /// Randomized crash-interleaving simulation for both families and both workload
-    /// regimes. Every pruning-window bug found on this branch was an interleaving of these
-    /// actions; this is the net for the class, not any single instance.
+    /// Randomized crash-interleaving simulation for both families and both workload regimes,
+    /// covering pruning-window failures caused by different orderings of these actions.
     #[test_traced]
     fn test_current_crash_interleaving_recovers_and_rewinds() {
         for seed in 0..8u64 {

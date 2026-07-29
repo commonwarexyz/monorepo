@@ -23,10 +23,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
@@ -94,9 +91,8 @@ pub struct Db<
     /// durable in the log, up to that commit's operation count.
     pub(crate) durable: std::ops::Range<Location<F>>,
 
-    /// Commits appended but not yet proven durable, oldest first, each as its declared
-    /// inactivity floor up to its operation count.
-    pub(crate) pending_commits: VecDeque<std::ops::Range<Location<F>>>,
+    /// A commit frontier that may be covered by the log's next durable barrier.
+    pub(crate) pending_commit: Option<std::ops::Range<Location<F>>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -456,39 +452,31 @@ where
         // commit justifies the target yet.
         if self.barrier().start < prune_loc {
             self.log = self.log.commit().await?;
-            self.mark_commits_durable();
+            self.mark_commit_durable();
         }
         let boundary;
         (self.log, boundary) = self.log.prune(prune_loc).await?;
         Ok((self, boundary))
     }
 
-    /// Advance [Self::durable] past every commit the log has proven durable.
+    /// Advance [Self::durable] when the pending commit is proven durable.
     pub(crate) fn advance_durable(&mut self) {
         let barrier = Location::new(self.log.durable().end);
-        while let Some(window) = self.pending_commits.front().cloned() {
-            if window.end > barrier {
-                break;
-            }
+        if let Some(window) = self.pending_commit.take_if(|window| window.end <= barrier) {
             self.durable = window;
-            self.pending_commits.pop_front();
         }
     }
 
-    /// Observe the journal barrier and return the db-level durable frontier: the inactivity
-    /// floor declared by the newest durable commit up to that commit's operation count.
-    ///
-    /// Durable claims (pruning boundaries, watermarks) must be computed from this frontier,
-    /// never from live state: a durably recorded claim the durable log cannot justify
-    /// leaves recovery unable to rebuild it.
+    /// Observe the journal barrier and return [Self::durable]. Durable claims (pruning
+    /// boundaries, watermarks) must be computed from this frontier, never from live state.
     pub(crate) fn barrier(&mut self) -> std::ops::Range<Location<F>> {
         self.advance_durable();
         self.durable.clone()
     }
 
-    /// Record that every appended commit is proven durable.
-    pub(crate) fn mark_commits_durable(&mut self) {
-        self.pending_commits.clear();
+    /// Record that the current commit is proven durable.
+    pub(crate) fn mark_commit_durable(&mut self) {
+        self.pending_commit = None;
         self.durable = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
     }
 
@@ -528,7 +516,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
+    /// Returns [`crate::qmdb::Error::NoCommitAtSize`] if `historical_size - 1` is retained
     /// but is not a commit op, meaning the caller passed a non-commit-boundary size.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -742,7 +730,7 @@ where
             ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
-        self.pending_commits.clear();
+        self.pending_commit = None;
         self.durable = Location::new(0)..Location::new(0);
         self.root = self
             .log
@@ -799,7 +787,7 @@ where
                 bounds
                     .end
                     .checked_sub(1)
-                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
+                    .ok_or(Error::NoCommitAtSize(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
                 &*log,
@@ -874,7 +862,7 @@ where
             snapshot: index,
             last_commit_loc,
             durable: inactivity_floor_loc..Location::new(*last_commit_loc + 1),
-            pending_commits: VecDeque::new(),
+            pending_commit: None,
             active_keys,
             bitmap,
             metrics,
@@ -900,7 +888,7 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
-        self.mark_commits_durable();
+        self.mark_commit_durable();
         Ok(self)
     }
 
@@ -926,8 +914,14 @@ where
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_sync_calls.inc();
+        let pending = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
         let (log, handle) = self.log.start_sync().await?;
         self.log = log;
+
+        // Installing the journal's new barrier observes its predecessor. Promote any commit
+        // covered by that barrier before tracking the state covered by this sync.
+        self.advance_durable();
+        self.pending_commit = Some(pending);
         Ok((self, handle))
     }
 
@@ -948,7 +942,7 @@ where
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;
-        self.mark_commits_durable();
+        self.mark_commit_durable();
         Ok(self)
     }
 

@@ -584,9 +584,7 @@ where
     /// Prune both the Merkle structure and journal to the given location.
     ///
     /// Callers must ensure `prune_loc` is justified by durable data (see
-    /// [`crate::journal::contiguous::Mutable::prune`]). Each component
-    /// syncs before removing anything only when its own barrier has not yet covered the
-    /// boundary.
+    /// [`crate::journal::contiguous::Mutable::prune`]).
     ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
@@ -600,6 +598,8 @@ where
         mut self,
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
+        // Family position conversion requires an in-domain location.
+        let prune_loc = Location::new((*prune_loc).min(self.journal.bounds().end));
         if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             let boundary = Location::new(self.journal.bounds().start);
@@ -644,7 +644,7 @@ where
     /// Sync places the Merkle structure's boundary exactly at the sync range's start while the
     /// operations log prunes on section boundaries, so the log can retain operations whose Merkle
     /// nodes are already gone. Proofs are available only at or above the later of the two.
-    pub fn provable_start(&self) -> Location<F> {
+    pub(crate) fn provable_start(&self) -> Location<F> {
         std::cmp::max(
             Location::new(self.journal.bounds().start),
             self.merkle.bounds().start,
@@ -995,13 +995,8 @@ where
     }
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
-        let prune_to = {
-            let bounds = self.journal.bounds();
-            min_position.min(bounds.end)
-        };
-
         let (journal, _, pruned) = self
-            .prune_inner(Location::new(prune_to))
+            .prune_inner(Location::new(min_position))
             .await
             .map_err(Self::map_error)?;
         Ok((journal, pruned))
@@ -2447,6 +2442,29 @@ mod tests {
     fn test_prune_empty_journal_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_prune_empty_journal_inner::<mmb::Family>);
+    }
+
+    async fn test_prune_caps_out_of_domain_location_inner<F: Family + PartialEq>(context: Context) {
+        let journal =
+            create_journal_with_ops::<F>(context.child("inherent"), "prune-max-inherent", 20).await;
+        let size = journal.bounds().end;
+        let (journal, boundary) = journal.prune(Location::<F>::new(u64::MAX)).await.unwrap();
+        assert_eq!(journal.bounds().end, size);
+        assert_eq!(boundary, Location::<F>::new(journal.bounds().start));
+        assert_eq!(boundary, journal.merkle.bounds().start);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_caps_out_of_domain_location_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_caps_out_of_domain_location_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_caps_out_of_domain_location_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_caps_out_of_domain_location_inner::<mmb::Family>);
     }
 
     /// Sync places the Merkle boundary exactly at the sync range's start while the operations log

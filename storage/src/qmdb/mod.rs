@@ -131,7 +131,7 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
+/// - [`Error::NoCommitAtSize`] if `op_count` is zero (no preceding commit exists), or if
 ///   `op_count - 1` is retained but is not a commit op, meaning the caller passed a
 ///   non-commit-boundary size.
 /// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
@@ -145,7 +145,7 @@ where
     R: Contiguous,
 {
     let Some(last_op) = op_count.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(op_count));
+        return Err(Error::NoCommitAtSize(op_count));
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -154,7 +154,7 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let floor = floor_of(&op).ok_or(Error::NoCommitAtSize(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
@@ -241,16 +241,15 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
-    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
-    /// proof matching the historical root.
+    /// The requested `historical_size` is not a retained commit boundary, so the wrapper cannot
+    /// derive the `inactive_peaks` count needed to construct a proof matching a historical root.
     ///
     /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
     /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
-    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
-    /// commit that would have governed the size.
-    #[error("historical floor pruned for size: {0}")]
-    HistoricalFloorPruned(Location<F>),
+    /// fires when the size is zero or the caller passes a retained non-commit-boundary size.
+    /// Pruned operations are reported separately as [`crate::journal::Error::ItemPruned`].
+    #[error("no commit at historical size: {0}")]
+    NoCommitAtSize(Location<F>),
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
