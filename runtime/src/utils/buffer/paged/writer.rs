@@ -244,8 +244,7 @@ impl<B: Blob> Writer<B> {
                     .ok_or(Error::OffsetOverflow)?;
                 let scrub_len = usize::try_from(cache_ref.page_size() - active_len)
                     .map_err(|_| Error::OffsetOverflow)?;
-                blob.write_at_sync(scrub_offset, vec![0; scrub_len])
-                    .await?;
+                blob.write_at_sync(scrub_offset, vec![0; scrub_len]).await?;
             }
             let slot_offset = page_offset
                 .checked_add(cache_ref.page_size())
@@ -2176,8 +2175,8 @@ mod tests {
                 BUFFER_SIZE,
                 cache_ref.clone(),
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
             assert_eq!(append.size(), 50);
             let read_buf = append.read_at(0, 50).await.unwrap().coalesce();
             assert_eq!(read_buf, &all[..50]);
@@ -3181,10 +3180,7 @@ mod tests {
             // Leave the longer slot invalid but non-retired so reopen attempts to scrub its stale
             // payload and retire it. The injected second sync persists only the retirement and
             // then fails, modeling an arbitrary crash image at that barrier.
-            blob.write_at_sync(
-                slot_offset as u64,
-                Checksum::slot_len_bytes(79).to_vec(),
-            )
+            blob.write_at_sync(slot_offset as u64, Checksum::slot_len_bytes(79).to_vec())
                 .await
                 .unwrap();
             let repairing = TombstoneOnlySyncBlob::new(blob.clone(), slot_offset as u64);
@@ -3209,8 +3205,8 @@ mod tests {
                 BUFFER_SIZE,
                 cache_ref,
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
             assert_eq!(writer.size(), 50);
 
             // Extend to the stale payload's length, then retain only the new slot length. The
@@ -5964,8 +5960,7 @@ mod tests {
             let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
             for retained_pages in [0, 1] {
                 let blob = SyncTrackingBlob::new();
-                let cache_ref =
-                    CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
                 let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                     .await
                     .unwrap();
@@ -5980,8 +5975,7 @@ mod tests {
                 // can still survive a crash.
                 let shrunk_size = retained_pages * physical_page_size;
                 blob.resize(shrunk_size).await.unwrap();
-                let cache_ref =
-                    CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
                 let mut writer = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                     .await
                     .unwrap();
