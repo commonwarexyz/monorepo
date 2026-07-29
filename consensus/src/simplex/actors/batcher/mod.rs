@@ -438,7 +438,8 @@ mod tests {
 
         // A verified notarization establishes the proposal and drops the
         // verifier's notarize buffers
-        assert!(round.record_notarization(&proposal));
+        let notarization = build_notarization(&schemes, &proposal, quorum(5) as usize);
+        assert!(round.record_certificate(&Certificate::Notarization(notarization)));
         assert!(round.has_certificate(Kind::Notarization));
 
         // The proposal can be forwarded before the leader is known
@@ -473,7 +474,8 @@ mod tests {
         assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
 
         // A finalization does not establish the proposal
-        round.record_finalization();
+        let finalization = build_finalization(&schemes, &proposal, quorum(5) as usize);
+        assert!(!round.record_certificate(&Certificate::Finalization(finalization)));
         assert!(round.has_certificate(Kind::Finalization));
 
         // Setting the leader discovers the proposal from its buffered vote

@@ -483,74 +483,42 @@ where
                 );
                 let _guard = span.entered();
 
-                match message {
-                    Certificate::Notarization(notarization) => {
-                        // Verify the certificate
-                        if !notarization.verify(
-                            self.context.as_mut(),
-                            self.scheme.as_ref(),
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        let proposal_changed = work
-                            .entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .record_notarization(&notarization.proposal);
-                        voter.recovered(Certificate::Notarization(notarization));
-
-                        // Reprocess buffered votes only if the notarization changed the
-                        // proposal filter.
-                        if !proposal_changed {
-                            continue;
-                        }
-
-                        updated_view = view;
-                    }
-                    Certificate::Nullification(nullification) => {
-                        // Verify the certificate
-                        if !nullification.verify::<_, D>(
-                            self.context.as_mut(),
-                            self.scheme.as_ref(),
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .record_nullification();
-                        voter.recovered(Certificate::Nullification(nullification));
-
-                        // Certificates are already forwarded to voter, no need for construction.
-                        continue;
-                    }
-                    Certificate::Finalization(finalization) => {
-                        // Verify the certificate
-                        if !finalization.verify(
-                            self.context.as_mut(),
-                            self.scheme.as_ref(),
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .record_finalization();
-                        voter.recovered(Certificate::Finalization(finalization));
-
-                        // Certificates are already forwarded to voter, no need for construction.
-                        continue;
-                    }
+                // Verify the certificate
+                let valid = match &message {
+                    Certificate::Notarization(notarization) => notarization.verify(
+                        self.context.as_mut(),
+                        self.scheme.as_ref(),
+                        &self.strategy,
+                    ),
+                    Certificate::Nullification(nullification) => nullification.verify::<_, D>(
+                        self.context.as_mut(),
+                        self.scheme.as_ref(),
+                        &self.strategy,
+                    ),
+                    Certificate::Finalization(finalization) => finalization.verify(
+                        self.context.as_mut(),
+                        self.scheme.as_ref(),
+                        &self.strategy,
+                    ),
+                };
+                if !valid {
+                    commonware_p2p::block!(self.blocker, sender, %view, %kind, "invalid certificate");
+                    continue;
                 }
+
+                // Store and forward to voter
+                let proposal_changed = work
+                    .entry(view)
+                    .or_insert_with(|| self.new_round(view))
+                    .record_certificate(&message);
+                voter.recovered(message);
+
+                // Reprocess buffered votes only if the notarization changed the
+                // round's proposal.
+                if !proposal_changed {
+                    continue;
+                }
+                updated_view = view;
             },
             // Handle votes from the network
             Ok((sender, message)) = vote_receiver.recv() else break => {
