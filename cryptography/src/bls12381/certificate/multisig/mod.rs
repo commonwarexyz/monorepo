@@ -6,9 +6,8 @@
 //! # Proof of Possession
 //!
 //! Before constructing a scheme, callers must verify a proof of possession (PoP) for every BLS
-//! public key in the participant map. Neither [`Generic::signer`] nor [`Generic::verifier`]
-//! performs this verification. Without it, aggregate certificate verification is vulnerable to
-//! rogue-key attacks. Verify each PoP during participant registration with
+//! public key in the participant map. Without it, aggregate certificate verification is vulnerable
+//! to rogue-key attacks. Verify each PoP during participant registration with
 //! [`verify_proof_of_possession`](crate::bls12381::primitives::ops::verify_proof_of_possession),
 //! then construct schemes only from the validated participant set.
 
