@@ -172,6 +172,27 @@ impl<D: Digest> ProposalState<D> {
             Self::Leader(proposal) | Self::Notarization(proposal) => Some(proposal),
         }
     }
+
+    /// Updates the proposal from a leader vote or notarization.
+    ///
+    /// An unknown proposal accepts either source, while a proposal from a
+    /// leader vote may be superseded by the first notarization. All other
+    /// transitions are ignored.
+    ///
+    /// Returns the selected proposal if its value changed. A provenance-only
+    /// change from a leader vote to a notarization of the same proposal returns
+    /// `None`.
+    fn update(&mut self, next: Self) -> Option<&Proposal<D>> {
+        match (&*self, &next) {
+            (Self::Unknown, Self::Leader(_) | Self::Notarization(_)) => {}
+            (Self::Leader(_), Self::Notarization(_)) => {}
+            _ => return None,
+        }
+
+        let changed = self.proposal() != next.proposal();
+        *self = next;
+        changed.then(|| self.proposal().expect("updated proposal must be known"))
+    }
 }
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
@@ -339,27 +360,27 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// certificate).
     ///
     /// Does nothing if the leader is unknown, `notarize` is not from the
-    /// leader, or a proposal is already set.
+    /// leader, or the proposal state rejects the transition.
     fn try_set_proposal_from_leader(&mut self, notarize: &Notarize<S, D>) {
-        if self.proposal().is_some() || self.leader != Some(notarize.signer()) {
+        if self.leader != Some(notarize.signer()) {
             return;
         }
         self.set_proposal(ProposalState::Leader(notarize.proposal.clone()));
     }
 
-    /// Adopts the proposal to which notarize and finalize votes are filtered,
-    /// replacing any previous proposal and dropping buffered votes for any
-    /// other proposal.
+    /// Updates the proposal state and, if the selected proposal changes, drops
+    /// buffered notarize and finalize votes for any other proposal.
     ///
-    /// Returns whether the proposal changed.
+    /// Returns `true` only if the selected proposal changed. Rejected
+    /// transitions and a provenance-only change from a leader vote to a
+    /// notarization of the same proposal return `false`.
     pub(super) fn set_proposal(&mut self, proposal: ProposalState<D>) -> bool {
-        let changed = self.proposal() != proposal.proposal();
-        if changed && let Some(new) = proposal.proposal() {
-            self.notarize.retain(|n| &n.proposal == new);
-            self.finalize.retain(|f| &f.proposal == new);
-        }
-        self.proposal = proposal;
-        changed
+        let Some(proposal) = self.proposal.update(proposal) else {
+            return false;
+        };
+        self.notarize.retain(|n| &n.proposal == proposal);
+        self.finalize.retain(|f| &f.proposal == proposal);
+        true
     }
 
     /// Adds a [Vote] message to the batch for later verification.
@@ -792,6 +813,13 @@ mod tests {
 
         // Re-adopting the same proposal reports no change.
         assert!(!verifier2.set_proposal(ProposalState::Notarization(notarized_proposal.clone())));
+
+        // The first notarization remains authoritative.
+        let conflicting_notarized_proposal = Proposal::new(round, View::new(0), sample_digest(3));
+        assert!(
+            !verifier2.set_proposal(ProposalState::Notarization(conflicting_notarized_proposal))
+        );
+        assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
         // If the notarization arrives first, setting the leader cannot replace
         // its proposal with a conflicting buffered leader vote.

@@ -95,12 +95,12 @@ impl<
         self.verifier.has_certificate(kind)
     }
 
-    /// Records a verified certificate and returns whether the round's
-    /// proposal changed.
+    /// Records a verified certificate and returns whether the round's proposal
+    /// changed.
     ///
-    /// Only a notarization can change the proposal. Its proposal is authoritative and replaces any
-    /// conflicting proposal learned from the leader's vote. Nullifications and finalizations leave
-    /// the proposal unchanged.
+    /// Only a notarization can change the proposal. Its proposal is
+    /// authoritative and replaces any conflicting proposal learned from the
+    /// leader's vote.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
         let proposal_changed = match certificate {
             Certificate::Notarization(notarization) => self

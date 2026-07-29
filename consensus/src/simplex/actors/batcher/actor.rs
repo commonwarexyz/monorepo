@@ -516,6 +516,8 @@ where
                 // Reprocess buffered votes only if the notarization changed the
                 // round's proposal.
                 if !proposal_changed {
+                    // Otherwise, certificates are already forwarded to voter,
+                    // no need for construction.
                     continue;
                 }
                 updated_view = view;
