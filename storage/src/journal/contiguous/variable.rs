@@ -50,9 +50,9 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-#[commonware_macros::stability(ALPHA)]
-use tracing::debug;
 use tracing::warn;
+#[commonware_macros::stability(ALPHA)]
+use tracing::{debug, info};
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -1594,12 +1594,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // The max keeps a mid-blob adopted boundary from regressing to its blob's start.
         let new_boundary = blob_first_position(min_blob, items_per_blob)?.max(self.bounds.start);
 
-        if target_blob > watermark_blob {
-            warn!(
+        if min_position > watermark {
+            // Log any attempt to prune data that isn't already durable in case it's not the
+            // intent of the caller. We clamp the boundary to the durable frontier instead of
+            // returning an error since pruning is already best-effort by contract.
+            info!(
                 requested = min_position,
                 frontier = watermark,
                 effective = new_boundary,
-                "start_prune target exceeds durable frontier; clamped (use prune)"
+                "clamping start_prune boundary to durable frontier"
             );
         }
 
@@ -2423,8 +2426,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// a data sync.
     ///
     /// `min_position` is clamped down to the proven-durable frontier: only already-synced data is
-    /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped (logging a
-    /// warning) rather than rejected; use [`Self::prune`] to prune data not yet synced. As with
+    /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped rather than
+    /// rejected; use [`Self::prune`] to prune data not yet synced. As with
     /// `prune`, blob boundaries are preserved, so slightly fewer items than requested may be
     /// pruned.
     ///
@@ -2433,8 +2436,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// are unlinked as the returned [PruneHandle] completes. Like [`Self::start_sync`], recording
     /// the boundary waits for a prior in-flight checkpoint sync before starting a new one. Await
     /// the handle to observe a durable boundary and removed blobs, or drive it off the hot path.
-    /// A dropped or crashed removal is completed by recovery from the durable boundary, so the
-    /// unlink never has to finish atomically or in order.
+    /// Until the handle resolves `Ok` the boundary advance is provisional: a failed metadata write
+    /// or a crash reverts it, so drive it to `Ok` before durably recording anything derived from
+    /// the boundary. A dropped or crashed removal is completed by recovery from the durable
+    /// boundary, so the unlink never has to finish atomically or in order.
     pub async fn start_prune(mut self, min_position: u64) -> Result<(Self, PruneHandle), Error> {
         let (inner, handle) = self.0.start_prune(min_position).await?;
         self.0 = inner;

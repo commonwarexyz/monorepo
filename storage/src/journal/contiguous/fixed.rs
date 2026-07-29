@@ -160,7 +160,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 // Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the
 // thread. Probes run per shard on the hot read path, where a fresh zeroed allocation per call
@@ -1181,12 +1181,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let new_boundary =
             super::blob_first_position(min_blob, items_per_blob)?.max(self.bounds.start);
 
-        if target_blob > watermark_blob {
-            warn!(
+        if min_item_pos > watermark {
+            // Log any attempt to prune data that isn't already durable in case it's not the
+            // intent of the caller. We clamp the boundary to the durable frontier instead of
+            // returning an error since pruning is already best-effort by contract.
+            info!(
                 requested = min_item_pos,
                 frontier = watermark,
                 effective = new_boundary,
-                "start_prune target exceeds durable frontier; clamped (use prune)"
+                "clamping start_prune boundary to durable frontier"
             );
         }
 
@@ -1483,8 +1486,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Begin pruning items older than `min_item_pos` off the hot path, without a data sync.
     ///
     /// `min_item_pos` is clamped down to the proven-durable frontier: only already-synced data is
-    /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped (logging a
-    /// warning) rather than rejected; use [`Self::prune`] to prune data not yet synced. As with
+    /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped rather than
+    /// rejected; use [`Self::prune`] to prune data not yet synced. As with
     /// `prune`, blob boundaries are preserved, so slightly fewer items than requested may be
     /// pruned.
     ///

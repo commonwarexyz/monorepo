@@ -146,32 +146,34 @@ impl<E: Context> Checkpoint<E> {
     }
 
     /// Begin recording `boundary` and raising the watermark to `watermark`, returning a completion
-    /// handle. If neither value advances, returns a resolved handle. The pipelined analogue of
-    /// [Self::persist].
+    /// handle. The boundary is always written. The watermark is written only if it is not already
+    /// current.
     ///
     /// # Preconditions
     ///
     /// - all items below `watermark` are durable
     /// - `boundary <= watermark`
+    /// - `boundary` advances past the recorded boundary
     pub(super) async fn start_persist(
         mut self,
         boundary: u64,
         watermark: u64,
     ) -> Result<(Self, Handle<()>), Error> {
         assert!(boundary <= watermark);
-        let advance_boundary =
-            !matches!(self.boundary_hint(), Some(current) if current >= boundary);
+
+        // Confirm the caller is advancing the boundary.
+        assert!(
+            !matches!(self.boundary_hint(), Some(current) if current >= boundary),
+            "start_persist requires an advancing boundary"
+        );
+
+        // Advance the watermark if it's not already current.
         let advance_watermark = !matches!(self.watermark(), Some(current) if current >= watermark);
-        if !advance_boundary && !advance_watermark {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
 
         // Stage both entries before the single sync so a boundary advance and its covering
         // watermark land in one metadata version; a crash can never expose one advance without the
         // other.
-        if advance_boundary {
-            self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
-        }
+        self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
         if advance_watermark {
             self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         }
