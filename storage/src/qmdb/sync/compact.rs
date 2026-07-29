@@ -58,7 +58,7 @@ use crate::{
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
         },
         operation::Key,
-        sync::{EngineError, Error},
+        sync::{EngineError, Error, resolver::Request},
         verify_proof,
     },
     translator::Translator,
@@ -633,51 +633,55 @@ where
     })
 }
 
-async fn fetch_state_from_full_source<F, Op, D, Current, Hist, HistFut, Pins, PinsFut>(
+/// Derive compact state from a source that still holds its operation log.
+///
+/// A full database has no persisted witness, so its compact state is synthesized on demand.
+/// This is the same question the operation-log path asks, at the degenerate range: prove the
+/// final commit, and pin at the tip, because a compact client retains no operations at all.
+async fn compact_state_from_log<S, F, D>(
+    source: &S,
+    current: Target<F, D>,
     target: Target<F, D>,
-    current_target: Current,
-    historical_proof: Hist,
-    pinned_nodes_at: Pins,
-) -> Result<State<F, Op, D>, ServeError<F, D>>
+) -> Result<State<F, S::Op, D>, ServeError<F, D>>
 where
     F: Family,
     D: Digest,
-    Current: FnOnce() -> Target<F, D>,
-    Hist: FnOnce(Location<F>, Location<F>) -> HistFut,
-    HistFut: Future<Output = Result<(Proof<F, D>, Vec<Op>), qmdb::Error<F>>>,
-    Pins: FnOnce(Location<F>) -> PinsFut,
-    PinsFut: Future<Output = Result<Vec<D>, qmdb::Error<F>>>,
+    S: crate::qmdb::sync::Source<Request<F>, Family = F, Digest = D, Error = qmdb::Error<F>>,
 {
-    // Full sources do not cache a compact witness. Instead, derive the compact payload on demand
-    // from the current tip commit plus the frontier pins at the requested tree size.
     target.validate().map_err(ServeError::InvalidTarget)?;
-    let current = current_target();
     if target.root != current.root || target.leaf_count != current.leaf_count {
         return Err(ServeError::StaleTarget {
             requested: target,
             current,
         });
     }
+
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let (last_commit_proof, mut operations) = historical_proof(leaf_count, last_commit_loc)
+    let request = Request::new(leaf_count, last_commit_loc, NonZeroU64::new(1).unwrap())
+        .retaining_from(leaf_count);
+    let (response, _validity) = source
+        .serve(request, oneshot::channel().1)
         .await
         .map_err(ServeError::Database)?;
-    // Compact sync always authenticates exactly the final commit leaf.
-    let last_commit_op =
-        operations
-            .pop()
-            .ok_or(ServeError::Database(qmdb::Error::DataCorrupted(
-                "missing last commit operation",
-            )))?;
-    let pinned_nodes = pinned_nodes_at(leaf_count)
-        .await
-        .map_err(ServeError::Database)?;
+
+    let mut operations = response.operations;
+    let last_commit_op = operations
+        .pop()
+        .ok_or(ServeError::Database(qmdb::Error::DataCorrupted(
+            "missing last commit operation",
+        )))?;
+    let pinned_nodes = response
+        .pinned_nodes
+        .ok_or(ServeError::Database(qmdb::Error::DataCorrupted(
+            "missing frontier pins",
+        )))?;
+
     Ok(State {
         leaf_count,
         pinned_nodes,
         last_commit_op,
-        last_commit_proof,
+        last_commit_proof: response.proof,
     })
 }
 
@@ -806,19 +810,8 @@ macro_rules! impl_state_source {
                 &self,
                 target: Target<F, H::Digest>,
             ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
-                fetch_state_from_full_source(
-                    target,
-                    || Target::new(self.root(), self.bounds().end),
-                    |leaf_count, last_commit_loc| {
-                        self.historical_proof(
-                            leaf_count,
-                            last_commit_loc,
-                            NonZeroU64::new(1).unwrap(),
-                        )
-                    },
-                    |leaf_count| self.pinned_nodes_at(leaf_count),
-                )
-                .await
+                let current = Target::new(self.root(), self.bounds().end);
+                compact_state_from_log(self, current, target).await
             }
         }
     };
@@ -839,19 +832,8 @@ macro_rules! impl_state_source {
                 &self,
                 target: Target<F, H::Digest>,
             ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
-                fetch_state_from_full_source(
-                    target,
-                    || Target::new(self.root(), self.bounds().end),
-                    |leaf_count, last_commit_loc| {
-                        self.historical_proof(
-                            leaf_count,
-                            last_commit_loc,
-                            NonZeroU64::new(1).unwrap(),
-                        )
-                    },
-                    |leaf_count| self.pinned_nodes_at(leaf_count),
-                )
-                .await
+                let current = Target::new(self.root(), self.bounds().end);
+                compact_state_from_log(self, current, target).await
             }
         }
     };
