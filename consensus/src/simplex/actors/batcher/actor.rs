@@ -632,13 +632,19 @@ where
                 };
                 let span = round.span();
                 async {
-                    // Batch verify votes if ready
-                    let timer = self.verify_latency.timer(self.context.as_ref());
-                    if let Some((batch, failed)) = round
-                        .try_verify(self.context.as_mut(), &self.strategy)
-                        .await
-                    {
+                    // Batch verify every ready kind. Learning the leader's
+                    // proposal can make notarizes and finalizes ready together.
+                    let mut verified_any = false;
+                    loop {
+                        let timer = self.verify_latency.timer(self.context.as_ref());
+                        let Some((batch, failed)) = round
+                            .try_verify(self.context.as_mut(), &self.strategy)
+                            .await
+                        else {
+                            break;
+                        };
                         timer.observe(self.context.as_ref());
+                        verified_any = true;
 
                         // Process verified votes.
                         trace!(%updated_view, batch, "batch verified votes");
@@ -655,7 +661,8 @@ where
                                 );
                             }
                         }
-                    } else {
+                    }
+                    if !verified_any {
                         trace!(
                             current = %current.view,
                             %finalized,
