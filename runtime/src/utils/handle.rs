@@ -303,14 +303,27 @@ impl Panicker {
             return;
         }
 
+        self.send(panic);
+    }
+
+    /// Notifies the runtime of an infrastructure failure regardless of panic policy.
+    ///
+    /// Returns true when this failure won the single root-interruption race.
+    pub(crate) fn notify_fatal(&self, panic: Box<dyn Any + Send + 'static>) -> bool {
+        self.send(panic)
+    }
+
+    /// Sends the first root-interrupting panic and ignores later failures.
+    fn send(&self, panic: Box<dyn Any + Send + 'static>) -> bool {
         // If we've already sent a panic, ignore the new one
         let mut sender = self.sender.lock();
         let Some(sender) = sender.take() else {
-            return;
+            return false;
         };
 
         // Send the panic
         let _ = sender.send(panic);
+        true
     }
 }
 
@@ -371,11 +384,14 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::Handle;
+    use super::{Handle, Panicker};
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::future;
-
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
@@ -388,6 +404,46 @@ mod tests {
                 None
             }
         })
+    }
+
+    #[test]
+    fn fatal_notification_bypasses_catch_and_has_one_winner() {
+        // Configure ordinary task panics to be caught, then verify an ordinary
+        // notification leaves the root-interruption sender available.
+        let (panicker, panicked) = Panicker::new(true);
+        panicker.notify(Box::new("caught task panic"));
+
+        // Race several infrastructure failures against the same one-shot path.
+        // Exactly one caller must consume the sender.
+        let contenders = 4;
+        let barrier = Arc::new(Barrier::new(contenders));
+        let winners = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..contenders)
+            .map(|index| {
+                let panicker = panicker.clone();
+                let barrier = Arc::clone(&barrier);
+                let winners = Arc::clone(&winners);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if panicker.notify_fatal(Box::new(format!("fatal {index}"))) {
+                        winners.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        // The winning payload reaches the receiver despite `catch = true`, while
+        // every later infrastructure failure observes the consumed sender.
+        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        let panic = futures::executor::block_on(panicked.receiver).unwrap();
+        assert!(
+            panic
+                .downcast_ref::<String>()
+                .is_some_and(|message| message.starts_with("fatal "))
+        );
     }
 
     #[test]
