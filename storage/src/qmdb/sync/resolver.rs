@@ -1,7 +1,7 @@
 use crate::{
     Context,
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
-    qmdb::{self, operation::Key, sync::compact::ServeError},
+    qmdb::{self, operation::Key, sync::ServeError},
     translator::Translator,
 };
 use bytes::{Buf, BufMut};

@@ -356,7 +356,7 @@ where
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
-            Error = compact::ServeError<mmr::Family, Key>,
+            Error = sync::ServeError<mmr::Family, Key>,
         >,
 {
     state.request_counter.inc();
@@ -371,10 +371,10 @@ where
         .map_err(|err| {
             warn!(?err, "failed to serve compact state");
             match err {
-                compact::ServeError::Database(err) => Error::Database(err),
-                compact::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
-                compact::ServeError::MissingSource => Error::DatabaseUnavailable,
-                compact::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
+                sync::ServeError::Database(err) => Error::Database(err),
+                sync::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
+                sync::ServeError::MissingSource => Error::DatabaseUnavailable,
+                sync::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
             }
         })?;
 
@@ -426,7 +426,7 @@ where
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
-            Error = compact::ServeError<mmr::Family, Key>,
+            Error = sync::ServeError<mmr::Family, Key>,
         >,
 {
     const LISTENING_MESSAGE: &'static str =
@@ -703,7 +703,7 @@ where
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
-            Error = compact::ServeError<mmr::Family, Key>,
+            Error = sync::ServeError<mmr::Family, Key>,
         >,
 {
     let database = initialize_compact_database(database, &config, &mut context).await?;

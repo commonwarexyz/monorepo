@@ -429,7 +429,7 @@ mod tests {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
-        type Error = sync::compact::ServeError<mmr::Family, Digest>;
+        type Error = sync::ServeError<mmr::Family, Digest>;
 
         async fn serve(
             &self,

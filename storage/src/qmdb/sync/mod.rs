@@ -8,7 +8,7 @@ pub mod engine;
 pub(crate) use engine::Engine;
 
 mod error;
-pub use error::{EngineError, Error};
+pub use error::{EngineError, Error, ServeError};
 
 mod gaps;
 mod journal;

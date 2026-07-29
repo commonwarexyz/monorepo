@@ -96,7 +96,7 @@ where
 }
 
 type CompactStateResult<F, V, D> =
-    Result<crate::qmdb::sync::resolver::Response<F, Operation<F, V>, D>, compact_sync::ServeError<F, D>>;
+    Result<crate::qmdb::sync::resolver::Response<F, Operation<F, V>, D>, crate::qmdb::sync::ServeError<F, D>>;
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
@@ -426,7 +426,7 @@ where
         // entry; decode outside it so concurrent readers do not contend.
         let (entry, leaf_count) = self.witness.with(|w| {
             if target.root != w.root || target.leaf_count != w.leaf_count() {
-                return Err(compact_sync::ServeError::StaleTarget {
+                return Err(crate::qmdb::sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
                 });
@@ -440,7 +440,7 @@ where
         } = entry;
         let op = Operation::<F, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
             .map_err(|_| {
-                compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
+                crate::qmdb::sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
         let _ = leaf_count;
         Ok(crate::qmdb::sync::resolver::Response::new(

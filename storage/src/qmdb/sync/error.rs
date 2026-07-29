@@ -2,9 +2,37 @@
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::sync::Target,
+    qmdb::{
+        self,
+        sync::{Target, compact},
+    },
 };
 use commonware_cryptography::Digest;
+
+/// Errors a [`Source`](crate::qmdb::sync::resolver::Source) returns instead of a response.
+///
+/// Serving reads local storage, so these describe the source's own state, not a bad request from
+/// a peer. A peer that sends something unusable is scored through
+/// [`Validity`](crate::qmdb::sync::resolver::Validity) instead.
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError<F: Family, D: Digest> {
+    /// The source database failed while building the response.
+    #[error("source database error: {0}")]
+    Database(#[from] qmdb::Error<F>),
+    /// The request named a target this source cannot serve.
+    #[error("invalid target: {0}")]
+    InvalidTarget(&'static str),
+    /// The wrapper holding this source has no database attached right now.
+    #[error("source missing")]
+    MissingSource,
+    /// The requested compact state is not the one this source currently holds. Compact sources
+    /// serve only their latest committed state, so they cannot answer for an older root.
+    #[error("stale target - requested {requested:?}, current {current:?}")]
+    StaleTarget {
+        requested: compact::Target<F, D>,
+        current: compact::Target<F, D>,
+    },
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError<F: Family, D: Digest> {

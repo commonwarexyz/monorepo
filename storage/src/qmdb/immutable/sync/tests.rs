@@ -1345,7 +1345,7 @@ mod compact_variable_mmr {
 
             assert!(matches!(
                 fetch_compact_state(&resolver, target).await,
-                Err(sync::compact::ServeError::MissingSource)
+                Err(sync::ServeError::MissingSource)
             ));
         });
     }
@@ -1675,7 +1675,7 @@ mod compact_variable_mmr {
                 fetch_compact_state(&source, stale_target.clone()).await;
             assert!(matches!(
                 result,
-                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                Err(sync::ServeError::StaleTarget { requested, current })
                     if requested == stale_target && current == current_target
             ));
 
@@ -1810,7 +1810,7 @@ mod compact_variable_mmr {
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Resolver(sync::compact::ServeError::StaleTarget {
+                Err(sync::Error::Resolver(sync::ServeError::StaleTarget {
                     requested,
                     current
                 })) if requested == target2 && current == target3
@@ -2119,7 +2119,7 @@ mod compact_variable_mmb {
 
             assert!(matches!(
                 fetch_compact_state(&resolver, target).await,
-                Err(sync::compact::ServeError::MissingSource)
+                Err(sync::ServeError::MissingSource)
             ));
         });
     }
@@ -2452,7 +2452,7 @@ mod compact_variable_mmb {
                 fetch_compact_state(&source, stale_target.clone()).await;
             assert!(matches!(
                 result,
-                Err(sync::compact::ServeError::StaleTarget { requested, current })
+                Err(sync::ServeError::StaleTarget { requested, current })
                     if requested == stale_target && current == current_target
             ));
 
@@ -2588,7 +2588,7 @@ mod compact_variable_mmb {
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Resolver(sync::compact::ServeError::StaleTarget {
+                Err(sync::Error::Resolver(sync::ServeError::StaleTarget {
                     requested,
                     current
                 })) if requested == target2 && current == target3

@@ -59,7 +59,7 @@ use crate::{
         },
         operation::Key,
         sync::{
-            EngineError, Error,
+            EngineError, Error, ServeError,
             resolver::{Request, Response, Source, Validity},
         },
         verify_proof,
@@ -182,26 +182,6 @@ pub struct ValidatedState<F: Family, Op, D: Digest> {
     pub last_commit_proof: Proof<F, D>,
     /// The target root this state was validated against.
     pub root: D,
-}
-
-/// Resolver-side errors for compact state serving.
-#[derive(Debug, thiserror::Error)]
-pub enum ServeError<F: Family, D: Digest> {
-    /// The source database returned an error while building compact state.
-    #[error("compact source database error: {0}")]
-    Database(#[from] qmdb::Error<F>),
-    /// The caller requested a target that compact sync cannot serve.
-    #[error("invalid compact target: {0}")]
-    InvalidTarget(&'static str),
-    /// The resolver wrapper did not currently hold a database.
-    #[error("compact source missing")]
-    MissingSource,
-    /// The caller requested a target different from the source's current witness.
-    #[error("stale compact target - requested {requested:?}, current {current:?}")]
-    StaleTarget {
-        requested: Target<F, D>,
-        current: Target<F, D>,
-    },
 }
 
 /// A [`Source`] of compact state whose associated types match a specific `Database`.
