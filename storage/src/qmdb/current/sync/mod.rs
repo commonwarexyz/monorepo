@@ -379,7 +379,8 @@ impl_current_sync_database!(
 /// operates on the ops root, which is `any`'s root.
 ///
 /// Every `current` alias resolves to this one generic, so one implementation covers all four.
-impl<F, E, U, C, I, H, const N: usize, S> crate::qmdb::sync::ProofSource
+impl<F, E, U, C, I, H, const N: usize, S>
+    crate::qmdb::sync::Source<crate::qmdb::sync::resolver::Request<F>>
     for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -399,7 +400,13 @@ where
     async fn serve(
         &self,
         request: crate::qmdb::sync::resolver::Request<F>,
-    ) -> Result<crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>, qmdb::Error<F>> {
+    ) -> Result<
+        (
+            crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>,
+            crate::qmdb::sync::resolver::Validity,
+        ),
+        qmdb::Error<F>,
+    > {
         self.any.serve(request).await
     }
 }

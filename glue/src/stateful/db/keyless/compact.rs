@@ -362,7 +362,8 @@ where
             Family = F,
             Op = Operation<F, VariableEncoding<V>>,
             Digest = H::Digest,
-        >,
+        > + Clone
+        + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 

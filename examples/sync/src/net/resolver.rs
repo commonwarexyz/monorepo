@@ -132,7 +132,7 @@ where
     }
 }
 
-impl<Op, D> sync::resolver::Resolver for Resolver<Op, D>
+impl<Op, D> sync::resolver::Source<sync::resolver::Request<mmr::Family>> for Resolver<Op, D>
 where
     Op: Clone + Read + EncodeShared,
     Op::Cfg: IsUnit,
@@ -143,9 +143,9 @@ where
     type Op = Op;
     type Error = crate::Error;
 
-    async fn fetch(
+    async fn serve(
         &self,
-        request: sync::resolver::Request<Self::Family>,
+        request: sync::resolver::Request<mmr::Family>,
     ) -> Result<
         (
             sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,

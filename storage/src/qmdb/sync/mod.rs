@@ -23,7 +23,7 @@ pub(crate) use database::{
 };
 
 pub mod resolver;
-pub(crate) use resolver::{ProofSource, Resolver};
+pub(crate) use resolver::Source;
 
 mod target;
 pub use target::Target;
@@ -31,18 +31,24 @@ pub use target::Target;
 pub mod compact;
 mod requests;
 
-/// A [`Resolver`] whose associated types match a specific `Database`.
+/// A [`Source`] of operations whose associated types match a specific `Database`.
 ///
-/// Blanket-impled for any matching `Resolver`, so callers never implement this directly.
+/// Blanket-impled for any matching `Source`, so callers never implement this directly.
+/// `Clone` and `'static` are required by the engine, which clones the source once per
+/// in-flight request; they are not required of sources in general.
 pub trait DbResolver<DB: Database>:
-    Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+    Source<resolver::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+    + Clone
+    + 'static
 {
 }
 
 impl<DB, R> DbResolver<DB> for R
 where
     DB: Database,
-    R: Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
+    R: Source<resolver::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+        + Clone
+        + 'static,
 {
 }
 

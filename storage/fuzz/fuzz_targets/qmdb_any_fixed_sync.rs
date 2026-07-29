@@ -127,11 +127,13 @@ async fn test_sync<F, R>(
 ) -> bool
 where
     F: MerkleFamily,
-    R: sync::resolver::Resolver<
+    R: sync::resolver::Source<
+            sync::resolver::Request<F>,
             Family = F,
             Digest = commonware_cryptography::sha256::Digest,
             Op = FixedOperation<F, Key, Value>,
-        >,
+        > + Clone
+        + 'static,
 {
     let db_config = test_config(test_name, &context);
     let expected_root = target.root;

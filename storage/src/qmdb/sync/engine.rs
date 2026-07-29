@@ -8,7 +8,7 @@ use crate::{
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            resolver::{Request, Resolver, Response, Validity},
+            resolver::{Request, Response, Source, Validity},
             target::validate_update,
         },
     },
@@ -29,8 +29,11 @@ use mpsc::error::TryRecvError;
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
-type Error<DB, R> =
-    qmdb::sync::Error<<DB as Database>::Family, <R as Resolver>::Error, <DB as Database>::Digest>;
+type Error<DB, R> = qmdb::sync::Error<
+    <DB as Database>::Family,
+    <R as Source<Request<<DB as Database>::Family>>>::Error,
+    <DB as Database>::Digest,
+>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -315,7 +318,7 @@ where
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, start_loc, target_size, async move {
-                    let result = resolver.fetch(request).await;
+                    let result = resolver.serve(request).await;
                     IndexedFetchResult { id, result }
                 });
         }
@@ -356,7 +359,7 @@ where
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, gap_range.start, target_size, async move {
-                    let result = resolver.fetch(request).await;
+                    let result = resolver.serve(request).await;
                     IndexedFetchResult { id, result }
                 });
         }
@@ -863,15 +866,15 @@ mod tests {
     #[derive(Clone)]
     struct TestResolver;
 
-    impl Resolver for TestResolver {
+    impl Source<Request<MmrFamily>> for TestResolver {
         type Digest = sha256::Digest;
         type Error = Infallible;
         type Family = MmrFamily;
         type Op = i32;
 
-        async fn fetch(
+        async fn serve(
             &self,
-            _request: Request<Self::Family>,
+            _request: Request<MmrFamily>,
         ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
             Ok((
                 Response::new(

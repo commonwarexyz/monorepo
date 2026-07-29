@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::resolver::{Request, Resolver as SyncResolver, Response},
+    qmdb::sync::resolver::{Request, Response, Source as SyncSource},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -26,11 +26,12 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Shared<DB> as SyncResolver>::Op;
-type DatabaseRoot<DB> = <Shared<DB> as SyncResolver>::Digest;
-type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
+type Op<F, DB> = <Shared<DB> as SyncSource<Request<F>>>::Op;
+type DatabaseRoot<F, DB> = <Shared<DB> as SyncSource<Request<F>>>::Digest;
+type SyncMailbox<F, DB> = Mailbox<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
+type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
 type Pending<F, Op, D> = mailbox::Delivery<F, Op, D>;
-type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
+type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -96,12 +97,13 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Shared<DB>: SyncResolver<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    DB: Send + Sync + 'static,
+    Shared<DB>: SyncSource<Request<F>, Family = F>,
+    Op<F, DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>>,
+    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
     state: State<DB>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, DB>,
@@ -114,8 +116,9 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Shared<DB>: SyncResolver<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    DB: Send + Sync + 'static,
+    Shared<DB>: SyncSource<Request<F>, Family = F>,
+    Op<F, DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
     pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
@@ -223,7 +226,7 @@ where
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>,
+        message: SyncMessage<F, DB>,
     ) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachDatabase(db) => {
@@ -290,7 +293,7 @@ where
         // `max_ops` is sourced from the original local request key above.
         let max_ops = key.max_ops.get() as usize;
         let decoded =
-            match handler::Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &max_ops) {
+            match handler::Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(value, &max_ops) {
                 Ok(decoded) => decoded,
                 Err(_) => {
                     self.pending.insert(key, subscribers);
@@ -362,7 +365,7 @@ where
             // start of the range it asked for.
             request = request.retaining_from(key.start_loc);
         }
-        let result = database.fetch(request).await;
+        let result = database.serve(request).await;
 
         let Ok((served, _validity)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
@@ -436,7 +439,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as SyncResolver>::Op;
+    type TestOp = <Shared<TestDb> as SyncSource<Request<mmr::Family>>>::Op;
 
     type TestActor = Actor<
         deterministic::Context,

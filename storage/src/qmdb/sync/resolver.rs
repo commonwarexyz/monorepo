@@ -107,70 +107,95 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, 
 /// `None` when the response came from local storage, where there is no peer to score.
 pub type Validity = Option<oneshot::Sender<bool>>;
 
-/// A handle a sync client fetches operations through. May be local or remote.
-pub trait Resolver: Send + Sync + Clone + 'static {
-    /// The merkle family backing the resolver's proofs
-    type Family: Family;
-
-    /// The digest type used in proofs returned by the resolver
-    type Digest: Digest;
-
-    /// The type of operations returned by the resolver
-    type Op;
-
-    /// The error type returned by the resolver
-    type Error: std::error::Error + Send + 'static;
-
-    /// Fetch the operations `request` asks for.
-    ///
-    /// Implementations may `select!` on it to abort in-flight work early.
-    #[allow(clippy::type_complexity)]
-    fn fetch<'a>(
-        &'a self,
-        request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
-    > + Send
-    + 'a;
-}
-
-/// A source of QMDB operations that can prove them.
+/// Anything that can answer question `Q`.
 ///
-/// A live database is a source; so is an owned snapshot; so is a lock around either, because
-/// wrapping a source yields a source. That is what lets a single [`Resolver`] implementation
-/// cover every shape a source is held in.
-pub trait ProofSource: Send + Sync {
+/// A database is a source; so is an owned snapshot; so is a lock around either, because
+/// wrapping a source yields a source; so is a handle to a remote peer. One implementation of
+/// this trait therefore covers both where the data lives and how it is reached.
+pub trait Source<Q: Send + 'static>: Send + Sync {
     /// The merkle family backing this source's proofs.
     type Family: Family;
 
     /// The digest type used in this source's proofs.
     type Digest: Digest;
 
-    /// The type of operations this source yields. Served across threads, so it is [`Send`].
-    type Op: Send;
+    /// The type of operations this source yields.
+    type Op;
 
     /// Why this source could not answer.
     type Error: std::error::Error + Send + 'static;
 
-    /// Answer one request.
+    /// Answer one question.
     ///
-    /// When `request.retain_from` is set, the response also carries the pins at that
-    /// boundary. They are authenticated by the proof in the same response, which is why
-    /// there is no way to ask for them on their own.
     #[allow(clippy::type_complexity)]
     fn serve<'a>(
         &'a self,
-        request: Request<Self::Family>,
+        question: Q,
     ) -> impl Future<
-        Output = Result<Response<Self::Family, Self::Op, Self::Digest>, Self::Error>,
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
     > + Send
     + 'a;
 }
 
+/// An `Arc` around a source is a source.
+impl<T, Q> Source<Q> for Arc<T>
+where
+    T: Source<Q> + ?Sized,
+    Q: Send + 'static,
+{
+    type Family = T::Family;
+    type Digest = T::Digest;
+    type Op = T::Op;
+    type Error = T::Error;
+
+    fn serve<'a>(
+        &'a self,
+        question: Q,
+    ) -> impl Future<
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
+    > + Send
+    + 'a {
+        T::serve(self, question)
+    }
+}
+
+/// A source that may be absent is a source that may report [`ServeError::MissingSource`].
+///
+/// This is what makes `Arc<Lock<Option<Db>>>` work: the `Option` contributes the missing case,
+/// the lock contributes the guard, and the `Arc` is transparent.
+impl<T, Q> Source<Q> for Option<T>
+where
+    T: Source<Q>,
+    Q: Send + 'static,
+    ServeError<T::Family, T::Digest>: From<T::Error>,
+{
+    type Family = T::Family;
+    type Digest = T::Digest;
+    type Op = T::Op;
+    type Error = ServeError<T::Family, T::Digest>;
+
+    async fn serve(
+        &self,
+        question: Q,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+        let source = self.as_ref().ok_or(ServeError::MissingSource)?;
+        Ok(source.serve(question).await?)
+    }
+}
+
 /// A lock around a source is a source.
+///
+/// The guard is held across the whole call, so a writer cannot prune the pins out from under
+/// the proof. A macro rather than one implementation generic over the lock because the two
+/// lock types share no trait, and giving them one would make this overlap with the
+/// implementation for [`Arc`].
 macro_rules! impl_locked_source {
     ($lock:ident) => {
-        impl<T: ProofSource> ProofSource for $lock<T> {
+        impl<T, Q> Source<Q> for $lock<T>
+        where
+            T: Source<Q>,
+            Q: Send + 'static,
+        {
             type Family = T::Family;
             type Digest = T::Digest;
             type Op = T::Op;
@@ -178,28 +203,9 @@ macro_rules! impl_locked_source {
 
             async fn serve(
                 &self,
-                request: Request<Self::Family>,
-            ) -> Result<Response<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.read().await.serve(request).await
-            }
-        }
-
-        impl<T: ProofSource> ProofSource for $lock<Option<T>>
-        where
-            ServeError<T::Family, T::Digest>: From<T::Error>,
-        {
-            type Family = T::Family;
-            type Digest = T::Digest;
-            type Op = T::Op;
-            type Error = ServeError<T::Family, T::Digest>;
-
-            async fn serve(
-                &self,
-                request: Request<Self::Family>,
-            ) -> Result<Response<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let source = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(source.serve(request).await?)
+                question: Q,
+            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+                self.read().await.serve(question).await
             }
         }
     };
@@ -207,24 +213,6 @@ macro_rules! impl_locked_source {
 
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
-
-/// Serve from any source, however it is held.
-impl<T> Resolver for Arc<T>
-where
-    T: ProofSource + 'static,
-{
-    type Family = T::Family;
-    type Digest = T::Digest;
-    type Op = T::Op;
-    type Error = T::Error;
-
-    async fn fetch(
-        &self,
-        request: Request<Self::Family>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-        Ok((T::serve(self, request).await?, None))
-    }
-}
 
 /// Answer a [`Request`] from a database's inherent proof reads.
 ///
@@ -237,7 +225,10 @@ macro_rules! serve_request {
             &self,
             request: $crate::qmdb::sync::resolver::Request<F>,
         ) -> Result<
-            $crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>,
+            (
+                $crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>,
+                $crate::qmdb::sync::resolver::Validity,
+            ),
             $crate::qmdb::Error<F>,
         > {
             let source = self;
@@ -248,10 +239,9 @@ macro_rules! serve_request {
                 Some(boundary) => Some(source.pinned_nodes_at(boundary).await?),
                 None => None,
             };
-            Ok($crate::qmdb::sync::resolver::Response::new(
-                proof,
-                operations,
-                pinned_nodes,
+            Ok((
+                $crate::qmdb::sync::resolver::Response::new(proof, operations, pinned_nodes),
+                None,
             ))
         }
     };
@@ -259,7 +249,7 @@ macro_rules! serve_request {
 
 /// Every `any` database alias resolves to this one generic, so one implementation covers all
 /// four of them.
-impl<F, E, U, C, I, H, const N: usize, S> ProofSource
+impl<F, E, U, C, I, H, const N: usize, S> Source<Request<F>>
     for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
@@ -281,7 +271,8 @@ where
     serve_request!();
 }
 /// Both `immutable` aliases resolve to this one generic.
-impl<F, E, K, V, C, H, T, S> ProofSource for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> Source<Request<F>>
+    for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -306,7 +297,7 @@ where
 }
 
 /// Both `keyless` aliases resolve to this one generic.
-impl<F, E, V, C, H, S> ProofSource for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> Source<Request<F>> for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -341,23 +332,30 @@ pub(crate) mod tests {
 
     macro_rules! assert_resolver_variants {
         ($db:ty) => {
-            assert_resolver::<Arc<$db>>();
-            assert_resolver::<Arc<AsyncRwLock<$db>>>();
-            assert_resolver::<Arc<AsyncRwLock<Option<$db>>>>();
-            assert_resolver::<Arc<TracedAsyncRwLock<$db>>>();
-            assert_resolver::<Arc<TracedAsyncRwLock<Option<$db>>>>();
+            assert_serves::<mmr::Family, Arc<$db>>();
+            assert_serves::<mmr::Family, Arc<AsyncRwLock<$db>>>();
+            assert_serves::<mmr::Family, Arc<AsyncRwLock<Option<$db>>>>();
+            assert_serves::<mmr::Family, Arc<TracedAsyncRwLock<$db>>>();
+            assert_serves::<mmr::Family, Arc<TracedAsyncRwLock<Option<$db>>>>();
         };
     }
 
-    fn assert_resolver<R: Resolver>() {}
+    fn assert_serves<F: Family, R: Source<Request<F>>>() {}
 
     /// A resolver that always fails.
-    #[derive(Clone)]
     pub struct FailResolver<F: Family, Op, D> {
         _phantom: PhantomData<(F, Op, D)>,
     }
 
-    impl<F, Op, D> Resolver for FailResolver<F, Op, D>
+    impl<F: Family, Op, D> Clone for FailResolver<F, Op, D> {
+        fn clone(&self) -> Self {
+            Self {
+                _phantom: PhantomData,
+            }
+        }
+    }
+
+    impl<F, Op, D> Source<Request<F>> for FailResolver<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -368,7 +366,7 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn fetch(
+        async fn serve(
             &self,
             _request: Request<F>,
         ) -> Result<(Response<F, Op, D>, Validity), qmdb::Error<F>> {

@@ -186,20 +186,21 @@ impl<DB> WriteSlot<'_, DB> {
     }
 }
 
-/// Serve full sync fetches by delegating to the storage impl on the inner lock.
-impl<DB> resolver::Resolver for Shared<DB>
+/// Serve any sync question by delegating to the storage implementation on the inner lock.
+impl<DB, Q> resolver::Source<Q> for Shared<DB>
 where
     DB: Send + Sync + 'static,
-    Inner<DB>: resolver::Resolver,
+    Q: Send + 'static,
+    Inner<DB>: resolver::Source<Q>,
 {
-    type Family = <Inner<DB> as resolver::Resolver>::Family;
-    type Digest = <Inner<DB> as resolver::Resolver>::Digest;
-    type Op = <Inner<DB> as resolver::Resolver>::Op;
-    type Error = <Inner<DB> as resolver::Resolver>::Error;
+    type Family = <Inner<DB> as resolver::Source<Q>>::Family;
+    type Digest = <Inner<DB> as resolver::Source<Q>>::Digest;
+    type Op = <Inner<DB> as resolver::Source<Q>>::Op;
+    type Error = <Inner<DB> as resolver::Source<Q>>::Error;
 
-    async fn fetch(
+    async fn serve(
         &self,
-        request: resolver::Request<Self::Family>,
+        question: Q,
     ) -> Result<
         (
             resolver::Response<Self::Family, Self::Op, Self::Digest>,
@@ -207,7 +208,7 @@ where
         ),
         Self::Error,
     > {
-        self.0.fetch(request).await
+        self.0.serve(question).await
     }
 }
 

@@ -38,7 +38,7 @@ use commonware_storage::{
             db::Db,
         },
         operation::Key,
-        sync::{self, Target as CurrentSyncTarget, resolver::Resolver},
+        sync::{self, Target as CurrentSyncTarget, resolver::{Request, Source}},
     },
     translator::Translator,
 };
@@ -965,11 +965,13 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    R: Resolver<
+    R: Source<
+            Request<F>,
             Family = F,
             Op = Operation<F, unordered::Update<K, FixedEncoding<V>>>,
             Digest = H::Digest,
-        >,
+        > + Clone
+        + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1020,11 +1022,13 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    R: Resolver<
+    R: Source<
+            Request<F>,
             Family = F,
             Op = Operation<F, ordered::Update<K, FixedEncoding<V>>>,
             Digest = H::Digest,
-        >,
+        > + Clone
+        + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1076,11 +1080,13 @@ where
     T: Translator,
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
-    R: Resolver<
+    R: Source<
+            Request<F>,
             Family = F,
             Op = Operation<F, unordered::Update<K, VariableEncoding<V>>>,
             Digest = H::Digest,
-        >,
+        > + Clone
+        + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1132,11 +1138,13 @@ where
     T: Translator,
     S: Strategy,
     Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
-    R: Resolver<
+    R: Source<
+            Request<F>,
             Family = F,
             Op = Operation<F, ordered::Update<K, VariableEncoding<V>>>,
             Digest = H::Digest,
-        >,
+        > + Clone
+        + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
