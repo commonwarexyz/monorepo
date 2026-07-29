@@ -85,64 +85,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_twins_mutator"
-path = "fuzz_targets/simplex_ed25519_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_ed25519_shuffled_twins_mutator"
 path = "fuzz_targets/simplex_ed25519_shuffled_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_faulty_msg"
-path = "fuzz_targets/simplex_ed25519_faulty_msg.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_selected_minpk_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_threshold_selected_minpk_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minpk_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minsig_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_threshold_minsig_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minpk_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_multisig_minpk_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minsig_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minpk"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk.rs"
 test = false
 doc = false
 bench = false
@@ -162,43 +106,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_multisig_minsig"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_secp256r1"
 path = "fuzz_targets/simplex_secp256r1.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_twins_mutator"
-path = "fuzz_targets/simplex_secp256r1_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_faulty_msg"
-path = "fuzz_targets/simplex_secp256r1_faulty_msg.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_node"
-path = "fuzz_targets/simplex_ed25519_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_node_recovery"
-path = "fuzz_targets/simplex_ed25519_node_recovery.rs"
 test = false
 doc = false
 bench = false
@@ -220,41 +129,6 @@ bench = false
 [[bin]]
 name = "simplex_id_node_recovery_stable_term"
 path = "fuzz_targets/simplex_id_node_recovery_stable_term.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_node"
-path = "fuzz_targets/simplex_secp256r1_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minpk_node"
-path = "fuzz_targets/simplex_bls12381_multisig_minpk_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minsig_node"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minpk_node"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minsig_node"
-path = "fuzz_targets/simplex_bls12381_threshold_minsig_node.rs"
 test = false
 doc = false
 bench = false
@@ -449,20 +323,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_faulty_net"
-path = "fuzz_targets/simplex_ed25519_faulty_net.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_twins_campaign"
-path = "fuzz_targets/simplex_ed25519_twins_campaign.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_id_byzzfuzz"
 path = "fuzz_targets/simplex_id_byzzfuzz.rs"
 test = false
@@ -526,71 +386,57 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_single_node_standard"
-path = "fuzz_targets/marshal_single_node_standard.rs"
+name = "marshal_actor_standard_inline_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_inline_cert_mock.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_single_node_coding"
-path = "fuzz_targets/marshal_single_node_coding.rs"
+name = "marshal_actor_standard_deferred_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_deferred_cert_mock.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_standard_inline"
-path = "fuzz_targets/marshal_standard_inline.rs"
+name = "marshal_actor_standard_store_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_store_cert_mock.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_standard_deferred"
-path = "fuzz_targets/marshal_standard_deferred.rs"
+name = "marshal_e2e_standard_deferred_cert_mock_disrupter"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_disrupter.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_store_standard"
-path = "fuzz_targets/marshal_store_standard.rs"
+name = "marshal_e2e_standard_app_cert_mock_twins"
+path = "fuzz_targets/marshal_e2e_standard_app_cert_mock_twins.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_liveness_deferred"
-path = "fuzz_targets/marshal_multi_node_liveness_deferred.rs"
+name = "marshal_e2e_standard_deferred_id_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_deferred_id_twins_split_header.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_twins"
-path = "fuzz_targets/marshal_multi_node_twins.rs"
+name = "marshal_e2e_standard_inline_id_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_inline_id_twins_split_header.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "marshal_multi_node_twins_id_split_header_deferred"
-path = "fuzz_targets/marshal_multi_node_twins_id_split_header_deferred.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_multi_node_twins_id_split_header_inline"
-path = "fuzz_targets/marshal_multi_node_twins_id_split_header_inline.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "marshal_multi_node_liveness_coding"
-path = "fuzz_targets/marshal_multi_node_liveness_coding.rs"
+name = "marshal_e2e_coding_cert_mock_disrupter"
+path = "fuzz_targets/marshal_e2e_coding_cert_mock_disrupter.rs"
 test = false
 doc = false
 bench = false

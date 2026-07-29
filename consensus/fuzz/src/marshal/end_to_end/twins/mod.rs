@@ -8,7 +8,7 @@
 
 mod layout;
 mod observer;
-mod stack;
+pub(crate) mod stack;
 
 use super::{
     app::{
@@ -61,11 +61,11 @@ static EMPTY_CASE_REPORTED: AtomicBool = AtomicBool::new(false);
 const MAX_CASES: usize = 64;
 const ATTACK_MAX_CASES: usize = 2048;
 
-type SchemeOf<P> = <P as Simplex>::Scheme;
-type PublicKeyOf<P> =
+pub(crate) type SchemeOf<P> = <P as Simplex>::Scheme;
+pub(crate) type PublicKeyOf<P> =
     <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
-type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
-type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
+pub(crate) type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
+pub(crate) type B<P> = MockBlock<Sha256Digest, Ctx<P>>;
 type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
 type BackendMarker<P, A, M> = std::marker::PhantomData<fn() -> (P, A, M)>;
 
@@ -330,7 +330,7 @@ where
             state.validators[idx].mailbox.clone(),
         );
         state.validators[idx].start(primary_builder.clone());
-        start_engine::<P, _, _>(
+        start_engine::<P, _, _, _>(
             context,
             oracle,
             validator,
@@ -413,7 +413,7 @@ where
                 self.stack_label.clone(),
             ),
         };
-        start_engine::<P, _, _>(
+        start_engine::<P, _, _, _>(
             context.child("honest"),
             oracle,
             validator,
@@ -457,8 +457,10 @@ where
     }
 }
 
-/// Run the shared general Twins campaign.
-pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
+/// Crypto: `SimplexCertificateMock`. Marshal: standard, wrapper from fuzz
+/// input. Cluster: `N4F1C3` Twins, general campaign. Liveness: checked.
+/// App: from fuzz input (always-accept or faulty).
+pub fn fuzz_marshal_standard_twins(input: MarshalTwinsInput) {
     let (selection, entropy) = select_general_stack(&input.raw_bytes);
     fuzz_marshal_twins_with::<
         SimplexCertificateMock,
@@ -467,9 +469,9 @@ pub fn fuzz_marshal_twins(input: MarshalTwinsInput) {
     >(input, CasePolicy::General, selection, entropy);
 }
 
-/// Run the standard-marshal Twins mutator with ID crypto and the focused
-/// split-header strategy.
-pub fn fuzz_marshal_twins_id_split_header(mut input: MarshalTwinsInput) {
+/// Crypto: `SimplexId`. Marshal: standard, deferred. Cluster: `N4F1C3` Twins,
+/// `SplitHeader` strategy. Liveness: checked. App: fixed always-accept.
+pub fn fuzz_marshal_standard_deferred_id_twins_split_header(mut input: MarshalTwinsInput) {
     input.strategy = StrategyChoice::SplitHeader {
         fault_rounds: input.rounds.into(),
         fault_rounds_bound: input.rounds.into(),
@@ -490,9 +492,9 @@ pub fn fuzz_marshal_twins_id_split_header(mut input: MarshalTwinsInput) {
     );
 }
 
-/// Run the Inline standard-marshal Twins mutator with ID crypto and the
-/// focused split-header strategy.
-pub fn fuzz_marshal_twins_id_split_header_inline(mut input: MarshalTwinsInput) {
+/// Crypto: `SimplexId`. Marshal: standard, inline. Cluster: `N4F1C3` Twins,
+/// `SplitHeader` strategy. Liveness: checked. App: fixed always-accept.
+pub fn fuzz_marshal_standard_inline_id_twins_split_header(mut input: MarshalTwinsInput) {
     input.strategy = StrategyChoice::SplitHeader {
         fault_rounds: input.rounds.into(),
         fault_rounds_bound: input.rounds.into(),

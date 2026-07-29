@@ -68,49 +68,29 @@ Available fuzz targets (standard mode):
 - `simplex_id`
 - `simplex_cert_mock`
 - `simplex_bls12381_multisig_minpk`
-- `simplex_bls12381_multisig_minsig`
-- `simplex_bls12381_threshold_minpk`
 - `simplex_bls12381_threshold_minsig`
 
 Available fuzz targets (faulty messaging):
-- `simplex_ed25519_faulty_msg`
-- `simplex_secp256r1_faulty_msg`
 - `simplex_id_faulty_msg`
 - `simplex_cert_mock_faulty_msg`
 
 Available fuzz targets (faulty network):
-- `simplex_ed25519_faulty_net`
 - `simplex_id_faulty_net`
 - `simplex_cert_mock_faulty_net`
 
 Available fuzz targets (twins mutator):
-- `simplex_ed25519_twins_mutator`
 - `simplex_ed25519_shuffled_twins_mutator`
-- `simplex_secp256r1_twins_mutator`
 - `simplex_id_twins_mutator`
 - `simplex_cert_mock_twins_mutator`
-- `simplex_bls12381_multisig_minpk_twins_mutator`
-- `simplex_bls12381_multisig_minsig_twins_mutator`
-- `simplex_bls12381_threshold_selected_minpk_twins_mutator`
-- `simplex_bls12381_threshold_minpk_twins_mutator`
-- `simplex_bls12381_threshold_minsig_twins_mutator`
 
 Available fuzz targets (twins campaign):
-- `simplex_ed25519_twins_campaign`
 - `simplex_id_twins_campaign`
 - `simplex_cert_mock_twins_campaign`
 
 Available fuzz targets (node driver):
-- `simplex_ed25519_node`
-- `simplex_ed25519_node_recovery`
 - `simplex_id_node`
 - `simplex_id_node_recovery`
 - `simplex_id_node_recovery_stable_term`
-- `simplex_secp256r1_node`
-- `simplex_bls12381_multisig_minpk_node`
-- `simplex_bls12381_multisig_minsig_node`
-- `simplex_bls12381_threshold_minpk_node`
-- `simplex_bls12381_threshold_minsig_node`
 - `simplex_cert_mock_node`
 - `simplex_cert_mock_node_recovery`
 
@@ -129,11 +109,11 @@ The standard-wrapper targets exercise proposal, verification, certification,
 broadcast, and application-result transitions using structured libFuzzer input:
 
 ```bash
-cargo fuzz run marshal_standard_inline
-cargo fuzz run marshal_standard_deferred
-cargo fuzz run marshal_multi_node_twins
-cargo fuzz run marshal_multi_node_twins_id_split_header_deferred
-cargo fuzz run marshal_multi_node_twins_id_split_header_inline
+cargo fuzz run marshal_actor_standard_inline_cert_mock
+cargo fuzz run marshal_actor_standard_deferred_cert_mock
+cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
+cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
+cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
 ```
 
 The inline and deferred targets include split-header equivocation in their

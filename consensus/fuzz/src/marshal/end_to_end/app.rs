@@ -23,10 +23,7 @@ use commonware_consensus::{
     marshal::{
         Update,
         ancestry::Ancestry,
-        mocks::{
-            application::Application as SinkApplication, block::Block,
-            harness::S as DefaultSigningScheme,
-        },
+        mocks::{application::Application as SinkApplication, block::Block},
     },
     types::View,
 };
@@ -42,7 +39,7 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(super) struct DeliveryReporter<C>
+pub(crate) struct DeliveryReporter<C>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -56,7 +53,7 @@ impl<C> DeliveryReporter<C>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
-    pub(super) fn new(
+    pub(crate) fn new(
         validator: usize,
         application: SinkApplication<Block<Sha256Digest, C>>,
         max_pending_acks: Option<NonZeroUsize>,
@@ -72,7 +69,7 @@ where
 }
 
 /// Out-of-band registry of blocks constructed by the fuzz applications.
-pub(super) struct BlockContextRegistry<C> {
+pub(crate) struct BlockContextRegistry<C> {
     contexts: Arc<Mutex<HashMap<Sha256Digest, C>>>,
 }
 
@@ -93,19 +90,19 @@ impl<C> Clone for BlockContextRegistry<C> {
 }
 
 impl<C> BlockContextRegistry<C> {
-    pub(super) fn record(&self, digest: Sha256Digest, context: C) {
+    pub(crate) fn record(&self, digest: Sha256Digest, context: C) {
         self.contexts.lock().insert(digest, context);
     }
 }
 
 impl<C: Clone> BlockContextRegistry<C> {
-    pub(super) fn get(&self, digest: &Sha256Digest) -> Option<C> {
+    pub(crate) fn get(&self, digest: &Sha256Digest) -> Option<C> {
         self.contexts.lock().get(digest).cloned()
     }
 }
 
 /// Honest block-building application, generic over the consensus context type.
-pub struct AlwaysAcceptBlockBuilderApp<C, S = DefaultSigningScheme>
+pub struct AlwaysAcceptBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -157,12 +154,12 @@ where
         }
     }
 
-    pub(super) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
+    pub(crate) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
         self.block_contexts = Some(block_contexts);
         self
     }
 
-    pub(super) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
+    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
         self.reporter = Some(reporter);
         self
     }
@@ -250,7 +247,7 @@ const FAULT_BEHAVIOR_VIEWS: usize = MAX_TWINS_ROUNDS as usize + 1;
 
 /// Honest application selected by the final byte of the general Twins input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ApplicationChoice {
+pub(crate) enum ApplicationChoice {
     AlwaysAccept,
     /// May temporarily omit proposals, delay verification, or reject blocks.
     /// These behaviors are deterministic and shared by all honest validators.
@@ -259,7 +256,7 @@ pub(super) enum ApplicationChoice {
 }
 
 impl ApplicationChoice {
-    pub(super) const fn from_selector(selector: u8) -> Self {
+    pub(crate) const fn from_selector(selector: u8) -> Self {
         match selector % 2 {
             0 => Self::AlwaysAccept,
             _ => Self::Faulty,
@@ -281,7 +278,7 @@ impl fmt::Display for ApplicationChoice {
 /// The table is generated once from fuzz bytes, then indexed by view rather
 /// than call order so honest validators make the same validity decision.
 #[derive(Clone, Copy)]
-pub(super) struct FaultyConfig {
+pub(crate) struct FaultyConfig {
     omit_proposal: [bool; FAULT_BEHAVIOR_VIEWS],
     verification: [VerificationBehavior; FAULT_BEHAVIOR_VIEWS],
     fault_injection_through: View,
@@ -295,7 +292,7 @@ enum VerificationBehavior {
 }
 
 impl FaultyConfig {
-    pub(super) fn new(rng: &mut FuzzRng, fault_injection_through: View) -> Self {
+    pub(crate) fn new(rng: &mut FuzzRng, fault_injection_through: View) -> Self {
         let mut omit_proposal = [false; FAULT_BEHAVIOR_VIEWS];
         let mut verification = [VerificationBehavior::Accept; FAULT_BEHAVIOR_VIEWS];
         for view in 0..FAULT_BEHAVIOR_VIEWS {
@@ -346,7 +343,7 @@ impl FaultyConfig {
             .map_or(VerificationBehavior::Accept, |view| self.verification[view])
     }
 
-    pub(super) fn rejects<C>(&self, context: &C) -> bool
+    pub(crate) fn rejects<C>(&self, context: &C) -> bool
     where
         C: Codec<Cfg = ()> + Viewable,
     {
@@ -356,7 +353,7 @@ impl FaultyConfig {
 
 /// Block-building application that explores transient construction failures,
 /// verification latency, and deterministic application rejection.
-pub(super) struct FaultyBlockBuilderApp<C, S = DefaultSigningScheme>
+pub(crate) struct FaultyBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -368,7 +365,7 @@ impl<C, S> FaultyBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
-    pub(super) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
+    pub(crate) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
         let inner = match verification_delay {
             Some((view, delay)) => {
                 AlwaysAcceptBlockBuilderApp::with_verification_delay(view, delay)
@@ -378,12 +375,12 @@ where
         Self { inner, config }
     }
 
-    pub(super) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
+    pub(crate) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
         self.inner = self.inner.with_block_contexts(block_contexts);
         self
     }
 
-    pub(super) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
+    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
         self.inner = self.inner.with_reporter(reporter);
         self
     }
@@ -454,7 +451,7 @@ where
 }
 
 /// Runtime-selected application for the shared general Twins corpus.
-pub(super) enum SelectedBlockBuilderApp<C, S = DefaultSigningScheme>
+pub(crate) enum SelectedBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
@@ -466,7 +463,7 @@ impl<C, S> SelectedBlockBuilderApp<C, S>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
-    pub(super) fn new(
+    pub(crate) fn new(
         choice: ApplicationChoice,
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
@@ -487,7 +484,7 @@ where
         }
     }
 
-    pub(super) fn with_block_contexts(self, block_contexts: BlockContextRegistry<C>) -> Self {
+    pub(crate) fn with_block_contexts(self, block_contexts: BlockContextRegistry<C>) -> Self {
         match self {
             Self::AlwaysAccept(application) => {
                 Self::AlwaysAccept(application.with_block_contexts(block_contexts))
@@ -498,14 +495,14 @@ where
         }
     }
 
-    pub(super) fn with_reporter(self, reporter: DeliveryReporter<C>) -> Self {
+    pub(crate) fn with_reporter(self, reporter: DeliveryReporter<C>) -> Self {
         match self {
             Self::AlwaysAccept(inner) => Self::AlwaysAccept(inner.with_reporter(reporter)),
             Self::Faulty(inner) => Self::Faulty(inner.with_reporter(reporter)),
         }
     }
 
-    pub(super) fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &C) -> bool
+    pub(crate) fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &C) -> bool
     where
         C: Codec<Cfg = ()> + Viewable,
     {
