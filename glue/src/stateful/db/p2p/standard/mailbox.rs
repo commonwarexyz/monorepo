@@ -1,7 +1,7 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
 use super::handler;
-use crate::stateful::db::{AttachableResolver, Shared};
+use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -11,33 +11,6 @@ use commonware_storage::{
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future, num::NonZeroU64};
-
-struct CancelGuard<DB, F: Family, Op, D: Digest> {
-    sender: Sender<Message<DB, F, Op, D>>,
-    request: Option<handler::Request<F>>,
-}
-
-impl<DB, F: Family, Op, D: Digest> CancelGuard<DB, F, Op, D> {
-    const fn new(sender: Sender<Message<DB, F, Op, D>>, request: handler::Request<F>) -> Self {
-        Self {
-            sender,
-            request: Some(request),
-        }
-    }
-
-    const fn disarm(&mut self) {
-        self.request = None;
-    }
-}
-
-impl<DB, F: Family, Op, D: Digest> Drop for CancelGuard<DB, F, Op, D> {
-    fn drop(&mut self) {
-        let Some(request) = self.request.take() else {
-            return;
-        };
-        let _ = self.sender.enqueue(Message::CancelOperations { request });
-    }
-}
 
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
@@ -182,7 +155,8 @@ where
             request: request.clone(),
             response: response_tx,
         });
-        let mut cancel = CancelGuard::new(self.sender.clone(), request);
+        let mut cancel =
+            CancelGuard::new(self.sender.clone(), Message::CancelOperations { request });
         let result = response_rx.await;
         cancel.disarm();
         result.map_err(|_| ResponseDropped)?
