@@ -85,64 +85,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_twins_mutator"
-path = "fuzz_targets/simplex_ed25519_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_ed25519_shuffled_twins_mutator"
 path = "fuzz_targets/simplex_ed25519_shuffled_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_faulty_msg"
-path = "fuzz_targets/simplex_ed25519_faulty_msg.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_selected_minpk_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_threshold_selected_minpk_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minpk_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minsig_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_threshold_minsig_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minpk_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_multisig_minpk_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minsig_twins_mutator"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minpk"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk.rs"
 test = false
 doc = false
 bench = false
@@ -162,43 +106,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_multisig_minsig"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_secp256r1"
 path = "fuzz_targets/simplex_secp256r1.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_twins_mutator"
-path = "fuzz_targets/simplex_secp256r1_twins_mutator.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_faulty_msg"
-path = "fuzz_targets/simplex_secp256r1_faulty_msg.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_node"
-path = "fuzz_targets/simplex_ed25519_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_node_recovery"
-path = "fuzz_targets/simplex_ed25519_node_recovery.rs"
 test = false
 doc = false
 bench = false
@@ -220,41 +129,6 @@ bench = false
 [[bin]]
 name = "simplex_id_node_recovery_stable_term"
 path = "fuzz_targets/simplex_id_node_recovery_stable_term.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_node"
-path = "fuzz_targets/simplex_secp256r1_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minpk_node"
-path = "fuzz_targets/simplex_bls12381_multisig_minpk_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_multisig_minsig_node"
-path = "fuzz_targets/simplex_bls12381_multisig_minsig_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minpk_node"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk_node.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_bls12381_threshold_minsig_node"
-path = "fuzz_targets/simplex_bls12381_threshold_minsig_node.rs"
 test = false
 doc = false
 bench = false
@@ -444,20 +318,6 @@ bench = false
 [[bin]]
 name = "simplex_cert_mock_twins_mutator_state_cov"
 path = "fuzz_targets/simplex_cert_mock_twins_mutator_state_cov.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_faulty_net"
-path = "fuzz_targets/simplex_ed25519_faulty_net.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_ed25519_twins_campaign"
-path = "fuzz_targets/simplex_ed25519_twins_campaign.rs"
 test = false
 doc = false
 bench = false

@@ -68,49 +68,29 @@ Available fuzz targets (standard mode):
 - `simplex_id`
 - `simplex_cert_mock`
 - `simplex_bls12381_multisig_minpk`
-- `simplex_bls12381_multisig_minsig`
-- `simplex_bls12381_threshold_minpk`
 - `simplex_bls12381_threshold_minsig`
 
 Available fuzz targets (faulty messaging):
-- `simplex_ed25519_faulty_msg`
-- `simplex_secp256r1_faulty_msg`
 - `simplex_id_faulty_msg`
 - `simplex_cert_mock_faulty_msg`
 
 Available fuzz targets (faulty network):
-- `simplex_ed25519_faulty_net`
 - `simplex_id_faulty_net`
 - `simplex_cert_mock_faulty_net`
 
 Available fuzz targets (twins mutator):
-- `simplex_ed25519_twins_mutator`
 - `simplex_ed25519_shuffled_twins_mutator`
-- `simplex_secp256r1_twins_mutator`
 - `simplex_id_twins_mutator`
 - `simplex_cert_mock_twins_mutator`
-- `simplex_bls12381_multisig_minpk_twins_mutator`
-- `simplex_bls12381_multisig_minsig_twins_mutator`
-- `simplex_bls12381_threshold_selected_minpk_twins_mutator`
-- `simplex_bls12381_threshold_minpk_twins_mutator`
-- `simplex_bls12381_threshold_minsig_twins_mutator`
 
 Available fuzz targets (twins campaign):
-- `simplex_ed25519_twins_campaign`
 - `simplex_id_twins_campaign`
 - `simplex_cert_mock_twins_campaign`
 
 Available fuzz targets (node driver):
-- `simplex_ed25519_node`
-- `simplex_ed25519_node_recovery`
 - `simplex_id_node`
 - `simplex_id_node_recovery`
 - `simplex_id_node_recovery_stable_term`
-- `simplex_secp256r1_node`
-- `simplex_bls12381_multisig_minpk_node`
-- `simplex_bls12381_multisig_minsig_node`
-- `simplex_bls12381_threshold_minpk_node`
-- `simplex_bls12381_threshold_minsig_node`
 - `simplex_cert_mock_node`
 - `simplex_cert_mock_node_recovery`
 
