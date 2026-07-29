@@ -517,6 +517,61 @@ mod tests {
         );
     }
 
+    /// A constructed finalize is added as verified while restoring only
+    /// matching network votes after replacing a conflicting leader proposal.
+    #[test_async]
+    async fn test_constructed_finalize_restores_only_network_votes() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            verifier,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let quorum_size = quorum(5) as usize;
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(verifier),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+        );
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"notarized"]));
+
+        // Select a conflicting proposal from the leader's buffered vote.
+        let leader = Participant::from_usize(quorum_size);
+        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
+        let notarize = Notarize::sign(&schemes[quorum_size], conflicting).unwrap();
+        assert!(round.add_network(participants[quorum_size].clone(), Vote::Notarize(notarize)));
+        round.set_leader(leader);
+
+        // These votes are retained by the tracker but filtered from the verifier.
+        for i in 1..quorum_size {
+            let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
+            assert!(round.add_network(participants[i].clone(), Vote::Finalize(finalize)));
+        }
+
+        // The constructed finalize replaces the proposal and restores the
+        // matching network votes before it enters the tracker itself.
+        let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+        round.add_constructed(Vote::Finalize(finalize));
+
+        // Only the network votes require verification.
+        let (batch, invalid) = round
+            .try_verify(&mut rng, &Sequential)
+            .await
+            .expect("restored finalize quorum must be ready");
+        assert_eq!(batch, quorum_size - 1);
+        assert!(invalid.is_empty());
+        let certificate = round
+            .try_construct_certificate(&Sequential)
+            .await
+            .expect("restored finalize quorum must construct a certificate");
+        assert!(
+            matches!(certificate, Certificate::Finalization(finalization) if finalization.proposal == proposal)
+        );
+    }
+
     /// A notarization restores matching finalize votes that were filtered when
     /// a conflicting leader proposal was selected.
     #[test_async]
