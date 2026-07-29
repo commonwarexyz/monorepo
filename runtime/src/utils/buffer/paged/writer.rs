@@ -525,9 +525,9 @@ impl<B: Blob> Writer<B> {
             return false;
         }
 
-        self.partial_page_state.as_ref().is_none_or(|state| {
-            self.buffer.len() != state.len as usize
-        })
+        self.partial_page_state
+            .as_ref()
+            .is_none_or(|state| self.buffer.len() != state.len as usize)
     }
 
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
