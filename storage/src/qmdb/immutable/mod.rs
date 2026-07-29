@@ -448,37 +448,37 @@ where
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `historical_size` or
-    /// because pruning removed the commit that would have governed `historical_size`.
+    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
+    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
+    /// because pruning removed the commit that would have governed `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
         level = "info",
         skip_all,
         fields(
-            historical_size = *historical_size,
+            op_count = *op_count,
             start_loc = *start_loc,
             max_ops = max_ops.get(),
         ),
     )]
     pub async fn historical_proof(
         &self,
-        historical_size: Location<F>,
+        op_count: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        if historical_size > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
+        if op_count > self.journal.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size, |op| op.has_floor())
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
                 .await?;
 
         Ok(self
             .journal
-            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
+            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
@@ -493,9 +493,8 @@ where
         start_index: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        let historical_size = self.bounds().end;
-        self.historical_proof(historical_size, start_index, max_ops)
-            .await
+        let op_count = self.bounds().end;
+        self.historical_proof(op_count, start_index, max_ops).await
     }
 
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
