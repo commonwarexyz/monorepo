@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message, Round};
+use super::{Config, Mailbox, Message, Round, VerifiedVotes};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
@@ -26,14 +26,14 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{N3f1, ordered::Quorum};
+use commonware_utils::{N3f1, futures::Pool, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tracing::{Instrument as _, Span, debug, info_span, trace};
+use tracing::{Span, debug, info_span, trace};
 
 /// Tracks the current view, its leader, and whether the voter has already been
 /// sent the leader-nullify hint for it.
@@ -45,6 +45,27 @@ struct Current {
     view: View,
     leader: Option<Participant>,
     leader_nullify_hinted: bool,
+}
+
+/// A completed crypto job from the actor's dispatch pool.
+enum Done<S: Scheme<D>, D: Digest> {
+    /// A verification batch completed: its verified votes must be
+    /// reintegrated into the view's round (see [Round::finish_verify]) and
+    /// invalid signers blocked.
+    Verified {
+        view: View,
+        batch: usize,
+        timer: histogram::Timer,
+        votes: VerifiedVotes<S, D>,
+        invalid: Vec<Participant>,
+    },
+    /// A certificate was recovered from a verified quorum and must be
+    /// forwarded to the voter.
+    Recovered {
+        view: View,
+        timer: histogram::Timer,
+        certificate: Certificate<S, D>,
+    },
 }
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
@@ -312,49 +333,46 @@ where
         }
     }
 
-    /// Batch-verifies any ready votes for `view` and forwards newly
-    /// constructible certificates to the voter.
-    async fn process_view(
+    /// Dispatches any ready crypto work for `view` into `pool` without
+    /// blocking the event loop: one verification batch per vote kind (each
+    /// kind independently tracks an in-flight batch) plus recovery of every
+    /// certificate with a verified quorum.
+    ///
+    /// Results arrive through the pool's completion branch, which reintegrates
+    /// them and marks the view dirty so this dispatch runs again (e.g. to
+    /// recover a certificate from a quorum a batch just completed).
+    fn dispatch_view(
         &mut self,
-        voter: &mut voter::Mailbox<S, D>,
+        pool: &mut Pool<Done<S, D>>,
         view: View,
         round: &mut Round<S, B, D, Re>,
     ) {
-        loop {
+        // Begin a verification batch for every vote kind with work worth
+        // verifying.
+        while let Some((batch, job)) = round.begin_verify(self.context.as_mut(), &self.strategy) {
             let timer = self.verify_latency.timer(self.context.as_ref());
-            let Some((batch, failed)) = round
-                .try_verify(self.context.as_mut(), &self.strategy)
-                .await
-            else {
-                trace!(%view, "no verifier ready");
-                break;
-            };
-
-            timer.observe(self.context.as_ref());
-
-            trace!(%view, batch, "batch verified votes");
-            self.verified.inc_by(batch as u64);
-            self.batch_size.observe(batch as f64);
-
-            for invalid in failed {
-                if let Some(signer) = self.scheme.participants().key(invalid) {
-                    commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+            pool.push(async move {
+                let (votes, invalid) = job.await;
+                Done::Verified {
+                    view,
+                    batch,
+                    timer,
+                    votes,
+                    invalid,
                 }
-            }
+            });
         }
 
-        // Construct and forward every certificate with a verified quorum
-        while let Some(certificate) = self
-            .recover_latency
-            .time_some(
-                self.context.as_ref(),
-                round.try_construct_certificate(&self.strategy),
-            )
-            .await
-        {
-            let kind = certificate.kind();
-            debug!(%view, %kind, "constructed certificate, forwarding to voter");
-            voter.recovered(certificate);
+        // Begin recovery of every certificate with a verified quorum.
+        while let Some(job) = round.begin_construct_certificate(&self.strategy) {
+            let timer = self.recover_latency.timer(self.context.as_ref());
+            pool.push(async move {
+                Done::Recovered {
+                    view,
+                    timer,
+                    certificate: job.await,
+                }
+            });
         }
     }
 
@@ -393,6 +411,11 @@ where
         // Views to (re)process this iteration. Reused to keep the per-vote
         // path allocation-free; a duplicate entry only costs a no-op pass.
         let mut dirty_views: Vec<View> = Vec::new();
+        // In-flight crypto (verification batches and certificate recoveries).
+        // Dispatching instead of awaiting keeps the event loop free to ingest
+        // votes while the strategy's workers verify, so multiple batches (and
+        // views) make progress concurrently.
+        let mut crypto_pool: Pool<Done<S, D>> = Pool::default();
         select_loop! {
             self.context,
             on_start => {
@@ -515,6 +538,48 @@ where
                         round.add_constructed(message);
                         self.added.inc();
                         dirty_views.push(view);
+                    }
+                }
+            },
+            // Handle completed crypto work (verification batches and
+            // certificate recoveries)
+            done = crypto_pool.next_completed() => {
+                match done {
+                    Done::Verified { view, batch, timer, votes, invalid } => {
+                        timer.observe(self.context.as_ref());
+                        self.verified.inc_by(batch as u64);
+                        self.batch_size.observe(batch as f64);
+
+                        for signer in invalid {
+                            if let Some(signer) = self.scheme.participants().key(signer) {
+                                commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+                            }
+                        }
+
+                        // The round may have been pruned while the batch was in
+                        // flight; its votes are no longer needed.
+                        let Some(round) = work.get_mut(&view) else {
+                            continue;
+                        };
+                        let _guard = round.span().entered();
+                        trace!(%view, batch, "batch verified votes");
+                        round.finish_verify(votes);
+
+                        // Revisit the view: the batch may have completed a
+                        // quorum (certificate recovery) or more votes may have
+                        // buffered while it was in flight (another batch).
+                        dirty_views.push(view);
+                    }
+                    Done::Recovered { view, timer, certificate } => {
+                        timer.observe(self.context.as_ref());
+                        let kind = certificate.kind();
+                        let _guard = work
+                            .get(&view)
+                            .map(|round| round.span())
+                            .unwrap_or_else(Span::none)
+                            .entered();
+                        debug!(%view, %kind, "constructed certificate, forwarding to voter");
+                        voter.recovered(certificate);
                     }
                 }
             },
@@ -680,9 +745,7 @@ where
                     }
 
                     let span = round.span();
-                    self.process_view(&mut voter, view, round)
-                        .instrument(span)
-                        .await;
+                    span.in_scope(|| self.dispatch_view(&mut crypto_pool, view, round));
                 }
 
                 // Drop any rounds that are no longer retained

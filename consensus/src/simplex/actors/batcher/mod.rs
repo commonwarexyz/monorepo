@@ -15,7 +15,7 @@ use commonware_parallel::Strategy;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
 use std::{num::NonZeroUsize, time::Duration};
-pub use verifier::Verifier;
+pub use verifier::{VerifiedVotes, Verifier, VerifyJob};
 
 pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub scheme: S,
