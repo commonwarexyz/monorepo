@@ -449,11 +449,10 @@ mod tests {
         );
     }
 
-    /// A finalization observed before the leader is known does not establish
-    /// the proposal. Setting the leader still discovers it from the leader's
-    /// buffered notarize vote.
+    /// A finalization establishes a proposal that a later leader selection
+    /// cannot replace.
     #[test]
-    fn test_set_leader_after_finalization() {
+    fn test_finalization_establishes_proposal() {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -468,20 +467,51 @@ mod tests {
             NoopReporter(PhantomData),
         );
 
-        // The leader's notarize arrives before the leader is known
-        let proposal = Proposal::new(round_id, View::new(0), Sha256::hash(&[b"payload"]));
-        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+        // The leader's notarize arrives before the leader is known.
+        let leader_proposal =
+            Proposal::new(round_id, View::zero(), Sha256::hash(&[b"leader"]));
+        let notarize = Notarize::sign(&schemes[0], leader_proposal).unwrap();
         assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
 
-        // A finalization does not establish the proposal
+        // The finalization establishes a conflicting authoritative proposal.
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"finalized"]));
         let finalization = build_finalization(&schemes, &proposal, quorum(5) as usize);
-        assert!(!round.record_certificate(&Certificate::Finalization(finalization)));
-        assert!(round.has_certificate(Kind::Finalization));
+        round.record_certificate(&Certificate::Finalization(finalization));
 
-        // Setting the leader discovers the proposal from its buffered vote
+        // Setting the leader cannot replace the finalization's proposal with
+        // its buffered vote.
         round.set_leader(Participant::from_usize(0));
         assert_eq!(
             round.try_forward_proposal(Participant::from_usize(1)),
+            Some(proposal)
+        );
+    }
+
+    /// A locally constructed finalize establishes the proposal without a known
+    /// leader.
+    #[test]
+    fn test_constructed_finalize_establishes_proposal() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(
+            round_id,
+            View::zero(),
+            Sha256::hash(&[b"notarized_payload"]),
+        );
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+        );
+
+        // The constructed finalize establishes the proposal without relying
+        // on a leader vote.
+        let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+        round.add_constructed(Vote::Finalize(finalize));
+        assert_eq!(
+            round.try_forward_proposal(Participant::from_usize(0)),
             Some(proposal)
         );
     }
@@ -860,9 +890,8 @@ mod tests {
                 context.sleep(Duration::from_millis(50)).await;
             }
 
-            // Submit a finalize quorum before the authoritative notarization.
-            let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
-            batcher_mailbox.constructed(Vote::Finalize(finalize));
+            // Submit all network finalize votes before the authoritative
+            // notarization.
             for (i, mut sender) in finalize_senders {
                 let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
                 sender
@@ -914,6 +943,11 @@ mod tests {
                         ..
                     } => {
                         assert_eq!(notarization.proposal, proposal);
+
+                        // Complete the quorum only after the notarization has
+                        // restored the network votes.
+                        let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+                        batcher_mailbox.constructed(Vote::Finalize(finalize));
                         saw_notarization = true;
                     }
                     voter::Message::Verified {

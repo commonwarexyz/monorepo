@@ -158,10 +158,11 @@ impl<V> Certification<V> {
 pub(super) enum ProposalState<D: Digest> {
     /// No proposal is known.
     Unknown,
-    /// Learned from the leader's notarize vote. May be replaced by a notarization.
+    /// Learned from the leader's notarize vote. An authoritative proposal may
+    /// replace it.
     Leader(Proposal<D>),
-    /// Learned from a verified notarization. Never replaced.
-    Notarization(Proposal<D>),
+    /// Authenticated independently of the leader's vote. Never replaced.
+    Authoritative(Proposal<D>),
 }
 
 impl<D: Digest> ProposalState<D> {
@@ -169,23 +170,21 @@ impl<D: Digest> ProposalState<D> {
     const fn proposal(&self) -> Option<&Proposal<D>> {
         match self {
             Self::Unknown => None,
-            Self::Leader(proposal) | Self::Notarization(proposal) => Some(proposal),
+            Self::Leader(proposal) | Self::Authoritative(proposal) => Some(proposal),
         }
     }
 
-    /// Updates the proposal from a leader vote or notarization.
+    /// Updates the proposal from a leader vote or authoritative evidence.
     ///
-    /// An unknown proposal accepts either source, while a proposal from a
-    /// leader vote may be superseded by the first notarization. All other
-    /// transitions are ignored.
+    /// An unknown proposal accepts either source. An authoritative proposal
+    /// may supersede a leader vote. All other transitions are ignored.
     ///
-    /// Returns the selected proposal if its value changed. A provenance-only
-    /// change from a leader vote to a notarization of the same proposal returns
-    /// `None`.
+    /// Returns the selected proposal if its value changed. Certifying the
+    /// leader-selected proposal returns `None`.
     fn update(&mut self, next: Self) -> Option<&Proposal<D>> {
         match (&*self, &next) {
-            (Self::Unknown, Self::Leader(_) | Self::Notarization(_)) => {}
-            (Self::Leader(_), Self::Notarization(_)) => {}
+            (Self::Unknown, Self::Leader(_) | Self::Authoritative(_)) => {}
+            (Self::Leader(_), Self::Authoritative(_)) => {}
             _ => return None,
         }
 
@@ -225,9 +224,9 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
 
     /// The round's proposal, once known.
     ///
-    /// A known leader's notarize vote may supply the initial proposal. A
-    /// verified notarization is authoritative and may replace it, or establish
-    /// the proposal before the leader is identified.
+    /// A known leader's notarize vote may supply the initial proposal. An
+    /// independently authenticated proposal is authoritative and may replace
+    /// it, or be established before the leader is identified.
     proposal: ProposalState<D>,
 
     /// Notarize certification progress.
@@ -372,8 +371,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// buffered notarize and finalize votes for any other proposal.
     ///
     /// Returns `true` only if the selected proposal changed. Rejected
-    /// transitions and a provenance-only change from a leader vote to a
-    /// notarization of the same proposal return `false`.
+    /// transitions and a provenance-only change from a leader vote to
+    /// authoritative state for the same proposal return `false`.
     pub(super) fn set_proposal(&mut self, proposal: ProposalState<D>) -> bool {
         let Some(proposal) = self.proposal.update(proposal) else {
             return false;
@@ -428,8 +427,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Sets the leader for the current consensus view.
     ///
     /// `notarize` carries the leader's already-received vote, if any. Its
-    /// proposal is learned when none is known. A proposal already established
-    /// by a verified notarization remains authoritative.
+    /// proposal is learned when none is known. An authoritative proposal is
+    /// never replaced.
     ///
     /// # Panics
     ///
@@ -485,7 +484,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                         .map(|n| (n.proposal, n.attestation))
                         .unzip();
                     // All proposals here are equal: pending votes are filtered to the
-                    // leader's proposal before verification becomes ready.
+                    // selected proposal before verification becomes ready.
                     let proposal = &proposals[0];
 
                     let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
@@ -808,17 +807,21 @@ mod tests {
         // from the leader's vote.
         let notarized_proposal = Proposal::new(round, View::new(0), sample_digest(2));
         assert_ne!(notarized_proposal, leader_notarize.proposal);
-        assert!(verifier2.set_proposal(ProposalState::Notarization(notarized_proposal.clone())));
+        assert!(verifier2.set_proposal(ProposalState::Authoritative(
+            notarized_proposal.clone()
+        )));
         assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
         // Re-adopting the same proposal reports no change.
-        assert!(!verifier2.set_proposal(ProposalState::Notarization(notarized_proposal.clone())));
+        assert!(!verifier2.set_proposal(ProposalState::Authoritative(
+            notarized_proposal.clone()
+        )));
 
         // The first notarization remains authoritative.
         let conflicting_notarized_proposal = Proposal::new(round, View::new(0), sample_digest(3));
-        assert!(
-            !verifier2.set_proposal(ProposalState::Notarization(conflicting_notarized_proposal))
-        );
+        assert!(!verifier2.set_proposal(ProposalState::Authoritative(
+            conflicting_notarized_proposal
+        )));
         assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
 
         // If the notarization arrives first, setting the leader cannot replace
@@ -828,7 +831,9 @@ mod tests {
             schemes[0].clone(),
             quorum,
         );
-        assert!(verifier3.set_proposal(ProposalState::Notarization(notarized_proposal.clone())));
+        assert!(verifier3.set_proposal(ProposalState::Authoritative(
+            notarized_proposal.clone()
+        )));
         assert!(verifier3.leader().is_none());
         assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
         verifier3.set_leader(leader, Some(&leader_notarize));
@@ -1432,7 +1437,7 @@ mod tests {
 
         let (mut verifier, finalize) = test_verifier_finalize();
 
-        verifier.set_proposal(ProposalState::Notarization(finalize.proposal.clone()));
+        verifier.set_proposal(ProposalState::Authoritative(finalize.proposal.clone()));
         assert!(verifier.leader.is_none());
         assert!(
             verifier
