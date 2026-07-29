@@ -103,7 +103,7 @@ where
     pub async fn get_compact_state(
         &self,
         target: compact::Target<mmr::Family, D>,
-    ) -> Result<compact::State<mmr::Family, Op, D>, crate::Error> {
+    ) -> Result<sync::resolver::Response<mmr::Family, Op, D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetCompactStateRequest(wire::GetCompactStateRequest {
             request_id,
@@ -187,7 +187,7 @@ where
     }
 }
 
-impl<Op, D> compact::Resolver for Resolver<Op, D>
+impl<Op, D> sync::resolver::Source<compact::Target<mmr::Family, D>> for Resolver<Op, D>
 where
     Op: Clone + Read + EncodeShared,
     Op::Cfg: IsUnit,
@@ -198,10 +198,17 @@ where
     type Op = Op;
     type Error = crate::Error;
 
-    async fn get_compact_state(
+    async fn serve(
         &self,
-        target: compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.get_compact_state(target).await.map(Into::into)
+        target: compact::Target<mmr::Family, D>,
+        _cancel: oneshot::Receiver<()>,
+    ) -> Result<
+        (
+            sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,
+            sync::resolver::Validity,
+        ),
+        Self::Error,
+    > {
+        Ok((self.get_compact_state(target).await?, None))
     }
 }

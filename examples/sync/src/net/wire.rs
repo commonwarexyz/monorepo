@@ -7,7 +7,7 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     merkle::MAX_PINNED_NODES,
     mmr::{self, Location, Proof},
-    qmdb::sync::{Target, compact, compact::State},
+    qmdb::sync::{Target, compact, resolver::Response},
 };
 use std::num::NonZeroU64;
 
@@ -85,7 +85,7 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub state: State<mmr::Family, Op, D>,
+    pub state: Response<mmr::Family, Op, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -525,14 +525,8 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let state = State::<mmr::Family, Op, D>::read_cfg(
-            buf,
-            &(
-                RangeCfg::from(0..=MAX_PINNED_NODES),
-                Op::Cfg::default(),
-                MAX_DIGESTS,
-            ),
-        )?;
+        // Compact state is exactly one operation, the final commit.
+        let state = Response::<mmr::Family, Op, D>::read_cfg(buf, &(1, Op::Cfg::default()))?;
         Ok(Self { request_id, state })
     }
 }

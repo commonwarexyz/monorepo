@@ -96,7 +96,7 @@ where
 }
 
 type CompactStateResult<F, V, D> =
-    Result<compact_sync::State<F, Operation<F, V>, D>, compact_sync::ServeError<F, D>>;
+    Result<crate::qmdb::sync::resolver::Response<F, Operation<F, V>, D>, compact_sync::ServeError<F, D>>;
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
@@ -286,13 +286,10 @@ where
         validated: compact_sync::ValidatedState<F, Operation<F, V>, H::Digest>,
     ) -> Result<Self, Error<F>> {
         let compact_sync::ValidatedState {
-            state:
-                compact_sync::State {
-                    leaf_count,
-                    pinned_nodes,
-                    last_commit_op,
-                    last_commit_proof,
-                },
+            leaf_count,
+            pinned_nodes,
+            last_commit_op,
+            last_commit_proof,
             root,
         } = validated;
         let last_commit_loc = Location::new(*leaf_count - 1);
@@ -445,12 +442,12 @@ where
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
-        Ok(compact_sync::State {
-            leaf_count,
-            pinned_nodes,
-            last_commit_op: op,
+        let _ = leaf_count;
+        Ok(crate::qmdb::sync::resolver::Response::new(
             last_commit_proof,
-        })
+            vec![op],
+            Some(pinned_nodes),
+        ))
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -1093,12 +1090,10 @@ mod tests {
                 witness::tests::tip(&journal).await
             };
             let validated = compact_sync::ValidatedState {
-                state: compact_sync::State {
-                    leaf_count: target_b.leaf_count,
-                    pinned_nodes: pinned_b,
-                    last_commit_op: Operation::Commit(Some(meta_b.clone()), Location::new(0)),
-                    last_commit_proof: proof_b,
-                },
+                leaf_count: target_b.leaf_count,
+                pinned_nodes: pinned_b,
+                last_commit_op: Operation::Commit(Some(meta_b.clone()), Location::new(0)),
+                last_commit_proof: proof_b,
                 root: target_b.root,
             };
 

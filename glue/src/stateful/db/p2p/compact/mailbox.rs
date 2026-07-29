@@ -4,7 +4,13 @@ use super::handler;
 use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::{merkle::Family, qmdb::sync::compact};
+use commonware_storage::{
+    merkle::Family,
+    qmdb::sync::{
+        compact,
+        resolver::{Response, Source, Validity},
+    },
+};
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
 
@@ -13,11 +19,16 @@ use std::{collections::VecDeque, future::Future};
 #[error("response dropped before completion")]
 pub struct ResponseDropped;
 
+/// Where the actor delivers a fetched response, along with the channel the caller reports
+/// peer validity on.
+pub(super) type Delivery<F, Op, D> =
+    oneshot::Sender<Result<(Response<F, Op, D>, Validity), ResponseDropped>>;
+
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     GetState {
         request: handler::Request<F, D>,
-        response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
+        response: Delivery<F, Op, D>,
     },
     CancelState {
         request: handler::Request<F, D>,
@@ -118,7 +129,7 @@ impl<DB: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<DB, F, Op, H> {
     }
 }
 
-impl<DB, F, Op, H> compact::Resolver for Mailbox<DB, F, Op, H>
+impl<DB, F, Op, H> Source<compact::Target<F, H::Digest>> for Mailbox<DB, F, Op, H>
 where
     DB: Send + Sync + 'static,
     F: Family,
@@ -130,10 +141,11 @@ where
     type Family = F;
     type Op = Op;
 
-    async fn get_compact_state(
+    async fn serve(
         &self,
         target: compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        _cancel: oneshot::Receiver<()>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
         let request = handler::Request::from_target(target);
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetState {
@@ -165,13 +177,13 @@ mod tests {
     use super::*;
     use commonware_cryptography::sha256::Sha256;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_storage::{mmr, qmdb::sync::compact::Resolver as _};
+    use commonware_storage::mmr;
     use commonware_utils::NZUsize;
     use futures::future::poll_fn;
     use std::task::Poll;
 
     #[test]
-    fn get_compact_state_sends_request() {
+    fn serve_sends_request() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, Sha256>::new(sender);
@@ -180,7 +192,8 @@ mod tests {
                 leaf_count: mmr::Location::new(7),
             };
 
-            let get = mailbox.get_compact_state(target.clone());
+            let (_cancel, cancel) = oneshot::channel();
+            let get = mailbox.serve(target.clone(), cancel);
             let observe = async move {
                 let message = receiver.recv().await.expect("request should be queued");
                 let Message::GetState { request, response } = message else {
@@ -205,7 +218,8 @@ mod tests {
                 leaf_count: mmr::Location::new(9),
             };
 
-            let mut get = Box::pin(mailbox.get_compact_state(target.clone()));
+            let (_cancel, cancel) = oneshot::channel();
+            let mut get = Box::pin(mailbox.serve(target.clone(), cancel));
             poll_fn(|cx| {
                 assert!(matches!(get.as_mut().poll(cx), Poll::Pending));
                 Poll::Ready(())

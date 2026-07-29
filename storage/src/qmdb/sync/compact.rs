@@ -58,13 +58,16 @@ use crate::{
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
         },
         operation::Key,
-        sync::{EngineError, Error, resolver::Request},
+        sync::{
+            EngineError, Error,
+            resolver::{Request, Response, Source, Validity},
+        },
         verify_proof,
     },
     translator::Translator,
 };
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
@@ -73,10 +76,9 @@ use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, resch
 use commonware_utils::{
     Array,
     channel::{mpsc, oneshot},
-    sync::{AsyncRwLock, TracedAsyncRwLock},
 };
 use futures::future::{Either, pending};
-use std::{future::Future, num::NonZeroU64, sync::Arc};
+use std::{future::Future, num::NonZeroU64};
 
 /// Compact-sync target for a compact-storage database.
 ///
@@ -164,93 +166,22 @@ where
     }
 }
 
-/// Authenticated state for initializing a compact-storage database at a target root.
+/// Compact state that has been validated against a target root.
+///
+/// [`validate_compact_state`] is what produces one: the frontier pins and the final commit have
+/// both been authenticated against `root`, so construction can treat them as trusted.
 #[derive(Clone, Debug)]
-pub struct State<F: Family, Op, D: Digest> {
-    /// Total number of operations/leaves in the target database.
+pub struct ValidatedState<F: Family, Op, D: Digest> {
+    /// Total committed operations, taken from the proof rather than sent alongside it.
     pub leaf_count: Location<F>,
-    /// Pinned Merkle nodes for the current frontier.
+    /// Pinned Merkle nodes for the committed frontier.
     pub pinned_nodes: Vec<D>,
     /// The final commit operation at `leaf_count - 1`.
     pub last_commit_op: Op,
-    /// Proof authenticating `last_commit_op` against the target root.
+    /// Proof authenticating `last_commit_op` against `root`.
     pub last_commit_proof: Proof<F, D>,
-}
-
-/// Compact state that has been validated against a target root.
-#[derive(Clone, Debug)]
-pub struct ValidatedState<F: Family, Op, D: Digest> {
-    /// The compact state fetched from a peer after validation.
-    pub state: State<F, Op, D>,
-    /// The target root that `state` was validated against.
+    /// The target root this state was validated against.
     pub root: D,
-}
-
-impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
-where
-    Op: Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        self.leaf_count.write(buf);
-        self.pinned_nodes.write(buf);
-        self.last_commit_op.write(buf);
-        self.last_commit_proof.write(buf);
-    }
-}
-
-/// Result from a compact-state fetch.
-pub struct FetchResult<F: Family, Op, D: Digest> {
-    /// The fetched compact state.
-    pub state: State<F, Op, D>,
-    /// Callback used to report whether downstream validated the state.
-    pub callback: Option<oneshot::Sender<bool>>,
-}
-
-impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FetchResult")
-            .field("state", &self.state)
-            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
-            .finish()
-    }
-}
-
-impl<F: Family, Op, D: Digest> From<State<F, Op, D>> for FetchResult<F, Op, D> {
-    fn from(state: State<F, Op, D>) -> Self {
-        Self {
-            state,
-            callback: None,
-        }
-    }
-}
-
-impl<F: Family, Op, D: Digest> EncodeSize for State<F, Op, D>
-where
-    Op: EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        self.leaf_count.encode_size()
-            + self.pinned_nodes.encode_size()
-            + self.last_commit_op.encode_size()
-            + self.last_commit_proof.encode_size()
-    }
-}
-
-impl<F: Family, Op, D: Digest> Read for State<F, Op, D>
-where
-    Op: Read,
-{
-    type Cfg = (RangeCfg<usize>, Op::Cfg, usize);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let (pinned_nodes_cfg, op_cfg, max_proof_digests) = cfg;
-        Ok(Self {
-            leaf_count: Location::<F>::read(buf)?,
-            pinned_nodes: Vec::<D>::read_cfg(buf, &(*pinned_nodes_cfg, ()))?,
-            last_commit_op: Op::read_cfg(buf, op_cfg)?,
-            last_commit_proof: Proof::<F, D>::read_cfg(buf, max_proof_digests)?,
-        })
-    }
 }
 
 /// Resolver-side errors for compact state serving.
@@ -273,44 +204,23 @@ pub enum ServeError<F: Family, D: Digest> {
     },
 }
 
-/// Trait for compact sync fetches from a source database.
-#[allow(clippy::type_complexity)]
-pub trait Resolver: Send + Sync + Clone + 'static {
-    /// The merkle family backing the resolver's proofs.
-    type Family: Family;
-
-    /// The digest type used in proofs returned by the resolver.
-    type Digest: Digest;
-
-    /// The type of operations returned by the resolver.
-    type Op;
-
-    /// The error type returned by the resolver.
-    type Error: std::error::Error + Send + 'static;
-
-    /// Fetch the authenticated state for `target`.
-    fn get_compact_state<'a>(
-        &'a self,
-        target: Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
-    + Send
-    + 'a;
-}
-
-/// Marker trait for resolvers whose associated types match a specific compact-sync database.
+/// A [`Source`] of compact state whose associated types match a specific `Database`.
 ///
-/// This is a trait-alias pattern used to avoid repeating
-/// `Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>`.
-/// Blanket-implemented for any matching [`Resolver`], so callers never implement this directly.
+/// Blanket-impled for any matching `Source`, so callers never implement this directly.
+/// `Clone` and `'static` are required by the retry loop, not by sources in general.
 pub trait CompactDbResolver<DB: Database>:
-    Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+    Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+    + Clone
+    + 'static
 {
 }
 
 impl<DB, R> CompactDbResolver<DB> for R
 where
     DB: Database,
-    R: Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
+    R: Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+        + Clone
+        + 'static,
 {
 }
 
@@ -510,18 +420,22 @@ where
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
     loop {
-        let FetchResult { state, callback } = resolver
-            .get_compact_state(target.clone())
+        // Compact sync fetches one response at a time and has nothing to abandon it for, so the
+        // sender is held for the duration of the call rather than dropped, which would read as an
+        // immediate cancellation.
+        let (_cancel, cancel) = oneshot::channel();
+        let (response, validity) = resolver
+            .serve(target.clone(), cancel)
             .await
             .map_err(Error::Resolver)?;
 
         // Validation failures describe a bad compact response. Reject it if the resolver supplied
         // feedback, then fetch another candidate.
-        let validated_state = match validate_compact_state::<DB>(target, state) {
+        let validated_state = match validate_compact_state::<DB>(target, response) {
             Ok(state) => state,
             Err(err) => {
-                if let Some(callback) = callback {
-                    let _ = callback.send(false);
+                if let Some(validity) = validity {
+                    let _ = validity.send(false);
                 }
                 tracing::debug!(error = ?err, "compact state failed validation, will retry");
                 continue;
@@ -544,8 +458,8 @@ where
             "validated compact state reconstructed unexpected root",
         );
 
-        if let Some(callback) = callback {
-            let _ = callback.send(true);
+        if let Some(validity) = validity {
+            let _ = validity.send(true);
         }
         let db = db.persist_compact_state().await?;
         return Ok(db);
@@ -553,31 +467,42 @@ where
 }
 
 /// Validate the peer-provided compact state before constructing local database storage.
-fn validate_compact_state<DB>(
+pub(crate) fn validate_compact_state<DB>(
     target: &Target<DB::Family, DB::Digest>,
-    state: State<DB::Family, DB::Op, DB::Digest>,
+    response: Response<DB::Family, DB::Op, DB::Digest>,
 ) -> CompactFrontierValidation<DB>
 where
     DB: Database,
 {
-    if state.leaf_count != target.leaf_count {
-        return Err(EngineError::UnexpectedLeafCount {
-            expected: target.leaf_count,
-            actual: state.leaf_count,
-        });
+    // Compact state is exactly one operation: the final commit. The tree size comes from the
+    // proof, so there is no separately transmitted count that could disagree with it.
+    let Response {
+        proof: last_commit_proof,
+        mut operations,
+        pinned_nodes,
+    } = response;
+    if operations.len() != 1 {
+        return Err(EngineError::InvalidProof);
+    }
+    let last_commit_op = operations.pop().expect("checked length");
+    let Some(pinned_nodes) = pinned_nodes else {
+        return Err(EngineError::InvalidProof);
+    };
+    if last_commit_proof.leaves != target.leaf_count {
+        return Err(EngineError::InvalidProof);
     }
 
-    let last_commit_loc = Location::new(*state.leaf_count - 1);
+    let last_commit_loc = Location::new(*target.leaf_count - 1);
     if !verify_proof::<DB::Hasher, _, _>(
-        &state.last_commit_proof,
+        &last_commit_proof,
         last_commit_loc,
-        std::slice::from_ref(&state.last_commit_op),
+        std::slice::from_ref(&last_commit_op),
         &target.root,
     ) {
         return Err(EngineError::InvalidProof);
     }
 
-    validate_compact_frontier::<DB>(target, state)
+    validate_compact_frontier::<DB>(target, pinned_nodes, last_commit_op, last_commit_proof)
 }
 
 /// Result of validating a peer-provided compact frontier.
@@ -589,15 +514,18 @@ type CompactFrontierValidation<DB> = Result<
 /// Validate that a peer-provided compact frontier authenticates the requested target root.
 fn validate_compact_frontier<DB>(
     target: &Target<DB::Family, DB::Digest>,
-    state: State<DB::Family, DB::Op, DB::Digest>,
+    pinned_nodes: Vec<DB::Digest>,
+    last_commit_op: DB::Op,
+    last_commit_proof: Proof<DB::Family, DB::Digest>,
 ) -> CompactFrontierValidation<DB>
 where
     DB: Database,
 {
+    let leaf_count = target.leaf_count;
     // The final commit is the only operation carried in compact state. Its floor determines which
     // peaks are inactive when authenticating the compact frontier root.
-    let last_commit_loc = Location::new(*state.leaf_count - 1);
-    let Some(inactivity_floor_loc) = DB::inactivity_floor(&state.last_commit_op) else {
+    let last_commit_loc = Location::new(*leaf_count - 1);
+    let Some(inactivity_floor_loc) = DB::inactivity_floor(&last_commit_op) else {
         return Err(EngineError::InvalidProof);
     };
     if inactivity_floor_loc > last_commit_loc {
@@ -608,13 +536,13 @@ where
     // storage. Invalid pin counts or inactive peak layouts are treated as bad peer proofs.
     let mem = crate::merkle::mem::Mem::<DB::Family, DB::Digest>::init(crate::merkle::mem::Config {
         nodes: Vec::new(),
-        pruning_boundary: state.leaf_count,
-        pinned_nodes: state.pinned_nodes.clone(),
+        pruning_boundary: leaf_count,
+        pinned_nodes: pinned_nodes.clone(),
     })
     .map_err(|_| EngineError::InvalidProof)?;
     let hasher = qmdb::hasher::<DB::Hasher>();
     let inactive_peaks = DB::Family::inactive_peaks(
-        DB::Family::location_to_position(state.leaf_count),
+        DB::Family::location_to_position(leaf_count),
         inactivity_floor_loc,
     );
     let actual = mem
@@ -628,7 +556,10 @@ where
     }
 
     Ok(ValidatedState {
-        state,
+        leaf_count,
+        pinned_nodes,
+        last_commit_op,
+        last_commit_proof,
         root: target.root,
     })
 }
@@ -642,7 +573,7 @@ async fn compact_state_from_log<S, F, D>(
     source: &S,
     current: Target<F, D>,
     target: Target<F, D>,
-) -> Result<State<F, S::Op, D>, ServeError<F, D>>
+) -> Result<Response<F, S::Op, D>, ServeError<F, D>>
 where
     F: Family,
     D: Digest,
@@ -665,133 +596,18 @@ where
         .await
         .map_err(ServeError::Database)?;
 
-    let mut operations = response.operations;
-    let last_commit_op = operations
-        .pop()
-        .ok_or(ServeError::Database(qmdb::Error::DataCorrupted(
-            "missing last commit operation",
-        )))?;
-    let pinned_nodes = response
-        .pinned_nodes
-        .ok_or(ServeError::Database(qmdb::Error::DataCorrupted(
-            "missing frontier pins",
-        )))?;
-
-    Ok(State {
-        leaf_count,
-        pinned_nodes,
-        last_commit_op,
-        last_commit_proof: response.proof,
-    })
+    Ok(response)
 }
 
-/// A source of a database's compact state at a target.
-///
-/// Compact sync serving reads through this trait, so it does not care whether the state is
-/// read from a persisted witness or synthesized from a full operation log. An implementor
-/// supplies that one read, and this module's [`Resolver`] implementations then cover every
-/// shape a source is held in: directly, behind a lock, or behind a lock that may be empty.
-pub trait StateSource: Send + Sync {
-    /// The merkle family backing this source's proofs.
-    type Family: Family;
-
-    /// The digest type used in this source's proofs.
-    type Digest: Digest;
-
-    /// The type of operations this source yields. Served across threads, so it is [`Send`].
-    type Op: Send;
-
-    /// Return the compact state committing `target`, or a stale-target error if this source
-    /// does not hold it.
-    #[allow(clippy::type_complexity)]
-    fn compact_state<'a>(
-        &'a self,
-        target: Target<Self::Family, Self::Digest>,
-    ) -> impl Future<
-        Output = Result<
-            State<Self::Family, Self::Op, Self::Digest>,
-            ServeError<Self::Family, Self::Digest>,
-        >,
-    > + Send
-    + 'a;
-}
-
-/// Serve from a source held directly.
-impl<T> Resolver for Arc<T>
-where
-    T: StateSource + 'static,
-{
-    type Family = T::Family;
-    type Digest = T::Digest;
-    type Op = T::Op;
-    type Error = ServeError<T::Family, T::Digest>;
-
-    async fn get_compact_state(
-        &self,
-        target: Target<Self::Family, Self::Digest>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.compact_state(target).await.map(Into::into)
-    }
-}
-
-/// Serve from a source behind a lock, and from one behind a lock that may be empty.
-///
-/// A single read guard spans the whole read, so a full source's synthesized state is built
-/// from one database state even while a writer waits. A macro rather than a further blanket
-/// implementation because the two lock types share no trait to be generic over.
-macro_rules! impl_locked_resolver {
-    ($lock:ident) => {
-        impl<T> Resolver for Arc<$lock<T>>
-        where
-            T: StateSource + 'static,
-        {
-            type Family = T::Family;
-            type Digest = T::Digest;
-            type Op = T::Op;
-            type Error = ServeError<T::Family, T::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let db = self.read().await;
-                db.compact_state(target).await.map(Into::into)
-            }
-        }
-
-        impl<T> Resolver for Arc<$lock<Option<T>>>
-        where
-            T: StateSource + 'static,
-        {
-            type Family = T::Family;
-            type Digest = T::Digest;
-            type Op = T::Op;
-            type Error = ServeError<T::Family, T::Digest>;
-
-            async fn get_compact_state(
-                &self,
-                target: Target<Self::Family, Self::Digest>,
-            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target).await.map(Into::into)
-            }
-        }
-    };
-}
-
-impl_locked_resolver!(AsyncRwLock);
-impl_locked_resolver!(TracedAsyncRwLock);
-
-/// Implement [`StateSource`] for a database.
+/// Implement [`Source<Target>`] for a database.
 ///
 /// A `full` database has no persisted witness, so its state is synthesized on demand from
 /// the current tip commit plus the frontier pins at the requested tree size; a `compact`
 /// database reads its witness directly. The `keyless` arms exist because those databases
 /// have no key or translator parameter.
-macro_rules! impl_state_source {
+macro_rules! impl_compact_source {
     (full $db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<F, E, K, V, H, T, S> StateSource for $db<F, E, K, V, H, T, S>
+        impl<F, E, K, V, H, T, S> Source<Target<F, H::Digest>> for $db<F, E, K, V, H, T, S>
         where
             F: Family,
             E: crate::Context,
@@ -805,18 +621,20 @@ macro_rules! impl_state_source {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
+            type Error = ServeError<F, H::Digest>;
 
-            async fn compact_state(
+            async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
+                _cancel: oneshot::Receiver<()>,
+            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
-                compact_state_from_log(self, current, target).await
+                Ok((compact_state_from_log(self, current, target).await?, None))
             }
         }
     };
     (full keyless $db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, V, H, S> StateSource for $db<F, E, V, H, S>
+        impl<F, E, V, H, S> Source<Target<F, H::Digest>> for $db<F, E, V, H, S>
         where
             F: Family,
             E: crate::Context,
@@ -827,18 +645,20 @@ macro_rules! impl_state_source {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, V>;
+            type Error = ServeError<F, H::Digest>;
 
-            async fn compact_state(
+            async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
+                _cancel: oneshot::Receiver<()>,
+            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
-                compact_state_from_log(self, current, target).await
+                Ok((compact_state_from_log(self, current, target).await?, None))
             }
         }
     };
     (compact $db:ident, $op:ident) => {
-        impl<F, E, K, V, H, C, S> StateSource for $db<F, E, K, V, H, C, S>
+        impl<F, E, K, V, H, C, S> Source<Target<F, H::Digest>> for $db<F, E, K, V, H, C, S>
         where
             F: Family,
             E: crate::Context,
@@ -852,17 +672,19 @@ macro_rules! impl_state_source {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, K, V>;
+            type Error = ServeError<F, H::Digest>;
 
-            async fn compact_state(
+            async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
-                self.compact_state(target)
+                _cancel: oneshot::Receiver<()>,
+            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
+                Ok((self.compact_state(target)?, None))
             }
         }
     };
     (compact keyless $db:ident, $op:ident) => {
-        impl<F, E, V, H, C, S> StateSource for $db<F, E, V, H, C, S>
+        impl<F, E, V, H, C, S> Source<Target<F, H::Digest>> for $db<F, E, V, H, C, S>
         where
             F: Family,
             E: crate::Context,
@@ -875,27 +697,29 @@ macro_rules! impl_state_source {
             type Family = F;
             type Digest = H::Digest;
             type Op = $op<F, V>;
+            type Error = ServeError<F, H::Digest>;
 
-            async fn compact_state(
+            async fn serve(
                 &self,
                 target: Target<F, H::Digest>,
-            ) -> Result<State<F, Self::Op, H::Digest>, ServeError<F, H::Digest>> {
-                self.compact_state(target)
+                _cancel: oneshot::Receiver<()>,
+            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
+                Ok((self.compact_state(target)?, None))
             }
         }
     };
 }
 
-impl_state_source!(compact keyless KeylessCompactDb, KeylessOp);
-impl_state_source!(compact ImmutableCompactDb, ImmutableOp);
-impl_state_source!(full keyless KeylessFixedDb, KeylessFixedOp, FixedValue);
-impl_state_source!(full keyless KeylessVariableDb, KeylessVariableOp, VariableValue);
-impl_state_source!(full ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
-impl_state_source!(full ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+impl_compact_source!(compact keyless KeylessCompactDb, KeylessOp);
+impl_compact_source!(compact ImmutableCompactDb, ImmutableOp);
+impl_compact_source!(full keyless KeylessFixedDb, KeylessFixedOp, FixedValue);
+impl_compact_source!(full keyless KeylessVariableDb, KeylessVariableOp, VariableValue);
+impl_compact_source!(full ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
+impl_compact_source!(full ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Database, FetchResult, Resolver, State, Target};
+    use super::{Config, Database, Response, Source, Target, Validity};
     use crate::{
         merkle::{Location, mmr},
         qmdb,
@@ -924,7 +748,7 @@ mod tests {
         };
     }
 
-    fn assert_resolver<R: super::Resolver>() {}
+    fn assert_resolver<R: Source<Target<mmr::Family, Digest>>>() {}
 
     struct TestDb {
         root: Digest,
@@ -960,30 +784,34 @@ mod tests {
         }
     }
 
+    type CompactResponse = (Response<mmr::Family, u8, Digest>, Validity);
+
+    /// Serves a canned sequence of responses, one per call, so tests can drive the retry loop.
     #[derive(Clone)]
     struct SequenceResolver {
-        states: Arc<commonware_utils::sync::Mutex<VecDeque<FetchResult<mmr::Family, u8, Digest>>>>,
+        responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
-    impl Resolver for SequenceResolver {
+    impl Source<Target<mmr::Family, Digest>> for SequenceResolver {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = u8;
         type Error = Infallible;
 
-        async fn get_compact_state(
+        async fn serve(
             &self,
             _target: Target<Self::Family, Self::Digest>,
-        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            _cancel: commonware_utils::channel::oneshot::Receiver<()>,
+        ) -> Result<CompactResponse, Self::Error> {
             Ok(self
-                .states
+                .responses
                 .lock()
                 .pop_front()
-                .expect("missing compact fetch result"))
+                .expect("missing compact response"))
         }
     }
 
-    fn valid_state_and_target() -> (State<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
+    fn valid_state_and_target() -> (Response<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
         let hasher = qmdb::hasher::<Sha256>();
         let mut merkle = crate::merkle::mem::Mem::<mmr::Family, Digest>::new();
         let op = 0u8;
@@ -1002,12 +830,7 @@ mod tests {
             .collect::<Vec<_>>();
         let proof = merkle.proof(&hasher, Location::new(1), 0).unwrap();
         (
-            State {
-                leaf_count,
-                pinned_nodes,
-                last_commit_op: op,
-                last_commit_proof: proof,
-            },
+            Response::new(proof, vec![op], Some(pinned_nodes)),
             Target::<mmr::Family, Digest> { root, leaf_count },
         )
     }
@@ -1070,22 +893,20 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (good_state, target) = valid_state_and_target();
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes.push(Sha256::hash(&[b"extra pin"]));
+            bad_state
+                .pinned_nodes
+                .as_mut()
+                .expect("valid state carries pins")
+                .push(Sha256::hash(&[b"extra pin"]));
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let constructions = Arc::new(AtomicUsize::new(0));
 
             let db = super::sync::<TestDb, _>(Config {
                 context,
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        FetchResult {
-                            state: bad_state,
-                            callback: None,
-                        },
-                        FetchResult {
-                            state: good_state,
-                            callback: Some(good_tx),
-                        },
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, Some(good_tx)),
                     ]))),
                 },
                 target: target.clone(),

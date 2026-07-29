@@ -1,9 +1,11 @@
 use crate::{
     Context,
-    merkle::{Family, Location, Proof},
+    merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
     qmdb::{self, operation::Key, sync::compact::ServeError},
     translator::Translator,
 };
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadRangeExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -92,6 +94,16 @@ impl<F: Family, Op, D: Digest> Response<F, Op, D> {
     }
 }
 
+impl<F: Family, Op: Clone, D: Digest> Clone for Response<F, Op, D> {
+    fn clone(&self) -> Self {
+        Self {
+            proof: self.proof.clone(),
+            operations: self.operations.clone(),
+            pinned_nodes: self.pinned_nodes.clone(),
+        }
+    }
+}
+
 impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, Op, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Response")
@@ -99,6 +111,41 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, 
             .field("operations", &self.operations)
             .field("pinned_nodes", &self.pinned_nodes)
             .finish()
+    }
+}
+
+impl<F: Family, Op: Write, D: Digest> Write for Response<F, Op, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.proof.write(buf);
+        self.operations.write(buf);
+        self.pinned_nodes.write(buf);
+    }
+}
+
+impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
+    fn encode_size(&self) -> usize {
+        self.proof.encode_size() + self.operations.encode_size() + self.pinned_nodes.encode_size()
+    }
+}
+
+impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D>
+where
+    Op::Cfg: Clone,
+{
+    /// The `max_ops` the request asked for, and the configuration for decoding one operation.
+    type Cfg = (usize, Op::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
+        let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
+        let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
+        let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
+        // Pins are the fold-prefix peaks at the requested boundary, independent of `max_ops`.
+        let pinned_nodes = Option::<Vec<D>>::read_range(buf, ..=MAX_PINNED_NODES)?;
+        Ok(Self {
+            proof,
+            operations,
+            pinned_nodes,
+        })
     }
 }
 

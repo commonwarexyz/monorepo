@@ -80,9 +80,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::{
-    qmdb::sync::{compact, resolver},
-};
+use commonware_storage::qmdb::sync::resolver;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -209,25 +207,6 @@ where
         Self::Error,
     > {
         self.0.serve(question).await
-    }
-}
-
-/// Serve compact sync fetches by delegating to the storage impl on the inner lock.
-impl<DB> compact::Resolver for Shared<DB>
-where
-    DB: Send + Sync + 'static,
-    Inner<DB>: compact::Resolver,
-{
-    type Family = <Inner<DB> as compact::Resolver>::Family;
-    type Digest = <Inner<DB> as compact::Resolver>::Digest;
-    type Op = <Inner<DB> as compact::Resolver>::Op;
-    type Error = <Inner<DB> as compact::Resolver>::Error;
-
-    async fn get_compact_state(
-        &self,
-        target: compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.0.get_compact_state(target).await
     }
 }
 

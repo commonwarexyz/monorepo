@@ -337,12 +337,7 @@ where
     H: Hasher + 'static,
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-    R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, K, FixedEncoding<V>>,
-            Digest = H::Digest,
-        > + Clone
-        + 'static,
+    R: sync::compact::CompactDbResolver<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -379,12 +374,7 @@ where
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
-    R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, K, VariableEncoding<V>>,
-            Digest = H::Digest,
-        > + Clone
-        + 'static,
+    R: sync::compact::CompactDbResolver<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -510,23 +500,31 @@ mod tests {
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl sync::compact::Resolver for SupersedingCompactResolver {
+    impl sync::resolver::Source<sync::compact::Target<mmr::Family, Digest>>
+        for SupersedingCompactResolver
+    {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = fixed::Operation<mmr::Family, Digest, Digest>;
         type Error = sync::compact::ServeError<mmr::Family, Digest>;
 
-        async fn get_compact_state(
+        async fn serve(
             &self,
             target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
+            cancel: commonware_utils::channel::oneshot::Receiver<()>,
+        ) -> Result<
+            (
+                sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,
+                sync::resolver::Validity,
+            ),
+            Self::Error,
+        > {
             if target == self.stale_target {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            sync::compact::Resolver::get_compact_state(&self.source, target).await
+            self.source.serve(target, cancel).await
         }
     }
 

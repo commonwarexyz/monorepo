@@ -123,7 +123,7 @@ mod tests {
     };
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256;
-    use commonware_storage::{mmr::Location, qmdb::sync::compact::State};
+    use commonware_storage::{mmr::Location, qmdb::sync::resolver::Response};
     use commonware_utils::NZU64;
     use rstest::rstest;
 
@@ -201,16 +201,15 @@ mod tests {
         let digest_c = sha256::Digest::from([10; 32]);
         let message = wire::Message::GetCompactStateResponse(wire::GetCompactStateResponse {
             request_id,
-            state: State {
-                leaf_count: Location::new(11),
-                pinned_nodes: vec![digest_a, digest_b],
-                last_commit_op: keyless_compact::Operation::Commit(None, Location::new(0)),
-                last_commit_proof: commonware_storage::mmr::Proof {
+            state: Response::new(
+                commonware_storage::mmr::Proof {
                     leaves: Location::new(11),
                     inactive_peaks: 0,
                     digests: vec![digest_c],
                 },
-            },
+                vec![keyless_compact::Operation::Commit(None, Location::new(0))],
+                Some(vec![digest_a, digest_b]),
+            ),
         });
 
         let encoded = message.encode().to_vec();
@@ -223,8 +222,8 @@ mod tests {
         match decoded {
             wire::Message::GetCompactStateResponse(response) => {
                 assert_eq!(response.request_id, request_id);
-                assert_eq!(response.state.leaf_count, Location::new(11));
-                assert_eq!(response.state.pinned_nodes.len(), 2);
+                assert_eq!(response.state.proof.leaves, Location::new(11));
+                assert_eq!(response.state.pinned_nodes.unwrap().len(), 2);
             }
             other => panic!("unexpected message variant: {other:?}"),
         }

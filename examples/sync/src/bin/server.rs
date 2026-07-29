@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{Target, compact},
+    qmdb::sync::{self, Target, compact, resolver::Source as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
@@ -26,7 +26,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     DurationExt,
-    channel::mpsc,
+    channel::{mpsc, oneshot},
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
     sys_rng,
@@ -351,7 +351,8 @@ async fn handle_get_compact_state<DB>(
 ) -> Result<wire::GetCompactStateResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
-    Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
+    Arc<AsyncRwLock<Option<DB>>>: sync::resolver::Source<
+            compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
@@ -360,7 +361,12 @@ where
 {
     state.request_counter.inc();
 
-    let compact_state = compact::Resolver::get_compact_state(&state.database, request.target)
+    // Serving is driven by the requesting client, which this handler cannot cancel, so the
+    // sender is held for the duration of the read.
+    let (_cancel, cancel) = oneshot::channel();
+    let (compact_state, _) = state
+        .database
+        .serve(request.target, cancel)
         .await
         .map_err(|err| {
             warn!(?err, "failed to serve compact state");
@@ -374,7 +380,7 @@ where
 
     Ok(wire::GetCompactStateResponse {
         request_id: request.request_id,
-        state: compact_state.state,
+        state: compact_state,
     })
 }
 
@@ -415,7 +421,8 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
+    Arc<AsyncRwLock<Option<DB>>>: sync::resolver::Source<
+            compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
@@ -691,7 +698,8 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
-    Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
+    Arc<AsyncRwLock<Option<DB>>>: sync::resolver::Source<
+            compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,

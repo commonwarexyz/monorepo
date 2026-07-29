@@ -14,12 +14,6 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Compact proof did not verify against the requested root.
     #[error("compact proof failed verification")]
     InvalidProof,
-    /// Compact payload leaf count did not match the requested target size.
-    #[error("unexpected compact leaf count - expected {expected}, got {actual}")]
-    UnexpectedLeafCount {
-        expected: Location<F>,
-        actual: Location<F>,
-    },
     /// Compact target parameters were invalid.
     #[error("invalid compact target: {0}")]
     InvalidCompactTarget(&'static str),

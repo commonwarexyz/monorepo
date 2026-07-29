@@ -104,7 +104,7 @@ where
 }
 
 type CompactStateResult<F, K, V, D> =
-    Result<compact_sync::State<F, Operation<F, K, V>, D>, compact_sync::ServeError<F, D>>;
+    Result<crate::qmdb::sync::resolver::Response<F, Operation<F, K, V>, D>, compact_sync::ServeError<F, D>>;
 
 /// A speculative batch for a compact immutable db.
 #[allow(clippy::type_complexity)]
@@ -299,13 +299,10 @@ where
         validated: compact_sync::ValidatedState<F, Operation<F, K, V>, H::Digest>,
     ) -> Result<Self, Error<F>> {
         let compact_sync::ValidatedState {
-            state:
-                compact_sync::State {
-                    leaf_count,
-                    pinned_nodes,
-                    last_commit_op,
-                    last_commit_proof,
-                },
+            leaf_count,
+            pinned_nodes,
+            last_commit_op,
+            last_commit_proof,
             root,
         } = validated;
         let last_commit_loc = Location::new(*leaf_count - 1);
@@ -460,12 +457,12 @@ where
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
-        Ok(compact_sync::State {
-            leaf_count,
-            pinned_nodes,
-            last_commit_op: op,
+        let _ = leaf_count;
+        Ok(crate::qmdb::sync::resolver::Response::new(
             last_commit_proof,
-        })
+            vec![op],
+            Some(pinned_nodes),
+        ))
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

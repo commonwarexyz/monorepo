@@ -1282,31 +1282,55 @@ mod compact_variable_mmr {
 
     #[derive(Clone)]
     struct SequenceResolver {
-        states: Arc<commonware_utils::sync::Mutex<VecDeque<CompactFetchResult>>>,
+        responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
-    type CompactFetchResult = sync::compact::FetchResult<
-        mmr::Family,
-        immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>,
-        sha256::Digest,
-    >;
+    type CompactResponse = (
+        sync::resolver::Response<mmr::Family, immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>, sha256::Digest>,
+        sync::resolver::Validity,
+    );
 
-    impl sync::compact::Resolver for SequenceResolver {
+    impl sync::resolver::Source<sync::compact::Target<mmr::Family, sha256::Digest>>
+        for SequenceResolver
+    {
         type Family = mmr::Family;
         type Digest = sha256::Digest;
         type Op = immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>;
         type Error = qmdb::Error<mmr::Family>;
 
-        async fn get_compact_state(
+        async fn serve(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
-            self.states
+            _cancel: commonware_utils::channel::oneshot::Receiver<()>,
+        ) -> Result<CompactResponse, Self::Error> {
+            self.responses
                 .lock()
                 .pop_front()
-                .ok_or(qmdb::Error::DataCorrupted("missing compact fetch result"))
+                .ok_or(qmdb::Error::DataCorrupted("missing compact response"))
         }
+    }
+
+    /// Fetch compact state for `target`. These tests never cancel, so the sender is held for the
+    /// duration of the call rather than dropped, which would read as an immediate cancellation.
+    async fn fetch_compact_state<R>(
+        source: &R,
+        target: sync::compact::Target<mmr::Family, sha256::Digest>,
+    ) -> Result<
+        (
+            sync::resolver::Response<mmr::Family, R::Op, sha256::Digest>,
+            sync::resolver::Validity,
+        ),
+        R::Error,
+    >
+    where
+        R: sync::resolver::Source<
+                sync::compact::Target<mmr::Family, sha256::Digest>,
+                Family = mmr::Family,
+                Digest = sha256::Digest,
+            >,
+    {
+        let (_cancel, cancel) = commonware_utils::channel::oneshot::channel();
+        source.serve(target, cancel).await
     }
 
     #[test_traced("WARN")]
@@ -1320,7 +1344,7 @@ mod compact_variable_mmr {
             };
 
             assert!(matches!(
-                sync::compact::Resolver::get_compact_state(&resolver, target).await,
+                fetch_compact_state(&resolver, target).await,
                 Err(sync::compact::ServeError::MissingSource)
             ));
         });
@@ -1404,19 +1428,19 @@ mod compact_variable_mmr {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            bad_state.last_commit_proof = crate::merkle::Proof::default();
+            bad_state.proof = crate::merkle::Proof::default();
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        bad_state.into(),
-                        good_state.into(),
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, None),
                     ]))),
                 },
                 target: target.clone(),
@@ -1456,32 +1480,27 @@ mod compact_variable_mmr {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            let immutable::variable::Operation::Commit(metadata, _) = bad_state.last_commit_op
+            let Some(immutable::variable::Operation::Commit(metadata, _)) = bad_state.operations.pop()
             else {
                 panic!("compact state should carry a commit operation");
             };
-            bad_state.last_commit_op =
-                immutable::variable::Operation::Commit(metadata, Location::new(0));
+            bad_state
+                .operations
+                .push(immutable::variable::Operation::Commit(metadata, Location::new(0)));
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        sync::compact::FetchResult {
-                            state: bad_state,
-                            callback: Some(bad_tx),
-                        },
-                        sync::compact::FetchResult {
-                            state: good_state,
-                            callback: Some(good_tx),
-                        },
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, Some(bad_tx)),
+                        (good_state, Some(good_tx)),
                     ]))),
                 },
                 target: target.clone(),
@@ -1527,20 +1546,20 @@ mod compact_variable_mmr {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
+            bad_state.pinned_nodes.as_mut().unwrap()[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        bad_state.into(),
-                        good_state.into(),
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, None),
                     ]))),
                 },
                 target: target.clone(),
@@ -1588,19 +1607,19 @@ mod compact_variable_mmr {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            bad_state.leaf_count = Location::new(*bad_state.leaf_count - 1);
+            bad_state.proof.leaves = Location::new(*bad_state.proof.leaves - 1);
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        bad_state.into(),
-                        good_state.into(),
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, None),
                     ]))),
                 },
                 target: target.clone(),
@@ -1653,7 +1672,7 @@ mod compact_variable_mmr {
 
             let source = Arc::new(source);
             let result =
-                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+                fetch_compact_state(&source, stale_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::compact::ServeError::StaleTarget { requested, current })
@@ -1918,13 +1937,12 @@ mod compact_variable_mmr {
             };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
-            let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
+            let (response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let validated = sync::compact::ValidatedState {
-                state: fetched.state,
-                root: target_b.root,
-            };
+            let validated =
+                sync::compact::validate_compact_state::<ClientDb>(&target_b, response)
+                    .unwrap();
             let imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import"),
                 client_cfg.clone(),
@@ -1939,13 +1957,12 @@ mod compact_variable_mmr {
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
-            let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
+            let (response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let validated = sync::compact::ValidatedState {
-                state: fetched.state,
-                root: target_b.root,
-            };
+            let validated =
+                sync::compact::validate_compact_state::<ClientDb>(&target_b, response)
+                    .unwrap();
             let imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import").with_attribute("index", 2),
                 client_cfg.clone(),
@@ -2039,31 +2056,55 @@ mod compact_variable_mmb {
 
     #[derive(Clone)]
     struct SequenceResolver {
-        states: Arc<commonware_utils::sync::Mutex<VecDeque<CompactFetchResult>>>,
+        responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
-    type CompactFetchResult = sync::compact::FetchResult<
-        mmb::Family,
-        immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>,
-        sha256::Digest,
-    >;
+    type CompactResponse = (
+        sync::resolver::Response<mmb::Family, immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>, sha256::Digest>,
+        sync::resolver::Validity,
+    );
 
-    impl sync::compact::Resolver for SequenceResolver {
+    impl sync::resolver::Source<sync::compact::Target<mmb::Family, sha256::Digest>>
+        for SequenceResolver
+    {
         type Family = mmb::Family;
         type Digest = sha256::Digest;
         type Op = immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>;
         type Error = qmdb::Error<mmb::Family>;
 
-        async fn get_compact_state(
+        async fn serve(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
-            self.states
+            _cancel: commonware_utils::channel::oneshot::Receiver<()>,
+        ) -> Result<CompactResponse, Self::Error> {
+            self.responses
                 .lock()
                 .pop_front()
-                .ok_or(qmdb::Error::DataCorrupted("missing compact fetch result"))
+                .ok_or(qmdb::Error::DataCorrupted("missing compact response"))
         }
+    }
+
+    /// Fetch compact state for `target`. These tests never cancel, so the sender is held for the
+    /// duration of the call rather than dropped, which would read as an immediate cancellation.
+    async fn fetch_compact_state<R>(
+        source: &R,
+        target: sync::compact::Target<mmb::Family, sha256::Digest>,
+    ) -> Result<
+        (
+            sync::resolver::Response<mmb::Family, R::Op, sha256::Digest>,
+            sync::resolver::Validity,
+        ),
+        R::Error,
+    >
+    where
+        R: sync::resolver::Source<
+                sync::compact::Target<mmb::Family, sha256::Digest>,
+                Family = mmb::Family,
+                Digest = sha256::Digest,
+            >,
+    {
+        let (_cancel, cancel) = commonware_utils::channel::oneshot::channel();
+        source.serve(target, cancel).await
     }
 
     #[test_traced("WARN")]
@@ -2077,7 +2118,7 @@ mod compact_variable_mmb {
             };
 
             assert!(matches!(
-                sync::compact::Resolver::get_compact_state(&resolver, target).await,
+                fetch_compact_state(&resolver, target).await,
                 Err(sync::compact::ServeError::MissingSource)
             ));
         });
@@ -2161,19 +2202,19 @@ mod compact_variable_mmb {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            bad_state.last_commit_proof = crate::merkle::Proof::default();
+            bad_state.proof = crate::merkle::Proof::default();
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        bad_state.into(),
-                        good_state.into(),
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, None),
                     ]))),
                 },
                 target: target.clone(),
@@ -2213,32 +2254,27 @@ mod compact_variable_mmb {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            let immutable::variable::Operation::Commit(metadata, _) = bad_state.last_commit_op
+            let Some(immutable::variable::Operation::Commit(metadata, _)) = bad_state.operations.pop()
             else {
                 panic!("compact state should carry a commit operation");
             };
-            bad_state.last_commit_op =
-                immutable::variable::Operation::Commit(metadata, Location::new(0));
+            bad_state
+                .operations
+                .push(immutable::variable::Operation::Commit(metadata, Location::new(0)));
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        sync::compact::FetchResult {
-                            state: bad_state,
-                            callback: Some(bad_tx),
-                        },
-                        sync::compact::FetchResult {
-                            state: good_state,
-                            callback: Some(good_tx),
-                        },
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, Some(bad_tx)),
+                        (good_state, Some(good_tx)),
                     ]))),
                 },
                 target: target.clone(),
@@ -2284,20 +2320,20 @@ mod compact_variable_mmb {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
+            bad_state.pinned_nodes.as_mut().unwrap()[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        bad_state.into(),
-                        good_state.into(),
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, None),
                     ]))),
                 },
                 target: target.clone(),
@@ -2348,19 +2384,19 @@ mod compact_variable_mmb {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+            let good_state = fetch_compact_state(&source, target.clone())
                 .await
                 .unwrap()
-                .state;
+                .0;
             let mut bad_state = good_state.clone();
-            bad_state.leaf_count = Location::new(*bad_state.leaf_count - 1);
+            bad_state.proof.leaves = Location::new(*bad_state.proof.leaves - 1);
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
-                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        bad_state.into(),
-                        good_state.into(),
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state, None),
+                        (good_state, None),
                     ]))),
                 },
                 target: target.clone(),
@@ -2413,7 +2449,7 @@ mod compact_variable_mmb {
 
             let source = Arc::new(source);
             let result =
-                sync::compact::Resolver::get_compact_state(&source, stale_target.clone()).await;
+                fetch_compact_state(&source, stale_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::compact::ServeError::StaleTarget { requested, current })
