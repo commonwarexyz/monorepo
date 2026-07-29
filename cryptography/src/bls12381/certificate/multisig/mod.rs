@@ -2,6 +2,15 @@
 //!
 //! This module provides both the generic BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
+//!
+//! # Proof of Possession
+//!
+//! Before constructing a scheme, callers must verify a proof of possession (PoP) for every BLS
+//! public key in the participant map. Neither [`Generic::signer`] nor [`Generic::verifier`]
+//! performs this verification. Without it, aggregate certificate verification is vulnerable to
+//! rogue-key attacks. Verify each PoP during participant registration with
+//! [`verify_proof_of_possession`](crate::bls12381::primitives::ops::verify_proof_of_possession),
+//! then construct schemes only from the validated participant set.
 
 #[cfg(feature = "mocks")]
 pub mod mocks;
@@ -35,7 +44,9 @@ use std::collections::BTreeSet;
 /// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
 pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
-    /// Participants in the committee.
+    /// Participants' identity keys and BLS signing keys.
+    ///
+    /// Every signing key must have a verified proof of possession.
     pub participants: BiMap<P, V::Public>,
     /// Key used for generating signatures.
     pub signer: Option<(Participant, Private)>,
@@ -52,6 +63,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// Returns `None` if the provided private key does not match any signing key
     /// in the participant set.
+    ///
+    /// # Security
+    ///
+    /// This function does not verify proofs of possession. The caller must verify a PoP for every
+    /// BLS public key in `participants` before constructing the scheme. See the [module-level
+    /// documentation](crate::bls12381::certificate::multisig) for details.
     pub fn signer(
         namespace: &[u8],
         participants: BiMap<P, V::Public>,
@@ -76,6 +93,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Participants have both an identity key and a signing key. The identity key
     /// is used for participant set ordering and indexing, while the signing key is used for
     /// verification.
+    ///
+    /// # Security
+    ///
+    /// This function does not verify proofs of possession. The caller must verify a PoP for every
+    /// BLS public key in `participants` before constructing the scheme. See the [module-level
+    /// documentation](crate::bls12381::certificate::multisig) for details.
     pub fn verifier(namespace: &[u8], participants: BiMap<P, V::Public>) -> Self {
         Self {
             participants,
@@ -394,6 +417,12 @@ where
 /// - `$faults`: The [`Faults`](commonware_utils::Faults) implementation used to compute certificate
 ///   quorums.
 ///
+/// # Security
+///
+/// The generated constructors do not verify proofs of possession. Before constructing a scheme,
+/// callers must verify a PoP for every BLS public key in the participant map. Otherwise, aggregate
+/// certificate verification is vulnerable to rogue-key attacks.
+///
 /// # Example
 /// ```ignore
 /// // For non-generic subject types with a single namespace:
@@ -434,6 +463,9 @@ macro_rules! impl_certificate_bls12381_multisig {
         }
 
         /// BLS12-381 multi-signature signing scheme wrapper.
+        ///
+        /// Every participant BLS public key must have a verified proof of possession before this
+        /// scheme is constructed.
         #[derive(Clone, Debug)]
         pub struct Scheme<
             P: $crate::PublicKey,
@@ -447,6 +479,11 @@ macro_rules! impl_certificate_bls12381_multisig {
             V: $crate::bls12381::primitives::variant::Variant,
         > Scheme<P, V> {
             /// Creates a new scheme instance with the provided key material.
+            ///
+            /// # Security
+            ///
+            /// This function does not verify proofs of possession. The caller must verify a PoP
+            /// for every BLS public key in `participants` before constructing the scheme.
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::BiMap<P, V::Public>,
@@ -462,6 +499,11 @@ macro_rules! impl_certificate_bls12381_multisig {
             }
 
             /// Builds a verifier that can authenticate signatures and certificates.
+            ///
+            /// # Security
+            ///
+            /// This function does not verify proofs of possession. The caller must verify a PoP
+            /// for every BLS public key in `participants` before constructing the scheme.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::BiMap<P, V::Public>,

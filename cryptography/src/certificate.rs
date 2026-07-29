@@ -21,7 +21,8 @@
     doc = "
 - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
   can be aggregated into a single multi-signature for compact certificates while preserving
-  attribution (signer indices are stored alongside the aggregated signature).
+  attribution (signer indices are stored alongside the aggregated signature). Callers must verify
+  a proof of possession for every BLS signing key before constructing the scheme.
 
 - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
   certificates that are constant-size regardless of committee size. Requires a trusted
