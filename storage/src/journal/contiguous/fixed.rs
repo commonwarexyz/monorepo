@@ -1492,9 +1492,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// watermark to the frontier) and the freed blobs are unlinked as the returned [PruneHandle]
     /// completes. Like [`Self::start_sync`], recording the boundary waits for a prior in-flight
     /// checkpoint sync before starting a new one. Await the handle to observe a durable boundary
-    /// and removed blobs, or drive it off the hot path. A dropped or crashed removal is completed
-    /// by recovery from the durable boundary, so the unlink never has to finish atomically or in
-    /// order.
+    /// and removed blobs, or drive it off the hot path. Until the handle resolves `Ok` the boundary
+    /// advance is provisional: a failed metadata write or a crash reverts it, so drive it to `Ok`
+    /// before durably recording anything derived from the boundary. A dropped or crashed removal is
+    /// completed by recovery from the durable boundary, so the unlink never has to finish atomically
+    /// or in order.
     pub async fn start_prune(mut self, min_item_pos: u64) -> Result<(Self, PruneHandle), Error> {
         let watermark = self.0.barrier.size();
         let (inner, handle) = self.0.start_prune(min_item_pos, watermark).await?;
