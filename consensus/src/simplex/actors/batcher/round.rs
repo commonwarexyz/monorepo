@@ -110,7 +110,7 @@ impl<
                 // A finalization may replace the leader-selected proposal, but its
                 // certificate makes reprocessing buffered finalize votes unnecessary.
                 self.verifier
-                    .set_proposal(ProposalState::Authoritative(finalization.proposal.clone()));
+                    .set_proposal(ProposalState::Certificate(finalization.proposal.clone()));
                 false
             }
             Certificate::Nullification(_) => false,
@@ -130,7 +130,7 @@ impl<
             .is_some_and(|selected| selected != proposal);
         let proposal_changed = self
             .verifier
-            .set_proposal(ProposalState::Authoritative(proposal.clone()));
+            .set_proposal(ProposalState::Certificate(proposal.clone()));
         if proposal_changed && proposal_replaced {
             self.restore_tracked_finalizes(proposal);
         }
