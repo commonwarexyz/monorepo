@@ -6,16 +6,21 @@ use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
-    merkle::{Family, Location},
-    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+    merkle::Family,
+    qmdb::sync::resolver::{Request, Resolver as SyncResolver, Response, Validity},
 };
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, future::Future, num::NonZeroU64};
+use std::{collections::VecDeque, future::Future};
 
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
 #[error("response dropped before completion")]
 pub struct ResponseDropped;
+
+/// Where the actor delivers a fetched response, along with the channel the caller reports
+/// peer validity on.
+pub(super) type Delivery<F, Op, D> =
+    oneshot::Sender<Result<(Response<F, Op, D>, Validity), ResponseDropped>>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
@@ -24,7 +29,7 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: handler::Request<F>,
-        response: oneshot::Sender<Result<FetchResult<F, Op, D>, ResponseDropped>>,
+        response: Delivery<F, Op, D>,
     },
     /// Cancel a previously requested operation fetch.
     CancelOperations { request: handler::Request<F> },
@@ -136,18 +141,15 @@ where
     type Op = Op;
     type Error = ResponseDropped;
 
-    async fn get_operations(
+    async fn fetch(
         &self,
-        op_count: Location<F>,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        request: Request<Self::Family>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
         let request = handler::Request {
-            op_count,
-            start_loc,
-            max_ops,
-            include_pinned_nodes,
+            op_count: request.size,
+            start_loc: request.start,
+            max_ops: request.max_ops,
+            include_pinned_nodes: request.retain_from.is_some(),
         };
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -197,7 +199,7 @@ mod tests {
 
             // Poll once so the request is enqueued, then abandon the fetch.
             {
-                let get = mailbox.get_operations(op_count, start_loc, max_ops, false);
+                let get = mailbox.fetch(Request::new(op_count, start_loc, max_ops));
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
             }
@@ -232,12 +234,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
-            let get = mailbox.get_operations(
+            let get = mailbox.fetch(Request::new(
                 mmr::Location::new(10),
                 mmr::Location::new(3),
                 NZU64!(2),
-                false,
-            );
+            ));
             let observe = async move {
                 let Message::GetOperations { response, .. } =
                     receiver.recv().await.expect("request should be queued")

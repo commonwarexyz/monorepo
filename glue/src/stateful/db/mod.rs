@@ -81,7 +81,6 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
 use commonware_storage::{
-    merkle::Location,
     qmdb::sync::{compact, resolver},
 };
 use commonware_utils::{
@@ -198,16 +197,17 @@ where
     type Op = <Inner<DB> as resolver::Resolver>::Op;
     type Error = <Inner<DB> as resolver::Resolver>::Error;
 
-    async fn get_operations(
+    async fn fetch(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-    ) -> Result<resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.0
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
-            .await
+        request: resolver::Request<Self::Family>,
+    ) -> Result<
+        (
+            resolver::Response<Self::Family, Self::Op, Self::Digest>,
+            resolver::Validity,
+        ),
+        Self::Error,
+    > {
+        self.0.fetch(request).await
     }
 }
 

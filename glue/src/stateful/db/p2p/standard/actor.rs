@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+    qmdb::sync::resolver::{Request, Resolver as SyncResolver, Response},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -29,7 +29,7 @@ use tracing::{debug, info};
 type Op<DB> = <Shared<DB> as SyncResolver>::Op;
 type DatabaseRoot<DB> = <Shared<DB> as SyncResolver>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
+type Pending<F, Op, D> = mailbox::Delivery<F, Op, D>;
 type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
@@ -305,11 +305,13 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok(FetchResult::with_callback(
-                    decoded.proof.clone(),
-                    decoded.operations.clone(),
-                    decoded.pinned_nodes.clone(),
-                    success_tx,
+                .send(Ok((
+                    Response::new(
+                        decoded.proof.clone(),
+                        decoded.operations.clone(),
+                        decoded.pinned_nodes.clone(),
+                    ),
+                    Some(success_tx),
                 )))
                 .is_err()
             {
@@ -354,25 +356,24 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let result = database
-            .get_operations(
-                key.op_count,
-                key.start_loc,
-                key.max_ops,
-                key.include_pinned_nodes,
-            )
-            .await;
+        let mut request = Request::new(key.op_count, key.start_loc, key.max_ops);
+        if key.include_pinned_nodes {
+            // The wire format only carries a flag, and a peer's retention floor is always the
+            // start of the range it asked for.
+            request = request.retaining_from(key.start_loc);
+        }
+        let result = database.fetch(request).await;
 
-        let Ok(fetch) = result else {
+        let Ok((served, _validity)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
 
         response.send_lossy(
             handler::Response {
-                proof: fetch.proof,
-                operations: fetch.operations,
-                pinned_nodes: fetch.pinned_nodes,
+                proof: served.proof,
+                operations: served.operations,
+                pinned_nodes: served.pinned_nodes,
             }
             .encode(),
         );
@@ -475,7 +476,13 @@ mod tests {
 
     type TestPending = Pending<mmr::Family, TestOp, sha256::Digest>;
     type TestPendingResult = oneshot::Receiver<
-        Result<FetchResult<mmr::Family, TestOp, sha256::Digest>, mailbox::ResponseDropped>,
+        Result<
+            (
+                Response<mmr::Family, TestOp, sha256::Digest>,
+                commonware_storage::qmdb::sync::resolver::Validity,
+            ),
+            mailbox::ResponseDropped,
+        >,
     >;
 
     fn test_subscriber() -> (TestPending, TestPendingResult) {
@@ -615,17 +622,15 @@ mod tests {
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let fetch = sub1_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
+                    let (_response, validity) = sub1_rx.await.unwrap().unwrap();
+                    validity
                         .expect("standard deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 },
                 async {
-                    let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
+                    let (_response, validity) = sub2_rx.await.unwrap().unwrap();
+                    validity
                         .expect("standard deliveries should include feedback")
                         .send(false)
                         .unwrap();
@@ -656,9 +661,8 @@ mod tests {
                     drop(fetch);
                 },
                 async {
-                    let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
+                    let (_response, validity) = sub2_rx.await.unwrap().unwrap();
+                    validity
                         .expect("standard deliveries should include feedback")
                         .send(true)
                         .unwrap();

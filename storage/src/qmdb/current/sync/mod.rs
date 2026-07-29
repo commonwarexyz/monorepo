@@ -375,62 +375,31 @@ impl_current_sync_database!(
 // The resolver for `current` databases serves ops-level proofs (not grafted proofs) from
 // the inner `any` db. The sync engine verifies each batch against the ops root.
 
-/// Forward a `current` database's proof reads, which are the wrapped `any` database's, to
-/// [`ProofSource`]. The sync engine operates on the ops root, so these are `any`'s reads.
-macro_rules! impl_current_proof_source {
-    ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::ProofSource
-            for $db<F, E, K, V, H, T, N, S>
-        where
-            F: Graftable,
-            E: Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-            $($($where_extra)+)?
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
+/// A `current` database serves proofs from the `any` database it wraps: the sync engine
+/// operates on the ops root, which is `any`'s root.
+///
+/// Every `current` alias resolves to this one generic, so one implementation covers all four.
+impl<F, E, U, C, I, H, const N: usize, S> crate::qmdb::sync::ProofSource
+    for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    U: Update + Send + Sync + 'static,
+    C: Mutable<Item = Operation<F, U>> + Send + Sync,
+    I: crate::index::Unordered<Value = Location<F>> + Send + Sync,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec + Send,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, U>;
+    type Error = qmdb::Error<F>;
 
-            async fn historical_proof(
-                &self,
-                op_count: Location<F>,
-                start_loc: Location<F>,
-                max_ops: std::num::NonZeroU64,
-            ) -> Result<(crate::merkle::Proof<F, H::Digest>, Vec<Self::Op>), qmdb::Error<F>> {
-                self.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await
-            }
-
-            async fn pinned_nodes_at(
-                &self,
-                loc: Location<F>,
-            ) -> Result<Vec<H::Digest>, qmdb::Error<F>> {
-                self.any.pinned_nodes_at(loc).await
-            }
-        }
-    };
+    async fn serve(
+        &self,
+        request: crate::qmdb::sync::resolver::Request<F>,
+    ) -> Result<crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>, qmdb::Error<F>> {
+        self.any.serve(request).await
+    }
 }
-
-// Unordered Fixed
-impl_current_proof_source!(CurrentUnorderedFixedDb, UnorderedFixedOp, FixedValue, Array);
-
-// Unordered Variable
-impl_current_proof_source!(
-    CurrentUnorderedVariableDb, UnorderedVariableOp, VariableValue, Key;
-    UnorderedVariableOp<F, K, V>: CodecShared,
-);
-
-// Ordered Fixed
-impl_current_proof_source!(CurrentOrderedFixedDb, OrderedFixedOp, FixedValue, Array);
-
-// Ordered Variable
-impl_current_proof_source!(
-    CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
-    OrderedVariableOp<F, K, V>: CodecShared,
-);

@@ -8,7 +8,7 @@ use crate::{
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            resolver::{FetchResult, Resolver},
+            resolver::{Request, Resolver, Response, Validity},
             target::validate_update,
         },
     },
@@ -62,7 +62,7 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
     pub id: RequestId,
     /// The result of the fetch operation.
-    pub result: Result<FetchResult<F, Op, D>, E>,
+    pub result: Result<(Response<F, Op, D>, Validity), E>,
 }
 
 /// Wait for the next synchronization event.
@@ -301,21 +301,21 @@ where
     fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let target_size = self.target.range.end();
 
-        // Schedule a pinned-nodes request at the lower sync bound if we don't
-        // have boundary state yet and one isn't already in flight.
+        // Schedule a boundary request at the lower sync bound if we don't have boundary
+        // state yet and one isn't already in flight. The pins it returns are what let us
+        // rebuild the pruned prefix, so it is the only request that sets `retain_from`.
         if !self.has_boundary_state()
             && !self
                 .outstanding_requests
                 .contains(&self.target.range.start())
         {
             let start_loc = self.target.range.start();
+            let request = Request::new(target_size, start_loc, NZU64!(1)).retaining_from(start_loc);
             let resolver = self.resolver.clone();
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, start_loc, target_size, async move {
-                    let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1), true)
-                        .await;
+                    let result = resolver.fetch(request).await;
                     IndexedFetchResult { id, result }
                 });
         }
@@ -351,13 +351,12 @@ where
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
+            let request = Request::new(target_size, gap_range.start, batch_size);
             let resolver = self.resolver.clone();
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, gap_range.start, target_size, async move {
-                    let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size, false)
-                        .await;
+                    let result = resolver.fetch(request).await;
                     IndexedFetchResult { id, result }
                 });
         }
@@ -556,27 +555,29 @@ where
         };
 
         let start_loc = request.start_loc;
-        let FetchResult {
-            proof,
-            operations,
-            pinned_nodes,
-            callback,
-        } = fetch_result.result.map_err(SyncError::Resolver)?;
+        let (
+            Response {
+                proof,
+                operations,
+                pinned_nodes,
+            },
+            validity,
+        ) = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
         let operations_len = operations.len() as u64;
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
             // Invalid batch size - notify resolver of failure.
             // We will request these operations again when we scan for unfetched operations.
-            if let Some(callback) = callback {
-                callback.send_lossy(false);
+            if let Some(validity) = validity {
+                validity.send_lossy(false);
             }
             return Ok(());
         }
 
         if proof.leaves != request.target_size {
-            if let Some(callback) = callback {
-                callback.send_lossy(false);
+            if let Some(validity) = validity {
+                validity.send_lossy(false);
             }
             return Ok(());
         }
@@ -617,8 +618,8 @@ where
         };
 
         // Report success or failure to the resolver.
-        if let Some(callback) = callback {
-            callback.send_lossy(valid);
+        if let Some(validity) = validity {
+            validity.send_lossy(valid);
         }
 
         if !valid {
@@ -868,20 +869,20 @@ mod tests {
         type Family = MmrFamily;
         type Op = i32;
 
-        async fn get_operations(
+        async fn fetch(
             &self,
-            _op_count: Location<Self::Family>,
-            _start_loc: Location<Self::Family>,
-            _max_ops: NonZeroU64,
-            _include_pinned_nodes: bool,
-        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-            Ok(FetchResult::new(
-                Proof {
-                    leaves: Location::new(0),
-                    inactive_peaks: 0,
-                    digests: vec![],
-                },
-                vec![],
+            _request: Request<Self::Family>,
+        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+            Ok((
+                Response::new(
+                    Proof {
+                        leaves: Location::new(0),
+                        inactive_peaks: 0,
+                        digests: vec![],
+                    },
+                    vec![],
+                    None,
+                ),
                 None,
             ))
         }
@@ -941,13 +942,16 @@ mod tests {
     fn dummy_result(id: RequestId) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, ()> {
         IndexedFetchResult {
             id,
-            result: Ok(FetchResult::new(
-                Proof {
-                    leaves: Location::new(0),
-                    inactive_peaks: 0,
-                    digests: vec![],
-                },
-                vec![],
+            result: Ok((
+                Response::new(
+                    Proof {
+                        leaves: Location::new(0),
+                        inactive_peaks: 0,
+                        digests: vec![],
+                    },
+                    vec![],
+                    None,
+                ),
                 None,
             )),
         }

@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            resolver::{self, FetchResult, Resolver},
+            resolver::{self, Request, Resolver, Response, Validity},
         },
     },
 };
@@ -1789,28 +1789,22 @@ where
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn get_operations(
+    async fn fetch(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let mut result = self
-            .inner
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
-            .await?;
+        request: Request<Self::Family>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+        let (mut response, validity) = self.inner.fetch(request).await?;
         // Corrupt pinned nodes only on the first request that includes them.
-        if result.pinned_nodes.is_some()
+        if response.pinned_nodes.is_some()
             && !self
                 .corrupted
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
-            && let Some(ref mut nodes) = result.pinned_nodes
+            && let Some(ref mut nodes) = response.pinned_nodes
             && !nodes.is_empty()
         {
             nodes[0] = Digest::from([0xFFu8; 32]);
         }
-        Ok(result)
+        Ok((response, validity))
     }
 }
 
@@ -1885,15 +1879,12 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn get_operations(
+    async fn fetch(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        if op_count == self.historical_target_size {
-            if include_pinned_nodes {
+        request: Request<Self::Family>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+        if request.size == self.historical_target_size {
+            if request.retain_from.is_some() {
                 // Never answers. The engine abandons this request when the target moves,
                 // which drops this future.
                 return std::future::pending().await;
@@ -1905,15 +1896,17 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
             }
         }
 
-        if include_pinned_nodes && start_loc == self.boundary_start {
+        if request.retain_from.is_some() && request.start == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
-                let mut result = self
-                    .inner
-                    .get_operations(self.historical_target_size, start_loc, max_ops, false)
-                    .await?;
-                result.pinned_nodes = None;
-                return Ok(result);
+                // Answer the boundary request against the historical size and without pins,
+                // so the engine has to retry it.
+                let historical =
+                    Request::new(self.historical_target_size, request.start, request.max_ops);
+                let (mut response, validity) =
+                    self.inner.fetch(historical).await?;
+                response.pinned_nodes = None;
+                return Ok((response, validity));
             }
 
             let release = self.release_boundary_retry.lock().take();
@@ -1922,9 +1915,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
             }
         }
 
-        self.inner
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
-            .await
+        self.inner.fetch(request).await
     }
 }
 
