@@ -85,7 +85,7 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub state: Response<mmr::Family, Op, D>,
+    pub response: Response<mmr::Family, Op, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -502,7 +502,7 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
-        self.state.write(buf);
+        self.response.write(buf);
     }
 }
 
@@ -512,7 +512,7 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.state.encode_size()
+        self.request_id.encode_size() + self.response.encode_size()
     }
 }
 
@@ -526,7 +526,10 @@ where
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
         // Compact state is exactly one operation, the final commit.
-        let state = Response::<mmr::Family, Op, D>::read_cfg(buf, &(1, Op::Cfg::default()))?;
-        Ok(Self { request_id, state })
+        let response = Response::<mmr::Family, Op, D>::read_cfg(buf, &(1, Op::Cfg::default()))?;
+        Ok(Self {
+            request_id,
+            response,
+        })
     }
 }

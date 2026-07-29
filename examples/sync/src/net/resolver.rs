@@ -122,7 +122,7 @@ where
             .await
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
-            wire::Message::GetCompactStateResponse(r) => Ok(r.state),
+            wire::Message::GetCompactStateResponse(r) => Ok(r.response),
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,
                 message: err.message,

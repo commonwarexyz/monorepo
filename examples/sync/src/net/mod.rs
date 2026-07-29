@@ -201,7 +201,7 @@ mod tests {
         let digest_c = sha256::Digest::from([10; 32]);
         let message = wire::Message::GetCompactStateResponse(wire::GetCompactStateResponse {
             request_id,
-            state: Response::new(
+            response: Response::new(
                 commonware_storage::mmr::Proof {
                     leaves: Location::new(11),
                     inactive_peaks: 0,
@@ -220,10 +220,10 @@ mod tests {
         .expect("failed to decode compact response");
 
         match decoded {
-            wire::Message::GetCompactStateResponse(response) => {
-                assert_eq!(response.request_id, request_id);
-                assert_eq!(response.state.proof.leaves, Location::new(11));
-                assert_eq!(response.state.pinned_nodes.unwrap().len(), 2);
+            wire::Message::GetCompactStateResponse(message) => {
+                assert_eq!(message.request_id, request_id);
+                assert_eq!(message.response.proof.leaves, Location::new(11));
+                assert_eq!(message.response.pinned_nodes.unwrap().len(), 2);
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
