@@ -131,6 +131,11 @@ impl<S: certificate::Scheme, D: Digest> AuditLog<S, D> {
         self.state.lock().events.clone()
     }
 
+    /// Returns the incarnation attached to subsequently recorded events.
+    pub(crate) fn generation(&self) -> u32 {
+        self.state.lock().generation
+    }
+
     pub(crate) fn record(&self, event: Event<S, D>) {
         let mut state = self.state.lock();
         let sequence = u64::try_from(state.events.len()).expect("audit history exceeds u64");

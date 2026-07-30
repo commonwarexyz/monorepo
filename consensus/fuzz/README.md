@@ -66,6 +66,7 @@ Available fuzz targets (standard mode):
 - `simplex_ed25519`
 - `simplex_secp256r1`
 - `simplex_id`
+- `simplex_id_audit_notarize_omission`
 - `simplex_cert_mock`
 - `simplex_bls12381_multisig_minpk`
 - `simplex_bls12381_threshold_minsig`

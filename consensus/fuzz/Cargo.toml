@@ -183,6 +183,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_audit_notarize_omission"
+path = "fuzz_targets/simplex_id_audit_notarize_omission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_faulty_msg"
 path = "fuzz_targets/simplex_id_faulty_msg.rs"
 test = false
