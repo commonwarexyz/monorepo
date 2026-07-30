@@ -294,9 +294,8 @@ where
         let max_proof_digests = cfg
             .max_proof_digests
             .min(cfg.max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT));
-        let (max_ops, op_cfg) = (&cfg.max_ops, &cfg.op);
         let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
-        let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
+        let operations = Vec::<Op>::read_cfg(buf, &((..=cfg.max_ops).into(), cfg.op.clone()))?;
         // Pins are the fold-prefix peaks at the requested boundary, independent of `max_ops`.
         let pinned_nodes = Option::<Vec<D>>::read_range(buf, ..=MAX_PINNED_NODES)?;
         Ok(Self {
@@ -699,7 +698,10 @@ pub(crate) mod tests {
     #[test]
     fn test_request_decode_rejects_contradictions() {
         let valid = Request::<mmr::Family>::new(Location::new(128), Location::new(64), NZU64!(16));
-        assert_eq!(Request::<mmr::Family>::decode(valid.encode()).unwrap(), valid);
+        assert_eq!(
+            Request::<mmr::Family>::decode(valid.encode()).unwrap(),
+            valid
+        );
 
         // start >= size
         let mut bad = valid;
