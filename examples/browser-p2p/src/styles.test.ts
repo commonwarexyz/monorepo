@@ -26,3 +26,11 @@ test("keeps the mobile chat inside the visual viewport", async () => {
   expect(mobile).toContain("minmax(0, 1fr)");
   expect(mobile).not.toContain("min-height: 540px");
 });
+
+test("keeps identity copy feedback visible inside the identity row", async () => {
+  const stylesheet = await Bun.file(new URL("./styles.css", import.meta.url)).text();
+  const feedback = stylesheet.slice(stylesheet.indexOf(".copy-tooltip"), stylesheet.indexOf(".copy-tooltip[hidden]"));
+
+  expect(feedback).toContain("display: inline-block");
+  expect(feedback).not.toContain("position: absolute");
+});

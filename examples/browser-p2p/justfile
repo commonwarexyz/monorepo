@@ -12,35 +12,35 @@ doctor:
 
 # Install the locked Bun dependencies.
 install: doctor
-    cd browser && bun install --frozen-lockfile
+    bun install --frozen-lockfile
 
 # Type-check and test the Bun application without changing packaged output.
 frontend-check: install
-    cd browser && bun run lint
-    cd browser && bun test
+    bun run lint
+    bun test
 
 # Build the hashed browser assets.
 frontend: install
-    cd browser && bun run build
+    bun run build
 
 # Type-check the Rust bridge against the browser target.
 wasm-check: doctor
-    cargo fmt --manifest-path browser/wasm/Cargo.toml -- --check
-    cargo check --locked --target wasm32-unknown-unknown --manifest-path browser/wasm/Cargo.toml
+    cargo fmt --manifest-path wasm/Cargo.toml -- --check
+    cargo check --locked --target wasm32-unknown-unknown --manifest-path wasm/Cargo.toml
 
 # Package wasm-bindgen output after the frontend has created a clean dist directory.
 wasm: frontend
-    cd browser/wasm && ./build.sh
+    cd wasm && ./build.sh
 
 # Build the complete static application.
 build: wasm
-    test -f browser/dist/index.html
-    test -f browser/dist/wasm/browser_p2p.js
-    test -f browser/dist/wasm/browser_p2p_bg.wasm
+    test -f dist/index.html
+    test -f dist/wasm/browser_p2p.js
+    test -f dist/wasm/browser_p2p_bg.wasm
 
 # Build and start the Bun static/rendezvous service.
 run: build
-    cd browser && bun run serve
+    bun run serve
 
 # Run focused checks without starting the service.
 check: frontend-check wasm-check
@@ -49,4 +49,4 @@ check: frontend-check wasm-check
 
 # Remove generated browser output.
 clean:
-    rm -rf browser/dist browser/wasm/target
+    rm -rf dist wasm/target

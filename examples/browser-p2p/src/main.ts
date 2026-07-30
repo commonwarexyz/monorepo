@@ -2,6 +2,7 @@ import QRCode from "qrcode";
 import "./styles.css";
 import { createBrowserChat, type BrowserP2pSession, type ChatEvent, type ConnectionState } from "./bridge";
 import { connectionView } from "./connection-view";
+import { copyText } from "./clipboard";
 import { createInvite, inviteUrl, parseInvite, type Invite } from "./invite";
 import { installThemeToggle } from "./theme";
 import { loadWebRtcConfig, WebRtcPairing } from "./webrtc";
@@ -10,10 +11,12 @@ const elements = {
   chat: getElement<HTMLElement>("chat"),
   composer: getElement<HTMLFormElement>("composer"),
   copyInvite: getElement<HTMLButtonElement>("copy-invite"),
+  copyStatus: getElement<HTMLSpanElement>("copy-status"),
   emptyState: getElement<HTMLLIElement>("empty-state"),
   emptyTitle: getElement<HTMLHeadingElement>("empty-title"),
   emptyDetail: getElement<HTMLParagraphElement>("empty-detail"),
   identity: getElement<HTMLButtonElement>("identity"),
+  identityCopyFeedback: getElement<HTMLSpanElement>("identity-copy-feedback"),
   inviteLink: getElement<HTMLAnchorElement>("invite-link"),
   messageInput: getElement<HTMLTextAreaElement>("message-input"),
   messages: getElement<HTMLOListElement>("messages"),
@@ -37,6 +40,8 @@ let chat: BrowserP2pSession | undefined;
 let pairing: WebRtcPairing | undefined;
 let state: ConnectionState = "disconnected";
 let currentInviteUrl: string | undefined;
+let identityCopyTimer = 0;
+let inviteCopyTimer = 0;
 
 installThemeToggle(elements.themeToggle);
 installViewportSync();
@@ -243,24 +248,47 @@ async function copyIdentity(): Promise<void> {
   if (!publicKey) {
     return;
   }
-  await navigator.clipboard.writeText(publicKey);
-  temporarilyLabel(elements.identity, "Copied public key");
+  showIdentityCopyFeedback("Copied");
+  try {
+    await copyText(publicKey);
+  } catch (error) {
+    showIdentityCopyFeedback("Copy failed");
+    showNotice("Could not copy", errorMessage(error));
+  }
 }
 
 async function copyInvite(): Promise<void> {
   if (!currentInviteUrl) {
     return;
   }
-  await navigator.clipboard.writeText(currentInviteUrl);
-  temporarilyLabel(elements.copyInvite, "Copied");
+  showInviteCopyFeedback("Copied");
+  try {
+    await copyText(currentInviteUrl);
+  } catch (error) {
+    showInviteCopyFeedback("Copy failed");
+    showNotice("Could not copy", errorMessage(error));
+  }
 }
 
-function temporarilyLabel(element: HTMLElement, label: string): void {
-  const previous = element.textContent;
-  element.textContent = label;
-  window.setTimeout(() => {
-    element.textContent = previous;
-  }, 1200);
+function showIdentityCopyFeedback(label: string): void {
+  window.clearTimeout(identityCopyTimer);
+  elements.identityCopyFeedback.textContent = label;
+  elements.identityCopyFeedback.hidden = false;
+  elements.copyStatus.textContent = label;
+  identityCopyTimer = window.setTimeout(() => {
+    elements.identityCopyFeedback.hidden = true;
+  }, 1600);
+}
+
+function showInviteCopyFeedback(label: string): void {
+  window.clearTimeout(inviteCopyTimer);
+  elements.copyInvite.textContent = label;
+  elements.copyInvite.dataset.copied = String(label === "Copied");
+  elements.copyStatus.textContent = label;
+  inviteCopyTimer = window.setTimeout(() => {
+    elements.copyInvite.textContent = "Copy link";
+    elements.copyInvite.removeAttribute("data-copied");
+  }, 1600);
 }
 
 function resizeComposer(): void {

@@ -15,7 +15,7 @@ candidates, or responder key. The signaling WebSockets close after the Commonwar
 - Bun 1.3 or newer
 - `just`
 - the `wasm32-unknown-unknown` Rust target
-- `wasm-bindgen-cli` matching `browser/wasm/Cargo.lock` (currently 0.2.126)
+- `wasm-bindgen-cli` matching `wasm/Cargo.lock` (currently 0.2.126)
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -91,9 +91,9 @@ is not a direct network path, although Commonware still protects peer identity a
 
 ## Layout
 
-- `browser/src/server.ts` serves static assets and routes bounded, opaque signaling envelopes.
-- `browser/src/webrtc.ts` owns rendezvous, encrypted signaling, SDP, ICE, and channel negotiation.
-- `browser/wasm/` owns ephemeral keys, the web runtime, Commonware authentication, and lookup.
+- `src/server.ts` serves static assets and routes bounded, opaque signaling envelopes.
+- `src/webrtc.ts` owns rendezvous, encrypted signaling, SDP, ICE, and channel negotiation.
+- `wasm/` owns ephemeral keys, the web runtime, Commonware authentication, and lookup.
 - `webrtc/` at the workspace root adapts an established `RTCDataChannel` to Commonware `Sink` and
   `Stream` semantics.
 
