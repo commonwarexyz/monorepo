@@ -38,6 +38,20 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3.77", optional = true }
+wasm-bindgen = { version = "0.2.100", optional = true }
+wasm-bindgen-futures = { version = "0.4.50", optional = true }
+web-sys = { version = "0.3.77", optional = true, features = [
+	"Document",
+	"Event",
+	"EventTarget",
+	"Navigator",
+	"Performance",
+	"VisibilityState",
+	"Window",
+] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable the JS backend for transitive dependencies that use getrandom on WASM.
 version = "0.4.3"
@@ -70,6 +84,9 @@ clap = { workspace = true, features = ["derive"] }
 rstest.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.50"
+
 [features]
 default = []
 arbitrary = [
@@ -83,6 +100,12 @@ bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 test-utils = []
+web = [
+	"dep:js-sys",
+	"dep:wasm-bindgen",
+	"dep:wasm-bindgen-futures",
+	"dep:web-sys",
+]
 iouring = [ "iouring-network", "iouring-storage" ]
 iouring-network = [ "io-uring" ]
 iouring-storage = [ "io-uring" ]

@@ -1,0 +1,52 @@
+set shell := ["bash", "-euc"]
+
+default:
+    @just --list
+
+# Verify the tools required by the browser package.
+doctor:
+    command -v bun >/dev/null
+    command -v cargo >/dev/null
+    command -v wasm-bindgen >/dev/null
+    rustup target list --installed | grep -qx wasm32-unknown-unknown
+
+# Install the locked Bun dependencies.
+install: doctor
+    bun install --frozen-lockfile
+
+# Type-check and test the Bun application without changing packaged output.
+frontend-check: install
+    bun run lint
+    bun test
+
+# Build the hashed browser assets.
+frontend: install
+    bun run build
+
+# Type-check the Rust bridge against the browser target.
+wasm-check: doctor
+    cargo fmt --manifest-path wasm/Cargo.toml -- --check
+    cd wasm && . ./toolchain.sh && cargo check --locked --target wasm32-unknown-unknown
+
+# Package wasm-bindgen output after the frontend has created a clean dist directory.
+wasm: frontend
+    cd wasm && ./build.sh
+
+# Build the complete static application.
+build: wasm
+    test -f dist/index.html
+    test -f dist/wasm/browser_p2p.js
+    test -f dist/wasm/browser_p2p_bg.wasm
+
+# Build and start the Bun static/rendezvous service.
+run: build
+    bun run serve
+
+# Run focused checks without starting the service.
+check: frontend-check wasm-check
+    cargo check -p commonware-webrtc
+    . wasm/toolchain.sh && cargo check --target wasm32-unknown-unknown -p commonware-webrtc
+
+# Remove generated browser output.
+clean:
+    rm -rf dist wasm/target

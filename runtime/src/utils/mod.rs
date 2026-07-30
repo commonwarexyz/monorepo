@@ -16,7 +16,7 @@ pub(crate) mod thread;
 
 mod handle;
 pub use handle::Handle;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) use handle::MetricHandle;
 #[commonware_macros::stability(ALPHA)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,7 +27,7 @@ pub(crate) use handle::Panicker;
 mod cell;
 pub use cell::Cell as ContextCell;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) mod supervision;
 
 /// The execution mode of a task.

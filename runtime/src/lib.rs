@@ -47,6 +47,9 @@ stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
+stability_scope!(ALPHA, cfg(all(target_arch = "wasm32", feature = "web")) {
+    pub mod web;
+});
 stability_scope!(BETA {
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};

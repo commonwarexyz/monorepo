@@ -1,12 +1,12 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::extract_panic_message;
 use crate::{Error, PlatformSend};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use crate::{telemetry::metrics::raw::Gauge, utils::supervision::Tree};
 use commonware_utils::channel::oneshot;
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_utils::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use commonware_utils::sync::Once;
 use futures::stream::{AbortHandle, Abortable};
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,7 +16,7 @@ use futures::{
     pin_mut,
     stream::Aborted,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
@@ -48,7 +48,7 @@ enum HandleState<T>
 where
     T: PlatformSend + 'static,
 {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
     Task {
         receiver: oneshot::Receiver<Result<T, Error>>,
         abort_handle: AbortHandle,
@@ -154,6 +154,42 @@ where
         )
     }
 
+    /// Wrap a browser-local task with abort support and supervised descendant cleanup.
+    #[inline(always)]
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub(crate) fn init_local<F>(
+        future: F,
+        metric: MetricHandle,
+        tree: Arc<Tree>,
+    ) -> (impl Future<Output = ()>, Self)
+    where
+        F: Future<Output = T> + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let cleanup_metric = metric.clone();
+        let task = async move {
+            let _cleanup = LocalTaskCleanup {
+                tree,
+                metric: cleanup_metric,
+            };
+            if let Ok(result) = Abortable::new(future, abort_registration).await {
+                let _ = sender.send(Ok(result));
+            }
+        };
+
+        (
+            task,
+            Self {
+                state: HandleState::Task {
+                    receiver,
+                    abort_handle,
+                    metric,
+                },
+            },
+        )
+    }
+
     /// Returns a handle backed by a completion receiver.
     pub fn from_receiver(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
@@ -187,7 +223,7 @@ where
     }
 
     /// Returns a handle that resolves to [`Error::Closed`] without spawning work.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
     pub(crate) fn closed(metric: MetricHandle) -> Self {
         // Mark the task as finished immediately so gauges remain accurate.
         metric.finish();
@@ -202,7 +238,7 @@ where
     /// Abort the spawned task or stop waiting for a completion.
     pub fn abort(&self) {
         match &self.state {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
             HandleState::Task {
                 abort_handle,
                 metric,
@@ -221,10 +257,10 @@ where
     }
 
     /// Returns a helper that aborts the task and updates metrics consistently.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
     pub(crate) fn aborter(&self) -> Option<Aborter> {
         match &self.state {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
             HandleState::Task {
                 abort_handle,
                 metric,
@@ -232,6 +268,20 @@ where
             } => Some(Aborter::new(abort_handle.clone(), metric.clone())),
             HandleState::Completion { .. } => None,
         }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+struct LocalTaskCleanup {
+    tree: Arc<Tree>,
+    metric: MetricHandle,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+impl Drop for LocalTaskCleanup {
+    fn drop(&mut self) {
+        self.tree.abort();
+        self.metric.finish();
     }
 }
 
@@ -243,7 +293,7 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.state {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
             HandleState::Task { receiver, .. } => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.unwrap_or_else(|_| Err(Error::Closed))),
@@ -256,13 +306,13 @@ where
 
 /// Tracks the metric state associated with a spawned task handle.
 #[derive(Clone)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) struct MetricHandle {
     gauge: Gauge,
     finished: Arc<Once>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl MetricHandle {
     /// Increments the supplied gauge and returns a handle responsible for
     /// eventually decrementing it.
@@ -376,13 +426,13 @@ impl Panicked {
 }
 
 /// Couples an [`AbortHandle`] with its metric handle so aborted tasks clean up gauges.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) struct Aborter {
     inner: AbortHandle,
     metric: MetricHandle,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl Aborter {
     /// Creates a new [`Aborter`] for the provided abort handle and metric handle.
     pub(crate) const fn new(inner: AbortHandle, metric: MetricHandle) -> Self {

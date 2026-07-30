@@ -3,11 +3,11 @@
 pub mod histogram;
 mod registration;
 pub mod status;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) mod task;
 
 /// Prefix for runtime metrics.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) const METRICS_PREFIX: &str = "runtime";
 
 pub use commonware_runtime_macros::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
@@ -36,15 +36,15 @@ pub mod raw {
     };
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use commonware_utils::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use prometheus_client::encoding::{
     MetricEncoder as PromMetricEncoder,
     text::{encode, encode_eof},
 };
 pub use registration::Registration;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use std::{
     any::Any,
     borrow::Cow,
@@ -288,7 +288,7 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
 //
 // Source:
 // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/encoding/text.rs#L218-L275
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 fn encode_descriptor<W>(
     writer: &mut W,
     name: &str,
@@ -311,7 +311,7 @@ where
 }
 
 /// Join a metric or label prefix with a child name using Prometheus' `_` separator.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) fn prefixed_name(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -322,7 +322,7 @@ pub(crate) fn prefixed_name(prefix: &str, name: &str) -> String {
 
 /// Build a child context label by appending `label` to `prefix`, asserting that
 /// `label` is valid and does not shadow the reserved runtime metric prefix.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) fn child_label(prefix: &str, label: &str) -> String {
     validate_label(label);
     let name = prefixed_name(prefix, label);
@@ -333,13 +333,13 @@ pub(crate) fn child_label(prefix: &str, label: &str) -> String {
     name
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 struct RegistryGuard {
     id: usize,
     registry: Weak<Mutex<RegistryInner>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl Drop for RegistryGuard {
     fn drop(&mut self) {
         let Some(registry) = self.registry.upgrade() else {
@@ -435,14 +435,14 @@ impl<M: std::fmt::Debug> std::fmt::Debug for Registered<M> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 type MetricAttributes = Vec<(Cow<'static, str>, Cow<'static, str>)>;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 type MetricKey = (String, MetricAttributes);
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 type SampleEncoder = dyn Fn(&mut String) -> Result<(), std::fmt::Error> + Send + Sync;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 struct PendingMetricEntry {
     family_name: String,
     attributes: MetricAttributes,
@@ -450,17 +450,17 @@ struct PendingMetricEntry {
     metric_any: Arc<dyn Any + Send + Sync>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) struct SharedMetric<M>(pub(crate) Arc<M>);
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl<M: std::fmt::Debug> std::fmt::Debug for SharedMetric<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
     fn encode(&self, encoder: PromMetricEncoder<'_>) -> Result<(), std::fmt::Error> {
         self.0.encode(encoder)
@@ -471,7 +471,7 @@ impl<M: EncodeMetric> EncodeMetric for SharedMetric<M> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 fn create_sample_encoder<M>(
     name: String,
     labels: MetricAttributes,
@@ -500,7 +500,7 @@ where
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 fn owned_attributes(attributes: Vec<(String, String)>) -> MetricAttributes {
     attributes
         .into_iter()
@@ -512,12 +512,12 @@ fn owned_attributes(attributes: Vec<(String, String)>) -> MetricAttributes {
 //
 // Source:
 // https://github.com/prometheus/client_rust/blob/4a6d40a55443d5b18f5be311d246c03e56f417d6/src/registry.rs#L340-L348
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 fn normalize_help(help: String) -> String {
     help + "."
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 struct MetricEntry {
     family_name: String,
     attributes: MetricAttributes,
@@ -528,7 +528,7 @@ struct MetricEntry {
 }
 
 #[derive(Debug)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 struct MetricFamily {
     help: String,
     metric_type: MetricType,
@@ -539,11 +539,11 @@ struct MetricFamily {
 /// Manages metrics with explicit lifetimes.
 #[derive(Clone)]
 pub struct Registry {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
     inner: Arc<Mutex<RegistryInner>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 struct RegistryInner {
     /// Dense metric storage indexed by stable metric id.
     metrics: Vec<Option<MetricEntry>>,
@@ -566,12 +566,12 @@ impl Default for Registry {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
             inner: Arc::new(Mutex::new(RegistryInner::new())),
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
     pub(crate) fn register<M>(
         &self,
         name: String,
@@ -587,18 +587,18 @@ impl Registry {
     }
 
     pub fn encode(&self) -> String {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
         {
             self.inner.lock().encode()
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "web")))]
         {
             "# EOF\n".to_string()
         }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl RegistryInner {
     fn new() -> Self {
         Self {
@@ -845,13 +845,13 @@ impl RegistryInner {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) struct Scope {
     registry: Registry,
     prefix: String,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 pub(crate) trait Register {
     /// Register a metric under this scope's prefix.
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M>;
@@ -860,7 +860,7 @@ pub(crate) trait Register {
     fn sub_registry(&mut self, prefix: &str) -> Scope;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl Register for Registry {
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M> {
         validate_label(name);
@@ -882,7 +882,7 @@ impl Register for Registry {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 impl Register for Scope {
     fn register<M: Metric>(&mut self, name: &str, help: &str, metric: M) -> Registered<M> {
         validate_label(name);

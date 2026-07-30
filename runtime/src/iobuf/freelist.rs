@@ -116,7 +116,7 @@
 //! a slot outside the freelist may access that slot's parking cell.
 use super::buffer::PooledBuffer;
 use crossbeam_utils::CachePadded;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::{alloc::Layout, cell::Cell, mem::MaybeUninit, sync::atomic::Ordering};
 
@@ -197,7 +197,7 @@ impl Freelist {
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "web"))]
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
