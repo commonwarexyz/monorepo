@@ -251,6 +251,12 @@ impl Config {
             if argument == "--bench" {
                 continue;
             }
+            // Filtered and harness-oriented Cargo invocations apply their
+            // arguments to every bench target. This custom harness has its own
+            // selectors, so exit without running its production-sized suite.
+            if is_harness_argument(&argument) || !argument.starts_with('-') {
+                return Ok(None);
+            }
 
             let (option, inline_value) = argument
                 .split_once('=')
@@ -426,6 +432,68 @@ impl Config {
             None
         }
     }
+}
+
+/// Returns whether an argument belongs to Criterion or libtest.
+fn is_harness_argument(argument: &str) -> bool {
+    let option = argument
+        .split_once('=')
+        .map_or(argument, |(option, _)| option);
+    if let Some(shorts) = option
+        .strip_prefix('-')
+        .filter(|shorts| !shorts.is_empty() && !shorts.starts_with('-'))
+    {
+        // Criterion accepts attached values for these options and clusters its
+        // boolean short options, so recognize the same forms.
+        return matches!(shorts.as_bytes()[0], b'b' | b'c' | b's' | b'Z')
+            || shorts
+                .bytes()
+                .all(|short| matches!(short, b'V' | b'n' | b'q' | b'v'));
+    }
+    matches!(
+        option,
+        "--baseline"
+            | "--baseline-lenient"
+            | "--color"
+            | "--colour"
+            | "--confidence-level"
+            | "--discard-baseline"
+            | "--ensure-time"
+            | "--exact"
+            | "--exclude-should-panic"
+            | "--fail-fast"
+            | "--force-run-in-process"
+            | "--format"
+            | "--ignored"
+            | "--include-ignored"
+            | "--list"
+            | "--load-baseline"
+            | "--logfile"
+            | "--measurement-time"
+            | "--no-capture"
+            | "--noise-threshold"
+            | "--nocapture"
+            | "--noplot"
+            | "--nresamples"
+            | "--output-format"
+            | "--plotting-backend"
+            | "--profile-time"
+            | "--quick"
+            | "--quiet"
+            | "--report-time"
+            | "--sample-size"
+            | "--save-baseline"
+            | "--show-output"
+            | "--shuffle"
+            | "--shuffle-seed"
+            | "--significance-level"
+            | "--skip"
+            | "--test"
+            | "--test-threads"
+            | "--version"
+            | "--verbose"
+            | "--warm-up-time"
+    )
 }
 
 /// Computes a checked observation count for one scenario.

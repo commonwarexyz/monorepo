@@ -48,6 +48,49 @@ fn cli_accepts_inline_values_and_cargo_marker() {
 }
 
 #[test]
+fn cli_skips_harness_and_filtered_invocations() {
+    // Setup: Select representative Criterion and libtest arguments used by
+    // filtered, listing, test, and benchmark-reporting workflows.
+    let invocations = [
+        vec!["iobuf"],
+        vec!["--list"],
+        vec!["-v"],
+        vec!["-vn"],
+        vec!["-cnever"],
+        vec!["--test"],
+        vec!["--noplot"],
+        vec!["--no-capture"],
+        vec!["--shuffle-seed", "7"],
+        vec!["--sample-size", "10"],
+        vec!["--output-format", "bencher"],
+        vec!["--output-format=bencher"],
+    ];
+
+    for invocation in invocations {
+        // Action: Parse each compatibility invocation through the production path.
+        let parsed = super::Config::parse_from(invocation.into_iter().map(str::to_owned)).unwrap();
+
+        // Assertion: The custom harness exits without running its expensive suite.
+        assert!(parsed.is_none());
+    }
+}
+
+#[test]
+fn cli_rejects_unknown_timer_options() {
+    // Setup: Supply one dashed option outside the timer and harness interfaces.
+    let arguments = ["--unknown-timer-option", "value"]
+        .into_iter()
+        .map(str::to_owned);
+
+    // Action: Parse the unsupported timer invocation.
+    let error = super::Config::parse_from(arguments).unwrap_err();
+
+    // Assertion: Compatibility handling does not hide misspelled timer options.
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("unknown option"));
+}
+
+#[test]
 fn cli_rejects_zero_for_positive_options() {
     // Setup: Supply zero for an option that controls a nonempty batch.
     let arguments = ["--accuracy-batches", "0"].into_iter().map(str::to_owned);
