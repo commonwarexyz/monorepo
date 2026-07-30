@@ -20,7 +20,7 @@ mod ordinary {
         io,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
-            Arc, Weak,
+            Arc, Barrier, Weak,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
         },
         task::{Context, Poll},
@@ -536,18 +536,24 @@ mod ordinary {
         }
     }
 
-    /// Claims timer shard indices from fresh worker-like or fallback threads.
+    /// Concurrently claims shard indices from fresh worker-like or fallback threads.
     fn claim_affinity_indices(affinity: &Arc<Affinity>, claims: usize, worker: bool) -> Vec<usize> {
-        (0..claims)
+        let barrier = Arc::new(Barrier::new(claims));
+        let threads: Vec<_> = (0..claims)
             .map(|_| {
                 let affinity = Arc::clone(affinity);
+                let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
+                    barrier.wait();
                     if worker {
                         affinity.assign_worker();
                     }
                     affinity.select()
                 })
             })
+            .collect();
+        threads
+            .into_iter()
             .map(|thread| thread.join().unwrap())
             .collect()
     }
@@ -1685,7 +1691,7 @@ mod ordinary {
         let workers = Arc::new(affinity(4));
         let fallbacks = Arc::new(affinity(4));
 
-        // Action: Claim every worker index once and two fallback rounds.
+        // Action: Concurrently claim every worker index once and two fallback rounds.
         let mut worker_indices = claim_affinity_indices(&workers, 4, true);
         let mut fallback_indices = claim_affinity_indices(&fallbacks, 8, false);
         worker_indices.sort_unstable();
