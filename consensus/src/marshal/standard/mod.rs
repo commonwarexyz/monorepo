@@ -57,8 +57,8 @@ mod tests {
                 harness::{
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
                     InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
-                    QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
-                    ValidatorHandle, default_leader, make_raw_block, setup_network_links,
+                    QUORUM, S, StandardHarness, TestHarness, UNRELIABLE_LINK, V, ValidatorHandle,
+                    default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants,
                 },
                 verifying::MockVerifyingApp,
@@ -82,21 +82,22 @@ mod tests {
     use commonware_broadcast::{Broadcaster as _, buffered};
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_cryptography::{
-        Digestible, Hasher as _,
+        Digestible, Hasher as _, Signer,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
-        ed25519::PublicKey,
+        ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Receiver as _, Recipients, Sender as _,
-        simulated::{self, Network},
+        CheckedSender as _, LimitedSender as _, ReachabilityManager as _, Receiver as _,
+        Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Scheduler, Supervisor as _, buffer::paged::CacheRef,
-        deterministic,
+        Clock, Metrics, Quota, Runner, Scheduler, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic::{self, network as deterministic_network},
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
@@ -107,7 +108,7 @@ mod tests {
         Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
-        ordered::{Quorum as _, Set},
+        ordered::Quorum as _,
         sequence::U64,
         sync::Mutex,
         vec::NonEmptyVec,
@@ -180,10 +181,10 @@ mod tests {
 
     fn assert_finalize_deterministic<H: TestHarness>(
         seed: u64,
-        link: commonware_p2p::simulated::Link,
+        link: deterministic_network::Link,
         quorum_sees_finalization: bool,
     ) {
-        let r1 = harness::finalize::<H>(seed, link.clone(), quorum_sees_finalization);
+        let r1 = harness::finalize::<H>(seed, link, quorum_sees_finalization);
         let r2 = harness::finalize::<H>(seed, link, quorum_sees_finalization);
         assert_eq!(r1, r2);
     }
@@ -198,6 +199,64 @@ mod tests {
         let r1 = harness::hailstorm::<H>(seed, 4, 4, 2, LINK);
         let r2 = harness::hailstorm::<H>(seed, 4, 4, 2, LINK);
         assert_eq!(r1, r2);
+    }
+
+    async fn wait_for_lookup_recipient(
+        context: &deterministic::Context,
+        sender: &mut commonware_p2p::authenticated::lookup::Sender<
+            PublicKey,
+            deterministic::Context,
+        >,
+        recipient: &PublicKey,
+    ) {
+        let deadline = context.current() + Duration::from_secs(10);
+        loop {
+            if sender
+                .check(Recipients::One(recipient.clone()))
+                .is_ok_and(|checked| checked.recipients().contains(recipient))
+            {
+                return;
+            }
+            assert!(
+                context.current() < deadline,
+                "lookup did not connect to {recipient}"
+            );
+            context.sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_lookup_delivery(
+        context: &deterministic::Context,
+        sender: &mut commonware_p2p::authenticated::lookup::Sender<
+            PublicKey,
+            deterministic::Context,
+        >,
+        receiver: &mut commonware_p2p::authenticated::lookup::Receiver<PublicKey>,
+        recipient: &PublicKey,
+        expected_sender: &PublicKey,
+        marker: &[u8],
+    ) {
+        wait_for_lookup_recipient(context, sender, recipient).await;
+        assert!(
+            !sender
+                .send(Recipients::One(recipient.clone()), marker.to_vec(), true)
+                .is_empty(),
+            "lookup readiness marker should be queued"
+        );
+
+        select! {
+            result = receiver.recv() => {
+                let (actual_sender, message) = result.expect("lookup readiness marker missing");
+                assert_eq!(&actual_sender, expected_sender);
+                assert_eq!(message.as_ref(), marker);
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!(
+                    "lookup did not deliver readiness marker {}",
+                    String::from_utf8_lossy(marker),
+                );
+            },
+        }
     }
 
     #[test_group("slow")]
@@ -572,13 +631,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -622,7 +682,20 @@ mod tests {
                     .await
             );
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
-            context.sleep(Duration::from_millis(200)).await;
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                if peer_mailbox.get_info(Identifier::Latest).await
+                    == Some((Height::new(2), block_two.digest()))
+                {
+                    break;
+                }
+
+                assert!(
+                    context.current() < deadline,
+                    "peer did not persist the finalized tip"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
 
             // Seed inconsistent state: has block_one but only a finalization
             // (no block data) for height 2.
@@ -639,12 +712,27 @@ mod tests {
             let recovering = StandardHarness::setup_validator_with(
                 context.child("recovering_validator"),
                 &mut oracle,
-                recovering_validator,
+                recovering_validator.clone(),
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
+            oracle
+                .wait_for_connection(&context, &recovering_validator, &peer_validator)
+                .await;
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                if recovering.mailbox.get_block(Height::new(2)).await == Some(block_two.clone()) {
+                    break;
+                }
+
+                assert!(
+                    context.current() < deadline,
+                    "recovering validator did not repair the finalized tip"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
 
             // Walk through all blocks sequentially. Block 2 must be
@@ -665,13 +753,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -779,13 +868,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -866,13 +956,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -982,13 +1073,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1097,13 +1189,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1174,6 +1267,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -1181,7 +1275,7 @@ mod tests {
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1404,13 +1498,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1491,6 +1586,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -1498,12 +1594,10 @@ mod tests {
             let victim = participants[0].clone();
             let server = participants[1].clone();
             let peers = vec![victim.clone(), server.clone()];
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                peers.clone(),
-            )
-            .await;
+            let peer_keys = private_keys[..2].to_vec();
+            let mut oracle =
+                setup_network_with_participants(context.child("network"), NZUsize!(1), peer_keys)
+                    .await;
 
             let victim_setup = StandardHarness::setup_validator(
                 context.child("victim"),
@@ -1596,6 +1690,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -1603,12 +1698,10 @@ mod tests {
             let victim = participants[0].clone();
             let server = participants[1].clone();
             let peers = vec![victim.clone(), server.clone()];
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                peers.clone(),
-            )
-            .await;
+            let peer_keys = private_keys[..2].to_vec();
+            let mut oracle =
+                setup_network_with_participants(context.child("network"), NZUsize!(1), peer_keys)
+                    .await;
 
             let victim_setup = StandardHarness::setup_validator(
                 context.child("victim"),
@@ -1838,6 +1931,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -1845,10 +1939,10 @@ mod tests {
                 NAMESPACE,
                 NUM_VALIDATORS,
             );
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
+       let mut oracle = setup_network_with_participants(
+           context.child("network"),
+           NZUsize!(1),
+            private_keys.clone(),
             )
             .await;
             let setup = StandardHarness::setup_validator(
@@ -1967,6 +2061,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -1990,10 +2085,10 @@ mod tests {
                 Some(&byzantine),
             );
 
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
+       let mut oracle = setup_network_with_participants(
+           context.child("network"),
+           NZUsize!(1),
+            private_keys.clone(),
             )
             .await;
             let setup = StandardHarness::setup_validator(
@@ -2067,22 +2162,56 @@ mod tests {
             // Channels 1 and 2 are owned by marshal. Keep the three Simplex
             // channels separate, register the Byzantine peer as the scripted
             // sender, and tap the observer's vote receiver.
-            let victim_control = oracle.control(victim.clone());
-            let vote_network = victim_control.register(3, TEST_QUOTA).await.unwrap();
-            let certificate_network = victim_control.register(4, TEST_QUOTA).await.unwrap();
-            let resolver_network = victim_control.register(5, TEST_QUOTA).await.unwrap();
-            let byzantine_control = oracle.control(byzantine.clone());
-            let (mut byzantine_vote_sender, _byzantine_vote_receiver) =
-                byzantine_control.register(3, TEST_QUOTA).await.unwrap();
-            let (mut byzantine_certificate_sender, _byzantine_certificate_receiver) =
-                byzantine_control.register(4, TEST_QUOTA).await.unwrap();
-            let _byzantine_resolver = byzantine_control.register(5, TEST_QUOTA).await.unwrap();
-            let (_observer_vote_sender, mut observer_vote_receiver) = oracle
-                .control(observer)
-                .register(3, TEST_QUOTA)
-                .await
-                .unwrap();
+            let (
+                (
+                    (mut victim_vote_sender, mut victim_vote_receiver),
+                    (victim_certificate_sender, mut victim_certificate_receiver),
+                    resolver_network,
+                ),
+                _,
+                victim_blocker,
+            ) = oracle.simplex_protocols(context.child("victim_simplex"), &victim);
+            let (
+                (
+                    (mut byzantine_vote_sender, _),
+                    (mut byzantine_certificate_sender, _),
+                    _byzantine_resolver,
+                ),
+                _,
+                _,
+            ) = oracle.simplex_protocols(context.child("byzantine_simplex"), &byzantine);
+            let (((_, mut observer_vote_receiver), _, _), _, _) =
+                oracle.simplex_protocols(context.child("observer_simplex"), &observer);
             setup_network_links(&mut oracle, &participants, LINK).await;
+            wait_for_lookup_delivery(
+                &context,
+                &mut byzantine_vote_sender,
+                &mut victim_vote_receiver,
+                &victim,
+                &byzantine,
+                b"byzantine-vote-ready",
+            )
+            .await;
+            wait_for_lookup_delivery(
+                &context,
+                &mut byzantine_certificate_sender,
+                &mut victim_certificate_receiver,
+                &victim,
+                &byzantine,
+                b"byzantine-certificate-ready",
+            )
+            .await;
+            wait_for_lookup_delivery(
+                &context,
+                &mut victim_vote_sender,
+                &mut observer_vote_receiver,
+                &observer,
+                &victim,
+                b"victim-vote-ready",
+            )
+            .await;
+            let vote_network = (victim_vote_sender, victim_vote_receiver);
+            let certificate_network = (victim_certificate_sender, victim_certificate_receiver);
 
             let wrapper = Wrapper::new(
                 kind,
@@ -2095,7 +2224,7 @@ mod tests {
                 simplex::config::Config {
                     scheme: schemes[1].clone(),
                     elector: RoundRobin::<Sha256>::default(),
-                    blocker: oracle.control(victim.clone()),
+                    blocker: victim_blocker,
                     automaton: wrapper.clone(),
                     relay: wrapper,
                     reporter: marshal,
@@ -2125,12 +2254,26 @@ mod tests {
                 .collect();
             let nullification =
                 Nullification::from_nullifies(&schemes[0], &nullifies, &Sequential).unwrap();
-            byzantine_certificate_sender.send(
-                Recipients::One(victim.clone()),
-                Certificate::<S, D>::Nullification(nullification).encode(),
-                true,
-            );
-            context.sleep(Duration::from_millis(250)).await;
+            let nullification = Certificate::<S, D>::Nullification(nullification).encode();
+            for _ in 0..5 {
+                wait_for_lookup_recipient(
+                    &context,
+                    &mut byzantine_certificate_sender,
+                    &victim,
+                )
+                .await;
+                assert!(
+                    !byzantine_certificate_sender
+                        .send(
+                            Recipients::One(victim.clone()),
+                            nullification.clone(),
+                            true,
+                        )
+                        .is_empty(),
+                    "scripted nullification should be queued"
+                );
+                context.sleep(Duration::from_millis(50)).await;
+            }
 
             // The Byzantine leader reuses the honest block commitment in a
             // conflicting header that declares the older certified parent.
@@ -2139,28 +2282,39 @@ mod tests {
             assert_eq!(bad_proposal.payload, good_proposal.payload);
             assert_ne!(bad_proposal, good_proposal);
             let bad_vote = Notarize::sign(&schemes[3], bad_proposal).unwrap();
-            byzantine_vote_sender.send(
-                Recipients::One(victim.clone()),
-                Vote::<S, D>::Notarize(bad_vote).encode(),
-                true,
-            );
+            let bad_vote = Vote::<S, D>::Notarize(bad_vote).encode();
 
             // InvalidProposal is the deterministic barrier proving that the
             // conflicting header reached verify and was rejected before the
             // honest notarization arrives.
-            select! {
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("{kind:?}: victim did not reject the conflicting proposal");
-                },
-                result = async {
-                    loop {
-                        let (_, message) = observer_vote_receiver.recv().await.unwrap();
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                wait_for_lookup_recipient(&context, &mut byzantine_vote_sender, &victim).await;
+                assert!(
+                    !byzantine_vote_sender
+                        .send(
+                            Recipients::One(victim.clone()),
+                            bad_vote.clone(),
+                            true,
+                        )
+                        .is_empty(),
+                    "scripted proposal should be queued"
+                );
+                select! {
+                    _ = context.sleep(Duration::from_millis(100)) => {
+                        assert!(
+                            context.current() < deadline,
+                            "{kind:?}: victim did not reject the conflicting proposal"
+                        );
+                    },
+                    result = observer_vote_receiver.recv() => {
+                        let (_, message) = result.unwrap();
                         let vote = Vote::<S, D>::decode(message).unwrap();
                         if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == round) {
                             break;
                         }
-                    }
-                } => result,
+                    },
+                }
             }
             context.sleep(Duration::from_millis(250)).await;
 
@@ -2217,6 +2371,7 @@ mod tests {
             runner.start(|mut context| async move {
                 let Fixture {
                     participants,
+                    private_keys,
                     schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -2227,7 +2382,7 @@ mod tests {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
-                    participants.clone(),
+                    private_keys.clone(),
                 )
                 .await;
                 let me = participants[0].clone();
@@ -2445,9 +2600,9 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
+            let Fixture {
+                participants,
+                schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
                     &mut context,
@@ -2727,9 +2882,10 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
+            let Fixture {
+                participants,
+                private_keys,
+                schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
                     &mut context,
@@ -2743,7 +2899,7 @@ mod tests {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(2),
-                    [victim.clone(), malicious.clone()],
+                    private_keys[..3].iter().cloned(),
                 )
                 .await;
                 setup_network_links(
@@ -2790,16 +2946,18 @@ mod tests {
                     .await;
                 assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
 
-                let malicious_backfill = oracle
-                    .control(malicious.clone())
-                    .register(1, Quota::per_second(NonZeroU32::MAX))
-                    .await
-                    .unwrap();
+                let (mut malicious_network, malicious_manager, malicious_blocker) =
+                    oracle.node(context.child("malicious_p2p"), &malicious);
+                let malicious_backfill = malicious_network.register(
+                    1,
+                    Quota::per_second(NonZeroU32::MAX),
+                    1024,
+                );
                 let (malicious_engine, _malicious_mailbox) = commonware_resolver::p2p::Engine::new(
                     context.child("malicious_resolver"),
                     commonware_resolver::p2p::Config {
-                        peer_provider: oracle.manager(),
-                        blocker: oracle.control(malicious.clone()),
+                        peer_provider: malicious_manager,
+                        blocker: malicious_blocker,
                         consumer: NoopConsumer,
                         producer: StaticProducer::new(
                             handler::Key::Notarized {
@@ -2817,6 +2975,7 @@ mod tests {
                     },
                 );
                 malicious_engine.start(malicious_backfill);
+                malicious_network.start();
 
                 let child_round = Round::new(Epoch::zero(), View::new(2));
                 let child_context = Ctx {
@@ -2847,11 +3006,7 @@ mod tests {
 
                 let start = context.current();
                 loop {
-                    let blocked = oracle.blocked().await.unwrap();
-                    if blocked
-                        .iter()
-                        .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious)
-                    {
+                    if oracle.is_blocked(&malicious) {
                         break;
                     }
                     if context.current().duration_since(start).unwrap_or_default()
@@ -2862,16 +3017,10 @@ mod tests {
                     context.sleep(Duration::from_millis(10)).await;
                 }
 
-                oracle
-                    .add_link(victim.clone(), honest.clone(), LINK)
-                    .await
-                    .unwrap();
-                oracle
-                    .add_link(honest.clone(), victim.clone(), LINK)
-                    .await
-                    .unwrap();
-                let mut manager = oracle.manager();
-                manager.track(1, Set::from_iter_dedup([honest.clone()]));
+                oracle.set_link(&victim, &honest, LINK);
+                oracle.set_link(&honest, &victim, LINK);
+                let mut manager = oracle.manager(&victim);
+                manager.track(1, oracle.reachable([honest.clone()]));
 
                 select! {
                     result = verify_or_certify => {
@@ -2885,11 +3034,8 @@ mod tests {
                     },
                 }
 
-                let blocked = oracle.blocked().await.unwrap();
                 assert!(
-                    blocked
-                        .iter()
-                        .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious),
+                    oracle.is_blocked(&malicious),
                     "{kind:?}: malicious peer should remain blocked"
                 );
             });
@@ -2903,6 +3049,7 @@ mod tests {
             runner.start(|mut context| async move {
                 let Fixture {
                     participants,
+                    private_keys,
                     schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -2913,7 +3060,7 @@ mod tests {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
-                    participants.clone(),
+                    private_keys.clone(),
                 )
                 .await;
                 let me = participants[0].clone();
@@ -3014,6 +3161,7 @@ mod tests {
             runner.start(|mut context| async move {
                 let Fixture {
                     participants,
+                    private_keys,
                     schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -3024,7 +3172,7 @@ mod tests {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
-                    participants.clone(),
+                    private_keys.clone(),
                 )
                 .await;
                 let me = participants[0].clone();
@@ -3159,6 +3307,7 @@ mod tests {
             runner.start(|mut context| async move {
                 let Fixture {
                     participants,
+                    private_keys,
                     schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -3169,7 +3318,7 @@ mod tests {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
-                    participants.clone(),
+                    private_keys.clone(),
                 )
                 .await;
                 let me = participants[0].clone();
@@ -3304,15 +3453,16 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
+            let Fixture {
+                participants,
+                private_keys,
+                schemes,
                     ..
                 } =
                     bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(context.child("network"),
                     NZUsize!(1),
-                    participants.clone(),
+                    private_keys.clone(),
                 )
                 .await;
                 let me = participants[0].clone();
@@ -3392,13 +3542,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             let me = participants[0].clone();
@@ -3448,13 +3599,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             let me = participants[0].clone();
@@ -3501,13 +3653,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             let me = participants[0].clone();
@@ -3561,13 +3714,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
             let me = participants[0].clone();
@@ -6554,23 +6708,16 @@ mod tests {
     fn test_standard_stale_finalized_delivery_does_not_block_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
-            let me = default_leader();
-            let (network, oracle) = Network::new_with_peers(
+            let private_key = PrivateKey::from_seed(0);
+            let me = private_key.public_key();
+            let oracle = setup_network_with_participants(
                 context.child("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                vec![me.clone()],
+                NZUsize!(1),
+                [private_key],
             )
             .await;
-            network.start();
-            let control = oracle.control(me.clone());
-            let network_channel = control
-                .register(0, Quota::per_second(NonZeroU32::MAX))
-                .await
-                .unwrap();
+            let (mut network, manager, _) = oracle.node(context.child("p2p"), &me);
+            let network_channel = network.register(0, Quota::per_second(NonZeroU32::MAX), 1024);
 
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
@@ -6632,11 +6779,12 @@ mod tests {
                 deque_size: 10,
                 priority: false,
                 codec_config: (),
-                peer_provider: oracle.manager(),
+                peer_provider: manager,
             };
             let (broadcast_engine, buffer) =
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
+            network.start();
 
             let (resolver_tx, resolver_rx) = mailbox::new(context.child("mailbox"), NZUsize!(100));
 
@@ -7519,13 +7667,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 

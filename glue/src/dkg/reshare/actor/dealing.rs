@@ -292,11 +292,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::sharing::Mode, certificate::Verifier as _, ed25519,
     };
-    use commonware_p2p::{
-        Receiver,
-        simulated::{Config as NetworkConfig, Network},
-        utils::mocks::inert_channel,
-    };
+    use commonware_p2p::{Receiver, utils::mocks::inert_channel};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         IoBuf, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -445,16 +441,22 @@ mod tests {
             let signer = ed25519::PrivateKey::from_seed(0);
             let peer = ed25519::PrivateKey::from_seed(1).public_key();
             let participants = Set::from_iter_dedup([signer.public_key(), peer.clone()]);
-            let (_network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                vec![signer.public_key(), peer.clone()],
-            )
-            .await;
+            let reachable_participants = vec![signer.public_key(), peer.clone()];
+            let transport = crate::test_utils::transport(
+                &context,
+                reachable_participants.len(),
+                commonware_runtime::deterministic::network::Link::default(),
+            );
+            let (oracle, _, _network) = crate::test_utils::start_node(
+                context.child("lookup"),
+                &transport,
+                signer.clone(),
+                0,
+                &reachable_participants,
+                TEST_NAMESPACE,
+                1024,
+                &[],
+            );
             let marshal = marshal_mailbox(
                 context.child("marshal"),
                 &signer,
@@ -466,8 +468,8 @@ mod tests {
                 context.child("actor"),
                 Config {
                     signer: signer.clone(),
-                    manager: oracle.manager(),
-                    blocker: oracle.control(signer.public_key()),
+                    manager: oracle.clone(),
+                    blocker: oracle,
                     participants_provider: StaticParticipants(participants),
                     secret_store: MemorySecretStore::default(),
                     strategy: Sequential,

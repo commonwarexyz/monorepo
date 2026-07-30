@@ -157,15 +157,19 @@ mod test {
         ed25519,
         sha256::Digest as Sha256Digest,
     };
-    use commonware_macros::test_collect_traces;
+    use commonware_macros::{select, test_collect_traces};
     use commonware_p2p::{
-        Recipients, Sender as _,
-        simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
+        Receiver as _, Recipients, Sender as _, authenticated::lookup::Sender as LookupSender,
     };
     use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
     use commonware_runtime::{
-        Clock, Handle, Metrics, Quota, Runner as _, Supervisor, buffer::paged::CacheRef,
-        deterministic, telemetry::traces::collector::TraceStorage,
+        Clock, Handle, Metrics, Quota, Runner as _, Scheduler as _, Supervisor,
+        buffer::paged::CacheRef,
+        deterministic::{
+            self,
+            network::{Behavior, Link},
+        },
+        telemetry::traces::collector::TraceStorage,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -173,7 +177,7 @@ mod test {
         channel::oneshot, sync::Mutex, test_rng,
     };
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         num::{NonZeroU32, NonZeroU64},
         sync::Arc,
         time::Duration,
@@ -185,10 +189,11 @@ mod test {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        behavior: Behavior::Deliver,
     };
     const PROBE_CHANNEL: u64 = 0;
     const BACKFILL_CHANNEL: u64 = 1;
+    const READINESS_CHANNEL: u64 = 2;
 
     type Scheme = MockScheme<ed25519::PublicKey>;
     type Variant = Standard<Block>;
@@ -503,7 +508,7 @@ mod test {
         marshal: MarshalMailbox<Scheme, Variant>,
         // A clone of the node's probe channel sender, used by tests to inject raw
         // bytes that appear to originate from this node.
-        probe_sender: Sender<ed25519::PublicKey, deterministic::Context>,
+        probe_sender: LookupSender<ed25519::PublicKey, deterministic::Context>,
         // The probe actor, started on demand via `start_probes` once peers have
         // been seeded with finalizations. `None` once started.
         start: Option<Box<dyn FnOnce() -> Handle<()>>>,
@@ -512,18 +517,19 @@ mod test {
     }
 
     /// A reusable harness of several real (unbuffered) marshal actors, each paired with a
-    /// [`Probe`], wired over an all-to-all simulated p2p network.
+    /// [`Probe`], wired over authenticated lookup and deterministic transports.
     struct Harness {
         participants: Vec<ed25519::PublicKey>,
         schemes: Vec<Scheme>,
         nodes: Vec<Node>,
-        oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
+        blocked: Arc<Mutex<BTreeSet<(ed25519::PublicKey, ed25519::PublicKey)>>>,
         // Held to keep the network alive.
-        _network: Handle<()>,
+        _networks: Vec<Handle<()>>,
+        _readiness: Vec<Handle<()>>,
     }
 
     impl Harness {
-        /// Spin up `n` nodes over a simulated network. Each node runs a real marshal actor
+        /// Spin up `n` nodes over deterministic authenticated lookup. Each node runs a marshal actor
         /// (seeded with only a genesis block) and a [`Probe`] using `retry_timeout`,
         /// configured with a [`ConstantProvider`] (single scheme, all epochs).
         async fn setup(
@@ -554,34 +560,15 @@ mod test {
             let mut rng = test_rng();
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = scheme_mocks::fixture(&mut rng, NAMESPACE, n);
 
-            // Simulated network with all participants tracked in a single peer set.
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                SimConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
-            )
-            .await;
-            let network = network.start();
-
-            // All-to-all links so every node can reach every other node.
-            for a in &participants {
-                for b in &participants {
-                    if a != b {
-                        oracle
-                            .add_link(a.clone(), b.clone(), LINK)
-                            .await
-                            .expect("failed to add link");
-                    }
-                }
-            }
+            let transport = crate::test_utils::transport(context, participants.len(), LINK);
+            let blocked = Arc::new(Mutex::new(BTreeSet::new()));
+            let mut networks = Vec::with_capacity(participants.len());
+            let mut readiness_channels = Vec::with_capacity(participants.len());
 
             let genesis = Block::new(0, 0);
             let mut nodes = Vec::with_capacity(n as usize);
@@ -590,19 +577,34 @@ mod test {
                 let node_ctx = context.child("node").with_attribute("index", index);
                 let partition_prefix = format!("node-{index}");
                 let page_cache = CacheRef::from_pooler(&node_ctx, NZU16!(1024), NZUsize!(10));
-                let control = oracle.control(public_key.clone());
+                let (oracle, mut channels, network) = crate::test_utils::start_node(
+                    node_ctx.child("lookup"),
+                    &transport,
+                    private_keys[index].clone(),
+                    index,
+                    &participants,
+                    NAMESPACE,
+                    1024 * 1024,
+                    &[
+                        (BACKFILL_CHANNEL, TEST_QUOTA),
+                        (PROBE_CHANNEL, TEST_QUOTA),
+                        (READINESS_CHANNEL, TEST_QUOTA),
+                    ],
+                );
+                networks.push(network);
 
                 // Marshal backfill resolver.
-                let backfill = control
-                    .register(BACKFILL_CHANNEL, TEST_QUOTA)
-                    .await
-                    .expect("failed to register backfill channel");
+                let backfill = channels.remove(0);
                 let resolver = marshal_resolver::init(
                     node_ctx.child("marshal_resolver"),
                     marshal_resolver::Config {
                         public_key: public_key.clone(),
-                        peer_provider: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
+                        peer_provider: oracle.clone(),
+                        blocker: crate::test_utils::RecordingBlocker::new(
+                            public_key.clone(),
+                            oracle.clone(),
+                            blocked.clone(),
+                        ),
                         mailbox_size: NZUsize!(100),
                         initial: Duration::from_secs(1),
                         timeout: Duration::from_secs(2),
@@ -656,17 +658,19 @@ mod test {
                 let marshal_handle = marshal_actor.start_unbuffered(NoopReporter, resolver);
 
                 // Probe.
-                let probe_network = control
-                    .register(PROBE_CHANNEL, TEST_QUOTA)
-                    .await
-                    .expect("failed to register probe channel");
+                let probe_network = channels.remove(0);
+                readiness_channels.push(channels.remove(0));
                 let probe_sender = probe_network.0.clone();
                 let (probe, probe_mailbox) = Probe::new(Config {
                     context: node_ctx.child("probe"),
                     provider: make_provider(&scheme),
                     strategy: Sequential,
                     capacity: NZUsize!(100),
-                    blocker: oracle.control(public_key.clone()),
+                    blocker: crate::test_utils::RecordingBlocker::new(
+                        public_key.clone(),
+                        oracle,
+                        blocked.clone(),
+                    ),
                     minimum_epoch,
                     retry_timeout,
                 });
@@ -690,12 +694,42 @@ mod test {
                 });
             }
 
+            let (mut readiness_sender, mut readiness_receiver) = readiness_channels.remove(0);
+            let mut readiness_handles = Vec::new();
+            for (index, (mut sender, mut receiver)) in readiness_channels.into_iter().enumerate() {
+                readiness_handles.push(
+                    context
+                        .child("readiness")
+                        .with_attribute("index", index + 1)
+                        .spawn(move |_| async move {
+                            while let Ok((peer, message)) = receiver.recv().await {
+                                sender.send(Recipients::One(peer), message, false);
+                            }
+                        }),
+                );
+            }
+            for participant in participants.iter().skip(1) {
+                loop {
+                    readiness_sender.send(Recipients::One(participant.clone()), vec![0], false);
+                    select! {
+                        result = readiness_receiver.recv() => {
+                            let (peer, _) = result.expect("readiness channel closed");
+                            if &peer == participant {
+                                break;
+                            }
+                        },
+                        _ = context.sleep(Duration::from_millis(10)) => {},
+                    }
+                }
+            }
+
             Self {
                 participants,
                 schemes,
                 nodes,
-                oracle,
-                _network: network,
+                blocked,
+                _networks: networks,
+                _readiness: readiness_handles,
             }
         }
 
@@ -736,9 +770,11 @@ mod test {
 
         /// Sends raw `bytes` on the probe channel from node `from` to node `to`,
         /// bypassing the wire encoding. Used to deliver malformed messages to a [`Probe`].
-        fn send_raw(&self, from: usize, to: usize, bytes: Vec<u8>) {
+        fn send_raw(&self, from: usize, to: usize, bytes: Vec<u8>) -> std::future::Ready<()> {
             let mut sender = self.nodes[from].probe_sender.clone();
-            sender.send(Recipients::One(self.participants[to].clone()), bytes, false);
+            let sent = sender.send(Recipients::One(self.participants[to].clone()), bytes, false);
+            assert!(!sent.is_empty(), "authenticated lookup peer is connected");
+            std::future::ready(())
         }
     }
 
@@ -881,7 +917,9 @@ mod test {
                 if index == 3 {
                     expected = Some(finalization.clone());
                 }
-                harness.send_raw(index as usize, 0, finalization_bytes(finalization));
+                harness
+                    .send_raw(index as usize, 0, finalization_bytes(finalization))
+                    .await;
             }
             let expected = expected.expect("highest finalization present");
 
@@ -907,7 +945,9 @@ mod test {
             // Node 0's first request gathers one reply, which is below the sample size (f + 1 = 2).
             let (_, finalization_f) = harness.finalization(1, 0xF);
             let (_, finalization_g) = harness.finalization(2, 0x6);
-            harness.send_raw(1, 0, finalization_bytes(finalization_f.clone()));
+            harness
+                .send_raw(1, 0, finalization_bytes(finalization_f.clone()))
+                .await;
 
             // Let node 0 finish its first request round. With too few finalizations available,
             // the subscription must remain pending.
@@ -923,8 +963,12 @@ mod test {
             // After the retry deadline, send a full sample. The actor should select the
             // highest valid reply.
             context.sleep(retry_timeout.get()).await;
-            harness.send_raw(1, 0, finalization_bytes(finalization_f));
-            harness.send_raw(2, 0, finalization_bytes(finalization_g.clone()));
+            harness
+                .send_raw(1, 0, finalization_bytes(finalization_f))
+                .await;
+            harness
+                .send_raw(2, 0, finalization_bytes(finalization_g.clone()))
+                .await;
 
             // The floor resolves to G, and only after the retry deadline has elapsed.
             context.sleep(Duration::from_millis(100)).await;
@@ -963,7 +1007,9 @@ mod test {
             // Seven participants => f + 1 = 3. Two matching replies are still not enough.
             let (_, finalization) = harness.finalization(1, 1);
             for index in 1..=2 {
-                harness.send_raw(index, 0, finalization_bytes(finalization.clone()));
+                harness
+                    .send_raw(index, 0, finalization_bytes(finalization.clone()))
+                    .await;
             }
 
             context.sleep(Duration::from_millis(100)).await;
@@ -1008,11 +1054,11 @@ mod test {
 
             let mut junk = vec![1u8];
             junk.extend_from_slice(&[0xAB; 32]);
-            harness.send_raw(1, 0, junk);
+            harness.send_raw(1, 0, junk).await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1040,11 +1086,13 @@ mod test {
                 schemes: foreign, ..
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_FOREIGN", 4);
             let (_, finalization) = build_finalization(&foreign, 1, 1);
-            harness.send_raw(1, 0, finalization_bytes(finalization));
+            harness
+                .send_raw(1, 0, finalization_bytes(finalization))
+                .await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1084,11 +1132,13 @@ mod test {
                 .find(|(_, peer)| !committee.contains(peer))
                 .expect("network should contain a non-participant sender");
             let (_, finalization) = build_finalization(&schemes, 1, 1);
-            harness.send_raw(sender, 0, finalization_bytes(finalization));
+            harness
+                .send_raw(sender, 0, finalization_bytes(finalization))
+                .await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.contains(&(harness.participants[0].clone(), peer.clone())),
                 "node 0 should have blocked the non-participant sender"
@@ -1130,7 +1180,7 @@ mod test {
             let _subscription = harness.nodes[0].probe.subscribe();
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 !blocked.contains(&(harness.participants[0].clone(), peer)),
                 "a non-participant should not receive a discovery request"
@@ -1147,11 +1197,11 @@ mod test {
             harness.start_probes();
 
             // An unrecognized wire tag is rejected by the decoder.
-            harness.send_raw(1, 0, vec![0xFF]);
+            harness.send_raw(1, 0, vec![0xFF]).await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1225,11 +1275,11 @@ mod test {
                 schemes: foreign, ..
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_FOREIGN", 4);
             let (_, invalid) = build_finalization(&foreign, 2, 9);
-            harness.send_raw(3, 0, finalization_bytes(invalid));
+            harness.send_raw(3, 0, finalization_bytes(invalid)).await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 !blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1256,14 +1306,16 @@ mod test {
             // reach the sample size.
             let (_, first) = harness.finalization(1, 1);
             let (_, second) = harness.finalization(2, 2);
-            harness.send_raw(1, 0, finalization_bytes(first));
-            harness.send_raw(1, 0, finalization_bytes(second.clone()));
-            harness.send_raw(2, 0, finalization_bytes(second));
+            harness.send_raw(1, 0, finalization_bytes(first)).await;
+            harness
+                .send_raw(1, 0, finalization_bytes(second.clone()))
+                .await;
+            harness.send_raw(2, 0, finalization_bytes(second)).await;
 
             context.sleep(Duration::from_millis(100)).await;
 
             // The duplicate is ignored, and one peer cannot inflate the sample.
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 !blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1294,18 +1346,18 @@ mod test {
 
             // Node 1 first sends a valid finalization, then an invalid (foreign) one.
             let (_, valid) = harness.finalization(1, 1);
-            harness.send_raw(1, 0, finalization_bytes(valid));
+            harness.send_raw(1, 0, finalization_bytes(valid)).await;
 
             let mut rng = test_rng();
             let Fixture {
                 schemes: foreign, ..
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_FOREIGN", 4);
             let (_, invalid) = build_finalization(&foreign, 1, 2);
-            harness.send_raw(1, 0, finalization_bytes(invalid));
+            harness.send_raw(1, 0, finalization_bytes(invalid)).await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 !blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1331,9 +1383,15 @@ mod test {
             // valid finalization. The highest reply should win.
             let (_, stale) = harness.finalization(1, 0x0F);
             let (_, newest) = harness.finalization(2, 0xA2);
-            harness.send_raw(1, 0, finalization_bytes(stale.clone()));
-            harness.send_raw(2, 0, finalization_bytes(stale.clone()));
-            harness.send_raw(3, 0, finalization_bytes(newest.clone()));
+            harness
+                .send_raw(1, 0, finalization_bytes(stale.clone()))
+                .await;
+            harness
+                .send_raw(2, 0, finalization_bytes(stale.clone()))
+                .await;
+            harness
+                .send_raw(3, 0, finalization_bytes(newest.clone()))
+                .await;
 
             context.sleep(Duration::from_millis(100)).await;
             let floor = subscription.try_recv().expect("floor resolved");
@@ -1373,8 +1431,12 @@ mod test {
 
             // Two peers report the same epoch-1 finalization, signed by the epoch-1 committee.
             let (_, finalization) = build_finalization_at(&epoch_one, Epoch::new(1), 1, 7);
-            harness.send_raw(1, 0, finalization_bytes(finalization.clone()));
-            harness.send_raw(2, 0, finalization_bytes(finalization.clone()));
+            harness
+                .send_raw(1, 0, finalization_bytes(finalization.clone()))
+                .await;
+            harness
+                .send_raw(2, 0, finalization_bytes(finalization.clone()))
+                .await;
 
             context.sleep(Duration::from_millis(100)).await;
             let floor = subscription.try_recv().expect("floor resolved");
@@ -1419,7 +1481,9 @@ mod test {
 
             let (_, finalization) = build_finalization_at(&new_schemes, Epoch::new(1), 1, 7);
             for index in 1..=2 {
-                harness.send_raw(index, 0, finalization_bytes(finalization.clone()));
+                harness
+                    .send_raw(index, 0, finalization_bytes(finalization.clone()))
+                    .await;
             }
 
             context.sleep(Duration::from_millis(100)).await;
@@ -1430,17 +1494,19 @@ mod test {
                 ),
                 "two replies must not satisfy the solicited seven-node committee sample"
             );
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.is_empty(),
                 "old-committee responders must not be blocked for returning a newer finalization"
             );
 
-            harness.send_raw(3, 0, finalization_bytes(finalization.clone()));
+            harness
+                .send_raw(3, 0, finalization_bytes(finalization.clone()))
+                .await;
             context.sleep(Duration::from_millis(100)).await;
             let floor = subscription.try_recv().expect("floor resolved");
             assert_eq!(floor, finalization);
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.is_empty(),
                 "no solicited responder should be blocked"
@@ -1473,8 +1539,10 @@ mod test {
 
             // These finalizations are valid and decodable, but below the configured search floor.
             let (_, old) = build_finalization_at(&harness.schemes, Epoch::zero(), 1, 1);
-            harness.send_raw(1, 0, finalization_bytes(old.clone()));
-            harness.send_raw(2, 0, finalization_bytes(old));
+            harness
+                .send_raw(1, 0, finalization_bytes(old.clone()))
+                .await;
+            harness.send_raw(2, 0, finalization_bytes(old)).await;
             context.sleep(Duration::from_millis(50)).await;
             assert!(
                 matches!(
@@ -1486,13 +1554,17 @@ mod test {
 
             // The same peers can still contribute once they answer with an accepted epoch.
             let (_, accepted) = build_finalization_at(&harness.schemes, Epoch::new(1), 2, 2);
-            harness.send_raw(1, 0, finalization_bytes(accepted.clone()));
-            harness.send_raw(2, 0, finalization_bytes(accepted.clone()));
+            harness
+                .send_raw(1, 0, finalization_bytes(accepted.clone()))
+                .await;
+            harness
+                .send_raw(2, 0, finalization_bytes(accepted.clone()))
+                .await;
             context.sleep(Duration::from_millis(100)).await;
 
             let floor = subscription.try_recv().expect("floor resolved");
             assert_eq!(floor, accepted);
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(blocked.is_empty(), "no peer should be blocked");
         });
     }
@@ -1506,6 +1578,7 @@ mod test {
             let mut rng = test_rng();
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 verifier,
                 ..
@@ -1519,33 +1592,32 @@ mod test {
                 scheme: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
             };
 
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                SimConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
-            )
-            .await;
-            let _network = network.start();
-            for a in &participants {
-                for b in &participants {
-                    if a != b {
-                        oracle
-                            .add_link(a.clone(), b.clone(), LINK)
-                            .await
-                            .expect("failed to add link");
-                    }
-                }
+            let transport = crate::test_utils::transport(&context, participants.len(), LINK);
+            let mut oracles = Vec::new();
+            let mut channels = Vec::new();
+            let mut readiness = Vec::new();
+            let mut _networks = Vec::new();
+            for (index, private_key) in private_keys.iter().enumerate() {
+                let (oracle, mut registered, network) = crate::test_utils::start_node(
+                    context.child("lookup").with_attribute("index", index),
+                    &transport,
+                    private_key.clone(),
+                    index,
+                    &participants,
+                    b"_COMMONWARE_GLUE_FD_ALL_VERIFIER_LOOKUP",
+                    1024 * 1024,
+                    &[(PROBE_CHANNEL, TEST_QUOTA), (READINESS_CHANNEL, TEST_QUOTA)],
+                );
+                oracles.push(oracle);
+                channels.push(registered.remove(0));
+                readiness.push(registered.remove(0));
+                _networks.push(network);
             }
+            let _readiness =
+                crate::test_utils::wait_for_connections(&context, &participants, readiness, 0)
+                    .await;
 
-            let probe_network = oracle
-                .control(participants[0].clone())
-                .register(PROBE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register probe channel");
+            let probe_network = channels.remove(0);
             let (probe, probe_mailbox) = Probe::<
                 _,
                 MaybeEnumerableScheme,
@@ -1559,23 +1631,14 @@ mod test {
                 provider,
                 strategy: Sequential,
                 capacity: NZUsize!(100),
-                blocker: oracle.control(participants[0].clone()),
+                blocker: oracles[0].clone(),
                 minimum_epoch: Epoch::zero(),
                 retry_timeout: NZDuration!(Duration::from_secs(3600)),
             });
             let _probe = probe.start(probe_network);
             let mut subscription = probe_mailbox.subscribe();
 
-            let mut peer_channels = Vec::new();
-            for public_key in participants.iter().take(3).skip(1) {
-                peer_channels.push(
-                    oracle
-                        .control(public_key.clone())
-                        .register(PROBE_CHANNEL, TEST_QUOTA)
-                        .await
-                        .expect("failed to register peer probe channel"),
-                );
-            }
+            let peer_channels: Vec<_> = channels.drain(..2).collect();
             let (_, finalization) = build_finalization_at(&schemes, Epoch::zero(), 1, 1);
             for (sender, _) in &peer_channels {
                 let mut sender = sender.clone();
@@ -1621,11 +1684,11 @@ mod test {
             // A finalization for the unknown epoch 5: dropped before verification, so the sender
             // is not blocked.
             let (_, unknown) = build_finalization_at(&epoch_one, Epoch::new(5), 1, 1);
-            harness.send_raw(1, 0, finalization_bytes(unknown));
+            harness.send_raw(1, 0, finalization_bytes(unknown)).await;
 
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 !blocked.contains(&(
                     harness.participants[0].clone(),
@@ -1675,7 +1738,9 @@ mod test {
             // sample size.
             let (_, epoch_one_finalization) =
                 build_finalization_at(&harness.schemes, Epoch::new(1), 1, 1);
-            harness.send_raw(1, 0, finalization_bytes(epoch_one_finalization));
+            harness
+                .send_raw(1, 0, finalization_bytes(epoch_one_finalization))
+                .await;
             context.sleep(Duration::from_millis(50)).await;
 
             // Forget epoch 1, so the buffered finalization's scheme is now unavailable.
@@ -1685,7 +1750,9 @@ mod test {
             // the buffer, where the stale epoch-1 entry can no longer be judged or counted.
             let (_, epoch_two_finalization) =
                 build_finalization_at(&harness.schemes, Epoch::new(2), 1, 2);
-            harness.send_raw(2, 0, finalization_bytes(epoch_two_finalization));
+            harness
+                .send_raw(2, 0, finalization_bytes(epoch_two_finalization))
+                .await;
             context.sleep(Duration::from_millis(50)).await;
 
             // No floor (one currently judgeable vote, below the sample size) and nothing is
@@ -1697,7 +1764,7 @@ mod test {
                 ),
                 "a single judgeable vote must not resolve the floor"
             );
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(blocked.is_empty(), "no peer should be blocked");
         });
     }

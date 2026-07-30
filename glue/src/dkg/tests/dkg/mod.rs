@@ -3,7 +3,7 @@ mod properties;
 
 use crate::simulate::action::{Action, Crash, Schedule};
 use commonware_macros::{test_group, test_traced};
-use commonware_p2p::simulated::Link;
+use commonware_runtime::deterministic::network::{Behavior, Link};
 use harness::{
     DkgEngine, good_link, run_closed_network_receiver, run_plan,
     run_restart_completion_state_is_fresh,
@@ -23,13 +23,13 @@ fn dkg_e2e_completes_for_all_participants() {
 
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn dkg_e2e_lossy_network() {
+fn dkg_e2e_slow_network() {
     run_plan(
         DkgEngine::new(4),
         Link {
             latency: Duration::from_millis(60),
             jitter: Duration::from_millis(20),
-            success_rate: 0.75,
+            behavior: Behavior::Deliver,
         },
         vec![],
         ExpectedOutcome::Success,

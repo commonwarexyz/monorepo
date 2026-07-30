@@ -503,71 +503,27 @@ impl<E: Scheduler, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S,
 mod tests {
     use super::*;
     use crate::{
-        Manager as _, Provider as _, Recipients,
-        simulated::{self, Link, Network, Oracle},
+        Recipients,
+        utils::mocks::deterministic::lookup_test::{LookupSender, Peer, start_peers},
     };
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set};
-    use std::{
-        num::NonZeroU32,
-        time::{Duration, SystemTime},
-    };
+    use commonware_runtime::{IoBuf, Runner, Supervisor as _, deterministic};
+    use std::time::SystemTime;
 
-    const LINK: Link = Link {
-        latency: Duration::from_millis(0),
-        jitter: Duration::from_millis(0),
-        success_rate: 1.0,
-    };
     const CAPACITY: usize = 5usize;
-
-    /// Default rate limit set high enough to not interfere with normal operation
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    /// Start the network and return the oracle.
-    fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
-        let (network, oracle) = Network::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
-        network.start();
-        oracle
-    }
 
     /// Create a public key from a seed.
     fn pk(seed: u64) -> PublicKey {
         PrivateKey::from_seed(seed).public_key()
     }
 
-    /// Link two peers bidirectionally.
-    async fn link_bidirectional(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        a: PublicKey,
-        b: PublicKey,
-    ) {
-        let mut manager = oracle.manager();
-        let peers = manager.peer_set(0).await.unwrap_or_default();
-        manager.track(
-            0,
-            Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
-        );
-        oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
-        oracle.add_link(b, a, LINK).await.unwrap();
-    }
-
-    /// Create a peer and register it with the oracle.
-    async fn create_peer(
+    fn create_peer(
         context: &deterministic::Context,
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        seed: u64,
+        peer: &mut Peer,
     ) -> (
         PublicKey,
         MuxHandle<
@@ -575,22 +531,17 @@ mod tests {
             impl Receiver<PublicKey = PublicKey> + use<>,
         >,
     ) {
-        let pubkey = pk(seed);
-        let (sender, receiver) = oracle
-            .control(pubkey.clone())
-            .register(0, TEST_QUOTA)
-            .await
-            .unwrap();
+        let pubkey = peer.key.clone();
+        let (sender, receiver) = peer.take_channel();
         let (mux, handle) = Muxer::new(context.child("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
     }
 
     /// Create a peer and register it with the oracle.
-    async fn create_peer_with_backup_and_global_sender(
+    fn create_peer_with_backup_and_global_sender(
         context: &deterministic::Context,
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        seed: u64,
+        peer: &mut Peer,
     ) -> (
         PublicKey,
         MuxHandle<
@@ -598,14 +549,10 @@ mod tests {
             impl Receiver<PublicKey = PublicKey> + use<>,
         >,
         mpsc::Receiver<BackupResponse<PublicKey>>,
-        GlobalSender<simulated::Sender<PublicKey, deterministic::Context>>,
+        GlobalSender<LookupSender>,
     ) {
-        let pubkey = pk(seed);
-        let (sender, receiver) = oracle
-            .control(pubkey.clone())
-            .register(0, TEST_QUOTA)
-            .await
-            .unwrap();
+        let pubkey = peer.key.clone();
+        let (sender, receiver) = peer.take_channel();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.child("mux"), sender, receiver, CAPACITY)
                 .with_backup()
@@ -717,11 +664,9 @@ mod tests {
         // Can register a subchannel and send messages to it.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (pk2, mut handle2) = create_peer(&context, &mut peers[1]);
 
             let (_, mut sub_rx1) = handle1.register(7).await.unwrap();
             let (mut sub_tx2, _) = handle2.register(7).await.unwrap();
@@ -740,11 +685,9 @@ mod tests {
         // Can register multiple subchannels and send messages to each.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (pk2, mut handle2) = create_peer(&context, &mut peers[1]);
 
             let (_, mut rx_a) = handle1.register(10).await.unwrap();
             let (_, mut rx_b) = handle1.register(20).await.unwrap();
@@ -773,11 +716,9 @@ mod tests {
         // This prevents head-of-line blocking where one slow subchannel blocks all others.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (_pk2, mut handle2) = create_peer(&context, &mut peers[1]);
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(99).await.unwrap();
@@ -801,11 +742,9 @@ mod tests {
         // messages to that subchannel are dropped.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (_pk2, mut handle2) = create_peer(&context, &mut peers[1]);
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(99).await.unwrap();
@@ -831,11 +770,9 @@ mod tests {
         // The unregistered subchannel does not affect the registered one.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (_pk2, mut handle2) = create_peer(&context, &mut peers[1]);
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(1).await.unwrap();
@@ -859,12 +796,10 @@ mod tests {
         // is not registered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2, mut backup2, _) =
-                create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (_pk2, mut handle2, mut backup2, _) =
+                create_peer_with_backup_and_global_sender(&context, &mut peers[1]);
 
             // Register the subchannels.
             let (tx1, _) = handle1.register(1).await.unwrap();
@@ -887,12 +822,10 @@ mod tests {
         // is not registered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (pk1, mut handle1) = create_peer(&context, &mut peers[0]);
             let (pk2, _handle2, mut backup2, mut global_sender2) =
-                create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+                create_peer_with_backup_and_global_sender(&context, &mut peers[1]);
 
             // Register the subchannels.
             let (mut tx1, mut rx1) = handle1.register(1).await.unwrap();
@@ -924,11 +857,9 @@ mod tests {
         // the subchannel on drop, but is included for completeness.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (pk2, mut handle2) = create_peer(&context, &mut peers[1]);
 
             // Register the subchannels.
             let (mut tx1, _) = handle1.register(1).await.unwrap();
@@ -955,12 +886,10 @@ mod tests {
         // Messages to unregistered subchannels are simply dropped.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2, backup2, _) =
-                create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            let mut peers = start_peers(&context, 2).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
+            let (_pk2, mut handle2, backup2, _) =
+                create_peer_with_backup_and_global_sender(&context, &mut peers[1]);
 
             // Explicitly drop the backup receiver.
             drop(backup2);
@@ -986,9 +915,8 @@ mod tests {
         // Returns an error if the subchannel is already registered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (_pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let mut peers = start_peers(&context, 1).await;
+            let (_pk1, mut handle1) = create_peer(&context, &mut peers[0]);
 
             // Register the subchannel.
             let (_, _rx) = handle1.register(7).await.unwrap();
@@ -1006,9 +934,8 @@ mod tests {
         // Can register a channel after it has been deregistered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let (_, mut handle) = create_peer(&context, &mut oracle, 0).await;
+            let mut peers = start_peers(&context, 1).await;
+            let (_, mut handle) = create_peer(&context, &mut peers[0]);
             let (_, rx) = handle.register(7).await.unwrap();
             drop(rx);
 

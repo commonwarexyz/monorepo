@@ -31,6 +31,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod audited;
+    pub(crate) mod bandwidth;
     pub(crate) mod deterministic;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {

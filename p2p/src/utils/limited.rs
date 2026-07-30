@@ -186,19 +186,6 @@ pub struct CheckedSender<'a, S: UnlimitedSender> {
     recipients: Recipients<S::PublicKey>,
 }
 
-impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
-    /// Extracts the inner [`UnlimitedSender`] reference.
-    ///
-    /// # Warning
-    ///
-    /// Rate limiting has already been applied to the original recipients. Any
-    /// messages sent via the extracted sender will bypass the rate limiter.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn into_inner(self) -> &'a mut S {
-        self.sender
-    }
-}
-
 impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
 

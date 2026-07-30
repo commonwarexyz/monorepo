@@ -60,7 +60,11 @@ mod tests {
             },
             elector::{self, Config as _, Random, RoundRobin, RoundRobinElector},
             metrics::TimeoutReason,
-            mocks, quorum,
+            mocks::{
+                self,
+                network::{Link, Network},
+            },
+            quorum,
             scheme::{
                 Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
                 ed25519, secp256r1,
@@ -78,14 +82,11 @@ mod tests {
         Hasher as _, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
-        ed25519::PublicKey,
+        ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_p2p::{
-        Recipients,
-        simulated::{Config as NConfig, Link, Network, Oracle},
-    };
+    use commonware_p2p::Recipients;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
@@ -109,24 +110,23 @@ mod tests {
 
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
+        private_keys: Vec<PrivateKey>,
         peers: I,
-        disconnect_on_block: bool,
-    ) -> Oracle<PublicKey, deterministic::Context>
+        _disconnect_on_block: bool,
+    ) -> Network
     where
         I: IntoIterator<Item = PublicKey>,
     {
-        let (network, oracle) = Network::new_with_peers(
+        let peers: Vec<_> = peers.into_iter().collect();
+        let network = Network::new(
             context.child("network"),
-            NConfig {
-                max_size: 1024 * 1024,
-                disconnect_on_block,
-                tracked_peer_sets: NZUsize!(1),
-            },
-            peers,
-        )
-        .await;
-        network.start();
-        oracle
+            private_keys,
+            peers.clone(),
+            [],
+            &[0, 1, 2, 3],
+        );
+        network.wait_for_peers(&context, &peers).await;
+        network
     }
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
@@ -207,7 +207,7 @@ mod tests {
     /// Helper to set up a voter actor for tests.
     async fn setup_voter<S, L>(
         context: &mut deterministic::Context,
-        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
+        oracle: &Network,
         participants: &[S::PublicKey],
         schemes: &[S],
         elector: L,
@@ -367,7 +367,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     async fn start_voter_with_floor<S, L>(
         context: &mut deterministic::Context,
-        oracle: &Oracle<S::PublicKey, deterministic::Context>,
+        oracle: &Network,
         participants: &[S::PublicKey],
         schemes: &[S],
         elector: L,
@@ -514,12 +514,17 @@ mod tests {
             let namespace = b"voter_restart_newer_floor".to_vec();
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
             let partition = "voter_restart_newer_floor".to_string();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
@@ -594,12 +599,17 @@ mod tests {
             let namespace = b"voter_restart_older_floor".to_vec();
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
             let partition = "voter_restart_older_floor".to_string();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
@@ -674,12 +684,17 @@ mod tests {
             let namespace = b"voter_replay_floor_static".to_vec();
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
             let partition = "voter_replay_floor_static".to_string();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
@@ -805,13 +820,15 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(
                 context.child("network"),
+                private_keys,
                 participants.clone(),
                 false,
             )
@@ -1037,14 +1054,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
@@ -1312,14 +1334,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1430,14 +1457,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1561,14 +1593,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -1681,14 +1718,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
@@ -1853,14 +1895,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
@@ -2060,14 +2107,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock
             let elector = L::default();
@@ -2290,16 +2342,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
             let me = participants[0].clone();
 
             let elector = RoundRobin::<Sha256>::default();
@@ -2475,21 +2528,19 @@ mod tests {
         let namespace = b"stall_timeout_nullifies_current_view".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.child("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let oracle = Network::new(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                [],
+                &[0, 1],
+            );
             let elector = RoundRobin::<Sha256>::default()
                 .with_term(TermLength::new(NZU32!(2)), Duration::from_secs(5));
             let first_round = Round::new(Epoch::new(333), View::new(1));
@@ -2584,21 +2635,19 @@ mod tests {
         let namespace = b"finalize_resumes_after_same_term_heal".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.child("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let oracle = Network::new(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                [],
+                &[0, 1],
+            );
             let elector =
                 RoundRobin::<Sha256>::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(20));
             let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
@@ -2726,14 +2775,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2820,14 +2874,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = L::default();
@@ -2917,19 +2976,24 @@ mod tests {
         let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
         let view_retention = ViewDelta::new(10);
-        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
@@ -3130,18 +3194,23 @@ mod tests {
         let quorum = quorum(n);
         let namespace = b"leader_nullify_timeout_hint_fast_paths_nullify".to_vec();
         let epoch = Epoch::new(333);
-        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3331,14 +3400,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -3496,14 +3570,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
@@ -3699,14 +3778,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -3838,14 +3922,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
@@ -4114,14 +4203,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Track certify calls across restarts
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4368,14 +4462,20 @@ mod tests {
         let partition = "no_self_verify_when_proposing".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -4536,14 +4636,20 @@ mod tests {
         let partition = "no_self_propose_or_verify_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -4789,15 +4895,20 @@ mod tests {
         let partition = "nullify_after_crash_in_propose_window".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -5079,14 +5190,20 @@ mod tests {
         let partition = "no_self_verify_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             // RoundRobin with epoch=333, n=5: view 3 -> leader=Participant::new(1).
             // We are Participant::new(0), so view 3 is a follower view.
@@ -5354,14 +5471,20 @@ mod tests {
         let partition = "certifies_own_proposal_when_proposing".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -5534,14 +5657,20 @@ mod tests {
         let partition = "certifies_own_proposal_after_restart".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -5792,15 +5921,20 @@ mod tests {
         let partition = "certify_observer_fires_for_external_leader_proposal".to_string();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            // Set up the simulated network.
+            // Set up the test network.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // RoundRobin with epoch=333, n=5: view 2 -> leader=Participant::new(0) = us.
             let target_view = View::new(2);
@@ -5991,14 +6125,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -6177,14 +6316,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = L::default();
@@ -6340,18 +6484,23 @@ mod tests {
         let namespace = b"late_notarization_after_nullification".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network.
+            // Create test network.
             // Build participants and voter.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6450,14 +6599,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -6569,14 +6723,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -6721,14 +6880,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
@@ -6864,16 +7028,17 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -7004,14 +7169,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
@@ -7133,16 +7303,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
@@ -7415,14 +7586,19 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             // Setup voter with Certifier::Cancel to simulate missing verification context.
             let elector = RoundRobin::<Sha256>::default();
@@ -7611,16 +7787,17 @@ mod tests {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -7747,19 +7924,24 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"pending_cert_nullify".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
         executor.start(|mut context| async move {
             // Get participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             let elector = RoundRobin::<Sha256>::default();
 
@@ -7904,16 +8086,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
@@ -8049,16 +8232,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
@@ -8182,16 +8366,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create test network
             let oracle = start_test_network_with_peers(context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 true,
-            )
-            .await;
+            ).await;
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
@@ -8328,14 +8513,19 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            // Create test network
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));
@@ -8503,11 +8693,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true).await;
+                start_test_network_with_peers(
+                    context.child("network"),
+                    private_keys,
+                    participants.clone(),
+                    true,
+                ).await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
@@ -8911,12 +9107,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
@@ -9165,12 +9366,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();
@@ -9421,12 +9627,17 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys,
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let me = participants[0].clone();
             let elector = RoundRobin::<Sha256>::default();

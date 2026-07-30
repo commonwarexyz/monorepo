@@ -234,47 +234,54 @@ mod tests {
     use commonware_macros::select;
     use commonware_p2p::{
         Receiver as _, Recipients, Sender as _,
-        simulated::{
-            Config as NetworkConfig, Link, Network, Oracle, Receiver as SimReceiver,
-            Sender as SimSender,
-        },
+        authenticated::lookup::{Receiver as LookupReceiver, Sender as LookupSender},
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Handle, Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef,
-        deterministic,
+        Clock as _, Handle, Quota, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic::{
+            self,
+            network::{Behavior, Link},
+        },
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
     };
-    use std::{num::NonZeroU64, time::Duration};
+    use std::{collections::BTreeSet, num::NonZeroU64, sync::Arc, time::Duration};
 
     const BACKFILL_CHANNEL: u64 = 0;
     const BOUNDARY_CHANNEL: u64 = 1;
+    const JOINER_READINESS_CHANNEL: u64 = 2;
+    const CLIENT_READINESS_CHANNEL: u64 = 3;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        behavior: Behavior::Deliver,
     };
 
     struct Harness {
         participants: Vec<mocks::TestPublicKey>,
         schemes: Vec<mocks::TestScheme>,
-        source_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
-        client_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
-        client_boundary_receiver: SimReceiver<mocks::TestPublicKey>,
-        backup_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
-        backup_boundary_receiver: SimReceiver<mocks::TestPublicKey>,
-        oracle: Oracle<mocks::TestPublicKey, deterministic::Context>,
+        source_boundary_sender: LookupSender<mocks::TestPublicKey, deterministic::Context>,
+        client_boundary_sender: LookupSender<mocks::TestPublicKey, deterministic::Context>,
+        client_boundary_receiver: LookupReceiver<mocks::TestPublicKey>,
+        backup_boundary_sender: LookupSender<mocks::TestPublicKey, deterministic::Context>,
+        backup_boundary_receiver: LookupReceiver<mocks::TestPublicKey>,
+        client_ready: bool,
+        backup_ready: bool,
+        blocked: Arc<
+            commonware_utils::sync::Mutex<BTreeSet<(mocks::TestPublicKey, mocks::TestPublicKey)>>,
+        >,
         joiner: super::Mailbox<mocks::TestScheme, mocks::TestMarshalVariant>,
         boundary: mocks::TestBlock,
         boundary_finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
         boundary_sharing: Sharing<mocks::TestBlsVariant>,
         _handles: Vec<Handle<()>>,
-        _network: Handle<()>,
+        _networks: Vec<Handle<()>>,
     }
 
     impl Harness {
@@ -306,27 +313,64 @@ mod tests {
             let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
 
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
+            let transport = crate::test_utils::transport(context, participants.len(), LINK);
+            let blocked = Arc::new(commonware_utils::sync::Mutex::new(BTreeSet::new()));
+            let mut networks = Vec::with_capacity(participants.len());
+            let mut oracles = Vec::with_capacity(participants.len());
+            let mut registered = Vec::with_capacity(participants.len());
+            for index in 0..participants.len() {
+                let channels: &[(u64, Quota)] = if index == 0 {
+                    &[
+                        (BACKFILL_CHANNEL, TEST_QUOTA),
+                        (BOUNDARY_CHANNEL, TEST_QUOTA),
+                        (JOINER_READINESS_CHANNEL, TEST_QUOTA),
+                        (CLIENT_READINESS_CHANNEL, TEST_QUOTA),
+                    ]
+                } else {
+                    &[
+                        (BOUNDARY_CHANNEL, TEST_QUOTA),
+                        (JOINER_READINESS_CHANNEL, TEST_QUOTA),
+                        (CLIENT_READINESS_CHANNEL, TEST_QUOTA),
+                    ]
+                };
+                let (oracle, channels, network) = crate::test_utils::start_node(
+                    context.child("lookup").with_attribute("index", index),
+                    &transport,
+                    fixture.private_keys[index].clone(),
+                    index,
+                    &participants,
+                    b"_COMMONWARE_GLUE_DKG_PROBE_LOOKUP",
+                    1024 * 1024,
+                    channels,
+                );
+                oracles.push(oracle);
+                registered.push(channels);
+                networks.push(network);
+            }
+            let client_readiness = registered
+                .iter_mut()
+                .map(|channels| channels.pop().expect("readiness channel"))
+                .collect();
+            let joiner_readiness = registered
+                .iter_mut()
+                .map(|channels| channels.pop().expect("readiness channel"))
+                .collect();
+            let mut readiness_handles = crate::test_utils::wait_for_connections(
+                context,
+                &participants,
+                joiner_readiness,
+                1,
             )
             .await;
-            let network = network.start();
-            for from in &participants {
-                for to in &participants {
-                    if from != to {
-                        oracle
-                            .add_link(from.clone(), to.clone(), LINK)
-                            .await
-                            .expect("failed to add link");
-                    }
-                }
-            }
+            readiness_handles.extend(
+                crate::test_utils::wait_for_connections(
+                    context,
+                    &participants,
+                    client_readiness,
+                    2,
+                )
+                .await,
+            );
 
             let (boundary, boundary_sharing) =
                 boundary_block(Epoch::new(1), participants[0].clone(), &participants);
@@ -345,23 +389,21 @@ mod tests {
 
             let (source_marshal, marshal_handle) = start_marshal(
                 context.child("source_marshal"),
-                &oracle,
+                &oracles[0],
                 &fixture.participants,
                 &fixture.schemes,
                 0,
                 source_boundaries,
+                registered[0].remove(0),
+                blocked.clone(),
             )
             .await;
 
-            let source_control = oracle.control(participants[0].clone());
-            let source_boundaries = source_control
-                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register source boundaries");
+            let source_boundaries = registered[0].remove(0);
             let source_boundary_sender = source_boundaries.0.clone();
             let (source_actor, source_mailbox) = Actor::new(Config {
                 context: context.child("source_probe"),
-                manager: oracle.manager(),
+                manager: oracles[0].clone(),
                 bootstrap: Bootstrap {
                     epoch: bootstrap_epoch,
                     participants: genesis.participants(),
@@ -369,23 +411,23 @@ mod tests {
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
                 strategy: Sequential,
-                blocker: oracle.control(participants[0].clone()),
+                blocker: crate::test_utils::RecordingBlocker::new(
+                    participants[0].clone(),
+                    oracles[0].clone(),
+                    blocked.clone(),
+                ),
                 blocks_per_epoch: BLOCKS_PER_EPOCH,
                 retry_timeout: NZDuration!(Duration::from_millis(500)),
                 mailbox_size: NZUsize!(16),
                 block_codec_config: (),
             });
-            source_mailbox.attach(source_marshal.clone());
+            source_mailbox.attach(source_marshal);
             let source_handle = source_actor.start(source_boundaries);
 
-            let joiner_control = oracle.control(participants[1].clone());
-            let joiner_boundaries = joiner_control
-                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register joiner boundaries");
+            let joiner_boundaries = registered[1].remove(0);
             let (joiner_actor, joiner) = Actor::new(Config {
                 context: context.child("joiner_probe"),
-                manager: oracle.manager(),
+                manager: oracles[1].clone(),
                 bootstrap: Bootstrap {
                     epoch: bootstrap_epoch,
                     participants: genesis.participants(),
@@ -393,23 +435,19 @@ mod tests {
                 verifier: fixture.schemes[1].clone(),
                 genesis,
                 strategy: Sequential,
-                blocker: oracle.control(participants[1].clone()),
+                blocker: crate::test_utils::RecordingBlocker::new(
+                    participants[1].clone(),
+                    oracles[1].clone(),
+                    blocked.clone(),
+                ),
                 blocks_per_epoch: BLOCKS_PER_EPOCH,
                 retry_timeout: NZDuration!(Duration::from_millis(500)),
                 mailbox_size: NZUsize!(16),
                 block_codec_config: (),
             });
             let joiner_handle = joiner_actor.start(joiner_boundaries);
-            let client_boundaries = oracle
-                .control(participants[2].clone())
-                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register client boundaries");
-            let backup_boundaries = oracle
-                .control(participants[3].clone())
-                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register backup boundaries");
+            let client_boundaries = registered[2].remove(0);
+            let backup_boundaries = registered[3].remove(0);
 
             Self {
                 participants,
@@ -419,13 +457,18 @@ mod tests {
                 client_boundary_receiver: client_boundaries.1,
                 backup_boundary_sender: backup_boundaries.0,
                 backup_boundary_receiver: backup_boundaries.1,
-                oracle,
+                client_ready: false,
+                backup_ready: false,
+                blocked,
                 joiner,
                 boundary,
                 boundary_finalization: first_boundary_finalization,
                 boundary_sharing,
-                _handles: vec![marshal_handle, source_handle, joiner_handle],
-                _network: network,
+                _handles: readiness_handles
+                    .into_iter()
+                    .chain([marshal_handle, source_handle, joiner_handle])
+                    .collect(),
+                _networks: networks,
             }
         }
 
@@ -457,10 +500,14 @@ mod tests {
             .to_vec()
         }
 
-        fn reply_latest_from_client(
+        async fn reply_latest_from_client(
             &mut self,
             finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
         ) {
+            if !self.client_ready {
+                Self::expect_latest_request(&mut self.client_boundary_receiver).await;
+                self.client_ready = true;
+            }
             self.client_boundary_sender.send(
                 Recipients::One(self.participants[1].clone()),
                 Self::latest_response(finalization),
@@ -468,10 +515,14 @@ mod tests {
             );
         }
 
-        fn reply_latest_from_backup(
+        async fn reply_latest_from_backup(
             &mut self,
             finalization: Finalization<mocks::TestScheme, mocks::TestDigest>,
         ) {
+            if !self.backup_ready {
+                Self::expect_latest_request(&mut self.backup_boundary_receiver).await;
+                self.backup_ready = true;
+            }
             self.backup_boundary_sender.send(
                 Recipients::One(self.participants[1].clone()),
                 Self::latest_response(finalization),
@@ -481,21 +532,25 @@ mod tests {
 
         /// Completes a sample for the target finalization from the client and
         /// backup peers.
-        fn complete_target_sample(&mut self) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
+        async fn complete_target_sample(
+            &mut self,
+        ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
             let target = self.target_finalization();
-            self.reply_latest_from_client(target.clone());
-            self.reply_latest_from_backup(target.clone());
+            self.reply_latest_from_client(target.clone()).await;
+            self.reply_latest_from_backup(target.clone()).await;
             target
         }
 
-        async fn next_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) -> wire::Request {
+        async fn next_request(
+            receiver: &mut LookupReceiver<mocks::TestPublicKey>,
+        ) -> wire::Request {
             let (_, message) = receiver.recv().await.expect("boundary request");
             wire::read_request(message)
                 .expect("decode boundary request")
                 .expect("boundary request tag")
         }
 
-        async fn expect_latest_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) {
+        async fn expect_latest_request(receiver: &mut LookupReceiver<mocks::TestPublicKey>) {
             match Self::next_request(receiver).await {
                 wire::Request::Latest => {}
                 wire::Request::Boundary(_) | wire::Request::Block(_) => {
@@ -504,7 +559,9 @@ mod tests {
             }
         }
 
-        async fn next_boundary_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) -> Epoch {
+        async fn next_boundary_request(
+            receiver: &mut LookupReceiver<mocks::TestPublicKey>,
+        ) -> Epoch {
             match Self::next_request(receiver).await {
                 wire::Request::Boundary(epoch) => epoch,
                 wire::Request::Block(_) | wire::Request::Latest => {
@@ -513,7 +570,7 @@ mod tests {
             }
         }
 
-        async fn next_block_request(receiver: &mut SimReceiver<mocks::TestPublicKey>) -> Epoch {
+        async fn next_block_request(receiver: &mut LookupReceiver<mocks::TestPublicKey>) -> Epoch {
             match Self::next_request(receiver).await {
                 wire::Request::Block(epoch) => epoch,
                 wire::Request::Boundary(_) | wire::Request::Latest => {
@@ -527,9 +584,10 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_marshal(
         context: deterministic::Context,
-        oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
+        oracle: &crate::simulate::engine::LookupManager<mocks::TestPublicKey>,
         participants: &[mocks::TestPublicKey],
         schemes: &[mocks::TestScheme],
         index: usize,
@@ -537,21 +595,24 @@ mod tests {
             mocks::TestBlock,
             Finalization<mocks::TestScheme, mocks::TestDigest>,
         )>,
+        backfill: crate::test_utils::Channel<mocks::TestPublicKey>,
+        blocked: Arc<
+            commonware_utils::sync::Mutex<BTreeSet<(mocks::TestPublicKey, mocks::TestPublicKey)>>,
+        >,
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
         let public_key = participants[index].clone();
         let partition_prefix = format!("probe-node-{index}");
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
-        let control = oracle.control(public_key.clone());
-        let backfill = control
-            .register(BACKFILL_CHANNEL, TEST_QUOTA)
-            .await
-            .expect("failed to register marshal backfill");
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
             marshal_resolver::Config {
                 public_key: public_key.clone(),
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
+                peer_provider: oracle.clone(),
+                blocker: crate::test_utils::RecordingBlocker::new(
+                    public_key.clone(),
+                    oracle.clone(),
+                    blocked,
+                ),
                 mailbox_size: NZUsize!(16),
                 initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
@@ -765,11 +826,10 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
-            let mut subscription = harness.joiner.subscribe();
-            let target = harness.complete_target_sample();
+            let subscription = harness.joiner.subscribe();
+            let target = harness.complete_target_sample().await;
 
-            context.sleep(Duration::from_millis(100)).await;
-            let artifact = subscription.try_recv().expect("artifact resolved");
+            let artifact = subscription.await.expect("artifact resolved");
             assert_eq!(artifact.floor, target);
             assert_artifact(
                 artifact,
@@ -789,7 +849,7 @@ mod tests {
 
             // One reply is below the sample threshold (f + 1 = 2 of 4).
             let target = harness.target_finalization();
-            harness.reply_latest_from_client(target);
+            harness.reply_latest_from_client(target).await;
 
             context.sleep(Duration::from_millis(100)).await;
             assert!(
@@ -812,8 +872,8 @@ mod tests {
             // Two different valid replies from the same peer must count once.
             let first = harness.latest_finalization(Epoch::new(1), Sha256::hash(&[b"first"]));
             let second = harness.latest_finalization(Epoch::new(2), Sha256::hash(&[b"second"]));
-            harness.reply_latest_from_client(first);
-            harness.reply_latest_from_client(second);
+            harness.reply_latest_from_client(first).await;
+            harness.reply_latest_from_client(second).await;
 
             context.sleep(Duration::from_millis(100)).await;
             assert!(
@@ -823,7 +883,7 @@ mod tests {
                 ),
                 "duplicate replies must not inflate the sample"
             );
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.is_empty(),
                 "a duplicate reply must be ignored, not treated as a fault"
@@ -838,7 +898,7 @@ mod tests {
             // The source can serve the epoch-2 boundary.
             let mut harness =
                 Harness::start_with_boundaries(&mut context, vec![Epoch::new(2)]).await;
-            let mut subscription = harness.joiner.subscribe();
+            let subscription = harness.joiner.subscribe();
 
             let (newer_boundary, newer_sharing) = boundary_block(
                 Epoch::new(2),
@@ -847,11 +907,10 @@ mod tests {
             );
             let stale = harness.latest_finalization(Epoch::new(1), Sha256::hash(&[b"stale"]));
             let newest = harness.latest_finalization(Epoch::new(2), newer_boundary.digest());
-            harness.reply_latest_from_client(stale);
-            harness.reply_latest_from_backup(newest.clone());
+            harness.reply_latest_from_client(stale).await;
+            harness.reply_latest_from_backup(newest.clone()).await;
 
-            context.sleep(Duration::from_millis(100)).await;
-            let artifact = subscription.try_recv().expect("artifact resolved");
+            let artifact = subscription.await.expect("artifact resolved");
             assert_eq!(artifact.floor, newest);
             assert_artifact(
                 artifact,
@@ -874,8 +933,8 @@ mod tests {
             // boundary fetch.
             let floor =
                 harness.latest_finalization(Epoch::zero(), Sha256::hash(&[b"genesis floor"]));
-            harness.reply_latest_from_client(floor.clone());
-            harness.reply_latest_from_backup(floor.clone());
+            harness.reply_latest_from_client(floor.clone()).await;
+            harness.reply_latest_from_backup(floor.clone()).await;
 
             context.sleep(Duration::from_millis(100)).await;
             let artifact = subscription.try_recv().expect("genesis resolved");
@@ -911,8 +970,8 @@ mod tests {
             // Valid replies below the bootstrap epoch are stale by definition
             // and must be ignored without blocking.
             let stale = harness.latest_finalization(Epoch::zero(), Sha256::hash(&[b"stale"]));
-            harness.reply_latest_from_client(stale.clone());
-            harness.reply_latest_from_backup(stale);
+            harness.reply_latest_from_client(stale.clone()).await;
+            harness.reply_latest_from_backup(stale).await;
             context.sleep(Duration::from_millis(100)).await;
             assert!(
                 matches!(
@@ -921,11 +980,11 @@ mod tests {
                 ),
                 "below-bootstrap replies must not complete the sample"
             );
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(blocked.is_empty(), "stale replies must not block peers");
 
             // The same peers may still contribute accepted replies.
-            let target = harness.complete_target_sample();
+            let target = harness.complete_target_sample().await;
             context.sleep(Duration::from_millis(100)).await;
             let artifact = subscription.try_recv().expect("artifact resolved");
             assert_eq!(artifact.floor, target);
@@ -950,10 +1009,10 @@ mod tests {
                 ),
                 &foreign.schemes,
             );
-            harness.reply_latest_from_client(invalid);
+            harness.reply_latest_from_client(invalid).await;
 
             context.sleep(Duration::from_millis(100)).await;
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.contains(&(
                     harness.participants[1].clone(),
@@ -971,9 +1030,7 @@ mod tests {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
 
-            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
-            Harness::expect_latest_request(&mut harness.backup_boundary_receiver).await;
-            harness.complete_target_sample();
+            harness.complete_target_sample().await;
 
             assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
             assert_eq!(
@@ -1031,9 +1088,7 @@ mod tests {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
 
-            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
-            Harness::expect_latest_request(&mut harness.backup_boundary_receiver).await;
-            harness.complete_target_sample();
+            harness.complete_target_sample().await;
 
             assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
             assert_eq!(
@@ -1088,7 +1143,7 @@ mod tests {
                 &harness.boundary_sharing,
                 &harness.participants,
             );
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(blocked.is_empty(), "silent responders must not be blocked");
         });
     }
@@ -1100,9 +1155,7 @@ mod tests {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
 
-            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
-            Harness::expect_latest_request(&mut harness.backup_boundary_receiver).await;
-            harness.complete_target_sample();
+            harness.complete_target_sample().await;
 
             assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
             assert_eq!(
@@ -1179,7 +1232,7 @@ mod tests {
                 &harness.boundary_sharing,
                 &harness.participants,
             );
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(blocked.contains(&(
                 harness.participants[1].clone(),
                 harness.participants[2].clone()
@@ -1196,8 +1249,7 @@ mod tests {
             let mut harness = Harness::start_with(&mut context, false).await;
             let mut subscription = harness.joiner.subscribe();
 
-            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
-            harness.complete_target_sample();
+            harness.complete_target_sample().await;
 
             // First broadcast: a peer observes the request, but nobody answers.
             assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
@@ -1222,8 +1274,7 @@ mod tests {
             let mut harness = Harness::start_with_boundaries(&mut context, Vec::new()).await;
             let mut subscription = harness.joiner.subscribe();
 
-            Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
-            harness.complete_target_sample();
+            harness.complete_target_sample().await;
             assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
 
             let terminal_finalization = finalization(
@@ -1258,7 +1309,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(100)).await;
 
-            let blocked = harness.oracle.blocked().await.unwrap();
+            let blocked = harness.blocked.lock().clone();
             assert!(
                 blocked.contains(&(
                     harness.participants[1].clone(),
@@ -1293,7 +1344,7 @@ mod tests {
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
             let mut first = harness.joiner.subscribe();
-            harness.complete_target_sample();
+            harness.complete_target_sample().await;
 
             context.sleep(Duration::from_millis(100)).await;
             let artifact = first.try_recv().expect("artifact resolved");

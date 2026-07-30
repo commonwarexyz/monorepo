@@ -4,6 +4,8 @@ pub mod application;
 pub mod conflicter;
 pub mod equivocator;
 pub mod impersonator;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod network;
 pub mod nuller;
 pub mod nullify_only;
 pub mod outdated;

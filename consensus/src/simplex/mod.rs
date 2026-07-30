@@ -533,8 +533,9 @@ mod tests {
         simplex::{
             elector::{self, Config as _, Elector as _, Random, RoundRobin},
             mocks::{
+                network::{Channel, Link, Network},
                 scheme as scheme_mocks,
-                twins::{self, Elector as TwinsElector},
+                twins::{self, Elector as TwinsElector, SplitOrigin, split_receiver, split_sender},
                 wrapped,
             },
             scheme::{
@@ -563,9 +564,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
-        simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
-        utils::mocks::inert_channel,
+        Manager as _, Recipients, Sender as _, TrackedPeers, utils::mocks::inert_channel,
     };
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
@@ -655,25 +654,12 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    /// Register a validator with the oracle.
+    /// Register a validator with the network.
     async fn register_validator(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        network: &Network,
         validator: PublicKey,
-    ) -> (
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-    ) {
-        let control = oracle.control(validator.clone());
+    ) -> (Channel, Channel, Channel) {
+        let control = network.control(validator);
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
             control.register(1, TEST_QUOTA).await.unwrap();
@@ -685,80 +671,57 @@ mod tests {
         )
     }
 
-    /// Registers all validators using the oracle.
+    /// Registers all validators using the network.
     async fn register_validators(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        network: &Network,
         validators: &[PublicKey],
-    ) -> HashMap<
-        PublicKey,
-        (
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-        ),
-    > {
+    ) -> HashMap<PublicKey, (Channel, Channel, Channel)> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let registration = register_validator(oracle, validator.clone()).await;
+            let registration = register_validator(network, validator.clone()).await;
             registrations.insert(validator.clone(), registration);
         }
         registrations
     }
 
-    async fn start_test_network_with_peers<I>(
+    fn start_test_network_with_peers<I, K>(
         context: deterministic::Context,
+        private_keys: K,
         peers: I,
-        disconnect_on_block: bool,
-    ) -> Oracle<PublicKey, deterministic::Context>
+        _disconnect_on_block: bool,
+    ) -> Network
     where
         I: IntoIterator<Item = PublicKey>,
+        K: IntoIterator<Item = PrivateKey>,
     {
-        let (network, oracle) = Network::new_with_peers(
+        Network::new(
             context.child("network"),
-            Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block,
-                tracked_peer_sets: NZUsize!(1),
-            },
+            private_keys,
             peers,
+            [],
+            &[0, 1, 2],
         )
-        .await;
-        network.start();
-        oracle
     }
 
-    async fn start_test_network_with_split_peers<I, J>(
+    fn start_test_network_with_split_peers<I, J, K>(
         context: deterministic::Context,
+        private_keys: K,
         primary: I,
         secondary: J,
-        disconnect_on_block: bool,
-    ) -> Oracle<PublicKey, deterministic::Context>
+        _disconnect_on_block: bool,
+    ) -> Network
     where
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
+        K: IntoIterator<Item = PrivateKey>,
     {
-        let (network, oracle) = Network::new_with_split_peers(
+        Network::new(
             context.child("network"),
-            Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block,
-                tracked_peer_sets: NZUsize!(1),
-            },
+            private_keys,
             primary,
             secondary,
+            &[0, 1, 2],
         )
-        .await;
-        network.start();
-        oracle
     }
 
     /// Enum to describe the action to take when linking validators.
@@ -774,7 +737,7 @@ mod tests {
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
     async fn link_validators(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        network: &Network,
         validators: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -796,7 +759,7 @@ mod tests {
                 // Do any unlinking first
                 match action {
                     Action::Update(_) | Action::Unlink => {
-                        oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
+                        network.remove_link(v1.clone(), v2.clone()).await.unwrap();
                     }
                     _ => {}
                 }
@@ -804,7 +767,7 @@ mod tests {
                 // Do any linking after
                 match action {
                     Action::Link(ref link) | Action::Update(ref link) => {
-                        oracle
+                        network
                             .add_link(v1.clone(), v2.clone(), link.clone())
                             .await
                             .unwrap();
@@ -850,14 +813,18 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let strategy = strategy(&mut context);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -865,7 +832,8 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
+            oracle.wait_for_peers(&context, &participants).await;
 
             // Create engines
             let elector = L::default();
@@ -1102,12 +1070,16 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
 
             let active = &participants[..active_count];
             let joiner_idx = active_count;
@@ -1118,7 +1090,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
+            link_validators(&oracle, active, Action::Link(link.clone()), None).await;
 
             let term_length = elector
                 .clone()
@@ -1191,7 +1163,7 @@ mod tests {
                 };
                 let engine = Engine::new(validator_context.child("engine"), cfg);
                 let (pending, recovered, resolver) =
-                    register_validator(&mut oracle, validator.clone()).await;
+                    register_validator(&oracle, validator.clone()).await;
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -1306,7 +1278,7 @@ mod tests {
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
-            let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
+            let (pending, recovered, resolver) = register_validator(&oracle, joiner).await;
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             let (mut joiner_latest, mut joiner_monitor) = joiner_reporter.subscribe().await;
@@ -1369,20 +1341,24 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             let elector = RoundRobin::default();
             let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
@@ -1511,6 +1487,7 @@ mod tests {
             // Register participants (active)
             let Fixture {
                 participants,
+                mut private_keys,
                 schemes,
                 verifier,
                 ..
@@ -1519,20 +1496,21 @@ mod tests {
             // Add observer (no share)
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
+            private_keys.push(private_key_observer);
 
-            let mut oracle = start_test_network_with_split_peers(
+            let oracle = start_test_network_with_split_peers(
                 context.child("network"),
+                private_keys,
                 participants.clone(),
                 [public_key_observer.clone()],
                 true,
-            )
-            .await;
+            );
 
             // Register all (including observer) with the network
             let mut all_validators = participants.clone();
             all_validators.push(public_key_observer.clone());
             all_validators.sort();
-            let mut registrations = register_validators(&mut oracle, &all_validators).await;
+            let mut registrations = register_validators(&oracle, &all_validators).await;
 
             // Link all peers (including observer)
             let link = Link {
@@ -1540,7 +1518,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
+            link_validators(&oracle, &all_validators, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -1668,6 +1646,7 @@ mod tests {
         let mut rng = test_rng();
         let Fixture {
             participants,
+            private_keys,
             schemes,
             ..
         } = fixture(&mut rng, &namespace, n);
@@ -1678,6 +1657,7 @@ mod tests {
 
         loop {
             let participants = participants.clone();
+            let private_keys = private_keys.clone();
             let schemes = schemes.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
@@ -1686,13 +1666,13 @@ mod tests {
 
             let f = |mut context: deterministic::Context| async move {
                 // Register participants
-                let mut oracle = start_test_network_with_peers(
+                let oracle = start_test_network_with_peers(
                     context.child("network"),
+                    private_keys.clone(),
                     participants.clone(),
                     true,
-                )
-                .await;
-                let mut registrations = register_validators(&mut oracle, &participants).await;
+                );
+                let mut registrations = register_validators(&oracle, &participants).await;
 
                 // Link all validators
                 let link = Link {
@@ -1700,7 +1680,7 @@ mod tests {
                     jitter: Duration::from_millis(50),
                     success_rate: 1.0,
                 };
-                link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+                link_validators(&oracle, &participants, Action::Link(link), None).await;
 
                 // Create engines
                 let elector = L::default();
@@ -1852,13 +1832,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators except first
             let link = Link {
@@ -1867,7 +1851,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
@@ -1967,7 +1951,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Update(link.clone()),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
@@ -1979,7 +1963,7 @@ mod tests {
 
             // Unlink second peer from all (except first)
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Unlink,
                 Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
@@ -1992,7 +1976,7 @@ mod tests {
 
             // Link first peer to all (except second)
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Link(link),
                 Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
@@ -2006,7 +1990,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Update(link),
                 Some(|_, i, j| ![i, j].contains(&1usize)),
@@ -2110,13 +2094,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators except first
             let link = Link {
@@ -2125,7 +2113,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
@@ -2343,13 +2331,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -2357,7 +2349,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -2515,13 +2507,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -2529,7 +2525,7 @@ mod tests {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -2616,7 +2612,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Unlink all validators to get latest view
-            link_validators(&mut oracle, &participants, Action::Unlink, None).await;
+            link_validators(&oracle, &participants, Action::Unlink, None).await;
 
             // Wait for a virtual minute (nothing should happen)
             context.sleep(Duration::from_secs(60)).await;
@@ -2637,7 +2633,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
@@ -2710,13 +2706,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Participant 0 never starts an engine and no links exist yet, so no
             // view can produce a certificate before the crash below.
@@ -2832,7 +2832,7 @@ mod tests {
                 success_rate: 1.0,
             };
             link_validators(
-                &mut oracle,
+                &oracle,
                 &participants,
                 Action::Link(link),
                 Some(|_, i, j| ![i, j].contains(&0usize)),
@@ -2905,7 +2905,7 @@ mod tests {
 
                 // Start engine
                 let (pending, recovered, resolver) =
-                    register_validator(&mut oracle, validator.clone()).await;
+                    register_validator(&oracle, validator.clone()).await;
                 engine.start(pending, recovered, resolver);
             }
 
@@ -2944,13 +2944,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -2958,7 +2962,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+            link_validators(&oracle, &participants, Action::Link(link.clone()), None).await;
 
             // Create engines
             let elector = L::default();
@@ -3046,7 +3050,7 @@ mod tests {
                 let m = n / 2;
                 (a < m && b >= m) || (a >= m && b < m)
             }
-            link_validators(&mut oracle, &participants, Action::Unlink, Some(separated)).await;
+            link_validators(&oracle, &participants, Action::Unlink, Some(separated)).await;
 
             // Wait for any in-progress notarizations/finalizations to finish
             context.sleep(Duration::from_secs(10)).await;
@@ -3067,13 +3071,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Restore links
-            link_validators(
-                &mut oracle,
-                &participants,
-                Action::Link(link),
-                Some(separated),
-            )
-            .await;
+            link_validators(&oracle, &participants, Action::Link(link), Some(separated)).await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
@@ -3125,13 +3123,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let degraded_link = Link {
@@ -3139,13 +3141,7 @@ mod tests {
                 jitter: Duration::from_millis(150),
                 success_rate: 0.5,
             };
-            link_validators(
-                &mut oracle,
-                &participants,
-                Action::Link(degraded_link),
-                None,
-            )
-            .await;
+            link_validators(&oracle, &participants, Action::Link(degraded_link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -3315,13 +3311,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -3329,7 +3329,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -3480,6 +3480,7 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
@@ -3498,10 +3499,13 @@ mod tests {
                 })
                 .collect();
 
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -3509,7 +3513,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = wrapped::Config(L::default());
@@ -3643,17 +3647,18 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let mut oracle = start_test_network_with_peers(
+            let oracle = start_test_network_with_peers(
                 context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 false,
-            )
-            .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all honest nodes. Only link node 0 to node 1.
             //
@@ -3670,13 +3675,7 @@ mod tests {
                 }
                 true
             }
-            link_validators(
-                &mut oracle,
-                &participants,
-                Action::Link(link),
-                Some(link_graph),
-            )
-            .await;
+            link_validators(&oracle, &participants, Action::Link(link), Some(link_graph)).await;
 
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
@@ -3804,16 +3803,23 @@ mod tests {
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
             let me = participants[0].clone();
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let (pending, recovered, resolver) = register_validator(&mut oracle, me.clone()).await;
+            let injector_key = PrivateKey::from_seed(9_000_000);
+            let injector_pk = injector_key.public_key();
+            let mut network_keys = private_keys.clone();
+            network_keys.push(injector_key);
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                network_keys,
+                participants.clone(),
+                true,
+            );
+            let (pending, recovered, resolver) = register_validator(&oracle, me.clone()).await;
 
-            let injector_pk = PrivateKey::from_seed(9_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -3951,13 +3957,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -3965,7 +3975,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -4100,13 +4110,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -4114,7 +4128,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -4246,7 +4260,7 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
             let (pending, recovered, resolver) =
-                register_validator(&mut oracle, validator.clone()).await;
+                register_validator(&oracle, validator.clone()).await;
             reporters.push(reporter.clone());
             let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
@@ -4349,13 +4363,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -4363,7 +4381,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -4497,13 +4515,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -4511,7 +4533,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -4658,13 +4680,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -4672,7 +4698,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -4797,13 +4823,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -4811,7 +4841,7 @@ mod tests {
                 jitter: Duration::from_millis(10),
                 success_rate: 0.98,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let elector = L::default();
@@ -4931,13 +4961,17 @@ mod tests {
             // Register a single participant
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
             let link = Link {
@@ -4945,7 +4979,7 @@ mod tests {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engine
             let elector = L::default();
@@ -5084,16 +5118,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let oracle = start_test_network_with_peers(
                 context.child("network"),
+                private_keys.clone(),
                 participants.clone(),
                 false,
-            )
-            .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -5101,7 +5136,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines with `AttributableReporter` wrapper
             let elector = L::default();
@@ -5297,16 +5332,21 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let injector_key = PrivateKey::from_seed(1_000_000);
+            let injector_pk = injector_key.public_key();
+            let mut network_keys = private_keys.clone();
+            network_keys.push(injector_key);
+            let oracle = start_test_network_with_peers(
                 context.child("network"),
+                network_keys,
                 participants.clone(),
                 false,
-            )
-            .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // ========== Build the certificates manually ==========
 
@@ -5362,7 +5402,6 @@ mod tests {
             let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
 
             // Create an 11th non-participant injector and obtain senders
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -5581,7 +5620,7 @@ mod tests {
             // ========== Reconnect all participants ==========
 
             // Reconnect all participants fully using the helper
-            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+            link_validators(&oracle, &participants, Action::Link(link.clone()), None).await;
 
             // Wait until all honest reporters finalize strictly past F+2 (e.g., at least F+3)
             {
@@ -5629,13 +5668,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -5643,7 +5686,7 @@ mod tests {
                 jitter: Duration::from_millis(5),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines and reporters
             let elector = L::default();
@@ -5781,13 +5824,17 @@ mod tests {
             // Register participants
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                private_keys.clone(),
+                participants.clone(),
+                true,
+            );
+            let mut registrations = register_validators(&oracle, &participants).await;
 
             // Link all validators
             let link = Link {
@@ -5795,7 +5842,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+            link_validators(&oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
@@ -5915,7 +5962,7 @@ mod tests {
 
                 // Start engine
                 let (pending, recovered, resolver) =
-                    register_validator(&mut oracle, validator.clone()).await;
+                    register_validator(&oracle, validator.clone()).await;
                 let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
                     me: validator.clone(),
@@ -6202,18 +6249,19 @@ mod tests {
             executor.start(|mut context| async move {
                 let Fixture {
                     participants,
+                    private_keys,
                     schemes,
                     ..
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
-                let mut oracle = start_test_network_with_peers(
+                let oracle = start_test_network_with_peers(
                     context.child("network"),
-                    participants.iter().cloned(),
+                    private_keys.clone(),
+participants.iter().cloned(),
                     false,
-                )
-                .await;
-                let mut registrations = register_validators(&mut oracle, &participants).await;
-                link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+                );
+                let mut registrations = register_validators(&oracle, &participants).await;
+                link_validators(&oracle, &participants, Action::Link(link), None).await;
 
                 // The elector is the single source of the term structure:
                 // twin routing derives its term length from the built elector,
@@ -6291,21 +6339,25 @@ mod tests {
                         }
                     };
                     let (vote_sender_primary, vote_sender_secondary) =
-                        vote_sender.split_with(make_vote_forwarder());
-                    let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver
-                        .split_with(
-                            context.child("pending_split").with_attribute("index", idx),
-                            make_vote_router(),
-                        );
+                        split_sender(vote_sender, participants.clone(), make_vote_forwarder());
+                    let (vote_receiver_primary, vote_receiver_secondary) = split_receiver(
+                        vote_receiver,
+                        context.child("pending_split").with_attribute("index", idx),
+                        make_vote_router(),
+                    );
                     let (certificate_sender_primary, certificate_sender_secondary) =
-                        certificate_sender.split_with(make_certificate_forwarder());
-                    let (certificate_receiver_primary, certificate_receiver_secondary) =
-                        certificate_receiver.split_with(
-                            context
-                                .child("recovered_split")
-                                .with_attribute("index", idx),
-                            make_certificate_router(),
+                        split_sender(
+                            certificate_sender,
+                            participants.clone(),
+                            make_certificate_forwarder(),
                         );
+                    let (certificate_receiver_primary, certificate_receiver_secondary) = split_receiver(
+                        certificate_receiver,
+                        context
+                            .child("recovered_split")
+                            .with_attribute("index", idx),
+                        make_certificate_router(),
+                    );
 
                     for (twin_label, pending, recovered) in [
                         (

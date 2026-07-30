@@ -50,7 +50,11 @@ mod tests {
             config::ForwardingPolicy,
             elector::RoundRobin,
             metrics::TimeoutReason,
-            mocks, quorum,
+            mocks::{
+                self,
+                network::{Link, Network},
+            },
+            quorum,
             scheme::{
                 Scheme, bls12381_multisig,
                 bls12381_threshold::{
@@ -76,8 +80,7 @@ mod tests {
     };
     use commonware_macros::{select, test_async, test_collect_traces, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
-        simulated::{Config as NConfig, Link, Network, Oracle},
+        CheckedSender as _, LimitedSender as _, Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -127,28 +130,42 @@ mod tests {
 
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
-        peers: I,
-    ) -> Oracle<PublicKey, deterministic::Context>
+        private_keys: I,
+    ) -> Network
     where
-        I: IntoIterator<Item = PublicKey>,
+        I: IntoIterator<Item = PrivateKey>,
     {
-        let (network, oracle) = Network::new_with_peers(
+        start_test_network_with_external_peers(context, private_keys, []).await
+    }
+
+    async fn start_test_network_with_external_peers<I, E>(
+        context: deterministic::Context,
+        private_keys: I,
+        external_private_keys: E,
+    ) -> Network
+    where
+        I: IntoIterator<Item = PrivateKey>,
+        E: IntoIterator<Item = PrivateKey>,
+    {
+        let private_keys = private_keys.into_iter().collect::<Vec<_>>();
+        let primary = private_keys
+            .iter()
+            .map(|private_key| private_key.public_key())
+            .collect::<Vec<_>>();
+        let network = Network::new(
             context.child("network"),
-            NConfig {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-            peers,
-        )
-        .await;
-        network.start();
-        oracle
+            private_keys.into_iter().chain(external_private_keys),
+            primary.clone(),
+            [],
+            &[0, 1],
+        );
+        network.wait_for_peers(&context, &primary).await;
+        network
     }
 
     async fn track_test_peers(
         context: &mut deterministic::Context,
-        oracle: &commonware_p2p::simulated::Oracle<PublicKey, deterministic::Context>,
+        oracle: &Network,
         id: u64,
         primary: &[PublicKey],
         secondary: &[PublicKey],
@@ -160,7 +177,37 @@ mod tests {
                 Set::from_iter_dedup(secondary.iter().cloned()),
             ),
         );
-        context.sleep(Duration::from_millis(10)).await;
+        oracle.wait_for_peers(context, primary).await;
+        for secondary in secondary {
+            for primary in primary {
+                oracle
+                    .wait_for_connection(context, secondary, primary)
+                    .await;
+            }
+        }
+    }
+
+    async fn send_when_connected(
+        context: &deterministic::Context,
+        sender: &mut commonware_p2p::authenticated::lookup::Sender<
+            PublicKey,
+            deterministic::Context,
+        >,
+        recipient: &PublicKey,
+        message: bytes::Bytes,
+    ) {
+        let deadline = context.current() + Duration::from_secs(10);
+        loop {
+            let connected = sender
+                .check(Recipients::All)
+                .is_ok_and(|checked| checked.recipients().contains(recipient));
+            if connected {
+                sender.send(Recipients::One(recipient.clone()), message.clone(), true);
+                return;
+            }
+            assert!(context.current() < deadline, "lookup connection timed out");
+            context.sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Builds the standard reporter mock used by batcher tests.
@@ -679,11 +726,12 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = ed25519::fixture(&mut context, namespace, n);
 
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
             let reporter = test_reporter(&mut context, &schemes[0]);
             let me = participants[0].clone();
             let batcher_cfg = test_config(
@@ -826,14 +874,17 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+            let injector = PrivateKey::from_seed(1_000_000);
+            let injector_pk = injector.public_key();
+            let oracle = start_test_network_with_external_peers(
+                context.child("network"),
+                private_keys,
+                [injector],
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -870,8 +921,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Create a peer to inject certificates
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -913,12 +962,13 @@ mod tests {
             let finalization = build_finalization(&schemes, &proposal, quorum);
 
             // Send notarization from network
-            injector_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Certificate::Notarization(notarization.clone()).encode(),
-                    true,
-                );
+            send_when_connected(
+                &context,
+                &mut injector_sender,
+                &me,
+                Certificate::Notarization(notarization.clone()).encode(),
+            )
+            .await;
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -928,13 +978,13 @@ mod tests {
             );
 
             // Send nullification from network
-            injector_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Certificate::<S, Sha256Digest>::Nullification(nullification.clone())
-                        .encode(),
-                    true,
-                );
+            send_when_connected(
+                &context,
+                &mut injector_sender,
+                &me,
+                Certificate::<S, Sha256Digest>::Nullification(nullification.clone()).encode(),
+            )
+            .await;
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -944,12 +994,13 @@ mod tests {
             );
 
             // Send finalization from network
-            injector_sender
-                .send(
-                    Recipients::One(me.clone()),
-                    Certificate::Finalization(finalization.clone()).encode(),
-                    true,
-                );
+            send_when_connected(
+                &context,
+                &mut injector_sender,
+                &me,
+                Certificate::Finalization(finalization.clone()).encode(),
+            )
+            .await;
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -988,13 +1039,14 @@ mod tests {
             // Get participants.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock.
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -1169,19 +1221,22 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network.
+            // Create network.
             // Get participants.
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+            let injector = PrivateKey::from_seed(1_000_001);
+            let injector_pk = injector.public_key();
+            let oracle = start_test_network_with_external_peers(
+                context.child("network"),
+                private_keys,
+                [injector],
+            ).await;
 
             // Setup reporter mock.
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -1214,8 +1269,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Create a peer to inject certificates.
-            let injector_pk = PrivateKey::from_seed(1_000_001).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -1325,14 +1378,14 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+                private_keys,
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -1527,16 +1580,15 @@ mod tests {
         let epoch = Epoch::new(1);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
+            // Create network
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+            let oracle = start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -1702,12 +1754,11 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+            let oracle = start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -1930,12 +1981,17 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+            let injector = PrivateKey::from_seed(1_000_000);
+            let injector_pk = injector.public_key();
+            let oracle = start_test_network_with_external_peers(
+                context.child("network"),
+                private_keys,
+                [injector],
+            ).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -1989,7 +2045,6 @@ mod tests {
                 participant_senders.push(Some(sender));
             }
 
-            let injector_pk = PrivateKey::from_seed(2_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -2143,12 +2198,17 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+            let injector = PrivateKey::from_seed(3_000_000);
+            let injector_pk = injector.public_key();
+            let oracle = start_test_network_with_external_peers(
+                context.child("network"),
+                private_keys,
+                [injector],
+            ).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -2184,7 +2244,6 @@ mod tests {
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
-            let injector_pk = PrivateKey::from_seed(3_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -2309,12 +2368,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -2518,12 +2578,11 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+            let oracle = start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -2707,14 +2766,17 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+            let injector = PrivateKey::from_seed(1_000_000);
+            let injector_pk = injector.public_key();
+            let oracle = start_test_network_with_external_peers(
+                context.child("network"),
+                private_keys,
+                [injector],
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -2768,7 +2830,6 @@ mod tests {
             }
 
             // Create an injector peer to send certificates (on channel 1)
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1, TEST_QUOTA)
@@ -2894,14 +2955,14 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+                private_keys,
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -3091,14 +3152,14 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+                private_keys,
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -3213,14 +3274,14 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+                private_keys,
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -3337,12 +3398,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -3467,11 +3529,12 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -3591,12 +3654,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -3736,12 +3800,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -3890,12 +3955,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -4007,12 +4073,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -4113,12 +4180,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -4285,12 +4353,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -4428,12 +4497,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -4579,12 +4649,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -4678,14 +4749,14 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+                private_keys,
+            ).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -4910,12 +4981,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -5103,12 +5175,13 @@ mod tests {
             let Fixture {
                 participants,
                 schemes,
+                private_keys,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create simulated network
+            // Create network
             let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), private_keys).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 

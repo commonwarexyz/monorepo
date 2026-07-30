@@ -103,6 +103,7 @@ mod tests {
     use super::{Config, Engine, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        simplex::mocks::network::{Channel, Link, Network},
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -112,7 +113,6 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Quota, Runner, Scheduler, Supervisor as _,
@@ -166,7 +166,7 @@ mod tests {
         };
     }
 
-    type Registrations<P> = BTreeMap<P, (Sender<P, deterministic::Context>, Receiver<P>)>;
+    type Registrations<P> = BTreeMap<P, Channel>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -182,7 +182,7 @@ mod tests {
 
     /// Register all participants with the network oracle.
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &mut Network,
         participants: &[PublicKey],
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
@@ -198,11 +198,7 @@ mod tests {
     }
 
     /// Establish network links between all participants.
-    async fn link_participants(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        participants: &[PublicKey],
-        link: Link,
-    ) {
+    async fn link_participants(oracle: &mut Network, participants: &[PublicKey], link: Link) {
         for v1 in participants.iter() {
             for v2 in participants.iter() {
                 if v2 == v1 {
@@ -221,21 +217,14 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         link: Link,
-    ) -> (
-        Oracle<PublicKey, deterministic::Context>,
-        Registrations<PublicKey>,
-    ) {
-        let (network, mut oracle) = Network::new_with_peers(
+    ) -> (Network, Registrations<PublicKey>) {
+        let mut oracle = Network::new(
             context.child("network"),
-            commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
+            fixture.private_keys.clone(),
             fixture.participants.clone(),
-        )
-        .await;
-        network.start();
+            std::iter::empty(),
+            &[0],
+        );
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
         link_participants(&mut oracle, &fixture.participants, link).await;
@@ -248,7 +237,7 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &mut Network,
         epoch: Epoch,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
@@ -799,7 +788,7 @@ mod tests {
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(120)));
+            .with_timeout(Some(Duration::from_secs(300)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {

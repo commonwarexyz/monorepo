@@ -17,7 +17,12 @@ use commonware_consensus::{
     Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardingPolicy, config,
-        mocks::{application, relay, reporter, twins},
+        mocks::{
+            application,
+            network::{Link, Network},
+            relay, reporter,
+            twins::{self, SplitOrigin, SplitTarget, split_receiver, split_sender},
+        },
         types::{Certificate, Vote},
     },
     types::{Delta, Epoch, TermLength, View},
@@ -28,10 +33,7 @@ use commonware_cryptography::{
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
 };
-use commonware_p2p::{
-    Recipients,
-    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
-};
+use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Scheduler as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -89,10 +91,7 @@ pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
 
-async fn setup_degraded_network<E: Clock>(
-    oracle: &mut Oracle<Ed25519PublicKey, E>,
-    participants: &[Ed25519PublicKey],
-) {
+async fn setup_degraded_network(network: &Network, participants: &[Ed25519PublicKey]) {
     let Some(victim) = participants.last() else {
         return;
     };
@@ -106,13 +105,13 @@ async fn setup_degraded_network<E: Clock>(
         if peer_idx == victim_idx {
             continue;
         }
-        oracle.remove_link(victim.clone(), peer.clone()).await.ok();
-        oracle.remove_link(peer.clone(), victim.clone()).await.ok();
-        oracle
+        network.remove_link(victim.clone(), peer.clone()).await.ok();
+        network.remove_link(peer.clone(), victim.clone()).await.ok();
+        network
             .add_link(victim.clone(), peer.clone(), degraded.clone())
             .await
             .unwrap();
-        oracle
+        network
             .add_link(peer.clone(), victim.clone(), degraded.clone())
             .await
             .unwrap();
@@ -191,18 +190,9 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 type NetworkChannels = (
-    (
-        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
-        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
-    ),
-    (
-        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
-        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
-    ),
-    (
-        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
-        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
-    ),
+    commonware_consensus::simplex::mocks::network::Channel,
+    commonware_consensus::simplex::mocks::network::Channel,
+    commonware_consensus::simplex::mocks::network::Channel,
 );
 
 /// Common setup for fuzz tests: network, participants, links.
@@ -210,29 +200,26 @@ async fn setup_network<P: simplex::Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
 ) -> (
-    Oracle<Ed25519PublicKey, deterministic::Context>,
+    Network,
     Vec<Ed25519PublicKey>,
     Vec<P::Scheme>,
     HashMap<Ed25519PublicKey, NetworkChannels>,
 ) {
     let Fixture {
         participants,
+        private_keys,
         schemes,
         ..
     } = P::fixture(context, NAMESPACE, input.configuration.n);
-    let (network, mut oracle) = Network::new_with_peers(
+    let network = Network::new(
         context.child("network"),
-        NetworkConfig {
-            max_size: 1024 * 1024,
-            disconnect_on_block: false,
-            tracked_peer_sets: NZUsize!(1),
-        },
+        private_keys,
         participants.clone(),
-    )
-    .await;
-    network.start();
+        [],
+        &[0, 1, 2],
+    );
 
-    let registrations = register(&mut oracle, &participants).await;
+    let registrations = register(&network, &participants).await;
 
     let link = Link {
         latency: Duration::from_millis(10),
@@ -240,7 +227,7 @@ async fn setup_network<P: simplex::Simplex>(
         success_rate: 1.0,
     };
     link_peers(
-        &mut oracle,
+        &network,
         &participants,
         Action::Link(link),
         input.partition.filter(),
@@ -251,10 +238,10 @@ async fn setup_network<P: simplex::Simplex>(
         && input.configuration == N4F1C3
         && input.degraded_network
     {
-        setup_degraded_network(&mut oracle, &participants).await;
+        setup_degraded_network(&network, &participants).await;
     }
 
-    (oracle, participants, schemes, registrations)
+    (network, participants, schemes, registrations)
 }
 
 /// Start a Disrupter with the given strategy and network channels.
@@ -341,7 +328,7 @@ fn spawn_honest_validator<
     ResolverReceiver,
 >(
     context: deterministic::Context,
-    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
+    network: &Network,
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
     scheme: P::Scheme,
@@ -381,7 +368,7 @@ where
     let (actor, application) = application::Application::new(context.child("application"), app_cfg);
     actor.start();
 
-    let blocker = oracle.control(validator.clone());
+    let blocker = network.control(validator.clone());
     let engine_cfg = config::Config {
         blocker,
         scheme,
@@ -418,7 +405,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (oracle, participants, schemes, mut registrations) =
+        let (network, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
@@ -444,7 +431,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 .with_attribute("public_key", &validator);
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
-                &oracle,
+                &network,
                 &participants,
                 input.term_length,
                 schemes[i].clone(),
@@ -498,12 +485,12 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (mut oracle, participants, schemes, mut registrations) =
+        let (network, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
 
         link_peers(
-            &mut oracle,
+            &network,
             participants.as_ref(),
             Action::Update(Link {
                 latency: Duration::from_millis(500),
@@ -525,6 +512,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .child("twin")
                 .with_attribute("public_key", validator);
             let scheme = schemes[idx].clone();
+            let peers: Arc<[_]> = participants
+                .iter()
+                .filter(|peer| *peer != validator)
+                .cloned()
+                .collect();
             let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
@@ -588,18 +580,30 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let (resolver_sender, resolver_receiver) = resolver_network;
 
             let (vote_sender_primary, vote_sender_secondary) =
-                vote_sender.split_with(make_vote_forwarder());
-            let (vote_receiver_primary, vote_receiver_secondary) =
-                vote_receiver.split_with(context.child("pending_split"), make_vote_router());
-            let (certificate_sender_primary, certificate_sender_secondary) =
-                certificate_sender.split_with(make_certificate_forwarder());
-            let (certificate_receiver_primary, certificate_receiver_secondary) =
-                certificate_receiver
-                    .split_with(context.child("recovered_split"), make_certificate_router());
-            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
-                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
-            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.child("resolver_split"), |_| SplitTarget::Both);
+                split_sender(vote_sender, peers.clone(), make_vote_forwarder());
+            let (vote_receiver_primary, vote_receiver_secondary) = split_receiver(
+                vote_receiver,
+                context.child("pending_split"),
+                make_vote_router(),
+            );
+            let (certificate_sender_primary, certificate_sender_secondary) = split_sender(
+                certificate_sender,
+                peers.clone(),
+                make_certificate_forwarder(),
+            );
+            let (certificate_receiver_primary, certificate_receiver_secondary) = split_receiver(
+                certificate_receiver,
+                context.child("recovered_split"),
+                make_certificate_router(),
+            );
+            let (resolver_sender_primary, resolver_sender_secondary) =
+                split_sender(resolver_sender, peers, |_origin, recipients, _message| {
+                    Some(recipients.clone())
+                });
+            let (resolver_receiver_primary, resolver_receiver_secondary) =
+                split_receiver(resolver_receiver, context.child("resolver_split"), |_| {
+                    SplitTarget::Both
+                });
 
             // Primary: legitimate engine
             let primary_context = context.child("primary");
@@ -626,7 +630,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 application::Application::new(primary_context.child("application"), app_cfg);
             actor.start();
 
-            let blocker = oracle.control(validator.clone());
+            let blocker = network.control(validator.clone());
             let engine_cfg = config::Config {
                 blocker,
                 scheme: scheme.clone(),
@@ -679,7 +683,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .expect("validator should be registered");
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
-                &oracle,
+                &network,
                 participants.as_ref(),
                 input.term_length,
                 schemes[idx].clone(),

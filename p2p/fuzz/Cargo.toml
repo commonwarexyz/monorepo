@@ -24,13 +24,6 @@ rand.workspace = true
 bench = false
 
 [[bin]]
-name = "simulated"
-path = "fuzz_targets/simulated.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "lookup"
 path = "fuzz_targets/lookup.rs"
 test = false

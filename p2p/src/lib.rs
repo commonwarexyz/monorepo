@@ -15,8 +15,6 @@
 )]
 use commonware_macros::{stability, stability_mod, stability_scope};
 
-stability_mod!(ALPHA, pub mod simulated);
-
 stability_scope!(BETA {
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::PublicKey;

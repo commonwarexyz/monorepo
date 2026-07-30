@@ -2,7 +2,10 @@
 
 #[stability(ALPHA)]
 pub use crate::authenticated::{
-    admission::{ExactPeerAdmission, InboundAdmission as PeerAdmission, Rejection as Rejected},
+    admission::{
+        ExactPeerAdmission, InboundAdmission as PeerAdmission, Rejection as Rejected,
+        UnrestrictedAdmission,
+    },
     attachment::{Attachments, Error},
 };
 use crate::{
