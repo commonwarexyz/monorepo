@@ -1,10 +1,10 @@
 use commonware_macros::stability_scope;
 
-stability_scope!(ALPHA {
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod audited;
     pub(crate) mod deterministic;
 });
-stability_scope!(BETA {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod metered;
 });
 stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network"))) {

@@ -1798,6 +1798,7 @@ impl IoBufsMut {
     /// # Panics
     ///
     /// Panics if `len` exceeds total capacity.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
         // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
         unsafe {

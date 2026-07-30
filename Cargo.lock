@@ -1881,6 +1881,7 @@ dependencies = [
  "getrandom 0.4.3",
  "governor",
  "io-uring",
+ "js-sys",
  "libc",
  "loom",
  "opentelemetry",
@@ -1900,6 +1901,9 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

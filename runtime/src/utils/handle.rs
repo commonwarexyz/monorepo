@@ -1,26 +1,28 @@
 use crate::{
     Error, PlatformSend,
     telemetry::metrics::raw::Gauge,
-    utils::{extract_panic_message, supervision::Tree},
+    utils::supervision::Tree,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::utils::extract_panic_message;
 use commonware_utils::{
     channel::oneshot,
-    sync::{Mutex, Once},
+    sync::Once,
 };
-use futures::{
-    FutureExt as _,
-    future::{Either, select},
-    pin_mut,
-    stream::{AbortHandle, Abortable, Aborted},
-};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_utils::sync::Mutex;
+use futures::stream::{AbortHandle, Abortable};
+#[cfg(not(target_arch = "wasm32"))]
+use futures::{FutureExt as _, future::{Either, select}, pin_mut, stream::Aborted};
 use std::{
-    any::Any,
     future::Future,
-    panic::{AssertUnwindSafe, resume_unwind},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{any::Any, panic::{AssertUnwindSafe, resume_unwind}};
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::error;
 
 /// Handle to an asynchronous result.
@@ -89,6 +91,7 @@ where
     T: PlatformSend + 'static,
 {
     #[inline(always)]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init<F>(
         f: F,
         metric: MetricHandle,
@@ -129,6 +132,40 @@ where
             tree.abort();
 
             // Finish the metric.
+            metric_handle.finish();
+        };
+
+        (
+            task,
+            Self {
+                state: HandleState::Task {
+                    receiver,
+                    abort_handle,
+                    metric,
+                },
+            },
+        )
+    }
+
+    /// Wrap a browser-local task with abort support and supervised descendant cleanup.
+    #[inline(always)]
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn init_local<F>(
+        future: F,
+        metric: MetricHandle,
+        tree: Arc<Tree>,
+    ) -> (impl Future<Output = ()>, Self)
+    where
+        F: Future<Output = T> + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let metric_handle = metric.clone();
+        let task = async move {
+            if let Ok(result) = Abortable::new(future, abort_registration).await {
+                let _ = sender.send(Ok(result));
+            }
+            tree.abort();
             metric_handle.finish();
         };
 
@@ -271,15 +308,18 @@ impl MetricHandle {
 }
 
 /// A panic emitted by a spawned task.
+#[cfg(not(target_arch = "wasm32"))]
 pub type Panic = Box<dyn Any + Send + 'static>;
 
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.
 #[derive(Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Panicker {
     catch: bool,
     sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Panicker {
     /// Creates a new [Panicker].
     pub(crate) fn new(catch: bool) -> (Self, Panicked) {
@@ -321,10 +361,12 @@ impl Panicker {
 }
 
 /// A handle that will be notified when a panic occurs.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Panicked {
     receiver: oneshot::Receiver<Panic>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Panicked {
     /// Polls a task that should be interrupted by a panic.
     pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output

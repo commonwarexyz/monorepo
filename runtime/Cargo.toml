@@ -20,29 +20,21 @@ bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
 commonware-conformance = { workspace = true, optional = true }
-commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-formatting = { workspace = true, features = ["std"] }
 commonware-macros = { workspace = true, features = ["std"] }
-commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 crossbeam-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
-libc.workspace = true
 loom = { workspace = true, optional = true }
-opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
 rand = { workspace = true, features = ["std_rng"] }
 rand_core.workspace = true
-rayon.workspace = true
-sha2.workspace = true
-sysinfo.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tracing-opentelemetry.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -56,14 +48,33 @@ package = "getrandom"
 version = "0.2"
 features = ["js"]
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3.77", optional = true }
+wasm-bindgen = { version = "0.2.100", optional = true }
+wasm-bindgen-futures = { version = "0.4.50", optional = true }
+web-sys = { version = "0.3.77", optional = true, features = [
+	"Event",
+	"EventTarget",
+	"Performance",
+	"Window",
+] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std"] }
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 crossbeam-queue = { workspace = true, optional = true }
+libc.workspace = true
+opentelemetry.workspace = true
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+rayon.workspace = true
+sha2.workspace = true
+sysinfo.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tracing-opentelemetry.workspace = true
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
@@ -83,6 +94,12 @@ bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 test-utils = []
+web = [
+	"dep:js-sys",
+	"dep:wasm-bindgen",
+	"dep:wasm-bindgen-futures",
+	"dep:web-sys",
+]
 iouring = [ "iouring-network", "iouring-storage" ]
 iouring-network = [ "io-uring" ]
 iouring-storage = [ "io-uring" ]

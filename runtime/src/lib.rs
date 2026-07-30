@@ -47,10 +47,14 @@ stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
+stability_scope!(ALPHA, cfg(all(target_arch = "wasm32", feature = "web")) {
+    pub mod web;
+});
 stability_scope!(BETA {
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
+    #[cfg(not(target_arch = "wasm32"))]
     use commonware_parallel::Rayon;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
@@ -60,10 +64,12 @@ stability_scope!(BETA {
         future::Future,
         io::Error as IoError,
         net::SocketAddr,
-        num::NonZeroUsize,
         sync::Arc,
         time::{Duration, SystemTime},
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::num::NonZeroUsize;
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) use telemetry::metrics::{METRICS_PREFIX, child_label, prefixed_name};
     use thiserror::Error;
 
@@ -104,6 +110,8 @@ stability_scope!(BETA {
         SendFailed,
         #[error("recv failed")]
         RecvFailed,
+        #[error("transport failed: {0}")]
+        TransportFailed(String),
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
         #[error(
@@ -352,6 +360,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that runtimes implement to provide parallel execution strategies.
+    #[cfg(not(target_arch = "wasm32"))]
     pub trait Strategizer: Spawner {
         /// Returns a new [Rayon] strategy with the requested parallelism.
         ///
