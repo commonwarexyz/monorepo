@@ -896,60 +896,50 @@ impl Drop for Batch {
     }
 }
 
-/// Mutable state retained across all iterations of one driver.
-struct DriverLoop {
-    /// Scratch storage reused for every expiry batch.
-    batch: Batch,
-}
-
-impl DriverLoop {
-    /// Creates a driver loop with reusable scratch storage.
-    fn new() -> Self {
-        Self {
-            batch: Batch::new(),
+/// Runs signal and native readiness handling until teardown.
+async fn run_driver_loop<A: Alarm>(
+    shard: &Arc<Shard<A>>,
+    batch: &mut Batch,
+) -> Result<(), DriverFailure> {
+    shard.rearm()?;
+    loop {
+        if shard.is_stopped() {
+            return Ok(());
         }
-    }
-
-    /// Runs signal and native readiness handling until teardown.
-    async fn run<A: Alarm>(&mut self, shard: &Arc<Shard<A>>) -> Result<(), DriverFailure> {
-        shard.rearm()?;
-        loop {
-            if shard.is_stopped() {
-                return Ok(());
-            }
-            select! {
-                result = shard.alarm.wait() => {
-                    result.map_err(|error| DriverFailure::io("wait for native alarm", error))?;
-                    let mut processed = 0_usize;
-                    loop {
-                        let more = shard.take_expired(&mut self.batch)?;
-                        processed = processed.saturating_add(self.batch.entries.len());
-                        // Callbacks run after take_expired releases the shard mutex.
-                        if let Some(panic) = self.batch.complete(ENTRY_FIRED) {
-                            return Err(DriverFailure::panic(&*panic));
-                        }
-                        if !more {
-                            break;
-                        }
-                        if processed >= EXPIRY_YIELD_BUDGET {
-                            processed = 0;
-                            tokio::task::yield_now().await;
-                        }
+        select! {
+            result = shard.alarm.wait() => {
+                result.map_err(|error| DriverFailure::io("wait for native alarm", error))?;
+                let mut processed = 0_usize;
+                loop {
+                    let more = shard.take_expired(batch)?;
+                    processed = processed.saturating_add(batch.entries.len());
+                    // Callbacks run after take_expired releases the shard mutex.
+                    if let Some(panic) = batch.complete(ENTRY_FIRED) {
+                        return Err(DriverFailure::panic(&*panic));
                     }
-                    shard.rearm()?;
-                },
-                _ = shard.signal.wait() => {
-                    shard.rearm()?;
-                },
-            }
+                    if !more {
+                        break;
+                    }
+                    if processed >= EXPIRY_YIELD_BUDGET {
+                        processed = 0;
+                        tokio::task::yield_now().await;
+                    }
+                }
+                shard.rearm()?;
+            },
+            _ = shard.signal.wait() => {
+                shard.rearm()?;
+            },
         }
     }
 }
 
 /// Runs one driver with panic capture and complete failure cleanup.
 async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
-    let mut driver = DriverLoop::new();
-    let outcome = AssertUnwindSafe(driver.run(&shard)).catch_unwind().await;
+    let mut batch = Batch::new();
+    let outcome = AssertUnwindSafe(run_driver_loop(&shard, &mut batch))
+        .catch_unwind()
+        .await;
     let failure = match outcome {
         Ok(Ok(())) if shard.is_stopped() => return,
         Ok(Ok(())) => DriverFailure {
@@ -962,7 +952,7 @@ async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
         Err(panic) => DriverFailure::panic(&*panic),
     };
     shard.fail(failure);
-    let _ = driver.batch.complete(ENTRY_FIRED);
+    let _ = batch.complete(ENTRY_FIRED);
 }
 
 /// Durable coalesced notification from any producer to one driver.
