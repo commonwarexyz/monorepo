@@ -27,6 +27,13 @@ use commonware_macros::stability_scope;
 mod macros;
 
 mod network;
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+mod platform;
 mod process;
 mod storage;
 
@@ -52,6 +59,7 @@ stability_scope!(BETA {
     use commonware_parallel::Rayon;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
+    pub use platform::{PlatformSend, PlatformSync};
     use iobuf::PoolError;
     use std::{
         future::Future,
