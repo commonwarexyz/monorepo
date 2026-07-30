@@ -97,6 +97,7 @@ struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
 struct MarshalTwinsState<P: Simplex> {
     validators: Vec<Validator<P>>,
     honest: Vec<(usize, Application<B<P>>)>,
+    primaries: Vec<(usize, Application<B<P>>)>,
     certification_agreement: CertificationAgreementInvariant,
     block_contexts: BlockContextRegistry<Ctx<P>>,
     genesis: Sha256Digest,
@@ -136,7 +137,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
     }
 
     fn pending_ack_invariant_limit(&self) -> Option<NonZeroUsize> {
-        (!self.uses_attack_layout()).then_some(self.max_pending_acks)
+        Some(self.max_pending_acks)
     }
 
     fn report_empty_case(&self, reason: &str) {
@@ -199,6 +200,7 @@ where
             state: MarshalTwinsState {
                 validators,
                 honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
+                primaries: Vec::new(),
                 certification_agreement: CertificationAgreementInvariant::new(
                     self.stack_label.clone(),
                     self.marshal_choice,
@@ -331,6 +333,9 @@ where
             state.validators[idx].mailbox.clone(),
         );
         state.validators[idx].start(primary_builder.clone());
+        state
+            .primaries
+            .push((idx, state.validators[idx].application.clone()));
         start_engine::<P, _, _, _>(
             context,
             oracle,
@@ -411,6 +416,7 @@ where
                 self.app_config,
                 A::rejects,
                 state.block_contexts.clone(),
+                self.marshal_choice,
                 self.stack_label.clone(),
             ),
         };
@@ -454,6 +460,9 @@ where
         state: &mut Self::State,
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
+        for (idx, application) in &state.primaries {
+            invariants::check_local_blocks(*idx, application, &self.stack_label);
+        }
         invariants::check_all_blocks(&state.honest, Some(&self.stack_label));
     }
 }

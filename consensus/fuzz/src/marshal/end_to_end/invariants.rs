@@ -113,6 +113,7 @@ pub(super) struct HeaderMismatchInvariant<P: Simplex, C: Copy> {
     app_choice: ApplicationChoice,
     app_config: C,
     rejects: fn(ApplicationChoice, C, &Ctx<P>) -> bool,
+    marshal: MarshalChoice,
     stack: Arc<str>,
 }
 
@@ -124,6 +125,7 @@ impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
             app_choice: self.app_choice,
             app_config: self.app_config,
             rejects: self.rejects,
+            marshal: self.marshal,
             stack: self.stack.clone(),
         }
     }
@@ -135,6 +137,7 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
         app_config: C,
         rejects: fn(ApplicationChoice, C, &Ctx<P>) -> bool,
         block_contexts: BlockContextRegistry<Ctx<P>>,
+        marshal: MarshalChoice,
         stack: Arc<str>,
     ) -> Self {
         Self {
@@ -143,6 +146,7 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             app_choice,
             app_config,
             rejects,
+            marshal,
             stack,
         }
     }
@@ -157,6 +161,10 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
 
     pub(super) fn block_context(&self, digest: &Sha256Digest) -> Option<Ctx<P>> {
         self.block_contexts.get(digest)
+    }
+
+    pub(super) const fn marshal(&self) -> MarshalChoice {
+        self.marshal
     }
 
     fn observed_mismatch(&self, round: Round, digest: Sha256Digest) -> bool {
@@ -193,10 +201,19 @@ pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
 ) {
     let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
-        check_in_order(*idx, &app.delivered(), stack);
-        check_parent_linkage(*idx, &app.blocks(), stack);
+        check_local_blocks(*idx, app, stack);
     }
     agreement(honest_apps, stack);
+}
+
+/// Run block-ordering and parent-linkage invariants for one node.
+pub(super) fn check_local_blocks<B: Block<Digest = Sha256Digest>>(
+    idx: usize,
+    app: &Application<B>,
+    stack: &str,
+) {
+    check_in_order(idx, &app.delivered(), stack);
+    check_parent_linkage(idx, &app.blocks(), stack);
 }
 
 /// Invariant: every pair of consecutively delivered blocks is parent-linked.
@@ -394,12 +411,26 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "max_pending_acks backpressure violated")]
+    fn pending_ack_at_window_boundary_is_rejected() {
+        type TestBlock = MockBlock<Sha256Digest, ()>;
+
+        let mut application = Application::<TestBlock>::manual_ack();
+        let block = TestBlock::new::<Sha256>((), digest(0), Height::zero(), 0);
+        let (ack, _waiter) = Exact::handle();
+        application.report(Update::Block(Arc::new(block), ack));
+
+        check_pending_acks(0, &application, Height::new(2), NZUsize!(2), "test");
+    }
+
+    #[test]
     fn missing_block_context_is_an_incomplete_observation() {
         let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
             ApplicationChoice::AlwaysAccept,
             (),
             |_, _, _| false,
             BlockContextRegistry::default(),
+            MarshalChoice::Deferred,
             "test".into(),
         );
 

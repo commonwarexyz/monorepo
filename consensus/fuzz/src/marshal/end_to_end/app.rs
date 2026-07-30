@@ -68,6 +68,28 @@ where
     }
 }
 
+impl<C> Reporter for DeliveryReporter<C>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
+    type Activity = Update<Block<Sha256Digest, C>>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let (Update::Block(block, _), Some(max_pending_acks)) =
+            (&activity, self.max_pending_acks)
+        {
+            super::invariants::check_pending_acks(
+                self.validator,
+                &self.application,
+                block.height(),
+                max_pending_acks,
+                &self.stack,
+            );
+        }
+        self.application.report(activity)
+    }
+}
+
 /// Out-of-band registry of blocks constructed by the fuzz applications.
 pub(crate) struct BlockContextRegistry<C> {
     contexts: Arc<Mutex<HashMap<Sha256Digest, C>>>,
@@ -224,18 +246,7 @@ where
         let Some(reporter) = &mut self.reporter else {
             return Feedback::Ok;
         };
-        if let (Update::Block(block, _), Some(max_pending_acks)) =
-            (&activity, reporter.max_pending_acks)
-        {
-            super::invariants::check_pending_acks(
-                reporter.validator,
-                &reporter.application,
-                block.height(),
-                max_pending_acks,
-                &reporter.stack,
-            );
-        }
-        reporter.application.report(activity)
+        reporter.report(activity)
     }
 }
 

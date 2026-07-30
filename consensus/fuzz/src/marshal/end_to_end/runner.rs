@@ -80,9 +80,8 @@ use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize};
 use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
 
-/// Generous backlog so marshal never blocks on ack pressure; the downstream
-/// application auto-acks.
-const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+/// Tight backlog so manual acknowledgements and backpressure stay observable.
+const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(2);
 
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
@@ -319,7 +318,7 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
                     DeliveryReporter::new(
                         idx,
                         node.application.clone(),
-                        None,
+                        Some(MAX_PENDING_ACKS),
                         "marshal-liveness".into(),
                     ),
                 );
@@ -421,6 +420,7 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
                 provider.clone(),
                 genesis.clone(),
                 MAX_PENDING_ACKS,
+                idx,
             )
             .await;
             honest_apps.push((idx, node.application.clone()));

@@ -9,7 +9,7 @@
 
 use super::{
     ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
-    app::AlwaysAcceptBlockBuilderApp,
+    app::{AlwaysAcceptBlockBuilderApp, DeliveryReporter},
     twins::{PublicKeyOf, SchemeOf},
 };
 use crate::SimplexCertificateMock;
@@ -48,7 +48,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::Oracle;
 use commonware_parallel::Sequential;
-use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize};
 use std::{num::NonZeroUsize, time::Duration};
@@ -89,8 +89,27 @@ pub(crate) async fn setup_validator_coding(
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
     genesis: CodingCoded,
     max_pending_acks: NonZeroUsize,
+    validator_idx: usize,
 ) -> CodingValidator {
-    let application = Application::<CodingB>::default();
+    let application = if max_pending_acks <= NZUsize!(2) {
+        Application::<CodingB>::manual_ack()
+    } else {
+        Application::<CodingB>::default()
+    };
+    if max_pending_acks <= NZUsize!(2) {
+        let acknowledger = application.clone();
+        context.child("acknowledger").spawn(move |_| async move {
+            loop {
+                acknowledger.acknowledged().await;
+            }
+        });
+    }
+    let delivery_reporter = DeliveryReporter::new(
+        validator_idx,
+        application.clone(),
+        Some(max_pending_acks),
+        "marshal-coding-liveness".into(),
+    );
     let config = Config {
         provider: provider.clone(),
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -225,7 +244,7 @@ pub(crate) async fn setup_validator_coding(
         config,
     )
     .await;
-    actor.start(application.clone(), shard_mailbox.clone(), resolver);
+    actor.start(delivery_reporter, shard_mailbox.clone(), resolver);
 
     CodingValidator {
         mailbox,

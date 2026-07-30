@@ -1,6 +1,6 @@
 //! Passive observation of Marshal automaton verdicts.
 
-use super::{Ctx, VERIFY_PROBE};
+use super::{Ctx, stack::MarshalChoice};
 use crate::{
     marshal::end_to_end::{
         app::FaultyConfig,
@@ -54,7 +54,26 @@ where
     type Digest = Sha256Digest;
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
-        self.inner.propose(context).await
+        let round = context.round;
+        let mut result = self.inner.propose(context).await;
+        let (mut tx, rx) = oneshot::channel();
+        let certification_agreement = self.certification_agreement.clone();
+        let runtime = self.context.lock().child("propose");
+        let validator = self.validator;
+        runtime.spawn(move |_| async move {
+            let digest = select! {
+                result = &mut result => result.ok(),
+                _ = tx.closed() => result.try_recv().ok(),
+            };
+            let Some(digest) = digest else {
+                return;
+            };
+            // FaultyConfig is shared and view-indexed across honest nodes. If it
+            // becomes per-node, this self-proposal clause must be scoped with it.
+            certification_agreement.record_proposal(validator, round, digest);
+            tx.send_lossy(digest);
+        });
+        rx
     }
 
     async fn verify(
@@ -78,15 +97,18 @@ where
                 return;
             };
             tx.send_lossy(value);
-            if *VERIFY_PROBE
-                && !value
-                && let Some(block_context) = header_mismatch.block_context(&digest)
-                && block_context != context
-            {
-                eprintln!(
-                    "[marshal-twins] mismatch-branch rejection: validator={} round={} \
-                     digest={digest} input={}",
-                    validator, context.round, probe_input
+            if let Some(block_context) = header_mismatch.block_context(&digest) {
+                let mismatched = match header_mismatch.marshal() {
+                    MarshalChoice::Deferred => block_context != context,
+                    MarshalChoice::Inline => block_context.parent.1 != context.parent.1,
+                };
+                assert!(
+                    !mismatched || !value,
+                    "marshal verified a payload under a header that is not the block's embedded \
+                     header: validator={validator} round={} digest={digest} marshal={} input={}",
+                    context.round,
+                    header_mismatch.marshal(),
+                    probe_input,
                 );
             }
         });

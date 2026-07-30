@@ -47,7 +47,7 @@ use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(2);
 const POLL: Duration = Duration::from_millis(50);
 const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
 const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
