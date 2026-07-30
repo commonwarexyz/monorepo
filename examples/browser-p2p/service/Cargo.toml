@@ -1,0 +1,17 @@
+[package]
+name = "commonware-browser-p2p-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[lints.rust]
+rust_2018_idioms = "deny"
+warnings = "deny"
+
+[dependencies]
+ctutils = "0.4.2"
+getrandom = "0.4.3"
