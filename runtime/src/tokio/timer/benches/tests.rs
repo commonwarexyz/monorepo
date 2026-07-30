@@ -105,12 +105,12 @@ fn latency_statistics_preserve_percentiles_and_drain_boundary() {
 }
 
 #[test]
-fn cancellation_orchestration_handles_one_and_multiple_producers() {
+fn cancellation_orchestration_handles_each_backend_and_producer_topology() {
     // Setup: Start the production runtime with two workers.
     let runner =
         commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(2));
 
-    // Action: Exercise both passes, backends, and producer topologies.
+    // Action: Exercise both backends and one- and multiple-producer topologies.
     runner.start(|context| async move {
         let clock = Arc::new(context);
         let configurations = [
@@ -119,44 +119,22 @@ fn cancellation_orchestration_handles_one_and_multiple_producers() {
             (Backend::Tokio, 2, 1, 1),
             (Backend::Tokio, 8, 4, 4),
         ];
-        let mut batch = 0;
-        for (backend, timers, canceled, producers) in configurations {
-            let latency = worst_case::run_cancellation_batch(
+        for (batch, (backend, timers, canceled, producers)) in
+            configurations.into_iter().enumerate()
+        {
+            let batch = u64::try_from(batch).expect("configuration count fits u64");
+            // Assertion: Successful completion exercises setup, coordination,
+            // concurrent cancellation, and cleanup without deadlock or early expiry.
+            worst_case::run_cancellation_batch(
                 Arc::clone(&clock),
                 backend,
                 timers,
                 canceled,
                 producers,
                 batch,
-                worst_case::CancellationPass::Latency,
             )
             .await
             .unwrap();
-            batch += 1;
-            let throughput = worst_case::run_cancellation_batch(
-                Arc::clone(&clock),
-                backend,
-                timers,
-                canceled,
-                producers,
-                batch,
-                worst_case::CancellationPass::Throughput,
-            )
-            .await
-            .unwrap();
-            batch += 1;
-
-            // Assertion: Latency retains initialized samples; throughput does not.
-            assert_eq!(latency.setup.len(), producers);
-            assert_eq!(latency.cancellation.len(), canceled);
-            assert!(
-                latency
-                    .cancellation
-                    .iter()
-                    .all(|sample| *sample != Duration::MAX)
-            );
-            assert_eq!(throughput.setup.capacity(), 0);
-            assert_eq!(throughput.cancellation.capacity(), 0);
         }
     });
 }

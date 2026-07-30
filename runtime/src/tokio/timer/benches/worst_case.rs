@@ -3,7 +3,6 @@
 use crate::{
     Backend, BenchSleep, Config,
     backend::DeadlinePair,
-    checked_observations,
     config::{
         CANCEL_PERCENT, CANCELLATION_TIMERS, PEER_LEAD, REGISTRATION_STEP, REGISTRATION_TIMERS,
         STORM_LEAD, STORM_TIMERS,
@@ -143,63 +142,23 @@ async fn benchmark_cancellation(
                         io::Error::new(io::ErrorKind::InvalidInput, "cancel count overflow")
                     })?
                     / 100;
-            let cancellation_samples = checked_observations(config.worst_batches, total_canceled)?;
-            let setup_samples = checked_observations(config.worst_batches, producers)?;
-            let mut setup = Vec::with_capacity(setup_samples);
-            let mut cancellation = Vec::with_capacity(cancellation_samples);
             let mut drain = Vec::with_capacity(config.worst_batches);
 
             for batch in 0..config.worst_batches {
                 let batch = u64::try_from(batch).unwrap_or(u64::MAX);
-                let latency = run_cancellation_batch(
-                    Arc::clone(&clock),
-                    backend,
-                    CANCELLATION_TIMERS,
-                    total_canceled,
-                    producers,
-                    batch,
-                    CancellationPass::Latency,
-                )
-                .await?;
-                let throughput = run_cancellation_batch(
-                    Arc::clone(&clock),
-                    backend,
-                    CANCELLATION_TIMERS,
-                    total_canceled,
-                    producers,
-                    batch,
-                    CancellationPass::Throughput,
-                )
-                .await?;
-                if !throughput.cancellation.is_empty() {
-                    return Err(io::Error::other(
-                        "throughput cancellation pass produced latency samples",
-                    ));
-                }
-
-                // Per-timer latency and aggregate drain use separate passes so
-                // clock reads and sample writes cannot distort drain scaling.
-                setup.extend(latency.setup);
-                cancellation.extend(latency.cancellation);
-                drain.push(throughput.drain);
-            }
-            if setup.len() != setup_samples
-                || cancellation.len() != cancellation_samples
-                || drain.len() != config.worst_batches
-            {
-                return Err(io::Error::other(format!(
-                    "cancellation sample accounting mismatch: expected setup={setup_samples}, \
-                     cancellation={cancellation_samples}, drain={}; got setup={}, \
-                     cancellation={}, drain={}",
-                    config.worst_batches,
-                    setup.len(),
-                    cancellation.len(),
-                    drain.len(),
-                )));
+                drain.push(
+                    run_cancellation_batch(
+                        Arc::clone(&clock),
+                        backend,
+                        CANCELLATION_TIMERS,
+                        total_canceled,
+                        producers,
+                        batch,
+                    )
+                    .await?,
+                );
             }
 
-            let setup_distribution = report::Distribution::new(&setup)?;
-            let cancel_distribution = report::Distribution::new(&cancellation)?;
             let drain_distribution = report::Distribution::new(&drain)?;
             if producers == 1 {
                 one_producer_p50 = Some(drain_distribution.p50);
@@ -220,28 +179,14 @@ async fn benchmark_cancellation(
                     ("timers_per_batch", CANCELLATION_TIMERS),
                     ("producers", producers),
                 ],
-                &[
-                    ("setup", setup.len()),
-                    ("cancellation", cancellation.len()),
-                    ("drain", drain.len()),
-                ],
+                &[("drain", drain.len())],
             );
             let shard_distribution =
                 report::cancellation_shard_distribution(backend, config.shards(), producers);
             println!(
-                "{name} {accounting} setup_p50_us={:.3} setup_p99_us={:.3} setup_max_us={:.3} \
-                 cancellation_p50_us={:.3} cancellation_p99_us={:.3} \
-                 cancellation_max_us={:.3} drain_p50_us={:.3} drain_p99_us={:.3} \
-                 drain_max_us={:.3} scaling_vs_one_producer={scaling} \
-                 measurement_passes=2 cancellation_measurement=instrumented \
-                 drain_measurement=uninstrumented setup_measurement=latency_pass \
-                 {shard_distribution}",
-                report::micros(setup_distribution.p50),
-                report::micros(setup_distribution.p99),
-                report::micros(setup_distribution.max),
-                report::micros(cancel_distribution.p50),
-                report::micros(cancel_distribution.p99),
-                report::micros(cancel_distribution.max),
+                "{name} {accounting} drain_p50_us={:.3} drain_p99_us={:.3} \
+                 drain_max_us={:.3} scaling_vs_one_producer={scaling} measurement_passes=1 \
+                 cancellation_measurement=aggregate_drain {shard_distribution}",
                 report::micros(drain_distribution.p50),
                 report::micros(drain_distribution.p99),
                 report::micros(drain_distribution.max),
@@ -249,15 +194,6 @@ async fn benchmark_cancellation(
         }
     }
     Ok(())
-}
-
-/// Work isolated by one cancellation measurement pass.
-#[derive(Clone, Copy)]
-pub(super) enum CancellationPass {
-    /// Measure every individual timer drop.
-    Latency,
-    /// Measure aggregate drain without per-drop instrumentation.
-    Throughput,
 }
 
 /// Returns drain scaling only when this run measured a one-producer baseline.
@@ -271,22 +207,8 @@ fn cancellation_scaling(baseline: Option<Duration>, current: Duration) -> Option
     })
 }
 
-/// Result of one cancellation batch across all producers.
-pub(super) struct CancellationBatch {
-    /// Per-producer construction and initial-poll durations.
-    pub(super) setup: Vec<Duration>,
-    /// Per-timer cancellation durations.
-    pub(super) cancellation: Vec<Duration>,
-    /// Wall time from producer release through the final cancellation.
-    drain: Duration,
-}
-
 /// Result returned by one contending cancellation producer thread.
 struct ProducerResult {
-    /// Construction and initial-poll time for this partition.
-    setup: Duration,
-    /// Individual cancellation durations for this partition.
-    cancellation: Vec<Duration>,
     /// Time immediately after this producer's final cancellation.
     last_cancellation: Instant,
     /// Uncanceled timers retained until the measured phase completes.
@@ -321,8 +243,6 @@ struct CancellationProducer {
     canceled: usize,
     /// Deterministic shuffle seed.
     seed: u64,
-    /// Measurement work performed after producer release.
-    pass: CancellationPass,
     /// Cancelable rendezvous shared with the coordinator.
     gate: Arc<ProducerGate>,
 }
@@ -335,8 +255,7 @@ pub(super) async fn run_cancellation_batch(
     canceled: usize,
     producers: usize,
     batch: u64,
-    pass: CancellationPass,
-) -> io::Result<CancellationBatch> {
+) -> io::Result<Duration> {
     let wall_deadline = checked_system_deadline(LONG_DEADLINE)?;
     let tokio_deadline = tokio::time::Instant::now()
         .checked_add(LONG_DEADLINE)
@@ -358,7 +277,6 @@ pub(super) async fn run_cancellation_batch(
             canceled: local_canceled,
             seed: batch.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15)
                 ^ u64::try_from(producer).unwrap_or(u64::MAX),
-            pass,
             gate: Arc::clone(&gate),
         };
         let unwind_gate = Arc::clone(&gate);
@@ -391,23 +309,9 @@ pub(super) async fn run_cancellation_batch(
         io::Error::other(format!("cancellation coordinator task failed: {error}"))
     })??;
 
-    let retain_samples = matches!(pass, CancellationPass::Latency);
-    let mut setup = if retain_samples {
-        Vec::with_capacity(producers)
-    } else {
-        Vec::new()
-    };
-    let mut cancellation = if retain_samples {
-        Vec::with_capacity(canceled)
-    } else {
-        Vec::new()
-    };
+    let CoordinatedCancellation { results, drain } = coordinated;
     let mut completed_early = false;
-    for mut result in coordinated.results {
-        if retain_samples {
-            setup.push(result.setup);
-            cancellation.append(&mut result.cancellation);
-        }
+    for result in results {
         completed_early |= result.completed_early;
         drop(result.survivors);
     }
@@ -420,11 +324,7 @@ pub(super) async fn run_cancellation_batch(
 
     // Producer results retain uncanceled timers until after measured drain is derived.
     tokio::task::yield_now().await;
-    Ok(CancellationBatch {
-        setup,
-        cancellation,
-        drain: coordinated.drain,
-    })
+    Ok(drain)
 }
 
 /// Registers, partitions, and then cancels one producer's timers.
@@ -432,7 +332,6 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
     // Setup: Enter the shared reactor and register this producer's partition.
     // Dedicated threads give Commonware deterministic round-robin shard claims.
     let _guard = input.runtime.enter();
-    let setup_start = matches!(input.pass, CancellationPass::Latency).then(Instant::now);
     let mut sleeps = Vec::with_capacity(input.timers);
     let mut completed_early = false;
     for _ in 0..input.timers {
@@ -445,57 +344,22 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
         completed_early |= poll_once(&mut sleep).is_ready();
         sleeps.push(sleep);
     }
-    let setup = setup_start.map_or(Duration::ZERO, |start| start.elapsed());
     shuffle(&mut sleeps, input.seed);
     let survivors = sleeps.split_off(input.canceled);
 
-    // Pre-touch latency samples before release so allocation and page faults do
-    // not contribute to either cancellation measurement.
-    let mut cancellation = match input.pass {
-        CancellationPass::Latency => {
-            let samples = vec![Duration::MAX; input.canceled];
-            let _ = std::hint::black_box(samples.as_slice());
-            samples
-        }
-        CancellationPass::Throughput => Vec::new(),
-    };
-
-    // Action: Wait for every producer, then run the selected cancellation pass.
+    // Action: Wait for every producer, then drain the selected cancellations.
     if input.gate.arrive_and_wait() == ProducerRelease::Cancel {
         return None;
     }
-    let last_cancellation = match input.pass {
-        CancellationPass::Latency => measure_cancellation_latency(&mut sleeps, &mut cancellation),
-        CancellationPass::Throughput => drain_cancellations(&mut sleeps),
-    };
+    let last_cancellation = drain_cancellations(&mut sleeps);
     Some(ProducerResult {
-        setup,
-        cancellation,
         last_cancellation,
         survivors,
         completed_early,
     })
 }
 
-/// Drops timers with per-cancellation latency instrumentation.
-#[inline(never)]
-fn measure_cancellation_latency(sleeps: &mut Vec<BenchSleep>, samples: &mut [Duration]) -> Instant {
-    debug_assert_eq!(sleeps.len(), samples.len());
-    sleeps
-        .drain(..)
-        .zip(samples)
-        .map(|(sleep, sample)| {
-            let start = Instant::now();
-            drop(sleep);
-            let finished = Instant::now();
-            *sample = finished.saturating_duration_since(start);
-            finished
-        })
-        .last()
-        .expect("validated cancellation partitions are nonempty")
-}
-
-/// Drops timers without per-cancellation instrumentation.
+/// Drops every selected timer and records aggregate completion.
 #[inline(never)]
 fn drain_cancellations(sleeps: &mut Vec<BenchSleep>) -> Instant {
     debug_assert!(!sleeps.is_empty());

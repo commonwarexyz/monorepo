@@ -254,11 +254,7 @@ impl Config {
                 checked_observations(self.accuracy_batches, concurrency)?;
             }
         }
-        if self.scenario.runs_registration() {
-            checked_observations(self.worst_batches, REGISTRATION_TIMERS)?;
-        }
         if self.scenario.runs_cancellation() {
-            checked_observations(self.worst_batches, CANCELLATION_TIMERS)?;
             let maximum_producers = *self
                 .cancellation_producer_counts_checked()?
                 .iter()
@@ -274,9 +270,6 @@ impl Config {
                     ),
                 ));
             }
-        }
-        if self.scenario.runs_expiry() {
-            checked_observations(self.worst_batches, STORM_TIMERS)?;
         }
         Ok(())
     }
