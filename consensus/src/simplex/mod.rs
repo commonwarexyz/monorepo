@@ -51,6 +51,7 @@
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Mark `c` as notarized
+//! * Treat the named parent as certified
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
 //! * Attempt to certify `c` (see [Certification](#certification)), leaving `t_a` armed so a
 //!   stalled certification still times out the view
@@ -84,7 +85,8 @@
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
 //! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
-//! finalization). Notarizations advance the view if-and-only-if the application certifies them.
+//! finalization). A notarization advances its view after the application certifies it or after a
+//! later notarization names it as the parent.
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -104,11 +106,13 @@
 //! proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
-//! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
-//! Until then (say a nullification certificate for a view arrives before certification completes), the application should continue
-//! attempting to complete certification. This increases the likelihood that we can vote on the next honest proposer's block (which
-//! may build on our in-flight certification or the nullification). If we did not do this, it is possible that different parts of
-//! the network (neither with quorum) would refuse to vote on each other's blocks (halting consensus).
+//! Simplex keeps a certification request open until the application returns a verdict or protocol
+//! evidence establishes success. A later notarization that names the pending proposal as its parent
+//! establishes success because its quorum contains an honest validator that accepted the parent as
+//! certified before voting. A finalization at the same or a higher view also makes the request obsolete.
+//! Nullification alone does neither, so certification continues after a nullification certificate
+//! arrives. This lets the validator vote on a later honest proposal that builds on the pending
+//! parent.
 //!
 //! A view timeout and a certification verdict serve different purposes. A timeout lets the voter
 //! leave the current view and emit a nullify vote while application work continues. It does not
@@ -122,12 +126,12 @@
 //! validator: one may never form, and a notarization and nullification may coexist without either
 //! invalidating the other.
 //!
-//! Consequently, an indefinitely pending certification is equivalent to losing that validator for
-//! the affected execution. Simplex remains responsive while certification is delayed, but its
-//! liveness guarantee assumes that every live validator eventually returns a deterministic verdict.
-//! Certification may be arbitrarily slow. A covering finalization makes the request obsolete, in
-//! which case consensus drops it without requiring a verdict. See [Fetching Missing
-//! Certificates](#fetching-missing-certificates).
+//! Consequently, a pending certification excludes that validator from proposals that depend on the
+//! result until the application responds or a dependent notarization establishes success. If neither
+//! occurs, an indefinitely pending request is equivalent to losing the validator for that execution.
+//! Simplex remains responsive while certification is delayed, but its liveness guarantee assumes
+//! that every live validator eventually returns a deterministic verdict when protocol evidence does
+//! not resolve the request first. See [Fetching Missing Certificates](#fetching-missing-certificates).
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -518,8 +522,8 @@
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
 //! a fast-skip signal and can halt progress because certification requests are not retried during
 //! the same run. Keep the request pending while its verdict depends on temporary data. A live
-//! implementation must eventually send a verdict. The only exception is when Simplex drops the
-//! receiver after finalizing the block or a descendant.
+//! implementation must eventually send a verdict unless a dependent notarization or a finalization
+//! establishes success first. In that case, Simplex drops the receiver.
 
 pub mod elector;
 pub mod scheme;

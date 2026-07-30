@@ -167,6 +167,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// however, consensus may request certification for the same `(round, payload)` again
         /// if the result was not durably recorded before shutdown.
         ///
+        /// Consensus may drop the receiver before it resolves when protocol evidence establishes
+        /// success. A notarization for a proposal that names this round as its parent proves that
+        /// honest validators accepted the parent as certified before voting for the child. A
+        /// finalization at this or a later round also makes the local request unnecessary.
+        ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
         /// round. Temporary conditions such as waiting for more data should not conclude
@@ -174,9 +179,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// # Liveness Requirement
         ///
-        /// Certification is consensus-critical work. A validator is live only if every
-        /// certification request that remains relevant eventually produces `true` or `false`.
-        /// A request may remain pending for an arbitrarily long time, but not forever.
+        /// Certification is consensus-critical work while no protocol certificate establishes
+        /// the result. A validator is live only if every request that remains relevant eventually
+        /// produces `true` or `false`. A request may remain pending for an arbitrarily long time,
+        /// but not forever.
         ///
         /// If certification does not finish before the certification timeout expires, the
         /// validator times out the current view and issues a nullify vote. The validator can enter
@@ -185,16 +191,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// validators are blocked this way, later views also time out and consensus cannot finalize
         /// new payloads.
         ///
-        /// Consensus cannot infer a certification verdict from elapsed time. `false` means
-        /// permanently uncertifiable, so returning it because of a local timeout could make honest
-        /// validators disagree about the same payload. Closing the channel is also terminal and is
-        /// reserved for shutdown or another condition that prevents the implementation from ever
-        /// producing a verdict.
+        /// Elapsed time does not establish a certification verdict. `false` means permanently
+        /// uncertifiable, so returning it because of a local timeout could make honest validators
+        /// disagree about the same payload. Closing the channel is also terminal and is reserved
+        /// for shutdown or another condition that prevents the implementation from ever producing
+        /// a verdict.
         ///
-        /// If the receiver remains open forever, the validator is unavailable for executions that
-        /// require that verdict. The validator therefore does not count as live for the consensus
-        /// liveness guarantee. Finalization may instead make the request obsolete, in which case
-        /// consensus drops the receiver.
+        /// If the receiver remains open forever and no dependent notarization or finalization
+        /// establishes success, the validator is unavailable for executions that require that
+        /// verdict. The validator therefore does not count as live for the consensus liveness
+        /// guarantee.
         ///
         /// Consensus can request certification again after restart if the previous result was not
         /// durably recorded.

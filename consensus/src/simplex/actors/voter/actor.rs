@@ -1,7 +1,7 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{Config as StateConfig, State, Verify},
+    state::{Certify, Config as StateConfig, State, Verify},
 };
 use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
@@ -1158,27 +1158,40 @@ impl<
                     pending_verify = self.try_verify(&mut resolver).await;
                 }
 
-                // Attempt to certify any views that we have notarizations for.
-                //
-                // Even our own proposals are certified through the automaton: that
-                // is the durability barrier that makes a block recoverable before
-                // we cast a finalize vote for it.
-                for proposal in self.state.certify_candidates() {
-                    let round = proposal.round;
+                // Attempt to certify any views that we have notarizations for. A dependent
+                // notarization supplies a positive result for its parent; otherwise the
+                // application provides the durability barrier before we cast a finalize vote.
+                for candidate in self.state.certify_candidates() {
+                    let round = candidate.round();
                     let view = round.view();
-                    debug!(%view, "attempting certification");
                     let span = info_span!(
                         parent: self.state.view_span(view),
                         "simplex.voter.certify",
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
-                    #[allow(clippy::async_yields_async)]
-                    let receiver = async { self.automaton.certify(round, proposal.payload).await }
-                        .instrument(span.clone())
-                        .await;
-                    let handle = certify_pool.push(async move { (round, span, receiver.await) });
-                    self.state.set_certify_handle(view, handle);
+                    match candidate {
+                        Certify::Application(proposal) => {
+                            debug!(%view, "attempting certification");
+                            #[allow(clippy::async_yields_async)]
+                            let receiver = async {
+                                self.automaton.certify(round, proposal.payload).await
+                            }
+                            .instrument(span.clone())
+                            .await;
+                            let handle =
+                                certify_pool.push(async move { (round, span, receiver.await) });
+                            self.state
+                                .set_application_certify_handle(view, handle);
+                        }
+                        Certify::Inferred(_) => {
+                            debug!(%view, "inferring certification from dependent notarization");
+                            let handle = certify_pool.push(async move {
+                                (round, span, Ok::<_, oneshot::error::RecvError>(true))
+                            });
+                            self.state.set_inferred_certify_handle(view, handle);
+                        }
+                    }
                 }
 
                 // Prune views below the activity floor. To lower view latency,

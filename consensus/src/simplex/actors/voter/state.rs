@@ -101,6 +101,24 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
     Wait,
 }
 
+/// Work needed to determine a notarized proposal's certification result.
+pub(super) enum Certify<D: Digest> {
+    /// Ask the application to certify the proposal.
+    Application(Proposal<D>),
+    /// Complete certification from a notarization that names this view as its parent.
+    Inferred(Rnd),
+}
+
+impl<D: Digest> Certify<D> {
+    /// Returns the round being certified.
+    pub const fn round(&self) -> Rnd {
+        match self {
+            Self::Application(proposal) => proposal.round,
+            Self::Inferred(round) => *round,
+        }
+    }
+}
+
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub scheme: S,
@@ -147,6 +165,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
 
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
+    implied_certifications: BTreeSet<View>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -179,6 +198,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             nullification_views: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
+            implied_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
             timeouts,
@@ -474,11 +494,26 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         let view = notarization.view();
+        let parent = notarization.proposal.parent;
+
         // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
         if result.0 && view > self.last_finalized {
             self.certification_candidates.insert(view);
+
+            // A notarization's quorum includes an honest vote, and honest voters only build on a
+            // certified parent. Retain that positive result until the parent's notarization is
+            // available and its certification can be completed through the normal durable path.
+            if parent < view
+                && parent > self.last_finalized
+                && self
+                    .views
+                    .get(&parent)
+                    .is_none_or(Round::can_infer_certification)
+            {
+                self.implied_certifications.insert(parent);
+            }
         }
         result
     }
@@ -527,6 +562,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             // Prune certification candidates at or below finalized view.
             // Finalization is definitive, so these certifications are no longer relevant.
             self.certification_candidates.retain(|v| *v > view);
+            self.implied_certifications.retain(|v| *v > view);
 
             // Abort outstanding certifications at or below finalized view for the same reason.
             let keep = self.outstanding_certifications.split_off(&view.next());
@@ -820,28 +856,63 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .unwrap_or(false)
     }
 
-    /// Store the abort handle for an in-flight certification request.
-    pub fn set_certify_handle(&mut self, view: View, handle: Aborter) {
+    /// Stores the abort handle for an application certification request.
+    pub fn set_application_certify_handle(&mut self, view: View, handle: Aborter) {
         let Some(round) = self.views.get_mut(&view) else {
             return;
         };
-        round.set_certify_handle(handle);
+        round.set_application_certify_handle(handle);
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates and returns proposals ready for certification.
-    pub fn certify_candidates(&mut self) -> Vec<Proposal<D>> {
+    /// Store the abort handle for certification inferred from protocol evidence.
+    pub fn set_inferred_certify_handle(&mut self, view: View, handle: Aborter) {
+        let Some(round) = self.views.get_mut(&view) else {
+            return;
+        };
+        round.set_inferred_certify_handle(handle);
+        self.outstanding_certifications.insert(view);
+    }
+
+    /// Takes all certification candidates and returns work ready for certification.
+    ///
+    /// A late gap notarization can make both itself and its pending parent inferable: a stored
+    /// descendant proves the gap, while the gap's own notarization proves its named parent.
+    pub fn certify_candidates(&mut self) -> Vec<Certify<D>> {
         let candidates = take(&mut self.certification_candidates);
-        candidates
-            .into_iter()
-            .filter_map(|view| {
-                if view <= self.last_finalized {
-                    return None;
-                }
-                let candidate = self.views.get_mut(&view)?.try_certify()?;
-                Some(candidate)
-            })
-            .collect()
+
+        // A child notarization may arrive after the application request for its parent was
+        // dispatched. Replace that local work before starting any new application requests.
+        let inferred: Vec<_> = self
+            .implied_certifications
+            .intersection(&self.outstanding_certifications)
+            .copied()
+            .collect();
+        let mut ready = Vec::with_capacity(candidates.len() + inferred.len());
+        for view in inferred {
+            let can_infer = self
+                .views
+                .get(&view)
+                .is_some_and(Round::can_infer_certification);
+            if !can_infer {
+                continue;
+            }
+            self.implied_certifications.remove(&view);
+            ready.push(Certify::Inferred(Rnd::new(self.epoch, view)));
+        }
+
+        ready.extend(candidates.into_iter().filter_map(|view| {
+            if view <= self.last_finalized {
+                return None;
+            }
+            let candidate = self.views.get_mut(&view)?.try_certify()?;
+            if self.implied_certifications.remove(&view) {
+                return Some(Certify::Inferred(candidate.round));
+            }
+            Some(Certify::Application(candidate))
+        }));
+
+        ready
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -854,6 +925,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Remove from outstanding since certification is complete
         self.outstanding_certifications.remove(&view);
+        self.implied_certifications.remove(&view);
 
         // Get notarization before advancing state
         let notarization = round
@@ -887,6 +959,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let removed = replace(&mut self.views, kept).into_keys().collect();
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
+        self.implied_certifications = self.implied_certifications.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -2216,7 +2289,7 @@ mod tests {
             // Set certify handle then certify the parent
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(parent_view, handle);
+            state.set_application_certify_handle(parent_view, handle);
             state.certified(parent_view, true);
             assert_eq!(state.parent_payload(&proposal), Ok(parent_payload));
         });
@@ -2811,7 +2884,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].round().view(), view);
         });
     }
 
@@ -2856,7 +2929,10 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0], proposal);
+            assert!(matches!(
+                &candidates[0],
+                Certify::Application(candidate) if candidate == &proposal
+            ));
         });
     }
 
@@ -3054,7 +3130,7 @@ mod tests {
             // Set certify handles for views 3, 4, 5, 7 (NOT 6 or 8)
             for i in [3u64, 4, 5, 7] {
                 let handle = pool.push(futures::future::pending());
-                state.set_certify_handle(View::new(i), handle);
+                state.set_application_certify_handle(View::new(i), handle);
             }
 
             // Candidates empty (consumed by certify_candidates, handles block re-fetching)
@@ -3089,17 +3165,17 @@ mod tests {
             state.add_notarization(make_notarization(View::new(9)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(9));
+            assert_eq!(candidates[0].round().view(), View::new(9));
 
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
-            state.set_certify_handle(View::new(9), handle9);
+            state.set_application_certify_handle(View::new(9), handle9);
             state.add_notarization(make_notarization(View::new(10)));
 
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(10));
+            assert_eq!(candidates[0].round().view(), View::new(10));
 
             // Finalize view 9 - aborts view 9's handle
             state.add_finalization(make_finalization(View::new(9)));
@@ -3109,7 +3185,160 @@ mod tests {
             state.add_notarization(make_notarization(View::new(11)));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), View::new(11));
+            assert_eq!(candidates[0].round().view(), View::new(11));
+        });
+    }
+
+    #[test]
+    fn dependent_notarization_infers_parent_in_either_arrival_order() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(1);
+            let parent_view = View::new(1);
+            let child_view = View::new(2);
+            let parent = Proposal::new(
+                Rnd::new(epoch, parent_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
+            let child = Proposal::new(
+                Rnd::new(epoch, child_view),
+                parent_view,
+                Sha256Digest::from([2u8; 32]),
+            );
+            let parent_notarization = build_notarization(&verifier, &schemes, &parent);
+            let child_notarization = build_notarization(&verifier, &schemes, &child);
+
+            let config = || Config {
+                scheme: schemes[0].clone(),
+                elector: round_robin(&verifier),
+                epoch,
+                view_retention: ViewDelta::new(5),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+
+            let mut parent_first = State::new(context.child("parent_first"), config());
+            parent_first.set_genesis(test_genesis());
+            assert!(parent_first.add_notarization(parent_notarization.clone()).0);
+            let candidates = parent_first.certify_candidates();
+            assert!(matches!(
+                candidates.as_slice(),
+                [Certify::Application(candidate)] if candidate == &parent
+            ));
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            parent_first.set_application_certify_handle(parent_view, handle);
+            assert!(parent_first.add_notarization(child_notarization.clone()).0);
+            let candidates = parent_first.certify_candidates();
+            assert!(matches!(
+                candidates.as_slice(),
+                [Certify::Inferred(round), Certify::Application(candidate)]
+                    if round.view() == parent_view && candidate == &child
+            ));
+
+            let mut child_first = State::new(context.child("child_first"), config());
+            child_first.set_genesis(test_genesis());
+            assert!(child_first.add_notarization(child_notarization).0);
+            assert!(child_first.add_notarization(parent_notarization).0);
+            let candidates = child_first.certify_candidates();
+            assert!(matches!(
+                candidates.as_slice(),
+                [Certify::Inferred(round), Certify::Application(candidate)]
+                    if round.view() == parent_view && candidate == &child
+            ));
+        });
+    }
+
+    #[test]
+    fn late_gap_notarization_completes_implied_chain() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 5, 1);
+            let epoch = Epoch::new(1);
+            let ancestor_view = View::new(1);
+            let gap_view = View::new(2);
+            let descendant_view = View::new(3);
+            let ancestor = Proposal::new(
+                Rnd::new(epoch, ancestor_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
+            let gap = Proposal::new(
+                Rnd::new(epoch, gap_view),
+                ancestor_view,
+                Sha256Digest::from([2u8; 32]),
+            );
+            let descendant = Proposal::new(
+                Rnd::new(epoch, descendant_view),
+                gap_view,
+                Sha256Digest::from([3u8; 32]),
+            );
+            let ancestor_notarization = build_notarization(&verifier, &schemes, &ancestor);
+            let gap_notarization = build_notarization(&verifier, &schemes, &gap);
+            let descendant_notarization = build_notarization(&verifier, &schemes, &descendant);
+            let mut pool = AbortablePool::<()>::default();
+
+            // Certification is pending for the ancestor when the descendant arrives without its
+            // direct parent. The descendant retains proof for the missing middle view.
+            assert!(state.add_notarization(ancestor_notarization).0);
+            assert!(matches!(
+                state.certify_candidates().as_slice(),
+                [Certify::Application(candidate)] if candidate == &ancestor
+            ));
+            let handle = pool.push(futures::future::pending());
+            state.set_application_certify_handle(ancestor_view, handle);
+
+            assert!(state.add_notarization(descendant_notarization).0);
+            assert!(matches!(
+                state.certify_candidates().as_slice(),
+                [Certify::Application(candidate)] if candidate == &descendant
+            ));
+            let handle = pool.push(futures::future::ready(()));
+            state.set_application_certify_handle(descendant_view, handle);
+
+            // Model the actor removing the descendant's completed application request from the
+            // pool before recording its result. Its notarization must retain the gap proof on its
+            // own.
+            assert!(pool.next_completed().await.is_ok());
+            assert_eq!(pool.len(), 1);
+            assert!(state.certified(descendant_view, true).is_some());
+
+            // Once the gap arrives, the certified descendant's notarization proves the gap and
+            // the gap proves its ancestor. Both missing results are inferred recursively.
+            assert!(state.add_notarization(gap_notarization).0);
+            let candidates = state.certify_candidates();
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(Certify::round)
+                    .map(|round| round.view())
+                    .collect::<Vec<_>>(),
+                vec![ancestor_view, gap_view]
+            );
+            for candidate in candidates {
+                let Certify::Inferred(round) = candidate else {
+                    panic!("late gap should not request application certification");
+                };
+                let handle = pool.push(futures::future::pending());
+                state.set_inferred_certify_handle(round.view(), handle);
+                assert!(state.certified(round.view(), true).is_some());
+            }
+
+            assert!(state.is_certified(ancestor_view).is_some());
+            assert!(state.is_certified(gap_view).is_some());
+            assert!(state.is_certified(descendant_view).is_some());
+            assert_eq!(state.current_view(), descendant_view.next());
         });
     }
 
@@ -3175,7 +3404,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), live_view);
+            assert_eq!(candidates[0].round().view(), live_view);
         });
     }
 
@@ -3207,7 +3436,7 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].round().view(), view);
         });
     }
 
@@ -3235,11 +3464,11 @@ mod tests {
 
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].round.view(), view);
+            assert_eq!(candidates[0].round().view(), view);
 
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(view, handle);
+            state.set_application_certify_handle(view, handle);
 
             let nullification =
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), view));
@@ -3301,10 +3530,14 @@ mod tests {
             let nullified_notarization =
                 build_notarization(&verifier, &schemes, &nullified_proposal);
             assert!(state.add_notarization(nullified_notarization).0);
-            assert_eq!(state.certify_candidates(), vec![nullified_proposal]);
+            let candidates = state.certify_candidates();
+            assert!(matches!(
+                candidates.as_slice(),
+                [Certify::Application(candidate)] if candidate == &nullified_proposal
+            ));
             let mut pool = AbortablePool::<()>::default();
             let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(nullified_view, handle);
+            state.set_application_certify_handle(nullified_view, handle);
             let nullification =
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), nullified_view));
             assert!(state.add_nullification(nullification));
@@ -3354,7 +3587,12 @@ mod tests {
             let (added, equivocator) = state.add_notarization(good_notarization);
             assert!(added);
             assert!(equivocator.is_some());
-            assert_eq!(state.certify_candidates(), vec![good_proposal]);
+            let candidates = state.certify_candidates();
+            assert!(matches!(
+                candidates.as_slice(),
+                [Certify::Inferred(round), Certify::Application(candidate)]
+                    if round.view() == nullified_view && candidate == &good_proposal
+            ));
         });
     }
 
