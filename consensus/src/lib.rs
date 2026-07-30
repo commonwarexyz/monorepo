@@ -178,10 +178,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certification request that remains relevant eventually produces `true` or `false`.
         /// A request may remain pending for an arbitrarily long time, but not forever.
         ///
-        /// A pending certification does not prevent the current view from timing out. The
-        /// validator can issue a nullify vote and enter later views while certification continues.
-        /// If enough validators remain unable to certify ancestry required by later proposals,
-        /// those views may also time out and no new finalization can form.
+        /// If certification does not finish before the certification timeout expires, the
+        /// validator times out the current view and issues a nullify vote. The validator can enter
+        /// later views while the certification request remains pending. Until the request resolves,
+        /// the validator cannot notarize a later proposal whose ancestry depends on it. If enough
+        /// validators are blocked this way, later views also time out and consensus cannot finalize
+        /// new payloads.
         ///
         /// Consensus cannot infer a certification verdict from elapsed time. `false` means
         /// permanently uncertifiable, so returning it because of a local timeout could make honest
