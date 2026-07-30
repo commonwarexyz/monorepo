@@ -289,6 +289,16 @@ h1 {
   white-space: pre-wrap;
 }
 
+.message-sender {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.025em;
+}
+
 .message time {
   display: block;
   margin-top: 4px;

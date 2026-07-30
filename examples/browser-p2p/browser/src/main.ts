@@ -64,6 +64,12 @@ async function initialize(): Promise<void> {
     elements.identity.dataset.publicKey = publicKey;
     elements.identity.disabled = false;
     setConnectionState("disconnected", "Ready to pair");
+
+    const invite = inviteFromLocation();
+    if (invite) {
+      window.history.replaceState(null, "", window.location.pathname);
+      await connect(invite);
+    }
   } catch (error) {
     session = undefined;
     setConnectionState("disconnected", "WASM unavailable");
@@ -135,11 +141,19 @@ function handleChatEvent(event: ChatEvent): void {
       setConnectionState(event.state, connectionLabel(event.state, event.attempt));
       return;
     case "peer":
+      lastPairingPayload = undefined;
+      elements.pairingInput.value = "";
+      elements.reconnectButton.hidden = true;
       clearNotice();
       showNotice("Peer authenticated", formatFingerprint(event.publicKey), "success");
       return;
     case "message":
-      appendMessage({ direction: "incoming", text: event.text, timestamp: event.receivedAt });
+      appendMessage({
+        direction: "incoming",
+        sender: event.sender,
+        text: event.text,
+        timestamp: event.receivedAt,
+      });
       return;
     case "error":
       showNotice("Network error", event.message);
@@ -161,6 +175,7 @@ function setConnectionState(nextState: ConnectionState, label = connectionLabel(
 
 function appendMessage(message: {
   direction: "incoming" | "outgoing";
+  sender?: string;
   text: string;
   timestamp: number;
 }): void {
@@ -168,6 +183,13 @@ function appendMessage(message: {
 
   const item = document.createElement("li");
   item.className = `message ${message.direction}`;
+
+  if (message.sender) {
+    const sender = document.createElement("span");
+    sender.className = "message-sender";
+    sender.textContent = formatFingerprint(message.sender);
+    item.append(sender);
+  }
 
   const body = document.createElement("p");
   body.textContent = message.text;
@@ -248,6 +270,14 @@ function formatFingerprint(publicKey: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function inviteFromLocation(): string | undefined {
+  const url = new URL(window.location.href);
+  if (url.searchParams.has("pair") || /(?:^#|[&#])pair=/.test(url.hash)) {
+    return url.toString();
+  }
+  return undefined;
 }
 
 function getElement<T extends HTMLElement>(id: string): T {
