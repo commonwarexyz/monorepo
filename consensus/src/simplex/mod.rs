@@ -86,9 +86,9 @@
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
 //! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
 //! finalization). A notarization advances its view after the application certifies it or after a
-//! later notarization names it as the parent.
-//! This means that a new participant joining consensus will immediately jump ahead on the previous
-//! view's nullification or finalization and begin participating in consensus at the current view.
+//! later notarization names it as the parent. This means that a new participant joining consensus
+//! will immediately jump ahead on the previous view's nullification or finalization and begin
+//! participating in consensus at the current view.
 //!
 //! ### Certification
 //!
