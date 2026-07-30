@@ -436,9 +436,19 @@ stability_scope!(BETA {
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
+        ///
+        /// The duration starts when this method is called rather than when the
+        /// returned future is first polled. A zero duration returns a future
+        /// that is ready on its first poll without a scheduler yield.
         fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
 
         /// Sleep until the given deadline.
+        ///
+        /// The wake target is fixed when this method is called rather than when
+        /// the returned future is first polled. Later changes to the system
+        /// clock do not move that target. A deadline at or before the current
+        /// time returns a future that is ready on its first poll without a
+        /// scheduler yield.
         fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
