@@ -1,8 +1,42 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, deterministic::AuditHasher};
+use crate::{
+    BatchOperation, Buf, BufferPool, Handle, IoBufs, IoBufsMut, RemoveTarget,
+    deterministic::AuditHasher,
+};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
-use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::RangeInclusive,
+    sync::Arc,
+};
+
+type BlobKey = (String, Vec<u8>);
+
+#[derive(Default)]
+struct Namespace {
+    next_generation: u64,
+    generations: BTreeMap<BlobKey, u64>,
+}
+
+impl Namespace {
+    fn generation(&mut self, key: &BlobKey) -> u64 {
+        if let Some(generation) = self.generations.get(key) {
+            return *generation;
+        }
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("blob generation overflow");
+        self.generations.insert(key.clone(), generation);
+        generation
+    }
+
+    fn remove(&mut self, key: &BlobKey) {
+        self.generations.remove(key);
+    }
+}
 
 /// Resolves a blob's header from its full contents (see [super::header::resolve]).
 fn resolve_header(
@@ -19,6 +53,7 @@ fn resolve_header(
 #[derive(Clone)]
 pub struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
+    namespace: Arc<Mutex<Namespace>>,
     pool: BufferPool,
 }
 
@@ -26,8 +61,14 @@ impl Storage {
     pub fn new(pool: BufferPool) -> Self {
         Self {
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            namespace: Arc::new(Mutex::new(Namespace::default())),
             pool,
         }
+    }
+
+    fn owns(&self, blob: &Blob) -> bool {
+        Arc::ptr_eq(&self.partitions, &blob.partitions)
+            && Arc::ptr_eq(&self.namespace, &blob.namespace)
     }
 }
 
@@ -64,54 +105,221 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, u16), crate::Error> {
         super::validate_partition_name(partition)?;
 
+        let key = (partition.to_string(), name.to_vec());
+        let mut namespace = self.namespace.lock();
         let mut partitions = self.partitions.lock();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
+        let mut opened_content = content.clone();
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(content, &versions, partition, name)?;
+        let existing = resolve_header(&opened_content, &versions, partition, name)?;
         let (logical_size, blob_version, data_offset) = existing.unwrap_or_else(|| {
             let (region, blob_version) = Header::create(&versions);
             let data_offset = region.len() as u64;
             content.clear();
             content.extend_from_slice(&region);
+            opened_content.clone_from(content);
             (0, blob_version, data_offset)
         });
+        let generation = namespace.generation(&key);
 
         Ok((
-            Blob::new(
-                self.partitions.clone(),
-                partition.into(),
-                name,
-                content.clone(),
-                self.pool.clone(),
+            Blob {
+                partitions: self.partitions.clone(),
+                namespace: self.namespace.clone(),
+                partition: partition.into(),
+                name: name.into(),
+                content: Arc::new(RwLock::new(opened_content)),
+                pool: self.pool.clone(),
                 data_offset,
-            ),
+                generation,
+            },
             logical_size,
             blob_version,
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
-        super::validate_partition_name(partition)?;
-
-        let mut partitions = self.partitions.lock();
-        match name {
-            Some(name) => {
-                partitions
-                    .get_mut(partition)
-                    .ok_or(crate::Error::PartitionMissing(partition.into()))?
-                    .remove(name)
-                    .ok_or(crate::Error::BlobMissing(partition.into(), hex(name)))?;
-            }
-            None => {
-                partitions
-                    .remove(partition)
-                    .ok_or(crate::Error::PartitionMissing(partition.into()))?;
+    async fn start_apply(
+        &self,
+        operations: Vec<BatchOperation<Self::Blob>>,
+    ) -> Result<Handle<()>, crate::Error> {
+        let mut descriptors = Vec::with_capacity(operations.len());
+        let mut mutation_blobs = BTreeMap::<BlobKey, Vec<Blob>>::new();
+        for operation in operations {
+            match operation {
+                BatchOperation::Remove(target) => {
+                    descriptors.push(super::batch::Operation::Remove(target));
+                }
+                BatchOperation::Resize { blob, len } => {
+                    if !self.owns(&blob) {
+                        return Err(crate::Error::BlobMissing(
+                            blob.partition.clone(),
+                            hex(&blob.name),
+                        ));
+                    }
+                    let len = len
+                        .checked_add(blob.data_offset)
+                        .ok_or(crate::Error::OffsetOverflow)?;
+                    usize::try_from(len).map_err(|_| crate::Error::OffsetOverflow)?;
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    mutation_blobs
+                        .entry((partition.clone(), name.clone()))
+                        .or_default()
+                        .push(blob);
+                    descriptors.push(super::batch::Operation::Resize {
+                        partition,
+                        name,
+                        len,
+                    });
+                }
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => {
+                    if !self.owns(&blob) {
+                        return Err(crate::Error::BlobMissing(
+                            blob.partition.clone(),
+                            hex(&blob.name),
+                        ));
+                    }
+                    let offset = offset
+                        .checked_add(blob.data_offset)
+                        .ok_or(crate::Error::OffsetOverflow)?;
+                    let len = len
+                        .checked_add(blob.data_offset)
+                        .ok_or(crate::Error::OffsetOverflow)?;
+                    usize::try_from(offset).map_err(|_| crate::Error::OffsetOverflow)?;
+                    usize::try_from(len).map_err(|_| crate::Error::OffsetOverflow)?;
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    mutation_blobs
+                        .entry((partition.clone(), name.clone()))
+                        .or_default()
+                        .push(blob);
+                    descriptors.push(super::batch::Operation::Update {
+                        partition,
+                        name,
+                        offset,
+                        data,
+                        len,
+                    });
+                }
             }
         }
-        Ok(())
+        let operations = super::batch::canonicalize_operations(descriptors)?;
+        let mutations = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                super::batch::Operation::Resize {
+                    partition, name, ..
+                }
+                | super::batch::Operation::Update {
+                    partition, name, ..
+                } => Some((
+                    operation,
+                    mutation_blobs
+                        .get(&(partition.clone(), name.clone()))
+                        .expect("canonical mutation must retain its blob handles"),
+                )),
+                super::batch::Operation::Remove(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        // Blob operations acquire the content lock before the namespace and partition locks.
+        // Acquiring every content lock in namespace order extends that ordering across the batch.
+        let mut contents = Vec::with_capacity(mutations.len());
+        for (_, blobs) in &mutations {
+            contents.push(blobs[0].content.write());
+        }
+
+        let mut namespace = self.namespace.lock();
+        for (_, blobs) in &mutations {
+            for blob in blobs.iter() {
+                let key = (blob.partition.clone(), blob.name.clone());
+                blob.ensure_current(&namespace, &key)?;
+            }
+        }
+
+        let mut partitions = self.partitions.lock();
+        for (_, blobs) in &mutations {
+            let blob = &blobs[0];
+            if partitions
+                .get(&blob.partition)
+                .and_then(|partition| partition.get(&blob.name))
+                .is_none()
+            {
+                return Err(crate::Error::BlobMissing(
+                    blob.partition.clone(),
+                    hex(&blob.name),
+                ));
+            }
+        }
+
+        for ((operation, blobs), content) in mutations.iter().zip(&mut contents) {
+            let blob = &blobs[0];
+            match operation {
+                super::batch::Operation::Resize { len, .. } => {
+                    let len = usize::try_from(*len).expect("validated length must fit in memory");
+                    content.resize(len, 0);
+                }
+                super::batch::Operation::Update {
+                    offset, data, len, ..
+                } => {
+                    let offset =
+                        usize::try_from(*offset).expect("validated offset must fit in memory");
+                    let len = usize::try_from(*len).expect("validated length must fit in memory");
+                    content.resize(len, 0);
+                    let end = offset
+                        .checked_add(data.len())
+                        .expect("validated update range fits in memory");
+                    content[offset..end].copy_from_slice(data.as_ref());
+                }
+                super::batch::Operation::Remove(_) => {
+                    unreachable!("mutation set contains a removal")
+                }
+            }
+            partitions
+                .get_mut(&blob.partition)
+                .and_then(|partition| partition.get_mut(&blob.name))
+                .expect("validated mutated blob must exist")
+                .clone_from(content);
+        }
+
+        let removed_partitions = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                super::batch::Operation::Remove(RemoveTarget::Partition(partition)) => {
+                    Some(partition.clone())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for operation in &operations {
+            match operation {
+                super::batch::Operation::Remove(RemoveTarget::Partition(partition)) => {
+                    partitions.remove(partition);
+                }
+                super::batch::Operation::Remove(RemoveTarget::Blob { partition, name }) => {
+                    if let Some(blobs) = partitions.get_mut(partition) {
+                        blobs.remove(name);
+                    }
+                    namespace.remove(&(partition.clone(), name.clone()));
+                }
+                super::batch::Operation::Resize { .. }
+                | super::batch::Operation::Update { .. } => {}
+            }
+        }
+        if !removed_partitions.is_empty() {
+            namespace
+                .generations
+                .retain(|key, _| !removed_partitions.contains(&key.0));
+        }
+        Ok(Handle::ready(Ok(())))
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, crate::Error> {
@@ -135,36 +343,33 @@ type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
 #[derive(Clone)]
 pub struct Blob {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
+    namespace: Arc<Mutex<Namespace>>,
     partition: String,
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Namespace generation captured when this handle was opened.
+    generation: u64,
 }
 
 impl Blob {
-    fn new(
-        partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
-        partition: String,
-        name: &[u8],
-        content: Vec<u8>,
-        pool: BufferPool,
-        data_offset: u64,
-    ) -> Self {
-        Self {
-            partitions,
-            partition,
-            name: name.into(),
-            content: Arc::new(RwLock::new(content)),
-            pool,
-            data_offset,
+    fn ensure_current(&self, namespace: &Namespace, key: &BlobKey) -> Result<(), crate::Error> {
+        if namespace.generations.get(key) == Some(&self.generation) {
+            return Ok(());
         }
+        Err(crate::Error::BlobMissing(
+            self.partition.clone(),
+            hex(&self.name),
+        ))
     }
 
     fn sync_inner(&self) -> Result<(), crate::Error> {
-        // Create new content for partition
-        let new_content = self.content.read().clone();
+        let new_content = self.content.read();
+        let key = (self.partition.clone(), self.name.clone());
+        let namespace = self.namespace.lock();
+        self.ensure_current(&namespace, &key)?;
 
         // Update partition content
         let mut partitions = self.partitions.lock();
@@ -177,7 +382,7 @@ impl Blob {
                 self.partition.clone(),
                 hex(&self.name),
             ))?;
-        *content = new_content;
+        content.clone_from(&new_content);
         Ok(())
     }
 }
@@ -202,12 +407,15 @@ impl crate::Blob for Blob {
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(crate::Error::OffsetOverflow)?;
         let content = self.content.read();
         let content_len = content.len();
-        if offset + len > content_len {
+        if end > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        bufs.copy_from_slice(&content[offset..offset + len]);
+        bufs.copy_from_slice(&content[offset..end]);
         Ok(bufs)
     }
 
@@ -224,7 +432,9 @@ impl crate::Blob for Blob {
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write();
-        let required = offset + buf.len();
+        let required = offset
+            .checked_add(buf.len())
+            .ok_or(crate::Error::OffsetOverflow)?;
         if required > content.len() {
             content.resize(required, 0);
         }
@@ -270,7 +480,10 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{Layout, tests::run_storage_tests},
+        storage::{
+            Layout,
+            tests::{run_storage_foreign_handle_test, run_storage_tests},
+        },
         telemetry::metrics::Registry,
     };
 
@@ -282,7 +495,90 @@ mod tests {
     #[tokio::test]
     async fn test_memory_storage() {
         let storage = Storage::new(test_pool());
+        let tested = storage.clone();
         run_storage_tests(storage).await;
+
+        let foreign = Storage::new(test_pool());
+        run_storage_foreign_handle_test(&tested, &foreign).await;
+    }
+
+    #[tokio::test]
+    async fn test_apply_batch_preserves_handles_and_rotates_generations() {
+        let storage = Storage::new(test_pool());
+        let (old_blob, _) = storage.open("batch_blob", b"name").await.unwrap();
+        old_blob.write_at(0, b"old blob").await.unwrap();
+        let old_blob_generation = old_blob.generation;
+
+        let (old_partition, _) = storage.open("batch_partition", b"name").await.unwrap();
+        old_partition.write_at(0, b"old partition").await.unwrap();
+        let old_partition_generation = old_partition.generation;
+
+        storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_blob".into(),
+                    name: b"name".to_vec(),
+                }),
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_blob".into(),
+                    name: b"name".to_vec(),
+                }),
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_partition".into(),
+                    name: b"name".to_vec(),
+                }),
+                BatchOperation::Remove(RemoveTarget::Partition("batch_partition".into())),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            old_blob.read_at(0, 8).await.unwrap().coalesce(),
+            b"old blob"
+        );
+        assert_eq!(
+            old_partition.read_at(0, 13).await.unwrap().coalesce(),
+            b"old partition"
+        );
+
+        let (new_blob, blob_len) = storage.open("batch_blob", b"name").await.unwrap();
+        assert_eq!(blob_len, 0);
+        assert_ne!(old_blob_generation, new_blob.generation);
+        new_blob.write_at(0, b"new blob").await.unwrap();
+        new_blob.sync().await.unwrap();
+
+        let (new_partition, partition_len) =
+            storage.open("batch_partition", b"name").await.unwrap();
+        assert_eq!(partition_len, 0);
+        assert_ne!(old_partition_generation, new_partition.generation);
+        new_partition.write_at(0, b"new partition").await.unwrap();
+        new_partition.sync().await.unwrap();
+
+        assert!(old_blob.sync().await.is_err());
+        assert!(old_partition.sync().await.is_err());
+        drop((old_blob, old_partition, new_blob, new_partition));
+
+        let (blob, blob_len) = storage.open("batch_blob", b"name").await.unwrap();
+        assert_eq!(blob_len, 8);
+        assert_eq!(blob.read_at(0, 8).await.unwrap().coalesce(), b"new blob");
+        let (partition, partition_len) = storage.open("batch_partition", b"name").await.unwrap();
+        assert_eq!(partition_len, 13);
+        assert_eq!(
+            partition.read_at(0, 13).await.unwrap().coalesce(),
+            b"new partition"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_range_overflow() {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let offset = u64::MAX - Layout::V1.data_offset();
+
+        assert!(matches!(
+            blob.read_at(offset, 1).await,
+            Err(crate::Error::OffsetOverflow)
+        ));
     }
 
     #[tokio::test]

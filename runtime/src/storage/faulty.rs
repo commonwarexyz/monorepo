@@ -1,6 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::BoxDynRng};
+use crate::{BatchOperation, Error, Handle, IoBufs, IoBufsMut, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
@@ -21,6 +21,8 @@ enum Op {
     Sync,
     Resize,
     Remove,
+    Batch,
+    BatchPostCommit,
     Scan,
 }
 
@@ -59,6 +61,12 @@ pub struct Config {
     /// Failure rate for `remove` operations.
     pub remove_rate: Option<f64>,
 
+    /// Pre-commit failure rate for non-empty batch operations.
+    pub batch_rate: Option<f64>,
+
+    /// Failure rate reported after a non-empty batch commits successfully.
+    pub batch_post_commit_rate: Option<f64>,
+
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<f64>,
 }
@@ -73,6 +81,8 @@ impl Config {
             Op::Sync => self.sync_rate,
             Op::Resize => self.resize_rate,
             Op::Remove => self.remove_rate,
+            Op::Batch => self.batch_rate,
+            Op::BatchPostCommit => self.batch_post_commit_rate,
             Op::Scan => self.scan_rate,
         }
         .unwrap_or(0.0)
@@ -123,6 +133,18 @@ impl Config {
     /// Set the remove failure rate.
     pub const fn remove(mut self, rate: f64) -> Self {
         self.remove_rate = Some(rate);
+        self
+    }
+
+    /// Set the pre-commit batch failure rate.
+    pub const fn batch(mut self, rate: f64) -> Self {
+        self.batch_rate = Some(rate);
+        self
+    }
+
+    /// Set the failure rate reported after a batch commits.
+    pub const fn batch_post_commit(mut self, rate: f64) -> Self {
+        self.batch_post_commit_rate = Some(rate);
         self
     }
 
@@ -247,7 +269,11 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             .open_versioned(partition, name, versions)
             .await
             .map(|(blob, len, blob_version)| {
-                (Blob::new(self.ctx.clone(), blob, len), len, blob_version)
+                (
+                    Blob::new(self.ctx.clone(), blob, partition.into(), name.to_vec(), len),
+                    len,
+                    blob_version,
+                )
             })
     }
 
@@ -256,6 +282,44 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             return Err(injected_io_error().into());
         }
         self.inner.remove(partition, name).await
+    }
+
+    async fn start_apply(
+        &self,
+        operations: Vec<BatchOperation<Self::Blob>>,
+    ) -> Result<Handle<()>, Error> {
+        crate::storage::batch::canonicalize_descriptors(&operations, |blob| {
+            (blob.partition.clone(), blob.name.clone())
+        })?;
+        if operations.is_empty() {
+            return self.inner.start_apply(Vec::new()).await;
+        }
+        if self.ctx.should_fail(Op::Batch) {
+            return Err(injected_io_error().into());
+        }
+
+        let mutated: Vec<_> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                BatchOperation::Remove(_) => None,
+                BatchOperation::Resize { blob, len } | BatchOperation::Update { blob, len, .. } => {
+                    Some((blob.size.clone(), *len))
+                }
+            })
+            .collect();
+        let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
+        let completion = self.inner.start_apply(operations).await?;
+        for (size, len) in mutated {
+            size.store(len, Ordering::Relaxed);
+        }
+        let fail_after_commit = self.ctx.should_fail(Op::BatchPostCommit);
+        Ok(Handle::from_future(async move {
+            completion.await?;
+            if fail_after_commit {
+                return Err(injected_io_error().into());
+            }
+            Ok(())
+        }))
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -271,15 +335,19 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 pub struct Blob<B: crate::Blob> {
     inner: B,
     ctx: Oracle,
+    partition: String,
+    name: Vec<u8>,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
 }
 
 impl<B: crate::Blob> Blob<B> {
-    fn new(ctx: Oracle, inner: B, size: u64) -> Self {
+    fn new(ctx: Oracle, inner: B, partition: String, name: Vec<u8>, size: u64) -> Self {
         Self {
             inner,
             ctx,
+            partition,
+            name,
             size: Arc::new(AtomicU64::new(size)),
         }
     }
@@ -404,8 +472,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
-        storage::{memory::Storage as MemStorage, tests::run_storage_tests},
+        Blob as _, BufferPool, BufferPoolConfig, RemoveTarget, Storage as _,
+        storage::{
+            memory::Storage as MemStorage,
+            tests::{run_storage_foreign_handle_test, run_storage_tests},
+        },
         telemetry::metrics::Registry,
     };
     use rand::{SeedableRng, rngs::StdRng};
@@ -445,7 +516,10 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_no_faults() {
         let h = Harness::new(Config::default());
+        let tested = h.storage.clone();
         run_storage_tests(h.storage).await;
+        let foreign = Harness::new(Config::default());
+        run_storage_foreign_handle_test(&tested, &foreign.storage).await;
     }
 
     #[tokio::test]
@@ -563,6 +637,133 @@ mod tests {
             h.storage.remove("partition", Some(b"test")).await,
             Err(Error::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_batch_fault_phases_are_atomic() {
+        let h = Harness::new(Config::default().batch(1.0));
+        for partition in ["batch_a", "batch_b"] {
+            let (blob, _) = h.storage.open(partition, b"name").await.unwrap();
+            blob.write_at(0, partition.as_bytes()).await.unwrap();
+            blob.sync().await.unwrap();
+        }
+
+        assert!(matches!(
+            h.storage
+                .apply(vec![RemoveTarget::Partition("invalid/name".into()).into()])
+                .await,
+            Err(Error::PartitionNameInvalid(_))
+        ));
+        h.storage.apply(Vec::new()).await.unwrap();
+
+        let targets = vec![
+            RemoveTarget::Blob {
+                partition: "batch_b".into(),
+                name: b"name".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_a".into(),
+                name: b"name".to_vec(),
+            },
+            RemoveTarget::Blob {
+                partition: "batch_b".into(),
+                name: b"name".to_vec(),
+            },
+        ];
+        assert!(matches!(
+            h.storage
+                .apply(targets.iter().cloned().map(BatchOperation::from).collect())
+                .await,
+            Err(Error::Io(_))
+        ));
+        assert_eq!(
+            h.inner.scan("batch_a").await.unwrap(),
+            vec![b"name".to_vec()]
+        );
+        assert_eq!(
+            h.inner.scan("batch_b").await.unwrap(),
+            vec![b"name".to_vec()]
+        );
+
+        *h.config.write() = Config::default().batch_post_commit(1.0);
+        assert!(matches!(
+            h.storage
+                .apply(targets.into_iter().map(BatchOperation::from).collect())
+                .await,
+            Err(Error::Io(_))
+        ));
+        assert!(h.inner.scan("batch_a").await.unwrap().is_empty());
+        assert!(h.inner.scan("batch_b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_validates_mixed_batch_before_faulting() {
+        let h = Harness::new(Config::default().batch(1.0));
+        let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+
+        let error = h
+            .storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "partition".into(),
+                    name: b"name".to_vec(),
+                }),
+                BatchOperation::Resize { blob, len: 0 },
+            ])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_batch_resize_bypasses_resize_faults() {
+        let h = Harness::new(Config::default());
+        let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+        blob.write_at(0, b"contents").await.unwrap();
+        blob.sync().await.unwrap();
+        *h.config.write() = Config::default().resize(1.0).partial_resize(1.0);
+
+        h.storage
+            .apply(vec![BatchOperation::Resize { blob, len: 3 }])
+            .await
+            .unwrap();
+
+        let (_, len) = h.inner.open("partition", b"name").await.unwrap();
+        assert_eq!(len, 3);
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_batch_update_post_commit_tracks_size() {
+        let h = Harness::new(Config::default());
+        let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+        blob.write_at(0, b"contents").await.unwrap();
+        blob.sync().await.unwrap();
+        *h.config.write() = Config::default()
+            .write(1.0)
+            .partial_write(1.0)
+            .resize(1.0)
+            .partial_resize(1.0)
+            .batch_post_commit(1.0);
+
+        assert!(matches!(
+            h.storage
+                .apply(vec![BatchOperation::Update {
+                    blob: blob.clone(),
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                }])
+                .await,
+            Err(Error::Io(_))
+        ));
+
+        assert_eq!(blob.size.load(Ordering::Relaxed), 4);
+        let (inner, len) = h.inner.open("partition", b"name").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(inner.read_at(0, 4).await.unwrap().coalesce(), b"cnew");
     }
 
     #[tokio::test]
