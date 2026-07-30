@@ -30,17 +30,17 @@ pub struct Round<
     reporter: R,
     /// The verifier attempts to recover notarizations and finalizations only
     /// from votes for one proposal. It initially filters to the first proposal
-    /// observed from the known leader. If the leader equivocates, a node that
-    /// observed the losing proposal cannot recover a proposal certificate
-    /// locally, but can still forward certificates recovered elsewhere. A
-    /// verified notarization is authoritative and switches the filter to its
-    /// proposal.
+    /// observed from the known leader. Independently authenticated proposal
+    /// evidence is authoritative and switches the filter.
     verifier: Verifier<S, D>,
-    /// Votes received from network (may not be verified yet).
-    /// Used for duplicate detection and conflict reporting.
+    /// At most one vote of each kind per signer.
+    ///
+    /// Includes locally constructed votes and network votes that may not be
+    /// verified. Used for duplicate detection, conflict reporting, and
+    /// proposal-switch recovery.
     votes: VoteTracker<S, D>,
 
-    /// Whether we've already sent the leader's proposal to the voter.
+    /// Whether we've already sent the selected proposal to the voter.
     proposal_sent: bool,
 
     /// Root span of the view, shared with the voter's round.
@@ -95,21 +95,51 @@ impl<
         self.verifier.has_certificate(kind)
     }
 
-    /// Records a verified certificate and returns whether the round's proposal
-    /// changed.
+    /// Records a verified certificate.
     ///
-    /// Only a notarization can change the proposal. Its proposal is
-    /// authoritative and replaces any conflicting proposal learned from the
-    /// leader's vote.
+    /// The first notarization or finalization establishes an authoritative
+    /// proposal and may replace one learned from the leader's vote. Returns
+    /// `true` when a notarization selects a new proposal, making its buffered
+    /// finalize votes eligible for processing.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
-        let proposal_changed = match certificate {
-            Certificate::Notarization(notarization) => self
-                .verifier
-                .set_proposal(ProposalState::Notarization(notarization.proposal.clone())),
-            Certificate::Nullification(_) | Certificate::Finalization(_) => false,
+        let process_votes = match certificate {
+            Certificate::Notarization(notarization) => {
+                self.set_authoritative_proposal(&notarization.proposal)
+            }
+            Certificate::Finalization(finalization) => {
+                // A finalization may replace the leader-selected proposal, but its
+                // certificate makes reprocessing buffered finalize votes unnecessary.
+                self.verifier
+                    .set_proposal(ProposalState::Certificate(finalization.proposal.clone()));
+                false
+            }
+            Certificate::Nullification(_) => false,
         };
         self.verifier.record_certificate(certificate.kind());
-        proposal_changed
+        process_votes
+    }
+
+    /// Makes an independently authenticated proposal authoritative, restoring
+    /// finalize votes filtered by a conflicting leader proposal.
+    ///
+    /// Returns whether the selected proposal changed.
+    fn set_authoritative_proposal(&mut self, proposal: &Proposal<D>) -> bool {
+        let update = self
+            .verifier
+            .set_proposal(ProposalState::Certificate(proposal.clone()));
+        if update.replaced {
+            // Matching tracked finalizes are unverified network votes: the conflicting
+            // leader proposal filtered them, while constructed finalizes establish the
+            // proposal before entering the tracker.
+            for finalize in self
+                .votes
+                .iter_finalizes()
+                .filter(|finalize| &finalize.proposal == proposal)
+            {
+                self.verifier.add(Vote::Finalize(finalize.clone()), false);
+            }
+        }
+        update.changed
     }
 
     /// Adds a vote from the network to this round's verifier.
@@ -252,7 +282,9 @@ impl<
                 self.reporter.report(Activity::Nullify(nullify.clone()));
             }
             Vote::Finalize(finalize) => {
-                // Our own votes are already verified
+                // The voter only constructs a finalize after independently
+                // authenticating the proposal.
+                self.set_authoritative_proposal(&finalize.proposal);
                 assert!(
                     self.votes.insert_finalize(finalize.clone()),
                     "duplicate finalize"
@@ -263,7 +295,7 @@ impl<
             }
         }
 
-        // The verifier drops votes for a different proposal than the leader's.
+        // The verifier drops votes for a different proposal than the selected one.
         self.verifier.add(message, true);
     }
 
