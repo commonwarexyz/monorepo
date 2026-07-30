@@ -96,10 +96,6 @@ pub(crate) enum ScenarioSelection {
     Registration,
     /// Run cancellation at every configured producer level.
     Cancellation,
-    /// Run cancellation with one producer.
-    CancellationSingle,
-    /// Run cancellation with every producer level greater than one.
-    CancellationMulti,
     /// Run only the common-deadline expiry storm.
     Expiry,
 }
@@ -117,30 +113,7 @@ impl ScenarioSelection {
 
     /// Returns whether any cancellation workload should run.
     pub(crate) const fn runs_cancellation(self) -> bool {
-        matches!(
-            self,
-            Self::All
-                | Self::WorstCase
-                | Self::Cancellation
-                | Self::CancellationSingle
-                | Self::CancellationMulti
-        )
-    }
-
-    /// Returns whether cancellation should include one producer.
-    const fn runs_single_producer(self) -> bool {
-        matches!(
-            self,
-            Self::All | Self::WorstCase | Self::Cancellation | Self::CancellationSingle
-        )
-    }
-
-    /// Returns whether cancellation should include contending producers.
-    const fn runs_multiple_producers(self) -> bool {
-        matches!(
-            self,
-            Self::All | Self::WorstCase | Self::Cancellation | Self::CancellationMulti
-        )
+        matches!(self, Self::All | Self::WorstCase | Self::Cancellation)
     }
 
     /// Returns whether the common-deadline expiry storm should run.
@@ -289,22 +262,18 @@ impl Config {
 
     /// Computes selected cancellation producer levels with checked arithmetic.
     fn cancellation_producer_counts_checked(&self) -> io::Result<Vec<usize>> {
-        let mut counts = Vec::with_capacity(3);
-        if self.scenario.runs_single_producer() {
-            counts.push(1);
-        }
-        if self.scenario.runs_multiple_producers() {
-            counts.push(self.worker_threads);
-            counts.push(self.worker_threads.checked_mul(4).ok_or_else(|| {
+        let mut counts = vec![
+            1,
+            self.worker_threads,
+            self.worker_threads.checked_mul(4).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "four times --worker-threads exceeds usize",
                 )
-            })?);
-        }
+            })?,
+        ];
         counts.sort_unstable();
         counts.dedup();
-        counts.retain(|count| self.scenario.runs_single_producer() || *count > 1);
         Ok(counts)
     }
 

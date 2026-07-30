@@ -163,8 +163,12 @@ async fn benchmark_cancellation(
             if producers == 1 {
                 one_producer_p50 = Some(drain_distribution.p50);
             }
-            let scaling = cancellation_scaling(one_producer_p50, drain_distribution.p50)
-                .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.3}"));
+            let baseline = one_producer_p50.expect("one-producer cancellation must run first");
+            let scaling = if drain_distribution.p50.is_zero() {
+                1.0
+            } else {
+                baseline.as_secs_f64() / drain_distribution.p50.as_secs_f64()
+            };
             let name = format!(
                 "{}::cancellation/backend={} timers={} cancel_percent={} producers={}",
                 module_path!(),
@@ -185,7 +189,7 @@ async fn benchmark_cancellation(
                 report::cancellation_shard_distribution(backend, config.shards(), producers);
             println!(
                 "{name} {accounting} drain_p50_us={:.3} drain_p99_us={:.3} \
-                 drain_max_us={:.3} scaling_vs_one_producer={scaling} measurement_passes=1 \
+                 drain_max_us={:.3} scaling_vs_one_producer={scaling:.3} measurement_passes=1 \
                  cancellation_measurement=aggregate_drain {shard_distribution}",
                 report::micros(drain_distribution.p50),
                 report::micros(drain_distribution.p99),
@@ -194,17 +198,6 @@ async fn benchmark_cancellation(
         }
     }
     Ok(())
-}
-
-/// Returns drain scaling only when this run measured a one-producer baseline.
-fn cancellation_scaling(baseline: Option<Duration>, current: Duration) -> Option<f64> {
-    baseline.map(|baseline| {
-        if current.is_zero() {
-            1.0
-        } else {
-            baseline.as_secs_f64() / current.as_secs_f64()
-        }
-    })
 }
 
 /// Result returned by one contending cancellation producer thread.
