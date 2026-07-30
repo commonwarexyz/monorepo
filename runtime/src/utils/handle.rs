@@ -372,7 +372,9 @@ impl Aborter {
 #[cfg(test)]
 mod tests {
     use super::Handle;
-    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use crate::{
+        Error, Metrics as _, Runner, Spawner, Supervisor as _, ThreadSpawner as _, deterministic,
+    };
     use commonware_utils::channel::oneshot;
     use futures::future;
 

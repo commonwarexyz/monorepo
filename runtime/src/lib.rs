@@ -181,7 +181,7 @@ stability_scope!(BETA {
     }
 
     /// Interface to track task hierarchy and identity.
-    pub trait Supervisor: Send + Sync + 'static {
+    pub trait Supervisor: PlatformSend + PlatformSync + 'static {
         /// Return the current label prefix and attributes.
         fn name(&self) -> Name;
 
@@ -267,26 +267,6 @@ stability_scope!(BETA {
 
     /// Interface that any task scheduler must implement to spawn tasks.
     pub trait Spawner: Supervisor {
-        /// Return a [`Spawner`] that schedules the next task onto the runtime's shared executor.
-        ///
-        /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
-        /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
-        /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
-        /// [`Spawner::dedicated`] instead.
-        ///
-        /// The shared executor with `blocking == false` is the default spawn mode.
-        #[must_use]
-        fn shared(self, blocking: bool) -> Self;
-
-        /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
-        ///
-        /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
-        /// shared executor.
-        ///
-        /// This is not the default behavior. See [`Spawner::shared`] for more information.
-        #[must_use]
-        fn dedicated(self) -> Self;
-
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -315,7 +295,7 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
+        /// [`ThreadSpawner::dedicated`] and [`ThreadSpawner::shared`] only affect the
         /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
         /// both start child task contexts from a clean spawn configuration.
         ///
@@ -324,9 +304,9 @@ stability_scope!(BETA {
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
-            F: FnOnce(Self) -> Fut + Send + 'static,
-            Fut: Future<Output = T> + Send + 'static,
-            T: Send + 'static;
+            F: FnOnce(Self) -> Fut + PlatformSend + 'static,
+            Fut: Future<Output = T> + PlatformSend + 'static,
+            T: PlatformSend + 'static;
 
         /// Signals the runtime to stop execution and waits for all outstanding tasks
         /// to perform any required cleanup and exit.
@@ -351,7 +331,7 @@ stability_scope!(BETA {
             self,
             value: i32,
             timeout: Option<Duration>,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+        ) -> impl Future<Output = Result<(), Error>> + PlatformSend;
 
         /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
         /// any task.
@@ -360,6 +340,20 @@ stability_scope!(BETA {
         /// immediately. The [signal::Signal] returned will always resolve to the value of the
         /// first [Spawner::stop] call.
         fn stopped(&self) -> signal::Signal;
+    }
+
+    /// Native scheduling hints for work that requires special thread placement.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub trait ThreadSpawner: Spawner {
+        /// Return a spawner that schedules the next task on the shared executor.
+        ///
+        /// Set `blocking` when the task may briefly block its executor thread.
+        #[must_use]
+        fn shared(self, blocking: bool) -> Self;
+
+        /// Return a spawner that runs the next task on a dedicated thread.
+        #[must_use]
+        fn dedicated(self) -> Self;
     }
 
     /// Interface that runtimes implement to provide parallel execution strategies.
@@ -1028,7 +1022,7 @@ mod tests {
         )]
         execution: Execution,
     ) where
-        R::Context: Spawner,
+        R::Context: ThreadSpawner,
     {
         runner.start(|context| async move {
             let context = match execution {
@@ -1798,7 +1792,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner,
+        R::Context: ThreadSpawner,
     {
         runner.start(|context| async move {
             let handle = context.dedicated().spawn(|_| async move { 42 });
@@ -2162,7 +2156,7 @@ mod tests {
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
-        R::Context: Spawner,
+        R::Context: ThreadSpawner,
     {
         runner.start(|context| async move {
             let context = match execution {
@@ -2184,7 +2178,7 @@ mod tests {
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
-        R::Context: Spawner + Clock,
+        R::Context: ThreadSpawner + Clock,
     {
         runner.start(|context| async move {
             let spawner = match execution {
@@ -2211,7 +2205,7 @@ mod tests {
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
-        R::Context: Spawner + Clock,
+        R::Context: ThreadSpawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
             let spawner = match execution {

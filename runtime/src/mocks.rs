@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
+    Spawner, Storage, Supervisor, ThreadSpawner,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -511,16 +511,6 @@ pub struct DelayedSyncContext<E> {
 forward_context!(DelayedSyncContext, pending);
 
 impl<E: Spawner> Spawner for DelayedSyncContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
-        self
-    }
-
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
-        self
-    }
-
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -537,6 +527,18 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 
     fn stopped(&self) -> Signal {
         self.inner.stopped()
+    }
+}
+
+impl<E: ThreadSpawner> ThreadSpawner for DelayedSyncContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
     }
 }
 

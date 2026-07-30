@@ -1117,16 +1117,6 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -1193,6 +1183,18 @@ impl crate::Spawner for Context {
         executor.auditor.event(b"stopped", |_| {});
 
         executor.shutdown.lock().stopped()
+    }
+}
+
+impl crate::ThreadSpawner for Context {
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
     }
 }
 

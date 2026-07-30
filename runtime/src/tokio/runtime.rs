@@ -8,7 +8,7 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
+    Spawner as _, StreamOf, Supervisor as _, ThreadSpawner as _, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -561,16 +561,6 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -650,6 +640,18 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.executor.shutdown.lock().stopped()
+    }
+}
+
+impl crate::ThreadSpawner for Context {
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
     }
 }
 
